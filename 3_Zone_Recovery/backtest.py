@@ -18,6 +18,8 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import Symbol
 from nautilus_trader.model.currencies import BTC, USDT
 from nautilus_trader.model import Price, Quantity
+from nautilus_trader.model.data import BarType
+from nautilus_trader.persistence.wranglers import BarDataWrangler
 
 def main() -> None:
 
@@ -70,7 +72,58 @@ def main() -> None:
     engine.add_instrument(instrument)
 
     #PASO 4: Creamos nuestra fuente de datos a partir de un CSV.
+    #Usamos el DataCatalog creado en el script datacatalog.py
+#--------------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------
+    # PASO 1: Creamos la parte del DataLoader
+    # 1.1 Cargamos y concatenamos múltiples archivos
+    files = [r'data\raw\BTCUSDT-30m-2026-01.csv', r'data\raw\BTCUSDT-30m-2026-02.csv']
+    # Cargamos cada CSV en una lista de DataFrames
+    df_list = [pd.read_csv(f, header=0) for f in files]
+    # Concatenamos todos en un único DataFrame
+    df = pd.concat(df_list, ignore_index=True)
 
+    # 1.2 Limpieza y Estructura de Tiempo
+    # Convertimos a datetime
+    df['timestamp'] = pd.to_datetime(df['open_time'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+
+    # ELIMINAR DUPLICADOS: Si un archivo termina donde empieza el otro, evitamos solapamientos.
+    df = df[~df.index.duplicated(keep='first')]
+
+    # ORDENAR: Crucial para comprobar gaps después
+    df.sort_index(inplace=True)
+
+    # 1.3 Comprobación de Gaps (Continuidad)
+    # Calculamos la diferencia entre cada timestamp. Para 30m, esperamos 30 min.
+    expected_delta = pd.Timedelta(minutes=30)
+    gaps = df.index.to_series().diff()[1:] # Ignoramos la primera fila
+    missing_data = gaps[gaps != expected_delta]
+
+    if not missing_data.empty:
+        print(f"¡Cuidado! Se detectaron gaps en: {missing_data.index.tolist()}")
+    else:
+        print("Continuidad verificada: No hay saltos en el tiempo.")
+
+    # 1.4 Seleccionar solo las 5 columnas requeridas y asegurar tipos flotantes.
+    # Nota: Doble corchete [[...]] para que Pandas devuelva un DataFrame, no una Serie.
+    df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+    print(df.head())
+
+    # 1.5 Creamos el BarType (Asegúrate de que coincida con tu InstrumentId)
+    barras = BarType.from_str("BTCUSDT.BINANCE-30-MINUTE-LAST-EXTERNAL")
+
+    # PASO 2: DataWrangler
+    # Ahora el df está limpio, continuo y con el formato perfecto.
+    wrangler = BarDataWrangler(barras, instrument)
+    bar_list = wrangler.process(df)
+#--------------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------
+    # Lo añadimos al engine
+    engine.add_data(bar_list)
+
+    # PASO 5: Crear una estrategia y añadirla al engine
+    
 
 if __name__ == '__main__':
     main()
