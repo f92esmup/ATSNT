@@ -126,7 +126,7 @@ def main() -> None:
     
 
     # PASO 6: Reports y visualización del tearsheets
-    engine.trader.generateorder_fills_report()
-
+    engine.trader.generate_order_fills_report()
+    
 if __name__ == '__main__':
     main()

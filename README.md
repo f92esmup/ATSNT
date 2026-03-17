@@ -1,2 +1,2 @@
-# Automating_trading_strategies
+# Automating_trading_strategies_with_Nautilus_trader
 
