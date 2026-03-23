@@ -21,6 +21,8 @@ from nautilus_trader.model import Price, Quantity
 from nautilus_trader.model.data import BarType
 from nautilus_trader.persistence.wranglers import BarDataWrangler
 
+from strategy import ZoneRecoveryRSI, ZoneRecoveryRSIConfig
+
 def main() -> None:
 
     # PASO 1: Creamos el engine de nuestra estrategia. Backtest en este caso
@@ -123,8 +125,21 @@ def main() -> None:
     engine.add_data(bar_list)
 
     # PASO 5: Crear una estrategia y añadirla al engine
+    strategy_config = ZoneRecoveryRSIConfig(
+        instrument_id= instrument.id,
+        bar_type= barras,
+        periodo_rsi=14,
+        zona_sobrecompra=70,
+        zona_sobreventa=30,
+    )
     
+    Estrategia = ZoneRecoveryRSI(config=strategy_config)
 
+    engine.add_strategy(Estrategia)
+
+    # Ejecutamos el motor
+    engine.run()
+    
     # PASO 6: Reports y visualización del tearsheets
     engine.trader.generate_order_fills_report()
     
