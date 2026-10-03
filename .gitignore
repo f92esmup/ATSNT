@@ -1,1 +1,7 @@
-./data/
+# Data
+/data/
+
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
