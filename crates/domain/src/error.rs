@@ -9,4 +9,6 @@ pub enum DomainError {
     InvalidPrice(String),
     #[error("quantity must be strictly positive, got: {0}")]
     InvalidQuantity(String),
+    #[error("window size must be at least 2, got: {0}")]
+    InvalidWindowSize(usize),
 }
