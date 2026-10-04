@@ -1,14 +1,15 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use adapters::{BinanceCsvReader, BinanceParquetReader, MarketDataStream};
 use anyhow::{Context, Result};
-use backtest::{BacktestConfig, BacktestEngine};
+use backtest::{BacktestConfig, BacktestEngine, MonteCarloConfig, MonteCarloSimulator};
 use clap::Parser;
 use domain::DollarBarAggregator;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use serde_json::json;
 use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, Strategy};
 
 #[derive(Parser, Debug)]
@@ -24,6 +25,18 @@ struct Args {
     /// Dollar bar threshold (e.g. 200000 for $200k, 1000000 for $1M)
     #[arg(long, default_value = "200000")]
     dollar_bar: Decimal,
+
+    /// Optional path to JSON strategy configuration (e.g. configs/hpo_results.json)
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+
+    /// Enable post-backtest Discrete Event Monte Carlo Stress-Testing
+    #[arg(long, default_value_t = false)]
+    monte_carlo: bool,
+
+    /// Number of synthetic Monte Carlo paths to simulate
+    #[arg(long, default_value_t = 10000)]
+    mc_iterations: usize,
 }
 
 fn main() -> Result<()> {
@@ -58,13 +71,24 @@ fn main() -> Result<()> {
     );
 
     // 2. Initialize Strategy (Dollar Bars + CUSUM + Z-Score)
-    let strat_config = DollarBarsCusumConfig {
-        rolling_window_len: 20,
-        cusum_vol_multiplier: dec!(1.5),
-        z_entry_threshold: dec!(1.8),
-        z_stop_threshold: dec!(3.0),
-        time_barrier_bars: 15,
+    let strat_config: DollarBarsCusumConfig = if let Some(config_path) = args.config {
+        println!(
+            "[*] Loading strategy parameters from: {}",
+            config_path.display()
+        );
+        let file = File::open(&config_path)
+            .with_context(|| format!("Failed to open config file {}", config_path.display()))?;
+        serde_json::from_reader(file)?
+    } else {
+        DollarBarsCusumConfig {
+            rolling_window_len: 20,
+            cusum_vol_multiplier: dec!(1.5),
+            z_entry_threshold: dec!(1.8),
+            z_stop_threshold: dec!(3.0),
+            time_barrier_bars: 15,
+        }
     };
+
     let mut strategy = DollarBarsCusumStrategy::new(strat_config)
         .map_err(|e| anyhow::anyhow!("Failed to initialize strategy: {e}"))?;
 
@@ -94,7 +118,7 @@ fn main() -> Result<()> {
 
         if let Some(bar) = aggregator.process_trade(&trade) {
             total_bars_emitted += 1;
-            if total_bars_emitted <= 20 || total_bars_emitted % 50 == 0 {
+            if total_bars_emitted <= 20 || total_bars_emitted % 100 == 0 {
                 println!(
                     "  [DollarBar #{:04}] Close: ${:.2} | Vol: {:.2} BTC | Notional: ${:.2}",
                     total_bars_emitted, bar.close, bar.volume, bar.dollar_volume
@@ -109,7 +133,7 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let metrics = engine.finish(mark);
+    let (metrics, closed_trades) = engine.finish_with_trades(mark);
 
     println!("\n============================================================");
     println!("               QUANTITATIVE PERFORMANCE REPORT              ");
@@ -145,6 +169,113 @@ fn main() -> Result<()> {
     );
     println!(" Sortino Ratio:             {:.2}", metrics.sortino_ratio);
     println!("============================================================");
+
+    // Save backtest telemetry
+    let reports_dir = Path::new("storage/reports");
+    fs::create_dir_all(reports_dir)?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let backtest_report_path = reports_dir.join(format!("backtest_{timestamp}.json"));
+
+    let bt_json = json!({
+        "timestamp": timestamp,
+        "data_source": args.data.display().to_string(),
+        "dollar_bar_threshold": args.dollar_bar,
+        "metrics": metrics,
+        "closed_trades": closed_trades,
+    });
+    fs::write(
+        &backtest_report_path,
+        serde_json::to_string_pretty(&bt_json)?,
+    )?;
+    println!(
+        "[*] Backtest report saved to: {}",
+        backtest_report_path.display()
+    );
+
+    // 4. Monte Carlo Stress-Testing
+    if args.monte_carlo {
+        println!("\n============================================================");
+        println!(" DISCRETE EVENT MONTE CARLO STRESS TEST (AFML Ch. 12 & 16)  ");
+        println!("============================================================");
+
+        if closed_trades.len() < 2 {
+            println!(
+                "[WARN] Only {} closed trade(s) available. Monte Carlo trade sequence resampling requires >= 2 trades.",
+                closed_trades.len()
+            );
+        } else {
+            let mc_config = MonteCarloConfig {
+                iterations: args.mc_iterations,
+                method: backtest::ResampleMethod::CircularBlockBootstrap { block_size: 5 },
+                ruin_threshold_pct: dec!(0.30),
+                seed: Some(42),
+            };
+
+            let simulator = MonteCarloSimulator::new(mc_config);
+            let mc_report = simulator
+                .run(engine_config.initial_capital, &closed_trades)
+                .map_err(|e| anyhow::anyhow!("Monte Carlo error: {e}"))?;
+
+            println!(
+                " Simulations Simulated:     {}",
+                mc_report.metrics.total_simulations
+            );
+            println!(" Resampling Technique:      Circular Block Bootstrap (L=5)");
+            println!(" Ruin Threshold:            30.00% Account Drawdown");
+            println!("------------------------------------------------------------");
+            println!(
+                " Historical Max Drawdown:   {:.2}%",
+                mc_report.metrics.historical_max_drawdown_pct * dec!(100)
+            );
+            println!(
+                " P05 Drawdown (95% Best):   {:.2}%",
+                mc_report.metrics.p05_max_drawdown_pct * dec!(100)
+            );
+            println!(
+                " P50 Drawdown (Median):     {:.2}%",
+                mc_report.metrics.p50_max_drawdown_pct * dec!(100)
+            );
+            println!(
+                " P95 Drawdown (95% Stress): {:.2}%",
+                mc_report.metrics.p95_max_drawdown_pct * dec!(100)
+            );
+            println!(
+                " P99 Drawdown (99% Stress): {:.2}%",
+                mc_report.metrics.p99_max_drawdown_pct * dec!(100)
+            );
+            println!(
+                " Worst Simulated Drawdown:  {:.2}%",
+                mc_report.metrics.worst_max_drawdown_pct * dec!(100)
+            );
+            println!("------------------------------------------------------------");
+            println!(
+                " Probability of Ruin:       {:.2}%",
+                mc_report.metrics.probability_of_ruin_pct
+            );
+            println!(
+                " Median Underwater Trades:  {} trades",
+                mc_report.metrics.median_underwater_trades
+            );
+            println!(
+                " P95 Underwater Trades:     {} trades",
+                mc_report.metrics.p95_underwater_trades
+            );
+            println!(
+                " Fan-Chart Trajectories:    {} sampled curves",
+                mc_report.fan_chart.len()
+            );
+            println!("============================================================");
+
+            let mc_path = reports_dir.join(format!("{}.json", mc_report.report_id));
+            fs::write(&mc_path, serde_json::to_string_pretty(&mc_report)?)?;
+            println!(
+                "[*] Monte Carlo fan-chart telemetry saved to: {}",
+                mc_path.display()
+            );
+        }
+    }
 
     Ok(())
 }

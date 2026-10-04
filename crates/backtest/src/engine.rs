@@ -242,20 +242,29 @@ impl BacktestEngine {
         });
     }
 
-    /// Concludes backtest simulation and compiles statistical performance metrics.
-    pub fn finish(mut self, last_mark_price: Option<Decimal>) -> BacktestMetrics {
+    /// Concludes backtest simulation and compiles statistical performance metrics along with closed trades.
+    pub fn finish_with_trades(
+        mut self,
+        last_mark_price: Option<Decimal>,
+    ) -> (BacktestMetrics, Vec<ClosedTrade>) {
         if self.active_position.is_some() {
             if let Some(mark) = last_mark_price {
                 self.execute_close(0, mark, Decimal::ZERO, true);
             }
         }
 
-        BacktestMetrics::calculate(
+        let metrics = BacktestMetrics::calculate(
             self.config.initial_capital,
             &self.closed_trades,
             self.max_drawdown_amount,
             self.max_drawdown_pct,
-        )
+        );
+        (metrics, self.closed_trades)
+    }
+
+    /// Concludes backtest simulation and compiles statistical performance metrics.
+    pub fn finish(self, last_mark_price: Option<Decimal>) -> BacktestMetrics {
+        self.finish_with_trades(last_mark_price).0
     }
 }
 
