@@ -26,7 +26,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] Walk-Forward Optimization (WFO) with Purged & Embargoed temporal splits (AFML Ch. 7).
 - [x] Parameter Stability Plateau scoring (anti-overfitting).
 - [x] Deflated Sharpe Ratio (DSR) statistical significance testing.
-- [ ] Discrete Event Monte Carlo Stress-Testing (Trade bootstrapping, Ruin probability, Drawdown percentiles).
+- [x] Discrete Event Monte Carlo Stress-Testing (Trade bootstrapping, Ruin probability, Drawdown percentiles).
 - [x] Automated JSON persistence for HPO results, Backtest manifests, and audit telemetry (`storage/reports/`).
 
 ---
