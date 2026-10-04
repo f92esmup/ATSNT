@@ -21,4 +21,13 @@ pub enum AdapterError {
         #[source]
         source: domain::DomainError,
     },
+
+    #[error("HTTP request error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("ZIP archive error: {0}")]
+    Zip(#[from] zip::result::ZipError),
+
+    #[error("{0}")]
+    General(String),
 }

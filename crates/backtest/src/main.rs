@@ -1,44 +1,69 @@
 use std::fs::File;
 use std::io::BufReader;
-use std::path::Path;
+use std::path::PathBuf;
 
-use adapters::{BinanceCsvReader, MarketDataStream};
+use adapters::{BinanceCsvReader, BinanceParquetReader, MarketDataStream};
 use anyhow::{Context, Result};
 use backtest::{BacktestConfig, BacktestEngine};
+use clap::Parser;
 use domain::DollarBarAggregator;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, Strategy};
 
+#[derive(Parser, Debug)]
+#[command(
+    name = "backtest",
+    about = "ATSNT - Quantitative Backtesting Engine (100% Rust)"
+)]
+struct Args {
+    /// Path to historical market data file (.csv or .parquet)
+    #[arg(short, long, default_value = "data/sample_trades.csv")]
+    data: PathBuf,
+
+    /// Dollar bar threshold (e.g. 200000 for $200k, 1000000 for $1M)
+    #[arg(long, default_value = "200000")]
+    dollar_bar: Decimal,
+}
+
 fn main() -> Result<()> {
+    let args = Args::parse();
+
     println!("============================================================");
     println!("     ATSNT - Quantitative Backtesting Engine (100% Rust)    ");
     println!("============================================================");
-
-    let data_path = Path::new("data/sample_trades.csv");
     println!(
         "[*] Loading market data stream from: {}",
-        data_path.display()
+        args.data.display()
     );
 
-    let file =
-        File::open(data_path).with_context(|| format!("Failed to open {}", data_path.display()))?;
-    let mut reader = BinanceCsvReader::new(BufReader::new(file));
+    let mut stream: Box<dyn MarketDataStream<Error = adapters::AdapterError>> =
+        if args.data.extension().and_then(|s| s.to_str()) == Some("parquet") {
+            println!("[*] Format: Apache Parquet (High-throughput columnar)");
+            Box::new(BinanceParquetReader::open(&args.data)?)
+        } else {
+            println!("[*] Format: CSV (Buffered line-by-line)");
+            let file = File::open(&args.data)
+                .with_context(|| format!("Failed to open {}", args.data.display()))?;
+            Box::new(BinanceCsvReader::new(BufReader::new(file)))
+        };
 
-    // 1. Initialize Dollar Bar Aggregator (Threshold: $200,000 per bar)
-    let dollar_threshold = dec!(200_000);
-    let mut aggregator = DollarBarAggregator::new(dollar_threshold)
+    // 1. Initialize Dollar Bar Aggregator
+    let mut aggregator = DollarBarAggregator::new(args.dollar_bar)
         .map_err(|e| anyhow::anyhow!("Failed to initialize aggregator: {e}"))?;
 
-    println!("[*] Configured DollarBarAggregator with threshold: ${dollar_threshold}");
+    println!(
+        "[*] Configured DollarBarAggregator with threshold: ${}",
+        args.dollar_bar
+    );
 
     // 2. Initialize Strategy (Dollar Bars + CUSUM + Z-Score)
     let strat_config = DollarBarsCusumConfig {
-        rolling_window_len: 4,
-        cusum_vol_multiplier: dec!(1.0),
-        z_entry_threshold: dec!(1.5),
+        rolling_window_len: 20,
+        cusum_vol_multiplier: dec!(1.5),
+        z_entry_threshold: dec!(1.8),
         z_stop_threshold: dec!(3.0),
-        time_barrier_bars: 10,
+        time_barrier_bars: 15,
     };
     let mut strategy = DollarBarsCusumStrategy::new(strat_config)
         .map_err(|e| anyhow::anyhow!("Failed to initialize strategy: {e}"))?;
@@ -63,16 +88,18 @@ fn main() -> Result<()> {
     let mut total_bars_emitted = 0usize;
     let mut last_price = Decimal::ZERO;
 
-    while let Some(trade) = reader.next_trade()? {
+    while let Some(trade) = stream.next_trade()? {
         total_trades_processed += 1;
         last_price = trade.price;
 
         if let Some(bar) = aggregator.process_trade(&trade) {
             total_bars_emitted += 1;
-            println!(
-                "  [DollarBar #{:02}] Close: ${:.2} | Vol: {:.2} BTC | Notional: ${:.2}",
-                total_bars_emitted, bar.close, bar.volume, bar.dollar_volume
-            );
+            if total_bars_emitted <= 20 || total_bars_emitted % 50 == 0 {
+                println!(
+                    "  [DollarBar #{:04}] Close: ${:.2} | Vol: {:.2} BTC | Notional: ${:.2}",
+                    total_bars_emitted, bar.close, bar.volume, bar.dollar_volume
+                );
+            }
             engine.process_bar(&mut strategy, &bar);
         }
     }

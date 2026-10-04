@@ -31,3 +31,11 @@ thiserror = "1.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parquet = { version = "53", default-features = false, features = ["arrow", "snap"] }
+arrow = { version = "53", default-features = false }
+arrow-schema = { version = "53" }
+arrow-array = { version = "53" }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "blocking"] }
+clap = { version = "4.5", features = ["derive"] }
+indicatif = "0.17"
