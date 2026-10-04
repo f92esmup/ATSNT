@@ -22,12 +22,12 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 
 ### Milestone 2: Real Market Data ETL, HPO Engine & Monte Carlo Validation
 - [x] Binance data fetcher utility to download official `aggTrades` daily/monthly datasets and convert to Parquet.
-- [ ] Multi-threaded CPU parallelism engine powered by `rayon`.
-- [ ] Walk-Forward Optimization (WFO) with Purged & Embargoed temporal splits (AFML Ch. 7).
-- [ ] Bayesian Optimization & Parameter Stability Plateau scoring (anti-overfitting).
-- [ ] Deflated Sharpe Ratio (DSR) statistical significance testing.
+- [x] Multi-threaded CPU parallelism engine powered by `rayon`.
+- [x] Walk-Forward Optimization (WFO) with Purged & Embargoed temporal splits (AFML Ch. 7).
+- [x] Parameter Stability Plateau scoring (anti-overfitting).
+- [x] Deflated Sharpe Ratio (DSR) statistical significance testing.
 - [ ] Discrete Event Monte Carlo Stress-Testing (Trade bootstrapping, Ruin probability, Drawdown percentiles).
-- [ ] Automated JSON persistence for HPO results, Backtest manifests, and Monte Carlo fan-chart telemetry (`storage/reports/`).
+- [x] Automated JSON persistence for HPO results, Backtest manifests, and audit telemetry (`storage/reports/`).
 
 ---
 
