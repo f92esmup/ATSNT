@@ -21,7 +21,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 ---
 
 ### Milestone 2: Real Market Data ETL, HPO Engine & Monte Carlo Validation
-- [ ] Binance data fetcher utility to download official `aggTrades` daily/monthly datasets.
+- [x] Binance data fetcher utility to download official `aggTrades` daily/monthly datasets and convert to Parquet.
 - [ ] Multi-threaded CPU parallelism engine powered by `rayon`.
 - [ ] Walk-Forward Optimization (WFO) with Purged & Embargoed temporal splits (AFML Ch. 7).
 - [ ] Bayesian Optimization & Parameter Stability Plateau scoring (anti-overfitting).
