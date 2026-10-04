@@ -13,3 +13,6 @@ serde_json.workspace = true
 rust_decimal.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
