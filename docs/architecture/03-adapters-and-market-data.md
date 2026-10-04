@@ -1,0 +1,64 @@
+# Market Data Adapters & Binance Ingestion Specification
+
+## 1. Architectural Role
+In accordance with Hexagonal Architecture (Ports and Adapters), the adapters crate (`crates/adapters`) contains concrete implementations of external interfaces. The core trading engine and domain logic remain completely decoupled from network protocols, file formats, and broker-specific APIs.
+
+---
+
+## 2. Ingestion Port: `MarketDataStream`
+
+The domain defines the expectation of market data through an abstract port:
+
+```rust
+pub trait MarketDataStream {
+    type Error;
+    fn next_trade(&mut self) -> Result<Option<domain::Trade>, Self::Error>;
+}
+```
+
+Any source—a historical CSV, an optimized Parquet file, or an asynchronous WebSocket stream—plugs into this port by emitting normalized `domain::Trade` items.
+
+---
+
+## 3. Binance `aggTrades` Standard & Zero-Interpolation Principle
+
+### 3.1 Why Aggregate Trades (`aggTrades`)?
+In high-frequency crypto trading, large taker orders are matched against multiple resting limit orders, generating multiple sub-millisecond execution ticks for a single market order. Binance groups these simultaneous fills into `aggTrades`.
+
+Using `aggTrades`:
+- Preserves the true sequence of market aggression.
+- Eliminates the need for artificial tick interpolation.
+- Reduces network and I/O bandwidth without discarding volume precision.
+
+### 3.2 Field Mapping Specification
+
+Both historical CSVs from `data.binance.vision` and live WebSocket streams from `wss://fstream.binance.com/ws/{symbol}@aggTrade` map identically:
+
+| Binance Field | Historical CSV Header | Live WebSocket Key | Domain `Trade` Target | Interpretation |
+| :--- | :--- | :--- | :--- | :--- |
+| Aggregate Trade ID | `agg_trade_id` | `a` | *(Internal/Audit)* | Sequential identifier |
+| Price | `price` | `p` | `trade.price` (`Decimal`) | Execution price |
+| Quantity | `quantity` | `q` | `trade.quantity` (`Decimal`) | Transacted base asset volume |
+| Timestamp | `transact_time` | `T` | `trade.timestamp` (`i64`) | Execution timestamp (Unix ms) |
+| Buyer Maker Flag | `is_buyer_maker` | `m` | `trade.side` (`Side`) | `true` = Market Sell / `false` = Market Buy |
+
+#### Rule for Aggressor Side:
+- If `is_buyer_maker == true`: The buyer was the passive maker; the active aggressor was a seller $\rightarrow$ `Side::Sell`.
+- If `is_buyer_maker == false`: The seller was the passive maker; the active aggressor was a buyer $\rightarrow$ `Side::Buy`.
+
+---
+
+## 4. The Three Operational Modes
+
+```text
+                        ┌─────────────────────────────────────┐
+                        │      PORT: MarketDataStream         │
+                        └──────────────────▲──────────────────┘
+                                           │
+         ┌─────────────────────────────────┼─────────────────────────────────┐
+         │                                 │                                 │
+   [ ADAPTER 1: Historical ]      [ ADAPTER 2: Paper Trading ]      [ ADAPTER 3: Live Trading ]
+   - Binance aggTrades CSV/ZIP     - Live WebSocket stream           - Live WebSocket stream
+   - High-throughput batch read    - In-memory simulated execution   - Authenticated REST / WebSocket
+   - Deterministic event replay    - Real market ticks / no money    - Signed API keys / Real orders
+```
