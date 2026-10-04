@@ -33,7 +33,7 @@ struct Args {
     dollar_bar: Decimal,
 
     /// Number of Walk-Forward validation folds
-    #[arg(short, long, default_value_t = 3)]
+    #[arg(short, long, visible_alias = "windows", default_value_t = 3)]
     folds: usize,
 
     /// Train ratio per window (e.g. 0.70 for 70% In-Sample)
@@ -49,7 +49,12 @@ struct Args {
     candidates: usize,
 
     /// Output path for winning configuration JSON
-    #[arg(short, long, default_value = "configs/hpo_results.json")]
+    #[arg(
+        short,
+        long,
+        visible_alias = "output",
+        default_value = "configs/hpo_results.json"
+    )]
     output_config: PathBuf,
 }
 
@@ -74,14 +79,17 @@ fn main() -> Result<()> {
 
     // 1. Ingest Market Data into In-Memory Dollar Bars
     println!("[1/4] Aggregating market trade stream into Dollar Bars...");
-    let mut stream: Box<dyn MarketDataStream<Error = adapters::AdapterError>> =
-        if args.data.extension().and_then(|s| s.to_str()) == Some("parquet") {
-            Box::new(BinanceParquetReader::open(&args.data)?)
-        } else {
-            let file = File::open(&args.data)
-                .with_context(|| format!("Failed to open {}", args.data.display()))?;
-            Box::new(BinanceCsvReader::new(BufReader::new(file)))
-        };
+    let mut stream: Box<dyn MarketDataStream<Error = adapters::AdapterError>> = if args
+        .data
+        .is_dir()
+        || args.data.extension().and_then(|s| s.to_str()) == Some("parquet")
+    {
+        Box::new(BinanceParquetReader::open(&args.data)?)
+    } else {
+        let file = File::open(&args.data)
+            .with_context(|| format!("Failed to open {}", args.data.display()))?;
+        Box::new(BinanceCsvReader::new(BufReader::new(file)))
+    };
 
     let mut aggregator = DollarBarAggregator::new(args.dollar_bar)
         .map_err(|e| anyhow::anyhow!("Failed to initialize aggregator: {e}"))?;

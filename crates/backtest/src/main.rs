@@ -50,16 +50,19 @@ fn main() -> Result<()> {
         args.data.display()
     );
 
-    let mut stream: Box<dyn MarketDataStream<Error = adapters::AdapterError>> =
-        if args.data.extension().and_then(|s| s.to_str()) == Some("parquet") {
-            println!("[*] Format: Apache Parquet (High-throughput columnar)");
-            Box::new(BinanceParquetReader::open(&args.data)?)
-        } else {
-            println!("[*] Format: CSV (Buffered line-by-line)");
-            let file = File::open(&args.data)
-                .with_context(|| format!("Failed to open {}", args.data.display()))?;
-            Box::new(BinanceCsvReader::new(BufReader::new(file)))
-        };
+    let mut stream: Box<dyn MarketDataStream<Error = adapters::AdapterError>> = if args
+        .data
+        .is_dir()
+        || args.data.extension().and_then(|s| s.to_str()) == Some("parquet")
+    {
+        println!("[*] Format: Apache Parquet (High-throughput columnar)");
+        Box::new(BinanceParquetReader::open(&args.data)?)
+    } else {
+        println!("[*] Format: CSV (Buffered line-by-line)");
+        let file = File::open(&args.data)
+            .with_context(|| format!("Failed to open {}", args.data.display()))?;
+        Box::new(BinanceCsvReader::new(BufReader::new(file)))
+    };
 
     // 1. Initialize Dollar Bar Aggregator
     let mut aggregator = DollarBarAggregator::new(args.dollar_bar)
