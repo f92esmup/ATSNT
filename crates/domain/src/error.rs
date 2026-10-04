@@ -11,4 +11,8 @@ pub enum DomainError {
     InvalidQuantity(String),
     #[error("window size must be at least 2, got: {0}")]
     InvalidWindowSize(usize),
+    #[error("invalid order state transition from {from} to {to}")]
+    InvalidStateTransition { from: String, to: String },
+    #[error("fill quantity exceeds remaining order quantity")]
+    OverfillError,
 }
