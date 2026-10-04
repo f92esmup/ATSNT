@@ -20,21 +20,31 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 
 ---
 
-### Milestone 2: Live Market Data Ingestion (WebSocket Adapter)
+### Milestone 2: Real Market Data ETL & High-Performance HPO Engine
+- [ ] Binance data fetcher utility to download official `aggTrades` daily/monthly datasets.
+- [ ] Multi-threaded CPU parallelism engine powered by `rayon`.
+- [ ] Walk-Forward Optimization (WFO) with Purged & Embargoed temporal splits (AFML Ch. 7).
+- [ ] Bayesian Optimization & Parameter Stability Plateau scoring (anti-overfitting).
+- [ ] Deflated Sharpe Ratio (DSR) statistical significance testing.
+- [ ] Automated serialization of optimized parameters to `configs/hpo_results.json` and strategy loader.
+
+---
+
+### Milestone 3: Live Market Data Ingestion (WebSocket Adapter)
 - [ ] Implement asynchronous Binance WebSocket client in `crates/adapters` (`wss://fstream.binance.com/ws/{symbol}@aggTrade`).
 - [ ] Reconnection state machine with exponential backoff and heartbeat ping/pong.
 - [ ] Stream real-time `Trade` events directly into `DollarBarAggregator`.
 
 ---
 
-### Milestone 3: Real-Time Paper Trading Engine
+### Milestone 4: Real-Time Paper Trading Engine
 - [ ] Connect `BacktestEngine` to live WebSocket stream.
 - [ ] Real-time order matching against live bid/ask spreads.
 - [ ] Mark-to-market live PnL and active position telemetry without risking capital.
 
 ---
 
-### Milestone 4: Web Presentation & Telemetry Dashboard (`crates/web`)
+### Milestone 5: Web Presentation & Telemetry Dashboard (`crates/web`)
 - [ ] Axum HTTP & WebSocket server in `crates/web`.
 - [ ] Real-time streaming of Dollar Bars, signals, and open positions.
 - [ ] Web dashboard visualizing strategy catalog, backtest equity curves, and performance metrics.
@@ -42,7 +52,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 
 ---
 
-### Milestone 5: Live Execution Gateway (Real Exchange Trading)
+### Milestone 6: Live Execution Gateway (Real Exchange Trading)
 - [ ] Authenticated REST & WebSocket order gateway in `crates/adapters`.
 - [ ] HMAC-SHA256 signature generator for Binance API keys.
 - [ ] Pre-trade risk manager (Account margin checks, balance verification, circuit breakers).
@@ -50,7 +60,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 
 ---
 
-### Milestone 6: Strategy Catalog & Machine Learning Expansion
+### Milestone 7: Strategy Catalog & Machine Learning Expansion
 - [ ] Microstructure feature pipelines (Order Flow Imbalance, Volume-Synchronized Probability of Toxicity - VPIN).
 - [ ] Pure Rust ML integration (`ort` for ONNX models / native Rust inference).
 - [ ] Multi-asset portfolio balancing and risk parity allocation.
