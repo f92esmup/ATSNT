@@ -1,5 +1,6 @@
+use std::collections::VecDeque;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -149,25 +150,45 @@ impl BinanceParquetWriter {
 ///
 /// Implements `MarketDataStream` to plug seamlessly into `BacktestEngine`.
 pub struct BinanceParquetReader {
-    reader: ParquetRecordBatchReader,
+    file_queue: VecDeque<PathBuf>,
+    current_reader: Option<ParquetRecordBatchReader>,
     current_batch: Option<RecordBatch>,
     row_idx: usize,
     batch_len: usize,
 }
 
 impl BinanceParquetReader {
-    /// Opens a Parquet file for streaming execution.
+    /// Opens a single Parquet file or a directory of Parquet files for streaming execution.
+    ///
+    /// If given a directory, discovers all `.parquet` files and replays them in sorted chronological order.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, AdapterError> {
-        let file = File::open(path)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|e| AdapterError::General(format!("Failed to open Parquet reader: {e}")))?;
-        let reader = builder
-            .with_batch_size(BATCH_SIZE)
-            .build()
-            .map_err(|e| AdapterError::General(format!("Failed to build Parquet reader: {e}")))?;
+        let p = path.as_ref();
+        let mut queue = VecDeque::new();
+
+        if p.is_dir() {
+            let mut files = Vec::new();
+            for entry in std::fs::read_dir(p)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("parquet") {
+                    files.push(path);
+                }
+            }
+            files.sort();
+            if files.is_empty() {
+                return Err(AdapterError::General(format!(
+                    "No .parquet files found in directory: {}",
+                    p.display()
+                )));
+            }
+            queue.extend(files);
+        } else {
+            queue.push_back(p.to_path_buf());
+        }
 
         let mut instance = Self {
-            reader,
+            file_queue: queue,
+            current_reader: None,
             current_batch: None,
             row_idx: 0,
             batch_len: 0,
@@ -178,22 +199,49 @@ impl BinanceParquetReader {
     }
 
     fn load_next_batch(&mut self) -> Result<(), AdapterError> {
-        match self.reader.next() {
-            Some(Ok(batch)) => {
-                self.row_idx = 0;
-                self.batch_len = batch.num_rows();
-                self.current_batch = Some(batch);
-                Ok(())
+        loop {
+            if let Some(reader) = &mut self.current_reader {
+                match reader.next() {
+                    Some(Ok(batch)) => {
+                        self.row_idx = 0;
+                        self.batch_len = batch.num_rows();
+                        self.current_batch = Some(batch);
+                        return Ok(());
+                    }
+                    Some(Err(e)) => {
+                        return Err(AdapterError::General(format!(
+                            "Error reading Parquet batch: {e}"
+                        )));
+                    }
+                    None => {
+                        // Current file finished, advance to next file in queue
+                        self.current_reader = None;
+                    }
+                }
             }
-            Some(Err(e)) => Err(AdapterError::General(format!(
-                "Error reading Parquet batch: {e}"
-            ))),
-            None => {
+
+            // Pop next file from queue
+            let Some(next_file) = self.file_queue.pop_front() else {
                 self.current_batch = None;
                 self.row_idx = 0;
                 self.batch_len = 0;
-                Ok(())
-            }
+                return Ok(());
+            };
+
+            let file = File::open(&next_file)?;
+            let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+                AdapterError::General(format!(
+                    "Failed to open Parquet reader for {}: {e}",
+                    next_file.display()
+                ))
+            })?;
+            let reader = builder.with_batch_size(BATCH_SIZE).build().map_err(|e| {
+                AdapterError::General(format!(
+                    "Failed to build Parquet reader for {}: {e}",
+                    next_file.display()
+                ))
+            })?;
+            self.current_reader = Some(reader);
         }
     }
 }
@@ -304,6 +352,28 @@ mod tests {
         let read2 = reader.next_trade().unwrap().unwrap();
         assert_eq!(read2, t2);
 
+        assert!(reader.next_trade().unwrap().is_none());
+    }
+
+    #[test]
+    fn read_from_directory_chains_parquet_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file1_path = temp_dir.path().join("01.parquet");
+        let file2_path = temp_dir.path().join("02.parquet");
+
+        let mut writer1 = BinanceParquetWriter::new(&file1_path).unwrap();
+        let t1 = Trade::new(1700000000001, dec!(60000.50), dec!(1.5), Side::Buy).unwrap();
+        writer1.write_trade(&t1).unwrap();
+        writer1.finish().unwrap();
+
+        let mut writer2 = BinanceParquetWriter::new(&file2_path).unwrap();
+        let t2 = Trade::new(1700000000002, dec!(60001.00), dec!(0.25), Side::Sell).unwrap();
+        writer2.write_trade(&t2).unwrap();
+        writer2.finish().unwrap();
+
+        let mut reader = BinanceParquetReader::open(temp_dir.path()).unwrap();
+        assert_eq!(reader.next_trade().unwrap().unwrap(), t1);
+        assert_eq!(reader.next_trade().unwrap().unwrap(), t2);
         assert!(reader.next_trade().unwrap().is_none());
     }
 }
