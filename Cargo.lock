@@ -50,6 +50,7 @@ dependencies = [
  "anyhow",
  "domain",
  "rust_decimal",
+ "rust_decimal_macros",
  "serde",
  "serde_json",
  "strategies",
