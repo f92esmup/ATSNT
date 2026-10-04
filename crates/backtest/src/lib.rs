@@ -1,7 +1,16 @@
 pub mod config;
 pub mod engine;
+pub mod error;
 pub mod metrics;
+pub mod optimization;
+pub mod walk_forward;
 
 pub use config::BacktestConfig;
 pub use engine::BacktestEngine;
+pub use error::BacktestError;
 pub use metrics::{BacktestMetrics, ClosedTrade};
+pub use optimization::{
+    calculate_dsr, calculate_parameter_stability, run_backtest_slice, CandidateEvaluation,
+    ParameterSpace, WalkForwardOptimizer,
+};
+pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};

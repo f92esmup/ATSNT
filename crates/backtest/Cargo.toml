@@ -19,3 +19,13 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
+rayon.workspace = true
+rand.workspace = true
+
+[[bin]]
+name = "backtest"
+path = "src/main.rs"
+
+[[bin]]
+name = "run_hpo"
+path = "src/bin/run_hpo.rs"

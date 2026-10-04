@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Implements the Zero-Toy-Assumption Principle specified in AGENTS.md,
 /// enforcing fee schedules, spreads, and latency slippage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BacktestConfig {
     /// Starting capital in quote currency (USDT).
     pub initial_capital: Decimal,
