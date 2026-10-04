@@ -54,14 +54,14 @@ cargo fmt --check
 Download official Binance Futures USDT-M `aggTrades` archives directly from `data.binance.vision` and convert them into compressed Apache Parquet format:
 
 ```bash
-# Download a single day (e.g. BTCUSDT on 2024-01-01) -> ~760k ticks in ~5MB Parquet
-cargo run -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2024 --month 1 --day 1
+# Download and convert an entire year automatically (all 12 months)
+cargo run --release -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2024
 
-# Download a full month (e.g. BTCUSDT January 2024)
-cargo run -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2024 --month 1
+# Download a specific month (e.g. January 2024)
+cargo run --release -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2024 --month 1
 
-# Specify custom output directory
-cargo run -p adapters --bin fetch_data -- --symbol ETHUSDT --year 2024 --month 2 --output-dir data/historical
+# Download a single day (e.g. 2024-01-01) -> ~760k ticks in ~5MB Parquet
+cargo run --release -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2024 --month 1 --day 1
 ```
 
 ---
