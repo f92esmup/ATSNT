@@ -10,3 +10,4 @@ A modular, high-reliability algorithmic trading engine built 100% in Rust, focus
 ## Documentation
 - [`AGENTS.md`](AGENTS.md): Architectural standards, engineering guidelines, and agent rules.
 - [`docs/strategy/01-dollar-bars-cusum.md`](docs/strategy/01-dollar-bars-cusum.md): Complete strategy specification covering Dollar Bars, CUSUM filtering, dynamic Z-Scores, the Triple Barrier Method, position sizing, and backtesting metrics.
+- [`docs/architecture/02-domain-models-and-lifecycle.md`](docs/architecture/02-domain-models-and-lifecycle.md): Domain architecture, mathematical foundations, and the 3-stage execution lifecycle (OrderIntent -> Order FSM -> Position).
