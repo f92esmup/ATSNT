@@ -36,12 +36,14 @@ arrow = { version = "53", default-features = false }
 arrow-schema = { version = "53" }
 arrow-array = { version = "53" }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "blocking", "json"] }
 clap = { version = "4.5", features = ["derive"] }
 indicatif = "0.17"
 rayon = "1.10"
 rand = "0.8"
+ring = { version = "0.17", default-features = false }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
 futures-util = "0.3"
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }

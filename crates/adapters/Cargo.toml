@@ -25,6 +25,8 @@ indicatif.workspace = true
 tempfile = "3"
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
+ring.workspace = true
+
 
 [[bin]]
 name = "fetch_data"
@@ -33,6 +35,11 @@ path = "src/bin/fetch_data.rs"
 [[bin]]
 name = "stream_trades"
 path = "src/bin/stream_trades.rs"
+
+[[bin]]
+name = "live_gateway"
+path = "src/bin/live_gateway.rs"
+
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true

@@ -55,10 +55,11 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 ---
 
 ### Milestone 6: Live Execution Gateway (Real Exchange Trading)
-- [ ] Authenticated REST & WebSocket order gateway in `crates/adapters`.
-- [ ] HMAC-SHA256 signature generator for Binance API keys.
-- [ ] Pre-trade risk manager (Account margin checks, balance verification, circuit breakers).
-- [ ] Order reconciliation listener for exchange user data stream.
+*(Architecture specification: [`docs/architecture/08-live-execution-gateway.md`](architecture/08-live-execution-gateway.md))*
+- [x] Authenticated REST & WebSocket order gateway in `crates/adapters`.
+- [x] HMAC-SHA256 signature generator for Binance API keys with official test vector validation.
+- [x] Pre-trade risk manager (Account margin checks, balance verification, circuit breakers).
+- [x] Order reconciliation listener for exchange user data stream.
 
 ---
 

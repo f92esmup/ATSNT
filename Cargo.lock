@@ -15,6 +15,7 @@ dependencies = [
  "indicatif",
  "parquet",
  "reqwest",
+ "ring",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",

@@ -168,6 +168,44 @@ cargo run -p web -- --port 8080
 
 ---
 
+### Step 8: Live Execution Gateway (Binance Testnet & Production)
+Connect to Binance Testnet or live production with cryptographic HMAC-SHA256 signing and institutional pre-trade risk controls:
+
+```bash
+# 1. Query available account balance on Binance Testnet (Spot)
+cargo run -p adapters --bin live_gateway -- \
+  --api-key "YOUR_BINANCE_TESTNET_API_KEY" \
+  --secret-key "YOUR_BINANCE_TESTNET_SECRET_KEY" \
+  --testnet \
+  --check-balance \
+  --asset USDT
+
+# 2. Listen for real-time order fill updates over the User Data Stream
+cargo run -p adapters --bin live_gateway -- \
+  --api-key "YOUR_BINANCE_TESTNET_API_KEY" \
+  --secret-key "YOUR_BINANCE_TESTNET_SECRET_KEY" \
+  --testnet \
+  --listen
+
+# Or export environment variables to avoid passing secrets in CLI arguments:
+export BINANCE_API_KEY="your_api_key_here"
+export BINANCE_SECRET_KEY="your_secret_key_here"
+
+cargo run -p adapters --bin live_gateway -- --testnet --check-balance
+```
+
+#### Pre-Trade Risk Policy & Safety Guarantees
+- **Circuit Breaker**: Trading automatically hard-halts if daily account drawdown breaches `max_daily_drawdown_pct` (default: 5%).
+- **Order Size Ceiling**: Single order notional value cannot exceed `max_order_notional` (default: $10,000 USDT).
+- **Position Cap**: Aggregate position exposure cannot exceed `max_position_notional` (default: $50,000 USDT).
+- **Zero-Float Math**: 100% fixed-point decimal arithmetic via `rust_decimal::Decimal`.
+- **Binance Testnet Setup**:
+  1. Visit [testnet.binance.vision](https://testnet.binance.vision/) and sign in with GitHub to generate free API/Secret keys.
+  2. Test execution, risk limits, and websocket fills with 0 € risk to real capital.
+  3. When transitioning to real capital on your VPS, bind your API key to your VPS static public IP and disable withdrawal permissions.
+
+---
+
 ## 4. Documentation Index
 
 - [`AGENTS.md`](AGENTS.md): Architectural standards, engineering guidelines, and agent rules.
@@ -179,6 +217,7 @@ cargo run -p web -- --port 8080
 - [`docs/architecture/05-monte-carlo-and-telemetry.md`](docs/architecture/05-monte-carlo-and-telemetry.md): Discrete Event Monte Carlo Stress-Testing, trade sequence bootstrap, and web telemetry schemas.
 - [`docs/architecture/06-paper-trading-and-realtime-execution.md`](docs/architecture/06-paper-trading-and-realtime-execution.md): Real-time Paper Trading architecture, event broadcasting, and mark-to-market telemetry.
 - [`docs/architecture/07-web-telemetry-dashboard.md`](docs/architecture/07-web-telemetry-dashboard.md): Web presentation layer, Axum REST & WebSocket streaming, and Lightweight Charts dashboard.
+- [`docs/architecture/08-live-execution-gateway.md`](docs/architecture/08-live-execution-gateway.md): Live Execution Gateway, HMAC-SHA256 authentication, Pre-Trade Risk Manager, and User Data Stream reconciliation.
 
 ---
 
