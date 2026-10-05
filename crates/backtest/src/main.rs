@@ -37,6 +37,10 @@ struct Args {
     /// Number of synthetic Monte Carlo paths to simulate
     #[arg(long, default_value_t = 10000)]
     mc_iterations: usize,
+
+    /// Optional output file path for the Monte Carlo telemetry report
+    #[arg(short, long)]
+    report: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -271,7 +275,12 @@ fn main() -> Result<()> {
             );
             println!("============================================================");
 
-            let mc_path = reports_dir.join(format!("{}.json", mc_report.report_id));
+            let mc_path = args
+                .report
+                .unwrap_or_else(|| reports_dir.join(format!("{}.json", mc_report.report_id)));
+            if let Some(parent) = mc_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
             fs::write(&mc_path, serde_json::to_string_pretty(&mc_report)?)?;
             println!(
                 "[*] Monte Carlo fan-chart telemetry saved to: {}",
