@@ -29,9 +29,9 @@ struct Cli {
     #[arg(long, default_value_t = true)]
     testnet: bool,
 
-    /// Target Binance Spot (true) or USD-M Perpetual Futures (false).
-    #[arg(long, default_value_t = true)]
-    spot: bool,
+    /// Target USD-M Perpetual Futures instead of Spot.
+    #[arg(long, default_value_t = false)]
+    futures: bool,
 
     /// Query and print current available account balance.
     #[arg(long, default_value_t = false)]
@@ -56,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let is_spot = !cli.futures;
 
     let api_key = cli
         .api_key
@@ -76,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
         api_key,
         secret_key,
         testnet: cli.testnet,
-        spot: cli.spot,
+        spot: is_spot,
         recv_window_ms: 5000,
         risk_policy: domain::RiskPolicy::default(),
     };
@@ -99,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
         info!(listen_key = %listen_key, "Acquired listenKey for User Data Stream");
 
         let mut user_stream =
-            BinanceUserDataStream::connect(listen_key, cli.testnet, cli.spot).await?;
+            BinanceUserDataStream::connect(listen_key, cli.testnet, is_spot).await?;
         info!("Listening for live execution reports (Press Ctrl+C to exit)...");
 
         while let Some(update) = user_stream.next_update().await {
