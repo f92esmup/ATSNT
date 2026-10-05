@@ -62,6 +62,54 @@ impl BacktestEngine {
         }
     }
 
+    /// Returns the currently active position, if any.
+    #[inline]
+    pub fn active_position(&self) -> Option<&Position> {
+        self.active_position.as_ref()
+    }
+
+    /// Returns the active order intent for the current position, if any.
+    #[inline]
+    pub fn active_intent(&self) -> Option<&domain::OrderIntent> {
+        self.active_intent.as_ref()
+    }
+
+    /// Returns the slice of all closed trades recorded during the simulation.
+    #[inline]
+    pub fn closed_trades(&self) -> &[ClosedTrade] {
+        &self.closed_trades
+    }
+
+    /// Returns the number of bars the active position has been held.
+    #[inline]
+    pub fn bars_held(&self) -> usize {
+        self.bars_held
+    }
+
+    /// Returns the peak equity reached during the simulation.
+    #[inline]
+    pub fn peak_equity(&self) -> Decimal {
+        self.peak_equity
+    }
+
+    /// Returns the maximum drawdown in currency amount.
+    #[inline]
+    pub fn max_drawdown_amount(&self) -> Decimal {
+        self.max_drawdown_amount
+    }
+
+    /// Returns the maximum drawdown percentage observed.
+    #[inline]
+    pub fn max_drawdown_pct(&self) -> Decimal {
+        self.max_drawdown_pct
+    }
+
+    /// Returns a reference to the backtest configuration.
+    #[inline]
+    pub fn config(&self) -> &BacktestConfig {
+        &self.config
+    }
+
     /// Ingests a closed DollarBar, updates position barriers, and steps the strategy.
     pub fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &DollarBar) {
         let had_position = self.active_position.is_some();

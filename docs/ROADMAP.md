@@ -39,9 +39,9 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 ---
 
 ### Milestone 4: Real-Time Paper Trading Engine
-- [ ] Connect `BacktestEngine` to live WebSocket stream.
-- [ ] Real-time order matching against live bid/ask spreads.
-- [ ] Mark-to-market live PnL and active position telemetry without risking capital.
+- [x] Connect `BacktestEngine` to live WebSocket stream.
+- [x] Real-time order matching against live bid/ask spreads.
+- [x] Mark-to-market live PnL and active position telemetry without risking capital.
 
 ---
 

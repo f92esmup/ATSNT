@@ -31,3 +31,7 @@ path = "src/main.rs"
 [[bin]]
 name = "run_hpo"
 path = "src/bin/run_hpo.rs"
+
+[[bin]]
+name = "paper_trading"
+path = "src/bin/paper_trading.rs"
