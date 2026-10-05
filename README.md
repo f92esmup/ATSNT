@@ -21,8 +21,8 @@ ATSNT/
 ├── crates/
 │   ├── domain/       # Pure business logic (DollarBar, Aggregator, CusumFilter, Z-Score, Order FSM, Position)
 │   ├── strategies/   # Strategy traits & implementations (DollarBarsCusumStrategy with Triple Barrier exits)
-│   ├── adapters/     # Ports & infrastructure adapters (Binance CSV, Parquet columnar, Binance ETL fetcher)
-│   ├── backtest/     # 1:1 Event Simulator, Walk-Forward Splitter, Rayon HPO Engine, Monte Carlo Simulator
+│   ├── adapters/     # Ports & infrastructure adapters (Binance CSV, Parquet columnar, Binance ETL fetcher, Binance WebSocket Stream)
+│   ├── backtest/     # 1:1 Event Simulator, Walk-Forward Splitter, Rayon HPO Engine, Monte Carlo, Real-Time Paper Trading
 │   └── web/          # REST & WebSocket telemetry server (Axum)
 ├── data/             # Historical market data (CSV samples & compressed Parquet archives)
 ├── configs/          # Serialized strategy parameters and winning HPO artifacts
@@ -114,15 +114,52 @@ cargo run -p backtest --bin run_hpo -- \
 
 ---
 
+### Step 5: Live Market Data Ingestion & Dollar Bar Streaming
+Subscribe to the real-time Binance WebSocket feed and stream live ticks into the `DollarBarAggregator`:
+
+```bash
+# Stream from Binance Futures (default)
+cargo run -p adapters --bin stream_trades -- --symbol btcusdt --threshold 50000
+
+# Stream from Binance Spot (recommended for EU/regulated networks)
+cargo run -p adapters --bin stream_trades -- --symbol btcusdt --threshold 50000 --spot
+```
+- Ingests real-time `aggTrades` using `BinanceWebSocketStream`.
+- Enforces strict zero-float parsing via `rust_decimal::Decimal`.
+- Handles automatic reconnection with exponential backoff and Ping/Pong heartbeats.
+- Aggregates ticks on the fly and prints finalized Dollar Bars with exact OHLCV metrics.
+
+---
+
+### Step 6: Run Real-Time Paper Trading Engine
+Connect the full trading engine to the live market stream and simulate execution with realistic friction without risking capital:
+
+```bash
+# Run paper trading on Binance Spot with $10,000 capital and 1% risk per trade
+cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --dollar-bar 50000 --capital 10000
+
+# Run with an optimized HPO configuration file
+cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --config configs/hpo_results.json
+```
+- Evaluates symmetric CUSUM filter and rolling Z-Score signals in real time upon bar completion.
+- Matches simulated orders with realistic maker/taker fees and slippage.
+- Computes real-time *mark-to-market* unrealized PnL and drawdown tracking.
+- Implements Triple Barrier exits (Stop Loss, Take Profit, Time Barrier).
+- Broadcasts real-time trading events via `tokio::sync::broadcast` (Milestone 5 web-ready).
+- Graceful shutdown on `Ctrl+C`: liquidates open position at current mark price, compiles full quantitative performance attribution (Sharpe/Sortino, Win Rate, Profit Factor), and persists audit JSON to `storage/reports/paper_trading_<timestamp>.json`.
+
+---
+
 ## 4. Documentation Index
 
 - [`AGENTS.md`](AGENTS.md): Architectural standards, engineering guidelines, and agent rules.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): Milestone progress and upcoming deliverables.
 - [`docs/strategy/01-dollar-bars-cusum.md`](docs/strategy/01-dollar-bars-cusum.md): Mathematics of Dollar Bars, symmetric CUSUM filter, rolling Z-Scores, and Triple Barrier exits.
 - [`docs/architecture/02-domain-models-and-lifecycle.md`](docs/architecture/02-domain-models-and-lifecycle.md): Domain models and 3-stage execution lifecycle (`OrderIntent` -> `Order` FSM -> `Position`).
-- [`docs/architecture/03-adapters-and-market-data.md`](docs/architecture/03-adapters-and-market-data.md): Ports and Adapters, Binance `aggTrades` mapping, and operational modes.
+- [`docs/architecture/03-adapters-and-market-data.md`](docs/architecture/03-adapters-and-market-data.md): Ports and Adapters, Binance `aggTrades` mapping, and WebSocket streaming.
 - [`docs/architecture/04-hpo-and-walk-forward.md`](docs/architecture/04-hpo-and-walk-forward.md): Walk-Forward Optimization, parameter stability scoring, DSR, and Rayon parallelism.
 - [`docs/architecture/05-monte-carlo-and-telemetry.md`](docs/architecture/05-monte-carlo-and-telemetry.md): Discrete Event Monte Carlo Stress-Testing, trade sequence bootstrap, and web telemetry schemas.
+- [`docs/architecture/06-paper-trading-and-realtime-execution.md`](docs/architecture/06-paper-trading-and-realtime-execution.md): Real-time Paper Trading architecture, event broadcasting, and mark-to-market telemetry.
 
 ---
 

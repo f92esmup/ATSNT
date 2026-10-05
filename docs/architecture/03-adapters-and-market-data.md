@@ -5,10 +5,12 @@ In accordance with Hexagonal Architecture (Ports and Adapters), the adapters cra
 
 ---
 
-## 2. Ingestion Port: `MarketDataStream`
+## 2. Ingestion Ports: `MarketDataStream` & `AsyncMarketDataStream`
 
-The domain defines the expectation of market data through an abstract port:
+The domain and adapter layer define market data expectations through abstract ports:
 
+### 2.1 Synchronous Port (`MarketDataStream`)
+Used by batch readers (`BinanceCsvReader`, `BinanceParquetReader`):
 ```rust
 pub trait MarketDataStream {
     type Error;
@@ -16,7 +18,16 @@ pub trait MarketDataStream {
 }
 ```
 
-Any source—a historical CSV, an optimized Parquet file, or an asynchronous WebSocket stream—plugs into this port by emitting normalized `domain::Trade` items.
+### 2.2 Asynchronous Streaming Port (`AsyncMarketDataStream`)
+Used by real-time reactive network feeds (`BinanceWebSocketStream`):
+```rust
+pub trait AsyncMarketDataStream {
+    type Error;
+    async fn next_trade(&mut self) -> Result<Option<domain::Trade>, Self::Error>;
+}
+```
+
+Any source—a historical CSV, an optimized columnar Parquet file, or an asynchronous WebSocket stream—plugs into these ports by emitting normalized `domain::Trade` items.
 
 ---
 
