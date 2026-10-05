@@ -32,9 +32,9 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 ---
 
 ### Milestone 3: Live Market Data Ingestion (WebSocket Adapter)
-- [ ] Implement asynchronous Binance WebSocket client in `crates/adapters` (`wss://fstream.binance.com/ws/{symbol}@aggTrade`).
-- [ ] Reconnection state machine with exponential backoff and heartbeat ping/pong.
-- [ ] Stream real-time `Trade` events directly into `DollarBarAggregator`.
+- [x] Implement asynchronous Binance WebSocket client in `crates/adapters` (`wss://fstream.binance.com/ws/{symbol}@aggTrade`).
+- [x] Reconnection state machine with exponential backoff and heartbeat ping/pong.
+- [x] Stream real-time `Trade` events directly into `DollarBarAggregator`.
 
 ---
 

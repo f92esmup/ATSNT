@@ -13,6 +13,7 @@ serde_json.workspace = true
 rust_decimal.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 anyhow.workspace = true
 parquet.workspace = true
 arrow-schema.workspace = true
@@ -22,10 +23,16 @@ reqwest.workspace = true
 clap.workspace = true
 indicatif.workspace = true
 tempfile = "3"
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 
 [[bin]]
 name = "fetch_data"
 path = "src/bin/fetch_data.rs"
+
+[[bin]]
+name = "stream_trades"
+path = "src/bin/stream_trades.rs"
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
