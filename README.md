@@ -186,29 +186,48 @@ cargo run -p web -- --port 8080
 ---
 
 ### Step 8: Live Execution Gateway (Binance Testnet & Production)
-Connect to Binance Testnet or live production with cryptographic HMAC-SHA256 signing and institutional pre-trade risk controls:
+Connect to Binance Testnet or live production with cryptographic HMAC-SHA256 signing and institutional pre-trade risk controls.
+
+#### Credential Setup (.env)
+Copy the template and configure your API keys (never commit `.env` to Git):
 
 ```bash
-# 1. Query available account balance on Binance Testnet (Spot)
+cp .env.example .env
+# Edit .env with your keys:
+nano .env
+# Load the credentials into your current shell session:
+set -a; source .env; set +a
+```
+
+#### Running Gateway Queries & Streams
+
+```bash
+# 1. Query available account balance on Binance Futures Testnet
 cargo run -p adapters --bin live_gateway -- \
-  --api-key "YOUR_BINANCE_TESTNET_API_KEY" \
-  --secret-key "YOUR_BINANCE_TESTNET_SECRET_KEY" \
+  --testnet \
+  --futures \
+  --check-balance \
+  --asset USDT
+
+# 2. Query balance on Binance Spot Testnet
+cargo run -p adapters --bin live_gateway -- \
   --testnet \
   --check-balance \
   --asset USDT
 
-# 2. Listen for real-time order fill updates over the User Data Stream
+# 3. Listen for real-time order fill updates over the User Data Stream
 cargo run -p adapters --bin live_gateway -- \
-  --api-key "YOUR_BINANCE_TESTNET_API_KEY" \
-  --secret-key "YOUR_BINANCE_TESTNET_SECRET_KEY" \
   --testnet \
+  --futures \
   --listen
 
-# Or export environment variables to avoid passing secrets in CLI arguments:
-export BINANCE_API_KEY="your_api_key_here"
-export BINANCE_SECRET_KEY="your_secret_key_here"
-
-cargo run -p adapters --bin live_gateway -- --testnet --check-balance
+# Alternatively, pass credentials explicitly via CLI flags if not using environment variables:
+cargo run -p adapters --bin live_gateway -- \
+  --api-key "YOUR_KEY" \
+  --secret-key "YOUR_SECRET" \
+  --testnet \
+  --futures \
+  --check-balance
 ```
 
 #### Pre-Trade Risk Policy & Safety Guarantees

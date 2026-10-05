@@ -4,6 +4,12 @@
 # Reports & Local artifacts
 /storage/
 
+# Environment & Credentials
+.env
+.env.*
+*.env
+!.env.example
+
 # Rust / Cargo
 /target/
 **/*.rs.bk
