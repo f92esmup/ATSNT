@@ -50,6 +50,23 @@ cargo fmt --check
 
 ---
 
+### CLI Tools & Binaries Index
+
+The repository provides 7 specialized CLI binaries built with `clap` (run any with `--help` for full parameter documentation):
+
+| Binary / Tool | Crate | Purpose | Quick Command | Detailed Guide |
+| :--- | :--- | :--- | :--- | :--- |
+| `fetch_data` | `adapters` | Official Binance ETL: downloads historical `aggTrades` & converts to Parquet | `cargo run -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2024 --month 1` | [Step 1](#step-1-download--convert-real-market-data-binance-etl) |
+| `backtest` | `backtest` | Deterministic 1:1 event simulator and Monte Carlo stress testing | `cargo run -p backtest -- --data data/sample_trades.csv --dollar-bar 50000` | [Step 2](#step-2-run-deterministic-11-backtest) & [Step 3](#step-3-run-monte-carlo-stress-simulation) |
+| `run_hpo` | `backtest` | Multi-core CPU parallel hyperparameter optimization (Rayon + WFO) | `cargo run -p backtest --bin run_hpo -- --data <PATH> --folds 3` | [Step 4](#step-4-run-parallel-walk-forward-hyperparameter-optimization-hpo) |
+| `stream_trades`| `adapters` | Live Binance WebSocket feed accumulating and printing Dollar Bars | `cargo run -p adapters --bin stream_trades -- --symbol btcusdt --threshold 50000` | [Step 5](#step-5-live-market-data-ingestion--dollar-bar-streaming) |
+| `paper_trading`| `backtest` | Real-time simulated execution with continuous mark-to-market PnL | `cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot` | [Step 6](#step-6-run-real-time-paper-trading-engine) |
+| `web` | `web` | Axum REST/WebSocket server and TradingView financial dashboard SPA | `cargo run -p web -- --mock` | [Step 7](#step-7-run-real-time-web-telemetry-dashboard) |
+| `live_gateway` | `adapters` | Authenticated live order gateway with HMAC signing and circuit breakers | `cargo run -p adapters --bin live_gateway -- --testnet --check-balance` | [Step 8](#step-8-live-execution-gateway-binance-testnet--production) |
+
+
+---
+
 ### Step 1: Download & Convert Real Market Data (Binance ETL)
 Download official Binance Futures USDT-M `aggTrades` archives directly from `data.binance.vision` and convert them into compressed Apache Parquet format:
 
