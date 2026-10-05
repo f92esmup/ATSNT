@@ -1,6 +1,5 @@
-use std::sync::Arc;
-
 use domain::DollarBar;
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use rust_decimal::{Decimal, MathematicalOps};
 use rust_decimal_macros::dec;
@@ -248,22 +247,28 @@ impl WalkForwardOptimizer {
         let candidates = self.parameter_space.generate_grid(max_candidates);
         let total_candidates = candidates.len();
         let total_bars = bars.len();
-
-        let bars_arc = Arc::new(bars.to_vec());
-        let folds_arc = Arc::new(folds.to_vec());
         let config = self.engine_config;
+
+        let pb = ProgressBar::new(total_candidates as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) | ETA: {eta_precise} | {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
+                .progress_chars("#>-"),
+        );
+        pb.set_message("Evaluating HPO parameter space");
 
         let mut evaluations: Vec<CandidateEvaluation> = candidates
             .par_iter()
             .filter_map(|candidate| {
-                let mut is_sortinos = Vec::with_capacity(folds_arc.len());
-                let mut oos_sortinos = Vec::with_capacity(folds_arc.len());
-                let mut oos_profit_factors = Vec::with_capacity(folds_arc.len());
+                let mut is_sortinos = Vec::with_capacity(folds.len());
+                let mut oos_sortinos = Vec::with_capacity(folds.len());
+                let mut oos_profit_factors = Vec::with_capacity(folds.len());
                 let mut total_oos_trades = 0usize;
 
-                for fold in folds_arc.iter() {
-                    let train_slice = fold.train_slice(&bars_arc);
-                    let test_slice = fold.test_slice(&bars_arc);
+                for fold in folds.iter() {
+                    let train_slice = fold.train_slice(bars);
+                    let test_slice = fold.test_slice(bars);
 
                     let is_metrics = run_backtest_slice(config, candidate, train_slice).ok()?;
                     let oos_metrics = run_backtest_slice(config, candidate, test_slice).ok()?;
@@ -274,7 +279,7 @@ impl WalkForwardOptimizer {
                     total_oos_trades += oos_metrics.total_trades;
                 }
 
-                let num_folds_dec = Decimal::from(folds_arc.len());
+                let num_folds_dec = Decimal::from(folds.len());
                 let mean_is_sortino = is_sortinos.iter().copied().sum::<Decimal>() / num_folds_dec;
                 let mean_oos_sortino =
                     oos_sortinos.iter().copied().sum::<Decimal>() / num_folds_dec;
@@ -282,7 +287,7 @@ impl WalkForwardOptimizer {
                     oos_profit_factors.iter().copied().sum::<Decimal>() / num_folds_dec;
 
                 // Parameter stability evaluated on the first fold's In-Sample slice
-                let first_train = folds_arc[0].train_slice(&bars_arc);
+                let first_train = folds[0].train_slice(bars);
                 let stability_score = calculate_parameter_stability(candidate, first_train, config);
 
                 // Fitness = max(0, mean_is_sortino) * stability_score
@@ -292,6 +297,8 @@ impl WalkForwardOptimizer {
                 // Statistical significance via Deflated Sharpe Ratio
                 let dsr_p = calculate_dsr(mean_oos_sortino, total_candidates, total_bars);
                 let is_significant = dsr_p < dec!(0.05);
+
+                pb.inc(1);
 
                 Some(CandidateEvaluation {
                     config: candidate.clone(),
@@ -306,6 +313,8 @@ impl WalkForwardOptimizer {
                 })
             })
             .collect();
+
+        pb.finish_with_message("HPO parameter evaluation complete");
 
         // Sort descending by Fitness (highest quality robust configurations first)
         evaluations.sort_by_key(|a| std::cmp::Reverse(a.fitness));

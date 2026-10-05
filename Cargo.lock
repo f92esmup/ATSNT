@@ -262,6 +262,7 @@ dependencies = [
  "anyhow",
  "clap",
  "domain",
+ "indicatif",
  "rand 0.8.8",
  "rayon",
  "rust_decimal",
