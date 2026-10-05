@@ -143,6 +143,11 @@ impl PaperTradingSession {
         self.event_sender.subscribe()
     }
 
+    /// Access the underlying broadcast sender channel.
+    pub fn event_sender(&self) -> broadcast::Sender<PaperTradingEvent> {
+        self.event_sender.clone()
+    }
+
     /// Ingests a live market trade, steps the aggregator, evaluates strategy signals
     /// and barrier exits, and returns all events generated during this tick.
     pub fn process_trade(&mut self, trade: &Trade) -> Vec<PaperTradingEvent> {

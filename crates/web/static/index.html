@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ATSNT Quantitative Telemetry Terminal</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="vendor/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+    <!-- Top Header -->
+    <header>
+        <div class="brand-section">
+            <span class="logo-badge">ATSNT</span>
+            <span class="system-title">QUANTITATIVE TRADING ENGINE</span>
+            <div id="ws-status" class="status-badge">
+                <span class="status-dot"></span>
+                <span id="ws-status-text">CONNECTING</span>
+            </div>
+        </div>
+
+        <div class="controls-section">
+            <select id="asset-selector" title="Select Asset Ticker">
+                <option value="BTCUSDT">BTC/USDT</option>
+                <option value="ETHUSDT" disabled>ETH/USDT (Upcoming)</option>
+            </select>
+
+            <select id="strategy-selector" title="Select Strategy Attribution">
+                <option value="all">All Strategies</option>
+                <option value="dollar_bars_cusum" selected>CUSUM Breakout (BTC)</option>
+            </select>
+
+            <div class="nav-tabs">
+                <button class="nav-tab active" data-tab="live">● LIVE STREAM</button>
+                <button class="nav-tab" data-tab="backtest">📊 BACKTESTS</button>
+                <button class="nav-tab" data-tab="hpo">🔬 HPO & MONTE CARLO</button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Top KPI Ribbon -->
+    <div class="kpi-ribbon">
+        <div class="kpi-card">
+            <div class="kpi-title">Portfolio Equity</div>
+            <div id="kpi-equity" class="kpi-value">$10,000.00</div>
+            <div id="kpi-cash" class="kpi-sub">Cash: $10,000.00</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Unrealized PnL</div>
+            <div id="kpi-upnl" class="kpi-value neutral">$0.00</div>
+            <div id="kpi-upnl-pct" class="kpi-sub neutral">+0.00%</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Active Exposure</div>
+            <div id="kpi-position" class="kpi-value">FLAT</div>
+            <div id="kpi-position-details" class="kpi-sub">0.00 BTC ($0.00)</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Max Drawdown</div>
+            <div id="kpi-drawdown" class="kpi-value neutral">0.00%</div>
+            <div class="kpi-sub">Peak to trough</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Engine Uptime</div>
+            <div id="kpi-uptime" class="kpi-value neutral">0s</div>
+            <div id="kpi-clients" class="kpi-sub">WS Clients: 0</div>
+        </div>
+    </div>
+
+    <!-- Main View Content Area -->
+    <div class="view-content">
+
+        <!-- TAB 1: LIVE PAPER TRADING VIEW -->
+        <div id="tab-live" class="tab-pane active">
+            <div class="live-layout">
+                <!-- Left: Candlestick Chart -->
+                <div class="chart-panel">
+                    <div class="panel-header">
+                        <div class="panel-title">
+                            <span>BTCUSDT (DOLLAR BARS)</span>
+                            <span style="color: var(--text-muted); font-size: 11px;">$50,000 Threshold</span>
+                        </div>
+                        <div class="live-ticker-price" id="live-price">---</div>
+                    </div>
+                    <div id="chart-live" class="chart-container"></div>
+                </div>
+
+                <!-- Right: Active Position & Strategy Telemetry -->
+                <div class="side-column">
+                    <div class="terminal-card">
+                        <div class="card-title">
+                            <span>Active Position</span>
+                            <span id="pos-badge" class="position-badge flat">FLAT</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Entry Price</span>
+                            <span id="pos-entry" class="detail-val">---</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Mark Price</span>
+                            <span id="pos-mark" class="detail-val">---</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Position Size</span>
+                            <span id="pos-qty" class="detail-val">---</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Stop Loss Barrier</span>
+                            <span id="pos-sl" class="detail-val negative">---</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Take Profit Barrier</span>
+                            <span id="pos-tp" class="detail-val positive">---</span>
+                        </div>
+                    </div>
+
+                    <div class="terminal-card">
+                        <div class="card-title">Strategy Engine</div>
+                        <div class="detail-row">
+                            <span class="detail-label">Algorithm</span>
+                            <span class="detail-val" style="color: var(--accent-blue);">DollarBarsCusum</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Z-Score Window</span>
+                            <span class="detail-val">20 Bars</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">CUSUM Multiplier</span>
+                            <span class="detail-val">2.00x Vol</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Time Barrier</span>
+                            <span class="detail-val">15 Bars</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Execution Mode</span>
+                            <span class="detail-val" style="color: var(--accent-green);">PAPER TRADING</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bottom: Real-Time Event & Execution Journal -->
+            <div class="events-section">
+                <div class="panel-header">
+                    <span class="panel-title">LIVE TELEMETRY JOURNAL & ORDER FILLS</span>
+                    <span style="font-size: 11px; color: var(--text-muted);" id="events-count">0 events</span>
+                </div>
+                <div class="table-wrapper">
+                    <table id="events-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Event Type</th>
+                                <th>Symbol</th>
+                                <th>Price / Value</th>
+                                <th>Details / Payload</th>
+                            </tr>
+                        </thead>
+                        <tbody id="events-body">
+                            <!-- Dynamic streaming rows -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 2: HISTORICAL BACKTEST EXPLORER -->
+        <div id="tab-backtest" class="tab-pane">
+            <div class="report-bar">
+                <select id="backtest-select" style="min-width: 320px;">
+                    <option value="">Select an audit report from storage/reports...</option>
+                </select>
+                <button id="btn-load-report">Inspect Report</button>
+            </div>
+
+            <div class="metrics-grid">
+                <div class="kpi-card">
+                    <div class="kpi-title">Net Profit</div>
+                    <div id="bt-pnl" class="kpi-value neutral">---</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-title">Win Rate</div>
+                    <div id="bt-winrate" class="kpi-value neutral">---</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-title">Sortino Ratio</div>
+                    <div id="bt-sortino" class="kpi-value neutral">---</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-title">Total Trades</div>
+                    <div id="bt-trades" class="kpi-value neutral">---</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-title">Max Drawdown</div>
+                    <div id="bt-drawdown" class="kpi-value neutral">---</div>
+                </div>
+            </div>
+
+            <div class="chart-panel" style="margin-bottom: 16px;">
+                <div class="panel-header">
+                    <span class="panel-title">EQUITY PERFORMANCE CURVE</span>
+                </div>
+                <div id="chart-backtest" class="chart-container" style="height: 380px;"></div>
+            </div>
+        </div>
+
+        <!-- TAB 3: HPO & MONTE CARLO AUDIT -->
+        <div id="tab-hpo" class="tab-pane">
+            <div class="report-bar">
+                <select id="hpo-select" style="min-width: 320px;">
+                    <option value="">Select HPO or Monte Carlo Report...</option>
+                </select>
+                <button id="btn-load-hpo">Analyze Run</button>
+            </div>
+
+            <div class="metrics-grid">
+                <div class="kpi-card">
+                    <div class="kpi-title">Probability of Ruin (P_ruin)</div>
+                    <div id="mc-ruin" class="kpi-value positive">0.00%</div>
+                    <div class="kpi-sub">At 30% Account DD</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-title">Median Drawdown (p50)</div>
+                    <div id="mc-p50" class="kpi-value neutral">---</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-title">95th Percentile DD (p95)</div>
+                    <div id="mc-p95" class="kpi-value neutral">---</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-title">Worst Case Drawdown</div>
+                    <div id="mc-worst" class="kpi-value negative">---</div>
+                </div>
+            </div>
+
+            <div class="chart-panel">
+                <div class="panel-header">
+                    <span class="panel-title">MONTE CARLO TRADE RESAMPLING FAN CHART (50 SIMULATION PATHS)</span>
+                </div>
+                <div id="chart-montecarlo" class="chart-container" style="height: 420px;"></div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Application Script -->
+    <script src="app.js"></script>
+</body>
+</html>

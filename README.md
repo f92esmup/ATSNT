@@ -150,6 +150,24 @@ cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --config co
 
 ---
 
+### Step 7: Run Real-Time Web Telemetry Dashboard
+Launch the standalone web telemetry server and browser dashboard:
+
+```bash
+# Run server in live mock/demo mode on localhost:3000
+cargo run -p web -- --mock
+
+# Run server binding to a custom port
+cargo run -p web -- --port 8080
+```
+- Serves the Single Page Application (SPA) dashboard at `http://127.0.0.1:3000`.
+- Streams real-time Dollar Bars, order executions, and mark-to-market PnL over `/ws/telemetry`.
+- Renders high-performance financial candlestick charts with TradingView Lightweight Charts at 60 FPS.
+- Allows browsing historical backtests and Monte Carlo fan chart distributions from `storage/reports/`.
+- Air-gapped read-only architecture ready for Cloudflare Zero Trust deployment.
+
+---
+
 ## 4. Documentation Index
 
 - [`AGENTS.md`](AGENTS.md): Architectural standards, engineering guidelines, and agent rules.
@@ -160,6 +178,7 @@ cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --config co
 - [`docs/architecture/04-hpo-and-walk-forward.md`](docs/architecture/04-hpo-and-walk-forward.md): Walk-Forward Optimization, parameter stability scoring, DSR, and Rayon parallelism.
 - [`docs/architecture/05-monte-carlo-and-telemetry.md`](docs/architecture/05-monte-carlo-and-telemetry.md): Discrete Event Monte Carlo Stress-Testing, trade sequence bootstrap, and web telemetry schemas.
 - [`docs/architecture/06-paper-trading-and-realtime-execution.md`](docs/architecture/06-paper-trading-and-realtime-execution.md): Real-time Paper Trading architecture, event broadcasting, and mark-to-market telemetry.
+- [`docs/architecture/07-web-telemetry-dashboard.md`](docs/architecture/07-web-telemetry-dashboard.md): Web presentation layer, Axum REST & WebSocket streaming, and Lightweight Charts dashboard.
 
 ---
 

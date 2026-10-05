@@ -46,10 +46,11 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 ---
 
 ### Milestone 5: Web Presentation & Telemetry Dashboard (`crates/web`)
-- [ ] Axum HTTP & WebSocket server in `crates/web`.
-- [ ] Real-time streaming of Dollar Bars, signals, and open positions.
-- [ ] Web dashboard visualizing strategy catalog, backtest equity curves, and performance metrics.
-- [ ] Deployment setup for VPS and custom domain reverse proxy (`pescudem.es`).
+*(Architecture specification: [`docs/architecture/07-web-telemetry-dashboard.md`](architecture/07-web-telemetry-dashboard.md))*
+- [x] Axum HTTP & WebSocket server in `crates/web`.
+- [x] Real-time streaming of Dollar Bars, signals, and open positions over `/ws/telemetry`.
+- [x] Web dashboard Single Page Application with Lightweight Charts (TradingView) dark financial terminal.
+- [x] Multi-asset and multi-strategy ready architecture with Zero-Trust perimeter deployment model.
 
 ---
 
