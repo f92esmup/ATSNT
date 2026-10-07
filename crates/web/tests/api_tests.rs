@@ -694,6 +694,60 @@ async fn websocket_delivers_mock_metadata_and_observed_tick_timestamp() {
 }
 
 #[tokio::test]
+async fn mock_startup_identity_is_configured_before_producer_events() {
+    // Guard the binary wiring without spawning a process or a timed demo producer.
+    let startup = include_str!("../src/main.rs");
+    let state_creation = startup.find("let app_state =").unwrap();
+    let producer_start = startup.find("mock::spawn_mock_ticker").unwrap();
+    assert!(
+        state_creation < producer_start,
+        "state must precede producer startup"
+    );
+    assert!(startup.contains("AppState::with_telemetry("));
+    assert!(startup.contains("mock::demo_telemetry_config()"));
+
+    let (tx, _) = broadcast::channel(2);
+    let metadata = web::mock::demo_telemetry_config();
+    let state = AppState::with_telemetry(tx.clone(), "unused-reports".into(), metadata.clone());
+    {
+        let snapshot = state.state.read().await;
+        assert_eq!(snapshot.active_symbol, "BTCUSDT");
+        assert_eq!(snapshot.active_strategy, "SyntheticDemo");
+        assert_eq!(snapshot.timestamp, None);
+    }
+    tokio::task::yield_now().await;
+    assert_eq!(state.state.read().await.timestamp, None);
+    tx.send(metadata.envelope(
+        1234,
+        PaperTradingEvent::MarkToMarket {
+            current_price: dec!(100),
+            unrealized_pnl: dec!(0),
+            total_equity: dec!(10000),
+            drawdown_pct: dec!(0),
+        },
+    ))
+    .unwrap();
+    wait_snapshot_time(&state, 1234).await;
+    let snapshot = state.state.read().await;
+    assert_eq!(snapshot.active_symbol, "BTCUSDT");
+    assert_eq!(snapshot.active_strategy, "SyntheticDemo");
+    assert_eq!(snapshot.timestamp, Some(1234));
+}
+
+async fn wait_snapshot_time(state: &AppState, timestamp: i64) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if state.state.read().await.timestamp == Some(timestamp) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn test_static_asset_serving() {
     let (tx, _) = broadcast::channel(100);
     let temp_dir = tempfile::tempdir().unwrap();
