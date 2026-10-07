@@ -60,6 +60,66 @@ pub enum PaperTradingEvent {
     },
 }
 
+impl PaperTradingEvent {
+    /// Stable wire identifier, independent of Rust debug formatting.
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::BarFormed(_) => "BarFormed",
+            Self::SignalGenerated(_) => "SignalGenerated",
+            Self::PositionOpened { .. } => "PositionOpened",
+            Self::PositionClosed { .. } => "PositionClosed",
+            Self::MarkToMarket { .. } => "MarkToMarket",
+        }
+    }
+}
+
+/// Explicit identity of one telemetry-producing session.
+///
+/// Separate from [`PaperTradingConfig`] to preserve existing raw-event callers.
+/// The caller supplies the actual instrument and strategy/session identifier;
+/// neither can be inferred from an anonymous market trade.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// Instrument traded by this session.
+    pub symbol: String,
+    /// Caller-selected strategy/session identifier.
+    pub strategy_id: String,
+}
+
+impl TelemetryConfig {
+    /// Wraps an event with its originating market tick's Unix millisecond timestamp.
+    pub fn envelope(
+        &self,
+        timestamp: i64,
+        event: PaperTradingEvent,
+    ) -> TelemetryEnvelope<PaperTradingEvent> {
+        TelemetryEnvelope {
+            timestamp: Some(timestamp),
+            strategy_id: self.strategy_id.clone(),
+            symbol: self.symbol.clone(),
+            event_type: event.event_type().to_string(),
+            payload: event,
+        }
+    }
+}
+
+/// Stable telemetry wire envelope shared by lifecycle events and snapshots.
+/// Lifecycle payloads retain the raw enum's existing externally tagged JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelemetryEnvelope<T> {
+    /// Originating market event time in Unix milliseconds. `None` is reserved
+    /// for an initial snapshot before any market event has been observed.
+    pub timestamp: Option<i64>,
+    /// Explicit strategy/session identifier.
+    pub strategy_id: String,
+    /// Explicit instrument identifier.
+    pub symbol: String,
+    /// Stable event name, not a Rust debug representation.
+    pub event_type: String,
+    /// Event-specific data.
+    pub payload: T,
+}
+
 /// Configuration settings for initializing a [`PaperTradingSession`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaperTradingConfig {
@@ -93,6 +153,10 @@ pub struct PaperTradingSession {
     strategy: DollarBarsCusumStrategy,
     engine: BacktestEngine,
     event_sender: broadcast::Sender<PaperTradingEvent>,
+    telemetry: Option<(
+        TelemetryConfig,
+        broadcast::Sender<TelemetryEnvelope<PaperTradingEvent>>,
+    )>,
 }
 
 impl PaperTradingSession {
@@ -113,7 +177,34 @@ impl PaperTradingSession {
             strategy,
             engine,
             event_sender,
+            telemetry: None,
         })
+    }
+
+    /// Initializes an explicitly identified session with an additional envelope channel.
+    /// Raw subscriptions and [`Self::process_trade`] return values are unchanged.
+    pub fn new_with_telemetry(
+        config: PaperTradingConfig,
+        telemetry: TelemetryConfig,
+    ) -> Result<Self, BacktestError> {
+        let capacity = if config.channel_capacity == 0 {
+            10_000
+        } else {
+            config.channel_capacity
+        };
+        let mut session = Self::new(config)?;
+        let (sender, _) = broadcast::channel(capacity);
+        session.telemetry = Some((telemetry, sender));
+        Ok(session)
+    }
+
+    /// Subscribes to identified envelopes, or returns `None` for raw-only sessions.
+    pub fn subscribe_telemetry(
+        &self,
+    ) -> Option<broadcast::Receiver<TelemetryEnvelope<PaperTradingEvent>>> {
+        self.telemetry
+            .as_ref()
+            .map(|(_, sender)| sender.subscribe())
     }
 
     /// Initializes a paper trading session with pre-built components.
@@ -135,6 +226,7 @@ impl PaperTradingSession {
             strategy,
             engine,
             event_sender,
+            telemetry: None,
         }
     }
 
@@ -252,6 +344,9 @@ impl PaperTradingSession {
         // 3. Broadcast events to all active subscribers
         for event in &events {
             let _ = self.event_sender.send(event.clone());
+            if let Some((metadata, sender)) = &self.telemetry {
+                let _ = sender.send(metadata.envelope(trade.timestamp, event.clone()));
+            }
         }
 
         events

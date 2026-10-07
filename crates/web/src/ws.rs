@@ -3,6 +3,7 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
+use backtest::TelemetryEnvelope;
 use futures_util::{SinkExt, StreamExt};
 use tracing::{debug, error, info};
 
@@ -31,10 +32,13 @@ async fn handle_socket(socket: WebSocket, app_state: AppState) {
     // 1. Send initial telemetry snapshot immediately upon connection
     let initial_snapshot = {
         let st = app_state.state.read().await;
-        serde_json::json!({
-            "event_type": "InitialSnapshot",
-            "payload": &*st,
-        })
+        TelemetryEnvelope {
+            timestamp: st.timestamp,
+            strategy_id: st.active_strategy.clone(),
+            symbol: st.active_symbol.clone(),
+            event_type: "InitialSnapshot".to_string(),
+            payload: st.clone(),
+        }
     };
 
     if let Ok(msg_text) = serde_json::to_string(&initial_snapshot) {
@@ -52,12 +56,7 @@ async fn handle_socket(socket: WebSocket, app_state: AppState) {
             event_result = rx.recv() => {
                 match event_result {
                     Ok(event) => {
-                        let json_msg = serde_json::json!({
-                            "event_type": format!("{:?}", event).split('{').next().unwrap_or("Event").split('(').next().unwrap_or("Event").trim(),
-                            "payload": event,
-                        });
-
-                        if let Ok(text) = serde_json::to_string(&json_msg) {
+                        if let Ok(text) = serde_json::to_string(&event) {
                             if let Err(e) = ws_sender.send(Message::Text(text)).await {
                                 debug!(error = %e, "Client disconnected or failed to receive WebSocket message");
                                 break;

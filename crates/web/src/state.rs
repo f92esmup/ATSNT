@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use backtest::PaperTradingEvent;
+use backtest::{PaperTradingEvent, TelemetryConfig, TelemetryEnvelope};
 use domain::PositionSide;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -30,6 +30,8 @@ pub struct PositionInfo {
 /// Instantaneous telemetry state of the trading portfolio and engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryState {
+    /// Latest originating market event time in Unix milliseconds; absent before observation.
+    pub timestamp: Option<i64>,
     /// Total portfolio equity (cash balance + unrealized PnL).
     pub portfolio_value: Decimal,
     /// Settled cash balance.
@@ -51,12 +53,13 @@ pub struct TelemetryState {
 impl Default for TelemetryState {
     fn default() -> Self {
         Self {
+            timestamp: None,
             portfolio_value: dec!(10_000.00),
             cash_balance: dec!(10_000.00),
             unrealized_pnl: dec!(0.00),
             active_position: None,
-            active_symbol: "BTCUSDT".to_string(),
-            active_strategy: "DollarBarsCusumStrategy".to_string(),
+            active_symbol: String::new(),
+            active_strategy: String::new(),
             last_price: None,
             drawdown_pct: dec!(0.00),
         }
@@ -67,7 +70,7 @@ impl Default for TelemetryState {
 #[derive(Clone)]
 pub struct AppState {
     /// Broadcast sender channel for paper trading telemetry events.
-    pub event_sender: broadcast::Sender<PaperTradingEvent>,
+    pub event_sender: broadcast::Sender<TelemetryEnvelope<PaperTradingEvent>>,
     /// Active telemetry snapshot.
     pub state: Arc<RwLock<TelemetryState>>,
     /// Directory containing historical JSON reports.
@@ -79,9 +82,35 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Creates a new [`AppState`] with the provided broadcast channel and reports directory.
-    pub fn new(event_sender: broadcast::Sender<PaperTradingEvent>, reports_dir: PathBuf) -> Self {
-        let state = Arc::new(RwLock::new(TelemetryState::default()));
+    /// Creates state without assuming a producer identity. Identity strings remain
+    /// empty until an envelope arrives; use [`Self::with_telemetry`] to configure
+    /// identity before the first event.
+    pub fn new(
+        event_sender: broadcast::Sender<TelemetryEnvelope<PaperTradingEvent>>,
+        reports_dir: PathBuf,
+    ) -> Self {
+        Self::with_telemetry(
+            event_sender,
+            reports_dir,
+            TelemetryConfig {
+                symbol: String::new(),
+                strategy_id: String::new(),
+            },
+        )
+    }
+
+    /// Creates dashboard state for an explicitly configured telemetry producer.
+    /// No timestamp is assigned until an event from that producer is observed.
+    pub fn with_telemetry(
+        event_sender: broadcast::Sender<TelemetryEnvelope<PaperTradingEvent>>,
+        reports_dir: PathBuf,
+        telemetry: TelemetryConfig,
+    ) -> Self {
+        let state = Arc::new(RwLock::new(TelemetryState {
+            active_symbol: telemetry.symbol,
+            active_strategy: telemetry.strategy_id,
+            ..TelemetryState::default()
+        }));
         let connected_clients = Arc::new(AtomicUsize::new(0));
         let start_time = Instant::now();
 
@@ -93,7 +122,10 @@ impl AppState {
         tokio::spawn(async move {
             while let Ok(event) = rx.recv().await {
                 let mut st = state_updater.write().await;
-                match event {
+                st.timestamp = event.timestamp;
+                st.active_symbol = event.symbol;
+                st.active_strategy = event.strategy_id;
+                match event.payload {
                     PaperTradingEvent::BarFormed(bar) => {
                         st.last_price = Some(bar.close);
                     }

@@ -41,8 +41,8 @@ The Web Presentation crate (`crates/web`) implements an **observable, air-gapped
    - The web server is strictly a telemetry consumer, not an execution gateway. Read-only access does not make telemetry public or protect against host compromise.
 
 2. **Multi-Asset & Multi-Strategy Attribution**:
-   - Every telemetry event, order fill, and bar payload explicitly carries `symbol` and `strategy_id`.
-   - The dashboard supports filtering by specific strategy or inspecting the aggregated multi-asset portfolio.
+   - Configured telemetry producers attach explicit `symbol` and `strategy_id` to the envelope, not to the raw event payload.
+   - Multi-asset filtering and aggregated multi-strategy views remain architectural goals; the current snapshot tracks one producer identity.
 
 3. **Single Self-Contained Deployment**:
    - Axum serves the REST API, WebSocket streams, and static web assets from a single compiled binary (`target/release/web`).
@@ -82,30 +82,49 @@ The Web Presentation crate (`crates/web`) implements an **observable, air-gapped
 
 ### 3.2 WebSocket Streaming (`/ws/telemetry`)
 
-The WebSocket endpoint upgrades client connections and pushes real-time events published to the `tokio::sync::broadcast` bus.
+The endpoint performs a real HTTP WebSocket upgrade, sends an `InitialSnapshot`, then forwards serialized envelopes from the `tokio::sync::broadcast` bus as text frames. The T1 Host/Origin policy still applies before upgrade.
 
 #### Event Envelope Schema
+Every message has exactly five top-level fields. Lifecycle payloads preserve the raw `PaperTradingEvent` enum's externally tagged JSON:
+
 ```json
 {
   "timestamp": 1704067200000,
-  "strategy_id": "cusum_breakout_v1",
-  "symbol": "BTCUSDT",
-  "event_type": "DollarBarFinalized",
-  "payload": { ... }
+  "strategy_id": "paper-17",
+  "symbol": "ETHUSDT",
+  "event_type": "BarFormed",
+  "payload": {
+    "BarFormed": {
+      "start_time": 1704067199000,
+      "end_time": 1704067200000,
+      "open": "100", "high": "101", "low": "100", "close": "101",
+      "volume": "1", "dollar_volume": "101", "trade_count": 1
+    }
+  }
 }
 ```
 
-#### Event Types
-1. **`DollarBarFinalized`**: Emitted when a Dollar Bar hits its threshold.
-   - `bar_id`, `open`, `high`, `low`, `close`, `volume`, `dollar_volume`, `trades_count`.
-2. **`SignalTriggered`**: Emitted when CUSUM or Z-Score triggers an order intent.
-   - `indicator`: `"CUSUM"` | `"Z_SCORE"`, `direction`: `"Long"` | `"Short"`, `threshold`, `value`.
-3. **`OrderFilled`**: Emitted upon order state transition to `Filled` or `PartiallyFilled`.
-   - `order_id`, `side`, `price`, `quantity`, `fee`, `slippage`.
-4. **`MarkToMarketUpdate`**: Emitted on trade ticks to report live unrealized PnL.
-   - `mark_price`, `unrealized_pnl`, `realized_pnl`, `current_equity`, `drawdown_pct`.
-5. **`PositionLiquidated`**: Emitted when a Triple Barrier (SL/TP/Time) or manual session stop closes a position.
-   - `exit_reason`: `"StopLoss"` | `"TakeProfit"` | `"TimeBarrier"` | `"SessionFinish"`, `exit_price`, `net_pnl`.
+`timestamp` is Unix milliseconds: paper events use the originating `Trade.timestamp`; all mock events from one synthetic tick share that tick's observed wall-clock timestamp. Neither WebSocket delivery nor snapshot creation invents a new event time. Financial decimals serialize as strings.
+
+#### Emitted Event Types
+For lifecycle events, `payload` is `{ "<event_type>": { ... } }`.
+
+| `event_type` | Payload fields / meaning |
+| :--- | :--- |
+| `BarFormed` | Finalized `DollarBar`: `start_time`, `end_time`, `open`, `high`, `low`, `close`, `volume`, `dollar_volume`, `trade_count`. |
+| `SignalGenerated` | `OrderIntent`: `timestamp`, `side` (`Buy`/`Sell`), `price`, `stop_loss`, `take_profit`, `max_bars_hold`; emitted with a newly opened paper position. |
+| `PositionOpened` | `side` (`Long`/`Short`), `entry_price`, `quantity`, `stop_loss`, `take_profit`. |
+| `PositionClosed` | `exit_reason`, `exit_price`, `net_pnl`, `total_equity`. Paper barrier exits use `StopLoss`, `TakeProfit`, or `TimeBarrier`, with an `Unknown` fallback; `finish()` does not emit a `SessionFinish` event. |
+| `MarkToMarket` | `current_price`, `unrealized_pnl`, `total_equity`, `drawdown_pct`; paper ticks emit it while a position is active. |
+| `InitialSnapshot` | Untagged `TelemetryState`: `timestamp`, `portfolio_value`, `cash_balance`, `unrealized_pnl`, `active_position`, `active_symbol`, `active_strategy`, `last_price`, `drawdown_pct`. |
+
+#### Identity, snapshots, and compatibility
+- `TelemetryConfig { symbol, strategy_id }` explicitly identifies a producer; anonymous trades cannot supply these identities. `AppState::with_telemetry` can set identity before the first event. Without configuration or an observed envelope, identity strings are empty and the timestamp is `null`.
+- The state updater retains the latest observed envelope's timestamp and identity. `/api/state` exposes that state; each WebSocket `InitialSnapshot` uses the same latest event timestamp, or `null` before observation, even when identity was preconfigured.
+- `PaperTradingConfig` struct literals and the raw `PaperTradingEvent` API remain backward compatible: `new`, `subscribe`, `event_sender`, and `process_trade` retain raw-event behavior. `new_with_telemetry` adds a separate envelope channel via `subscribe_telemetry` (which returns `None` for raw-only sessions). The web application consumes envelopes; its JavaScript reads the existing tagged lifecycle payloads and uses envelope identity/time for attribution, logs, and position markers.
+- In `crates/web/tests/api_tests.rs`, `websocket_delivers_configured_paper_event_and_snapshot_envelopes` exercises a loopback HTTP 101 upgrade, text-frame delivery of all five paper event types, exact envelope/payload equality, and latest-time snapshots. `websocket_delivers_mock_metadata_and_observed_tick_timestamp` checks mock identity and tick time against the delivered bar's `end_time`. These are socket delivery tests, not just upgrade-extractor checks; they were inspected, not rerun for this documentation update.
+
+**Runtime boundary (T3 pending):** the web binary does not yet wire a real `PaperTradingSession` into its process. `--mock` is explicit opt-in, demo-only synthetic data (`BTCUSDT` / `SyntheticDemo` by default), not paper-session execution. Without it, the binary starts without a market-event producer; identity remains empty and timestamp `null` until events arrive. The paper-to-web bridge in the contract test does not complete T3 runtime wiring.
 
 ---
 
@@ -240,9 +259,9 @@ policy. Embedders using another port or a tunnel should construct
 `create_router_with_security`. The embedder remains responsible for actually
 binding that validated loopback listener.
 
-This perimeter change covers closure task T1 only. Timestamp/strategy/symbol
-telemetry and real paper-session wiring remain separate tasks; it does not declare
-Milestone 5 complete.
+The perimeter controls above cover closure task T1. Section 3.2 documents the T2
+telemetry contract; real paper-session process wiring remains T3 pending. Neither
+this documentation update nor the checklist below declares Milestone 5 complete.
 
 ---
 

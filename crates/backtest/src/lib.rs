@@ -19,5 +19,7 @@ pub use optimization::{
     calculate_dsr, calculate_parameter_stability, run_backtest_slice, CandidateEvaluation,
     ParameterSpace, WalkForwardOptimizer,
 };
-pub use paper::{PaperTradingConfig, PaperTradingEvent, PaperTradingSession};
+pub use paper::{
+    PaperTradingConfig, PaperTradingEvent, PaperTradingSession, TelemetryConfig, TelemetryEnvelope,
+};
 pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};

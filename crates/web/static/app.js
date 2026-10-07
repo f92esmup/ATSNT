@@ -124,7 +124,7 @@
             wsStatus.className = 'status-badge live';
             wsStatusText.textContent = 'LIVE WS';
             reconnectDelay = 1000;
-            appendLog('SYSTEM', 'BTCUSDT', 'Connected to real-time telemetry stream');
+            appendLog('SYSTEM', '---', 'Connected to real-time telemetry stream');
         };
 
         socket.onmessage = function (event) {
@@ -158,13 +158,16 @@
     function handleTelemetryEvent(msg) {
         const type = msg.event_type;
         const p = msg.payload;
+        const symbol = msg.symbol;
+        const log = (...args) => appendLog(...args, msg.timestamp, msg.strategy_id);
+        updateTelemetryIdentity(msg);
 
         if (type === 'InitialSnapshot') {
             updateInitialSnapshot(p);
             return;
         }
 
-        if (type === 'BarFormed' || p.BarFormed) {
+        if (type === 'BarFormed') {
             const bar = p.BarFormed || p;
             const candleTime = Math.floor(bar.end_time / 1000);
             const closeVal = parseFloat(bar.close);
@@ -180,8 +183,8 @@
             }
 
             livePriceEl.textContent = `$${closeVal.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
-            appendLog('BAR_FORMED', 'BTCUSDT', `$${closeVal.toFixed(2)}`, `Vol: ${parseFloat(bar.volume).toFixed(4)} BTC ($${parseFloat(bar.dollar_volume).toFixed(0)})`);
-        } else if (type === 'MarkToMarket' || p.MarkToMarket) {
+            log('BAR_FORMED', symbol, `$${closeVal.toFixed(2)}`, `Vol: ${parseFloat(bar.volume).toFixed(4)} base units ($${parseFloat(bar.dollar_volume).toFixed(0)})`);
+        } else if (type === 'MarkToMarket') {
             const m = p.MarkToMarket || p;
             const price = parseFloat(m.current_price);
             const upnl = parseFloat(m.unrealized_pnl);
@@ -199,7 +202,7 @@
             const upnlPct = (upnl / totalEq) * 100;
             kpiUpnlPct.textContent = `${upnlPct >= 0 ? '+' : ''}${upnlPct.toFixed(2)}%`;
             kpiUpnlPct.className = `kpi-sub ${upnl > 0 ? 'positive' : upnl < 0 ? 'negative' : 'neutral'}`;
-        } else if (type === 'PositionOpened' || p.PositionOpened) {
+        } else if (type === 'PositionOpened') {
             const pos = p.PositionOpened || p;
             const side = pos.side;
             const entry = parseFloat(pos.entry_price);
@@ -209,19 +212,18 @@
 
             posBadge.className = `position-badge ${side.toLowerCase()}`;
             posBadge.textContent = side.toUpperCase();
-            kpiPosition.textContent = `${side.toUpperCase()} ${qty} BTC`;
+            kpiPosition.textContent = `${side.toUpperCase()} ${qty} base units`;
             kpiPositionDetails.textContent = `@ $${entry.toFixed(2)}`;
 
             posEntry.textContent = `$${entry.toFixed(2)}`;
-            posQty.textContent = `${qty.toFixed(4)} BTC`;
+            posQty.textContent = `${qty.toFixed(4)} base units`;
             posSl.textContent = `$${sl.toFixed(2)}`;
             posTp.textContent = `$${tp.toFixed(2)}`;
 
             // Marker on chart
             if (candleSeries) {
-                const nowSec = Math.floor(Date.now() / 1000);
                 chartMarkers.push({
-                    time: nowSec,
+                    time: Math.floor(msg.timestamp / 1000),
                     position: side.toLowerCase() === 'long' ? 'belowBar' : 'aboveBar',
                     color: side.toLowerCase() === 'long' ? '#10b981' : '#f43f5e',
                     shape: side.toLowerCase() === 'long' ? 'arrowUp' : 'arrowDown',
@@ -230,8 +232,8 @@
                 candleSeries.setMarkers(chartMarkers);
             }
 
-            appendLog('POSITION_OPEN', 'BTCUSDT', `$${entry.toFixed(2)}`, `${side.toUpperCase()} ${qty} BTC (SL: ${sl.toFixed(0)}, TP: ${tp.toFixed(0)})`);
-        } else if (type === 'PositionClosed' || p.PositionClosed) {
+            log('POSITION_OPEN', symbol, `$${entry.toFixed(2)}`, `${side.toUpperCase()} ${qty} base units (SL: ${sl.toFixed(0)}, TP: ${tp.toFixed(0)})`);
+        } else if (type === 'PositionClosed') {
             const exit = p.PositionClosed || p;
             const pnl = parseFloat(exit.net_pnl);
             const exitPrice = parseFloat(exit.exit_price);
@@ -240,7 +242,7 @@
             posBadge.className = 'position-badge flat';
             posBadge.textContent = 'FLAT';
             kpiPosition.textContent = 'FLAT';
-            kpiPositionDetails.textContent = '0.00 BTC ($0.00)';
+            kpiPositionDetails.textContent = '0.00 base units ($0.00)';
 
             posEntry.textContent = '---';
             posMark.textContent = '---';
@@ -255,9 +257,8 @@
 
             // Marker on chart
             if (candleSeries) {
-                const nowSec = Math.floor(Date.now() / 1000);
                 chartMarkers.push({
-                    time: nowSec,
+                    time: Math.floor(msg.timestamp / 1000),
                     position: 'aboveBar',
                     color: pnl >= 0 ? '#10b981' : '#f43f5e',
                     shape: 'circle',
@@ -266,15 +267,38 @@
                 candleSeries.setMarkers(chartMarkers);
             }
 
-            appendLog('POSITION_CLOSED', 'BTCUSDT', `$${exitPrice.toFixed(2)}`, `Reason: ${exit.exit_reason}, Net PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`);
-        } else if (type === 'SignalGenerated' || p.SignalGenerated) {
+            log('POSITION_CLOSED', symbol, `$${exitPrice.toFixed(2)}`, `Reason: ${exit.exit_reason}, Net PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`);
+        } else if (type === 'SignalGenerated') {
             const s = p.SignalGenerated || p;
-            appendLog('SIGNAL', 'BTCUSDT', `$${parseFloat(s.price).toFixed(2)}`, `Signal: ${s.side}`);
+            log('SIGNAL', symbol, `$${parseFloat(s.price).toFixed(2)}`, `Signal: ${s.side}`);
         }
+    }
+
+    function updateTelemetryIdentity(msg) {
+        for (const [id, value] of [['asset-selector', msg.symbol], ['strategy-selector', msg.strategy_id]]) {
+            const selector = document.getElementById(id);
+            if (!selector) continue;
+            if (!value) {
+                selector.selectedIndex = -1;
+                continue;
+            }
+            let option = Array.from(selector.options).find(item => item.value === value);
+            if (!option) {
+                option = document.createElement('option');
+                option.value = value;
+                option.textContent = value;
+                selector.appendChild(option);
+            }
+            option.disabled = false;
+            selector.value = value;
+        }
+        const title = document.querySelector('#chart-live')?.parentElement?.querySelector('.panel-title > span');
+        if (title) title.textContent = msg.symbol ? `${msg.symbol} (DOLLAR BARS)` : 'Awaiting configured telemetry';
     }
 
     function updateInitialSnapshot(st) {
         if (!st) return;
+        if (!st.active_position) kpiPositionDetails.textContent = '0.00 base units ($0.00)';
         kpiEquity.textContent = `$${parseFloat(st.portfolio_value).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
         kpiCash.textContent = `Cash: $${parseFloat(st.cash_balance).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
         if (st.last_price) {
@@ -282,24 +306,31 @@
         }
     }
 
-    function appendLog(eventType, symbol, price, details) {
+    function appendLog(eventType, symbol, price, details, timestamp = null, strategyId = '') {
         eventLogCount++;
         eventsCount.textContent = `${eventLogCount} events`;
 
         const tr = document.createElement('tr');
-        const now = new Date().toLocaleTimeString();
+        const eventTime = timestamp === null ? '---' : new Date(timestamp).toLocaleTimeString();
 
         let badgeColor = 'neutral';
         if (eventType.includes('OPEN') || eventType.includes('BAR')) badgeColor = 'positive';
-        if (eventType.includes('CLOSE')) badgeColor = details.includes('-') ? 'negative' : 'positive';
+        if (eventType.includes('CLOSE')) badgeColor = (details || '').includes('-') ? 'negative' : 'positive';
 
-        tr.innerHTML = `
-            <td style="color: var(--text-muted);">${now}</td>
-            <td style="font-weight: 700; color: var(--accent-blue);">${eventType}</td>
-            <td>${symbol}</td>
-            <td class="${badgeColor}">${price || '---'}</td>
-            <td style="color: var(--text-secondary);">${details || ''}</td>
-        `;
+        // Configured identities and event details are text, never executable markup.
+        const values = [eventTime, eventType, symbol, price || '---',
+            `${strategyId ? `[${strategyId}] ` : ''}${details || ''}`];
+        values.forEach((value, index) => {
+            const cell = document.createElement('td');
+            cell.textContent = value;
+            if (index === 0 || index === 4) cell.style.color = 'var(--text-muted)';
+            if (index === 1) {
+                cell.style.fontWeight = '700';
+                cell.style.color = 'var(--accent-blue)';
+            }
+            if (index === 3) cell.className = badgeColor;
+            tr.appendChild(cell);
+        });
 
         eventsBody.insertBefore(tr, eventsBody.firstChild);
         if (eventsBody.children.length > 80) {

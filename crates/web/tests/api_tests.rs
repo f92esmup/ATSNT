@@ -383,7 +383,10 @@ async fn test_state_and_strategies_endpoints() {
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["portfolio_value"], "10000.00");
-    assert_eq!(json["active_symbol"], "BTCUSDT");
+    // Without a configured producer, do not attribute the snapshot to a demo session.
+    assert_eq!(json["active_symbol"], "");
+    assert_eq!(json["active_strategy"], "");
+    assert_eq!(json["timestamp"], serde_json::Value::Null);
 
     // Test /api/strategies
     let req2 = Request::builder()
@@ -485,7 +488,14 @@ async fn test_event_broadcasting_updates_telemetry_state() {
         drawdown_pct: dec!(0.015),
     };
 
-    tx.send(event).unwrap();
+    tx.send(
+        backtest::TelemetryConfig {
+            symbol: "ETHUSDT".into(),
+            strategy_id: "configured-cusum".into(),
+        }
+        .envelope(123456, event),
+    )
+    .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Check /api/state reflects updated price & equity
@@ -503,6 +513,184 @@ async fn test_event_broadcasting_updates_telemetry_state() {
     assert_eq!(json["unrealized_pnl"], "150.25");
     assert_eq!(json["portfolio_value"], "10150.25");
     assert_eq!(json["drawdown_pct"], "0.015");
+    assert_eq!(json["active_symbol"], "ETHUSDT");
+    assert_eq!(json["active_strategy"], "configured-cusum");
+    assert_eq!(json["timestamp"], 123456);
+}
+
+// Connect through the real HTTP upgrade and decode unmasked server text frames.
+// This uses only existing Tokio dependencies, not a Tower upgrade rejection.
+async fn connect_telemetry(
+    state: AppState,
+) -> (tokio::net::TcpStream, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let security = DashboardSecurity::new(addr, &[]).unwrap();
+    let router = create_router_with_security(state, None, security);
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+    socket.write_all(format!("GET /ws/telemetry HTTP/1.1\r\nHost: {addr}\r\nOrigin: http://{addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !response.ends_with(b"\r\n\r\n") {
+            response.push(socket.read_u8().await.unwrap());
+            assert!(response.len() < 8192);
+        }
+    })
+    .await
+    .unwrap();
+    assert!(String::from_utf8(response)
+        .unwrap()
+        .starts_with("HTTP/1.1 101"));
+    (socket, server)
+}
+
+async fn read_envelope(socket: &mut tokio::net::TcpStream) -> serde_json::Value {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(Duration::from_secs(6), async {
+        assert_eq!(socket.read_u8().await.unwrap(), 0x81, "complete text frame");
+        let length = socket.read_u8().await.unwrap();
+        assert_eq!(length & 0x80, 0, "server frames are unmasked");
+        let length = match length {
+            126 => u64::from(socket.read_u16().await.unwrap()),
+            127 => socket.read_u64().await.unwrap(),
+            n => u64::from(n),
+        };
+        assert!(length < 65536);
+        let mut bytes = vec![0; length as usize];
+        socket.read_exact(&mut bytes).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn websocket_delivers_configured_paper_event_and_snapshot_envelopes() {
+    use backtest::{PaperTradingConfig, PaperTradingSession, TelemetryConfig};
+    use domain::{Side, Trade};
+    let metadata = TelemetryConfig {
+        symbol: "ETHUSDT".into(),
+        strategy_id: "paper-17".into(),
+    };
+    let mut session = PaperTradingSession::new_with_telemetry(
+        PaperTradingConfig {
+            dollar_bar_threshold: dec!(100),
+            strategy: strategies::DollarBarsCusumConfig {
+                rolling_window_len: 4,
+                cusum_vol_multiplier: dec!(1),
+                z_entry_threshold: dec!(1.5),
+                z_stop_threshold: dec!(3),
+                time_barrier_bars: 10,
+            },
+            ..Default::default()
+        },
+        metadata.clone(),
+    )
+    .unwrap();
+    let mut events = session.subscribe_telemetry().unwrap();
+    let (tx, _) = broadcast::channel(100);
+    let state = AppState::with_telemetry(tx.clone(), "unused-reports".into(), metadata);
+    let (mut socket, server) = connect_telemetry(state.clone()).await;
+    let initial = read_envelope(&mut socket).await;
+    assert_eq!(initial.as_object().unwrap().len(), 5);
+    assert_eq!(initial["timestamp"], serde_json::Value::Null);
+    assert_eq!(initial["strategy_id"], "paper-17");
+    assert_eq!(initial["symbol"], "ETHUSDT");
+    assert_eq!(initial["event_type"], "InitialSnapshot");
+    assert_eq!(initial["payload"]["active_symbol"], "ETHUSDT");
+
+    let mut kinds = std::collections::BTreeSet::new();
+    for (timestamp, price, quantity) in [
+        (1000, dec!(100), dec!(1)),
+        (2000, dec!(101), dec!(1)),
+        (3000, dec!(99), dec!(1.1)),
+        (4000, dec!(100), dec!(1)),
+        (5000, dec!(90), dec!(1.5)),
+        (5500, dec!(91), dec!(0.1)),
+        (6000, dec!(101), dec!(1)),
+    ] {
+        let raw =
+            session.process_trade(&Trade::new(timestamp, price, quantity, Side::Buy).unwrap());
+        for payload in raw {
+            let event = events.try_recv().unwrap();
+            let expected = serde_json::to_value(&event).unwrap();
+            kinds.insert(event.event_type.clone());
+            tx.send(event).unwrap();
+            let delivered = read_envelope(&mut socket).await;
+            assert_eq!(delivered, expected);
+            assert_eq!(delivered.as_object().unwrap().len(), 5);
+            assert_eq!(delivered["timestamp"], timestamp);
+            assert_eq!(delivered["symbol"], "ETHUSDT");
+            assert_eq!(delivered["strategy_id"], "paper-17");
+            assert_eq!(delivered["event_type"], payload.event_type());
+            assert_eq!(delivered["payload"], serde_json::to_value(payload).unwrap());
+        }
+    }
+    assert_eq!(
+        kinds,
+        [
+            "BarFormed",
+            "SignalGenerated",
+            "PositionOpened",
+            "MarkToMarket",
+            "PositionClosed"
+        ]
+        .map(String::from)
+        .into_iter()
+        .collect()
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            {
+                let snapshot = state.state.read().await;
+                if snapshot.timestamp == Some(6000) && snapshot.active_position.is_none() {
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let (mut second, second_server) = connect_telemetry(state).await;
+    let snapshot = read_envelope(&mut second).await;
+    assert_eq!(snapshot["timestamp"], 6000);
+    assert_eq!(snapshot["symbol"], "ETHUSDT");
+    assert_eq!(snapshot["strategy_id"], "paper-17");
+    assert_eq!(snapshot["payload"]["last_price"], "101");
+    server.abort();
+    second_server.abort();
+}
+
+#[tokio::test]
+async fn websocket_delivers_mock_metadata_and_observed_tick_timestamp() {
+    use backtest::TelemetryConfig;
+    let metadata = TelemetryConfig {
+        symbol: "SOLUSDT".into(),
+        strategy_id: "demo-9".into(),
+    };
+    let (tx, _) = broadcast::channel(100);
+    let state = AppState::with_telemetry(tx.clone(), "unused-reports".into(), metadata.clone());
+    let (mut socket, server) = connect_telemetry(state).await;
+    read_envelope(&mut socket).await;
+    let ticker = web::mock::spawn_mock_ticker_with_config(tx, metadata);
+    let event = read_envelope(&mut socket).await;
+    assert_eq!(event.as_object().unwrap().len(), 5);
+    assert_eq!(event["symbol"], "SOLUSDT");
+    assert_eq!(event["strategy_id"], "demo-9");
+    assert_eq!(event["event_type"], "BarFormed");
+    assert!(event["timestamp"].as_i64().unwrap() > 0);
+    assert_eq!(
+        event["timestamp"],
+        event["payload"]["BarFormed"]["end_time"]
+    );
+    ticker.abort();
+    server.abort();
 }
 
 #[tokio::test]
