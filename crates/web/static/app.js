@@ -12,6 +12,7 @@
     let hpoChart = null;
     let eventLogCount = 0;
     let chartMarkers = [];
+    let telemetryStale = false;
 
     // DOM Elements
     const wsStatus = document.getElementById('ws-status');
@@ -121,8 +122,7 @@
         }
 
         socket.onopen = function () {
-            wsStatus.className = 'status-badge live';
-            wsStatusText.textContent = 'LIVE WS';
+            showTelemetryStatus();
             reconnectDelay = 1000;
             appendLog('SYSTEM', '---', 'Connected to real-time telemetry stream');
         };
@@ -296,13 +296,50 @@
         if (title) title.textContent = msg.symbol ? `${msg.symbol} (DOLLAR BARS)` : 'Awaiting configured telemetry';
     }
 
+    function showTelemetryStatus() {
+        wsStatus.className = telemetryStale ? 'status-badge' : 'status-badge live';
+        wsStatusText.textContent = telemetryStale ? 'STALE / UNCERTAIN' : 'LIVE WS';
+    }
+
     function updateInitialSnapshot(st) {
         if (!st) return;
-        if (!st.active_position) kpiPositionDetails.textContent = '0.00 base units ($0.00)';
-        kpiEquity.textContent = `$${parseFloat(st.portfolio_value).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+        // A last-known projection is not an authoritative resync, even on reconnect.
+        telemetryStale = telemetryStale || st.stale === true;
+        showTelemetryStatus();
+        updateTelemetryIdentity({ symbol: st.active_symbol, strategy_id: st.active_strategy });
+        const equity = parseFloat(st.portfolio_value);
+        const upnl = parseFloat(st.unrealized_pnl);
+        const tone = upnl > 0 ? 'positive' : upnl < 0 ? 'negative' : 'neutral';
+        kpiEquity.textContent = `$${equity.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
         kpiCash.textContent = `Cash: $${parseFloat(st.cash_balance).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
-        if (st.last_price) {
-            livePriceEl.textContent = `$${parseFloat(st.last_price).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+        kpiUpnl.textContent = `${upnl >= 0 ? '+' : ''}$${upnl.toFixed(2)}`;
+        kpiUpnl.className = `kpi-value ${tone}`;
+        const pct = equity === 0 ? 0 : upnl / equity * 100;
+        kpiUpnlPct.textContent = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+        kpiUpnlPct.className = `kpi-sub ${tone}`;
+        kpiDrawdown.textContent = `${(parseFloat(st.drawdown_pct) * 100).toFixed(2)}%`;
+        const mark = st.last_price === null ? null : parseFloat(st.last_price);
+        livePriceEl.textContent = mark === null ? '---' : `$${mark.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+        const pos = st.active_position;
+        if (pos) {
+            const side = pos.side;
+            const entry = parseFloat(pos.entry_price);
+            const qty = parseFloat(pos.quantity);
+            posBadge.className = `position-badge ${side.toLowerCase()}`;
+            posBadge.textContent = side.toUpperCase();
+            kpiPosition.textContent = `${side.toUpperCase()} ${qty} base units`;
+            kpiPositionDetails.textContent = `@ $${entry.toFixed(2)}`;
+            posEntry.textContent = `$${entry.toFixed(2)}`;
+            posQty.textContent = `${qty.toFixed(4)} base units`;
+            posSl.textContent = `$${parseFloat(pos.stop_loss).toFixed(2)}`;
+            posTp.textContent = `$${parseFloat(pos.take_profit).toFixed(2)}`;
+            posMark.textContent = mark === null ? '---' : `$${mark.toFixed(2)}`;
+        } else {
+            posBadge.className = 'position-badge flat';
+            posBadge.textContent = 'FLAT';
+            kpiPosition.textContent = 'FLAT';
+            kpiPositionDetails.textContent = '0.00 base units ($0.00)';
+            for (const element of [posEntry, posMark, posQty, posSl, posTp]) element.textContent = '---';
         }
     }
 
@@ -466,7 +503,14 @@
 
     // Startup
     initLiveChart();
-    connectWebSocket();
+    fetch('/api/state')
+        .then(res => {
+            if (!res.ok) throw new Error('Snapshot request failed');
+            return res.json();
+        })
+        .then(updateInitialSnapshot)
+        .catch(err => console.error('Failed loading initial state:', err))
+        .finally(connectWebSocket);
     loadReportsIndex();
     setInterval(pollHealth, 3000);
 

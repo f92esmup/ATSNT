@@ -120,13 +120,13 @@ For lifecycle events, `payload` is `{ "<event_type>": { ... } }`.
 | `MarkToMarket` | `current_price`, `unrealized_pnl`, `total_equity`, `drawdown_pct`; paper ticks emit it while a position is active. |
 | `InitialSnapshot` | Untagged `TelemetryState`: `timestamp`, `portfolio_value`, `cash_balance`, `unrealized_pnl`, `active_position`, `active_symbol`, `active_strategy`, `last_price`, `drawdown_pct`, `stale`. |
 
-#### Snapshot completeness and uncertainty (T2b complete in `43d85bb`)
+#### Snapshot completeness and uncertainty (T2b complete in commit `43d85bb`)
 - HTTP state and WebSocket snapshots carry all displayed financial values and full open-position details. The browser restores equity, cash, unrealized PnL, drawdown and position details; a null position clears every position field, and a null last price clears the price display.
 - `stale` defaults to false and becomes sticky when the aggregator misses broadcast events. Aggregation continues after lag, retaining last-known values and consuming later events; incremental updates, including newer timestamps, cannot restore certainty.
 - An individual lagging WebSocket receiver gets an `InitialSnapshot` with `stale: true` and discards its pre-snapshot buffered backlog before forwarding future events. This client-local gap does not mark the shared state stale for other clients. Raw lifecycle envelopes remain unchanged.
-- Shared aggregator uncertainty notifies connected clients independently of later producer events. Each notified client receives a stale snapshot and discards its pre-snapshot backlog; initial/reconnect snapshots retain shared uncertainty. The browser keeps uncertainty sticky, including across reconnects.
-- Reconnects, HTTP refreshes and `InitialSnapshot` delivery expose last-known projections, not authoritative recovery. No producer-authoritative resync source exists in T2b; these projections cannot clear uncertainty.
-- T2b's Rust regressions cover complete snapshots, flat positions, continued aggregation after gaps and isolated client lag through the socket receiver path. Direct DOM restoration remains for T7 browser E2E; this documentation reconciliation reruns no tests.
+- Shared aggregator uncertainty notifies connected clients through a sticky watch notification, independently of later producer events. Each notified client receives a stale snapshot and discards its pre-snapshot backlog; initial/reconnect snapshots retain shared uncertainty. The browser keeps uncertainty sticky, including across reconnects.
+- Reconnects, HTTP refreshes and `InitialSnapshot` delivery expose last-known projections, not authoritative recovery. Only a genuine complete producer-authoritative snapshot could clear uncertainty; no such resync source exists in T2b, so these projections cannot clear it.
+- T2b's Rust regressions cover complete snapshots, flat positions, continued aggregation after gaps and isolated client lag through the same receiver path as socket delivery. Direct DOM restoration remains for T7 browser E2E; no JavaScript harness is introduced here, and this documentation reconciliation reruns no tests.
 
 #### Identity, snapshots, and compatibility
 - `TelemetryConfig { symbol, strategy_id }` explicitly identifies a producer; anonymous trades cannot supply these identities. `AppState::with_telemetry` can set identity before the first event. Without configuration or an observed envelope, identity strings are empty and the timestamp is `null`.

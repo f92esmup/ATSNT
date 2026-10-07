@@ -58,12 +58,21 @@ async fn main() -> anyhow::Result<()> {
     let security = DashboardSecurity::new(addr, &cli.allowed_origins)?;
     let (event_sender, _) = broadcast::channel(10_000);
 
-    // If mock flag is enabled, spawn synthetic market data ticker
-    if cli.mock {
-        mock::spawn_mock_ticker(event_sender.clone());
-    }
+    // Configure identity and subscribe the state updater before starting a producer.
+    // Construction leaves the timestamp null until an actual event is observed.
+    let app_state = if cli.mock {
+        AppState::with_telemetry(
+            event_sender.clone(),
+            cli.reports_dir,
+            mock::demo_telemetry_config(),
+        )
+    } else {
+        AppState::new(event_sender.clone(), cli.reports_dir)
+    };
 
-    let app_state = AppState::new(event_sender, cli.reports_dir);
+    if cli.mock {
+        mock::spawn_mock_ticker(event_sender);
+    }
     let app = create_router_with_security(app_state, cli.static_dir, security);
 
     info!(

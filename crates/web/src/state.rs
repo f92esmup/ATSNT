@@ -10,7 +10,7 @@ use domain::PositionSide;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, watch, RwLock};
 
 /// Information about an active open position in the paper trading engine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +32,9 @@ pub struct PositionInfo {
 pub struct TelemetryState {
     /// Latest originating market event time in Unix milliseconds; absent before observation.
     pub timestamp: Option<i64>,
+    /// An event gap makes this last-known projection uncertain until authoritative resync.
+    #[serde(default)]
+    pub stale: bool,
     /// Total portfolio equity (cash balance + unrealized PnL).
     pub portfolio_value: Decimal,
     /// Settled cash balance.
@@ -54,6 +57,7 @@ impl Default for TelemetryState {
     fn default() -> Self {
         Self {
             timestamp: None,
+            stale: false,
             portfolio_value: dec!(10_000.00),
             cash_balance: dec!(10_000.00),
             unrealized_pnl: dec!(0.00),
@@ -73,6 +77,8 @@ pub struct AppState {
     pub event_sender: broadcast::Sender<TelemetryEnvelope<PaperTradingEvent>>,
     /// Active telemetry snapshot.
     pub state: Arc<RwLock<TelemetryState>>,
+    /// Sticky shared uncertainty notification, independent of producer events.
+    pub uncertainty: watch::Receiver<bool>,
     /// Directory containing historical JSON reports.
     pub reports_dir: PathBuf,
     /// Number of active WebSocket client connections.
@@ -116,11 +122,21 @@ impl AppState {
 
         // Spawn a background task to keep TelemetryState continuously up-to-date
         // by listening to the broadcast channel.
+        let (uncertainty_sender, uncertainty) = watch::channel(false);
         let state_updater = Arc::clone(&state);
         let mut rx = event_sender.subscribe();
 
         tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
+            loop {
+                let event = match rx.recv().await {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        state_updater.write().await.stale = true;
+                        uncertainty_sender.send_replace(true);
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
                 let mut st = state_updater.write().await;
                 st.timestamp = event.timestamp;
                 st.active_symbol = event.symbol;
@@ -169,6 +185,7 @@ impl AppState {
         Self {
             event_sender,
             state,
+            uncertainty,
             reports_dir,
             connected_clients,
             start_time,
