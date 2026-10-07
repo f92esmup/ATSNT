@@ -748,6 +748,174 @@ async fn wait_snapshot_time(state: &AppState, timestamp: i64) {
 }
 
 #[tokio::test]
+async fn snapshot_individually_lagging_client_is_uncertain() {
+    let (tx, _) = broadcast::channel(2);
+    let metadata = backtest::TelemetryConfig {
+        symbol: "SOLUSDT".into(),
+        strategy_id: "demo-9".into(),
+    };
+    let state = AppState::with_telemetry(tx.clone(), "unused-reports".into(), metadata.clone());
+    let mut client = tx.subscribe();
+    for timestamp in 1..=4 {
+        tx.send(metadata.envelope(
+            timestamp,
+            PaperTradingEvent::MarkToMarket {
+                current_price: dec!(105),
+                unrealized_pnl: dec!(10),
+                total_equity: dec!(10010),
+                drawdown_pct: dec!(0.02),
+            },
+        ))
+        .unwrap();
+        wait_snapshot_time(&state, timestamp).await;
+    }
+    let message = web::ws::receive_client_message(&mut client, &state)
+        .await
+        .unwrap();
+    assert_eq!(message["event_type"], "InitialSnapshot");
+    assert_eq!(message["payload"]["stale"], true);
+    assert_eq!(message["timestamp"], 4);
+    assert!(!state.state.read().await.stale);
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            web::ws::receive_client_message(&mut client, &state),
+        )
+        .await
+        .is_err(),
+        "pre-snapshot backlog must not be forwarded"
+    );
+    let (mut socket, server) = connect_telemetry(state).await;
+    let reconnect = read_envelope(&mut socket).await;
+    assert_eq!(reconnect["timestamp"], 4);
+    assert_eq!(reconnect["payload"]["last_price"], "105");
+    server.abort();
+}
+
+#[tokio::test]
+async fn lag_shared_aggregator_notifies_idle_connected_client() {
+    let (tx, _) = broadcast::channel(2);
+    let metadata = web::mock::demo_telemetry_config();
+    let state = AppState::with_telemetry(tx.clone(), "unused-reports".into(), metadata.clone());
+    let (mut socket, server) = connect_telemetry(state.clone()).await;
+    assert_eq!(read_envelope(&mut socket).await["payload"]["stale"], false);
+    // Block only the projection updater, while the client drains every event.
+    let guard = state.state.write().await;
+    for timestamp in 1..=5 {
+        tx.send(metadata.envelope(
+            timestamp,
+            PaperTradingEvent::MarkToMarket {
+                current_price: dec!(105),
+                unrealized_pnl: dec!(10),
+                total_equity: dec!(10010),
+                drawdown_pct: dec!(0.02),
+            },
+        ))
+        .unwrap();
+        assert_eq!(read_envelope(&mut socket).await["timestamp"], timestamp);
+    }
+    drop(guard);
+    // No further producer event: stale must independently wake the socket.
+    let notice = read_envelope(&mut socket).await;
+    assert_eq!(notice["event_type"], "InitialSnapshot");
+    assert_eq!(notice["payload"]["stale"], true);
+    let (mut reconnect, second_server) = connect_telemetry(state).await;
+    assert_eq!(
+        read_envelope(&mut reconnect).await["payload"]["stale"],
+        true
+    );
+    server.abort();
+    second_server.abort();
+}
+
+#[tokio::test]
+async fn snapshot_retains_uncertainty_and_consumes_after_aggregator_gap() {
+    let (tx, _) = broadcast::channel(2);
+    let metadata = backtest::TelemetryConfig {
+        symbol: "SOLUSDT".into(),
+        strategy_id: "demo-9".into(),
+    };
+    let state = AppState::with_telemetry(tx.clone(), "unused-reports".into(), metadata.clone());
+    let initial = serde_json::to_value(&*state.state.read().await).unwrap();
+    assert_eq!(initial["timestamp"], serde_json::Value::Null);
+    assert_eq!(initial["active_symbol"], "SOLUSDT");
+    tx.send(metadata.envelope(
+        1,
+        PaperTradingEvent::PositionOpened {
+            side: domain::PositionSide::Long,
+            entry_price: dec!(100),
+            quantity: dec!(2),
+            stop_loss: dec!(90),
+            take_profit: dec!(120),
+        },
+    ))
+    .unwrap();
+    wait_snapshot_time(&state, 1).await;
+    // No await: on this single-thread runtime the updater must miss events.
+    for timestamp in 2..=5 {
+        tx.send(metadata.envelope(
+            timestamp,
+            PaperTradingEvent::MarkToMarket {
+                current_price: dec!(105),
+                unrealized_pnl: dec!(10),
+                total_equity: dec!(10010),
+                drawdown_pct: dec!(0.02),
+            },
+        ))
+        .unwrap();
+    }
+    tokio::task::yield_now().await;
+    let snapshot = serde_json::to_value(&*state.state.read().await).unwrap();
+    assert_eq!(snapshot["stale"], true);
+    wait_snapshot_time(&state, 5).await;
+    let (mut socket, server) = connect_telemetry(state.clone()).await;
+    let snapshot = read_envelope(&mut socket).await;
+    let p = &snapshot["payload"];
+    assert_eq!(p["stale"], true);
+    assert_eq!(p["portfolio_value"], "10010");
+    assert_eq!(p["cash_balance"], "10000.00");
+    assert_eq!(p["unrealized_pnl"], "10");
+    assert_eq!(p["drawdown_pct"], "0.02");
+    assert_eq!(p["last_price"], "105");
+    assert_eq!(
+        p["active_position"],
+        serde_json::json!({
+            "side": "Long", "entry_price": "100", "quantity": "2",
+            "stop_loss": "90", "take_profit": "120"
+        })
+    );
+    tx.send(metadata.envelope(
+        6,
+        PaperTradingEvent::PositionClosed {
+            exit_reason: "TakeProfit".into(),
+            exit_price: dec!(120),
+            net_pnl: dec!(40),
+            total_equity: dec!(10040),
+        },
+    ))
+    .unwrap();
+    wait_snapshot_time(&state, 6).await;
+    let router = create_router(state, None);
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/state")
+                .header(header::HOST, "localhost:3000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let flat: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(flat["active_position"], serde_json::Value::Null);
+    assert_eq!(flat["unrealized_pnl"], "0");
+    assert_eq!(flat["cash_balance"], "10040");
+    assert_eq!(flat["stale"], true);
+    server.abort();
+}
+
+#[tokio::test]
 async fn test_static_asset_serving() {
     let (tx, _) = broadcast::channel(100);
     let temp_dir = tempfile::tempdir().unwrap();

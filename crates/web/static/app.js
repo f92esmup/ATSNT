@@ -12,6 +12,7 @@
     let hpoChart = null;
     let eventLogCount = 0;
     let chartMarkers = [];
+    let telemetryStale = false;
 
     // DOM Elements
     const wsStatus = document.getElementById('ws-status');
@@ -121,8 +122,7 @@
         }
 
         socket.onopen = function () {
-            wsStatus.className = 'status-badge live';
-            wsStatusText.textContent = 'LIVE WS';
+            showTelemetryStatus();
             reconnectDelay = 1000;
             appendLog('SYSTEM', '---', 'Connected to real-time telemetry stream');
         };
@@ -296,8 +296,16 @@
         if (title) title.textContent = msg.symbol ? `${msg.symbol} (DOLLAR BARS)` : 'Awaiting configured telemetry';
     }
 
+    function showTelemetryStatus() {
+        wsStatus.className = telemetryStale ? 'status-badge' : 'status-badge live';
+        wsStatusText.textContent = telemetryStale ? 'STALE / UNCERTAIN' : 'LIVE WS';
+    }
+
     function updateInitialSnapshot(st) {
         if (!st) return;
+        // A last-known projection is not an authoritative resync, even on reconnect.
+        telemetryStale = telemetryStale || st.stale === true;
+        showTelemetryStatus();
         updateTelemetryIdentity({ symbol: st.active_symbol, strategy_id: st.active_strategy });
         const equity = parseFloat(st.portfolio_value);
         const upnl = parseFloat(st.unrealized_pnl);
