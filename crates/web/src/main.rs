@@ -1,12 +1,12 @@
 //! ATSNT Web Telemetry Server binary entrypoint.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use clap::Parser;
 use tokio::sync::broadcast;
 use tracing::info;
-use web::{create_router, mock, AppState};
+use web::{create_router_with_security, mock, AppState, DashboardSecurity};
 
 /// Command line arguments for configuring the ATSNT web telemetry server.
 #[derive(Parser, Debug)]
@@ -17,13 +17,18 @@ use web::{create_router, mock, AppState};
     about = "ATSNT Real-Time Web Telemetry Server & Dashboard"
 )]
 struct Cli {
-    /// Network host interface to bind on (strict localhost for Cloudflare Zero-Trust).
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
+    /// Literal loopback IP to bind on (hostnames and public interfaces are rejected).
+    #[arg(long, default_value = "127.0.0.1", value_parser = web::security::parse_loopback_ip)]
+    host: IpAddr,
 
-    /// TCP port to listen on.
-    #[arg(short, long, default_value_t = 3000)]
+    /// TCP port to listen on (1-65535; zero is not supported).
+    #[arg(short, long, default_value_t = 3000, value_parser = clap::value_parser!(u16).range(1..))]
     port: u16,
+
+    /// Additional browser origin for tunnel access, e.g. https://dashboard.example.com.
+    /// Repeat for multiple origins; no paths, wildcards, or credentials are allowed.
+    #[arg(long = "allowed-origin")]
+    allowed_origins: Vec<String>,
 
     /// Directory containing static frontend SPA assets (HTML, CSS, JS).
     #[arg(long)]
@@ -48,6 +53,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let addr = SocketAddr::new(cli.host, cli.port);
+    // Fail closed before spawning tasks, reading reports, or opening the listener.
+    let security = DashboardSecurity::new(addr, &cli.allowed_origins)?;
     let (event_sender, _) = broadcast::channel(10_000);
 
     // If mock flag is enabled, spawn synthetic market data ticker
@@ -56,16 +64,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let app_state = AppState::new(event_sender, cli.reports_dir);
-    let app = create_router(app_state, cli.static_dir);
-
-    let addr_str = format!("{}:{}", cli.host, cli.port);
-    let addr: SocketAddr = addr_str.parse()?;
+    let app = create_router_with_security(app_state, cli.static_dir, security);
 
     info!(
         host = %cli.host,
         port = cli.port,
         mock_mode = cli.mock,
-        "ATSNT Web Telemetry Dashboard starting on http://{addr_str}"
+        "ATSNT Web Telemetry Dashboard starting on http://{addr}"
     );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -98,5 +103,56 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_rejects_non_loopback_and_non_literal_hosts() {
+        for host in ["0.0.0.0", "::", "192.0.2.1", "localhost", "example.com"] {
+            assert!(
+                Cli::try_parse_from(["web", "--host", host]).is_err(),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_rejects_ephemeral_port_without_a_stable_default_origin() {
+        assert!(Cli::try_parse_from(["web", "--port", "0"]).is_err());
+    }
+
+    #[test]
+    fn cli_accepts_loopback_and_explicit_tunnel_origin() {
+        let cli = Cli::try_parse_from([
+            "web",
+            "--host",
+            "::1",
+            "--port",
+            "3001",
+            "--allowed-origin",
+            "https://dashboard.example",
+            "--allowed-origin",
+            "https://dashboard.example:8443",
+        ])
+        .unwrap();
+        assert!(
+            DashboardSecurity::new(SocketAddr::new(cli.host, cli.port), &cli.allowed_origins)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn invalid_cli_origin_fails_startup_configuration() {
+        let cli =
+            Cli::try_parse_from(["web", "--allowed-origin", "https://dashboard.example/path"])
+                .unwrap();
+        assert!(
+            DashboardSecurity::new(SocketAddr::new(cli.host, cli.port), &cli.allowed_origins)
+                .is_err()
+        );
     }
 }

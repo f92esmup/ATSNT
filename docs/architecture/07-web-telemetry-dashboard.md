@@ -38,7 +38,7 @@ The Web Presentation crate (`crates/web`) implements an **observable, air-gapped
 1. **Air-Gapped Telemetry (Zero Mutation)**:
    - The web interface has zero order submission, modification, or cancellation endpoints.
    - It cannot mutate strategy parameters or risk allocations at runtime.
-   - Any external web breach is completely harmless to capital because the web server is strictly a telemetry consumer.
+   - The web server is strictly a telemetry consumer, not an execution gateway. Read-only access does not make telemetry public or protect against host compromise.
 
 2. **Multi-Asset & Multi-Strategy Attribution**:
    - Every telemetry event, order fill, and bar payload explicitly carries `symbol` and `strategy_id`.
@@ -49,8 +49,8 @@ The Web Presentation crate (`crates/web`) implements an **observable, air-gapped
    - Zero Node.js runtime or complex external web servers (Nginx/Apache) required on the host VPS.
 
 4. **Zero-Trust Perimeter Integration**:
-   - The server binds strictly to `127.0.0.1:3000`.
-   - A lightweight `cloudflared` tunnel forwards authenticated traffic through Cloudflare Access with two-factor authentication (2FA).
+   - The server defaults to `127.0.0.1:3000` and rejects non-loopback bind addresses.
+   - A lightweight `cloudflared` tunnel forwards authenticated traffic through Cloudflare Access with two-factor authentication (2FA); its browser origin must be explicitly allowed.
 
 ---
 
@@ -167,15 +167,82 @@ The frontend is structured around three primary views with a permanent top KPI r
 
 ## 5. Security & Deployment Model
 
-1. **Localhost Binding**:
-   - The binary binds strictly to `127.0.0.1:3000`.
-   - Never exposed to `0.0.0.0` or directly to public interfaces.
-2. **Cloudflare Tunnel (`cloudflared`)**:
-   - The VPS runs `cloudflared` pointing `trading.<domain>.es` to `http://localhost:3000`.
-   - Cloudflare Access enforces Zero-Trust email OTP or Google SSO + 2FA.
-   - All public inbound ports on the VPS firewall (80, 443, 3000) remain blocked.
-3. **CORS & WebSocket Origin Validation**:
-   - Axum validates the `Origin` header on `/ws/telemetry` upgrades to prevent cross-site hijacking.
+### 5.1 Local browser access
+
+The binary defaults to `127.0.0.1:3000`. `--host` accepts only literal loopback IPs
+(e.g. `127.0.0.1` or `::1`), never hostnames, wildcard addresses, or public/private
+network interfaces. `--port` accepts 1–65535; port zero is deliberately unsupported
+because default browser origins require a stable port.
+
+```sh
+cargo run --locked --offline -p web -- --mock
+# Open http://localhost:3000 or http://127.0.0.1:3000
+```
+
+The default allowed origins are `http://localhost:<port>`,
+`http://127.0.0.1:<port>`, and `http://[::1]:<port>`. The selected loopback bind IP
+is also allowed. Changing `--port` changes these defaults; it does not leave port
+3000 trusted. An IPv6 listener can be selected with `--host ::1` (browse to
+`http://[::1]:3000`). These aliases do not cause additional listeners to be bound.
+
+### 5.2 Explicit tunnel origins
+
+Keep the listener on loopback and configure the **browser page's origin**, not a
+`ws://`/`wss://` URL or the tunnel's local upstream address:
+
+```sh
+cargo run --locked --offline -p web -- --mock \
+  --allowed-origin https://dashboard.example.com
+# Additional origins require repeated flags, for example:
+# --allowed-origin https://dashboard.example.com:8443
+```
+
+Configure `cloudflared` to forward to `http://127.0.0.1:3000` and enforce
+Cloudflare Access authentication (SSO/OTP plus 2FA) before publishing the hostname.
+Public inbound ports on the host remain blocked. The proxy may preserve the
+explicitly allowed public Host or rewrite it to the trusted local upstream Host;
+it must forward the original browser Origin for WebSocket handshakes. Changing
+`--allowed-origin` does not relax the loopback-only bind rule.
+
+Allowed values must contain only an `http` or `https` scheme, a hostname or IP,
+and an optional port. Paths (including a trailing `/`), credentials, wildcards,
+queries, fragments, whitespace, malformed/out-of-range ports, and opaque `null`
+origins are rejected. DNS names use ASCII labels (punycode for IDNs), without a
+trailing dot. Scheme/host/effective-port tuples are matched: DNS case and IPv6
+notation are normalized, and omitted HTTP 80 / HTTPS 443 equals an explicit
+80 / 443. Other ports, subdomains, and schemes are distinct. Invalid configured
+origins fail startup before any mock task or listener starts.
+
+### 5.3 HTTP, CORS, and WebSocket policy
+
+- **Host/DNS-rebinding protection on all routes:** REST, static assets, and
+  WebSockets require a Host (or HTTP/2 URI authority) matching a local default or
+  configured origin authority. Repeated/malformed/untrusted Host values are
+  rejected with 403. An absolute URI authority is also checked. Trust is never
+  derived from arbitrary incoming Host, `Forwarded`, or `X-Forwarded-*` headers.
+  This also protects same-origin REST fetches that omit Origin.
+- **Explicit CORS only:** when Origin is present it must be one trusted origin.
+  CORS echoes only that permitted origin, allows only GET, and does not grant
+  credentialed access or wildcard origins/methods/headers. Rejected requests and
+  preflights return 403 without CORS permission.
+- **WebSockets require Origin:** `/ws/telemetry` rejects missing, `null`, malformed,
+  repeated, or untrusted Origin headers with 403 before the upgrade extractor or
+  event subscription. The browser dashboard supplies its page origin naturally.
+- **Deliberate native-client policy:** native WebSocket clients must send one
+  allowed Origin too; there is no missing-origin exemption. Native HTTP health
+  probes and REST clients may omit Origin but still need a trusted Host/authority.
+  Origins and Host are browser perimeter controls, not native-client authentication:
+  a native client can forge both. Tunnel authentication remains essential.
+
+The library's compatibility `create_router` uses the secure port-3000 localhost
+policy. Embedders using another port or a tunnel should construct
+`DashboardSecurity::new(listener_address, additional_origins)` and pass it to
+`create_router_with_security`. The embedder remains responsible for actually
+binding that validated loopback listener.
+
+This perimeter change covers closure task T1 only. Timestamp/strategy/symbol
+telemetry and real paper-session wiring remain separate tasks; it does not declare
+Milestone 5 complete.
 
 ---
 

@@ -6,23 +6,48 @@
 
 pub mod handlers;
 pub mod mock;
+pub mod security;
 pub mod state;
 pub mod ws;
 
 use std::path::{Path, PathBuf};
 
+use axum::http::Method;
+use axum::middleware;
 use axum::routing::get;
 use axum::Router;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
+pub use security::{DashboardSecurity, SecurityError};
 pub use state::{AppState, PositionInfo, TelemetryState};
 
-/// Builds the complete Axum application router with all REST routes, WebSocket upgrade,
-/// and static asset serving.
+/// Builds a router with secure localhost HTTP origins on port 3000.
+/// Use [`create_router_with_security`] for another port or explicit tunnel origins.
+/// The caller must still bind its listener to loopback.
 pub fn create_router(app_state: AppState, static_dir: Option<PathBuf>) -> Router {
+    create_router_with_security(app_state, static_dir, DashboardSecurity::default())
+}
+
+/// Builds the REST, WebSocket, and static routes using a validated perimeter.
+/// Requests require a trusted Host (or HTTP/2 authority); WebSockets also require
+/// an explicit trusted Origin. Proxy headers never establish trust.
+pub fn create_router_with_security(
+    app_state: AppState,
+    static_dir: Option<PathBuf>,
+    security: DashboardSecurity,
+) -> Router {
+    let cors_policy = security.clone();
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            origin
+                .to_str()
+                .is_ok_and(|value| cors_policy.allows_origin(value))
+        }))
+        .allow_methods([Method::GET]);
+
     let api_routes = Router::new()
         .route("/health", get(handlers::health_handler))
         .route("/state", get(handlers::get_state_handler))
@@ -45,7 +70,11 @@ pub fn create_router(app_state: AppState, static_dir: Option<PathBuf>) -> Router
 
     router
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(cors)
+        .layer(middleware::from_fn_with_state(
+            security,
+            security::enforce_perimeter,
+        ))
 }
 
 /// Locates the static assets directory based on candidate locations.
