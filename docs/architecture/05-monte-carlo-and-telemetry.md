@@ -79,6 +79,8 @@ From the $N$ synthetic equity curves, the engine computes:
 
 ## 4. Telemetry & Web Presentation Architecture
 
+For proposed read-only research catalog/detail/comparison/replay requirements, see the [canonical workspace contract](09-read-only-web-workspace.md#5-proposed-laboratory-contract), especially W4/W5. The schemas and route examples here are design specifications, not guarantees of the current web API (documented in [the dashboard contract](07-web-telemetry-dashboard.md#31-rest-api-specification)). The example `fan_chart_trajectories` differs from the current browser's `fan_chart_curves` reader; W4 must reconcile actual report producers and consumers without assuming either example is authoritative for stored reports.
+
 ### 4.1 The "Anti-Bloat" Storage Contract
 A critical architectural pitfall in quantitative dashboards is attempting to serialize and persist all $10,000$ synthetic equity curves at tick or trade resolution. Doing so creates massive multi-gigabyte JSON files that choke browser rendering, exhaust server memory, and degrade I/O throughput.
 

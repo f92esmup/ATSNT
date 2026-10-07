@@ -2,6 +2,8 @@
 
 ## 1. Architectural Philosophy: The Real Capital Boundary
 
+**Dashboard boundary:** the [proposed read-only workspace](09-read-only-web-workspace.md) observes sourced state; it does not expose this gateway's order/strategy commands or imply live readiness. T4–T6 remain separate execution-gateway closure tasks, not prerequisites for read-only paper views. Live values must be unavailable or explicitly stale until a real supported source exists. This cross-link does not change the gateway profile, guarantees or task status; the [closure tracker](../../odd/tasks/milestone-5-6-closure.md) owns that evidence.
+
 The Live Execution Gateway (`crates/adapters`) represents the final frontier: transitioning algorithmic strategies from simulated paper trading to **live financial execution** with real exchange capital.
 
 ```text
@@ -39,7 +41,7 @@ The Live Execution Gateway (`crates/adapters`) represents the final frontier: tr
 ### Safety Guarantees
 
 1. **Pre-Trade Gatekeeping (The Circuit Breaker)**:
-   - No order reaches network sockets without clearing the pure domain [`RiskPolicy`](file:///home/f92esmup/Projects/ATSNT/crates/domain/src/risk.rs).
+   - No order reaches network sockets without clearing the pure domain [`RiskPolicy`](../../crates/domain/src/risk.rs).
    - If account drawdown breaches `max_daily_drawdown_pct`, the engine hard-halts all order dispatch.
    - If order size exceeds `max_order_notional` or position exposure exceeds `max_position_notional`, the order is rejected in-memory in zero microseconds.
 
@@ -74,12 +76,12 @@ The gateway seamlessly switches between testnet and production with a single con
 ## 3. Component Reference
 
 ### 3.1 Cryptographic Signer (`BinanceAuth`)
-- Located at [`crates/adapters/src/binance_auth.rs`](file:///home/f92esmup/Projects/ATSNT/crates/adapters/src/binance_auth.rs).
+- Located at [`crates/adapters/src/binance_auth.rs`](../../crates/adapters/src/binance_auth.rs).
 - Implements `sign(payload: &str) -> String` and `sign_query(query: &str, recv_window: Option<u64>) -> String`.
 - Appends current Unix millisecond timestamp and calculates HMAC-SHA256 tag.
 
 ### 3.2 Pre-Trade Risk Policy (`RiskPolicy`)
-- Located at [`crates/domain/src/risk.rs`](file:///home/f92esmup/Projects/ATSNT/crates/domain/src/risk.rs).
+- Located at [`crates/domain/src/risk.rs`](../../crates/domain/src/risk.rs).
 - Pure business rule with zero I/O or network dependencies.
 - Enforces:
   - `max_order_notional`: Hard ceiling on a single order (e.g. $10,000 USDT).
@@ -87,7 +89,7 @@ The gateway seamlessly switches between testnet and production with a single con
   - `max_daily_drawdown_pct`: Circuit breaker halting execution upon drawdown breach (e.g. 5%).
 
 ### 3.3 Execution Gateway (`BinanceGateway`)
-- Located at [`crates/adapters/src/binance_gateway.rs`](file:///home/f92esmup/Projects/ATSNT/crates/adapters/src/binance_gateway.rs).
+- Located at [`crates/adapters/src/binance_gateway.rs`](../../crates/adapters/src/binance_gateway.rs).
 - Methods:
   - `fetch_balance(asset: &str) -> Result<Decimal, GatewayError>`: Queries available balance.
   - `place_order(symbol, intent, quantity, current_pos, drawdown) -> Result<OrderExecutionReport, GatewayError>`: Runs pre-trade risk checks and submits authenticated order.
@@ -96,9 +98,9 @@ The gateway seamlessly switches between testnet and production with a single con
   - `keep_alive_listen_key(listen_key) -> Result<(), GatewayError>`: Pings session key every 30 minutes.
 
 ### 3.4 User Data Stream Listener (`BinanceUserDataStream`)
-- Located at [`crates/adapters/src/binance_user_stream.rs`](file:///home/f92esmup/Projects/ATSNT/crates/adapters/src/binance_user_stream.rs).
+- Located at [`crates/adapters/src/binance_user_stream.rs`](../../crates/adapters/src/binance_user_stream.rs).
 - Connects to WebSocket using `listenKey`.
-- Asynchronously processes `executionReport` events into normalized [`ExecutionUpdate`](file:///home/f92esmup/Projects/ATSNT/crates/adapters/src/binance_user_stream.rs#L16).
+- Asynchronously processes `executionReport` events into normalized [`ExecutionUpdate`](../../crates/adapters/src/binance_user_stream.rs#L16).
 
 ---
 

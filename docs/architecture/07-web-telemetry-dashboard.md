@@ -1,5 +1,7 @@
 # Web Presentation & Real-Time Telemetry Dashboard Specification
 
+**Document boundary:** Sections 3 and 5 retain the API/perimeter facts from historical base snapshot `c7ae8f4107b9214a3c7f4fc20193393b65da617c`, reconciled with T2b completed in `43d85bb` (`fix(web): preserve uncertainty across telemetry gaps`). The visual hierarchy and original checklist are design/history, not proof of implemented capabilities. The [Read-Only Web Workspace contract](09-read-only-web-workspace.md) is canonical for the proposed product/UI and W0–W6 plan; it does not replace this current API contract or the T-task tracker.
+
 ## 1. Architectural Philosophy: Air-Gapped Read-Only Telemetry
 
 The Web Presentation crate (`crates/web`) implements an **observable, air-gapped monitoring dashboard** for the algorithmic trading engine.
@@ -74,11 +76,11 @@ The Web Presentation crate (`crates/web`) implements an **observable, air-gapped
 
 | Method | Endpoint | Description | Response Schema |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/health` | Healthcheck and uptime probe | `{"status": "ok", "uptime_secs": u64, "version": str}` |
-| `GET` | `/api/state` | Current paper/live session state | Active positions, cash balance, equity, active symbol, strategy |
-| `GET` | `/api/strategies` | Catalog of configured strategies | List of strategies with allocated capital and status (`ACTIVE`/`PAUSED`) |
-| `GET` | `/api/reports` | Index of historical backtests & HPOs | List of filenames, strategy, symbol, date, Sharpe, and Sortino |
-| `GET` | `/api/reports/:id` | Full quantitative telemetry report | Complete JSON manifest (equity curve, trade list, Monte Carlo metrics) |
+| `GET` | `/api/health` | Healthcheck and uptime probe | `status`, `uptime_secs`, `version`, `connected_ws_clients` |
+| `GET` | `/api/state` | Current single-producer telemetry snapshot | `TelemetryState` fields listed in Section 3.2; not proof of a connected live session |
+| `GET` | `/api/strategies` | Hard-coded strategy catalog | `id`, `name`, `symbol`, `status`, `description`; no allocated-capital or runtime-instance model |
+| `GET` | `/api/reports` | Best-effort JSON report index | `filename`, filename-inferred `report_type`, `size_bytes`, `modified_timestamp`, optional `symbol`, `net_profit`, `win_rate`, `sortino_ratio`, `total_trades` |
+| `GET` | `/api/reports/:id` | Raw stored report JSON | No normalized guarantee of equity curves, trades or Monte Carlo fields |
 
 ### 3.2 WebSocket Streaming (`/ws/telemetry`)
 
@@ -116,7 +118,15 @@ For lifecycle events, `payload` is `{ "<event_type>": { ... } }`.
 | `PositionOpened` | `side` (`Long`/`Short`), `entry_price`, `quantity`, `stop_loss`, `take_profit`. |
 | `PositionClosed` | `exit_reason`, `exit_price`, `net_pnl`, `total_equity`. Paper barrier exits use `StopLoss`, `TakeProfit`, or `TimeBarrier`, with an `Unknown` fallback; `finish()` does not emit a `SessionFinish` event. |
 | `MarkToMarket` | `current_price`, `unrealized_pnl`, `total_equity`, `drawdown_pct`; paper ticks emit it while a position is active. |
-| `InitialSnapshot` | Untagged `TelemetryState`: `timestamp`, `portfolio_value`, `cash_balance`, `unrealized_pnl`, `active_position`, `active_symbol`, `active_strategy`, `last_price`, `drawdown_pct`. |
+| `InitialSnapshot` | Untagged `TelemetryState`: `timestamp`, `portfolio_value`, `cash_balance`, `unrealized_pnl`, `active_position`, `active_symbol`, `active_strategy`, `last_price`, `drawdown_pct`, `stale`. |
+
+#### Snapshot completeness and uncertainty (T2b complete in `43d85bb`)
+- HTTP state and WebSocket snapshots carry all displayed financial values and full open-position details. The browser restores equity, cash, unrealized PnL, drawdown and position details; a null position clears every position field, and a null last price clears the price display.
+- `stale` defaults to false and becomes sticky when the aggregator misses broadcast events. Aggregation continues after lag, retaining last-known values and consuming later events; incremental updates, including newer timestamps, cannot restore certainty.
+- An individual lagging WebSocket receiver gets an `InitialSnapshot` with `stale: true` and discards its pre-snapshot buffered backlog before forwarding future events. This client-local gap does not mark the shared state stale for other clients. Raw lifecycle envelopes remain unchanged.
+- Shared aggregator uncertainty notifies connected clients independently of later producer events. Each notified client receives a stale snapshot and discards its pre-snapshot backlog; initial/reconnect snapshots retain shared uncertainty. The browser keeps uncertainty sticky, including across reconnects.
+- Reconnects, HTTP refreshes and `InitialSnapshot` delivery expose last-known projections, not authoritative recovery. No producer-authoritative resync source exists in T2b; these projections cannot clear uncertainty.
+- T2b's Rust regressions cover complete snapshots, flat positions, continued aggregation after gaps and isolated client lag through the socket receiver path. Direct DOM restoration remains for T7 browser E2E; this documentation reconciliation reruns no tests.
 
 #### Identity, snapshots, and compatibility
 - `TelemetryConfig { symbol, strategy_id }` explicitly identifies a producer; anonymous trades cannot supply these identities. `AppState::with_telemetry` can set identity before the first event. Without configuration or an observed envelope, identity strings are empty and the timestamp is `null`.
@@ -129,6 +139,8 @@ For lifecycle events, `payload` is `{ "<event_type>": { ... } }`.
 ---
 
 ## 4. UI Dashboard Architecture & Visual Hierarchy
+
+**Original design target, not a current capability inventory.** The current frontend uses live/backtest/HPO tabs, but does not implement every feature below. Its backtest chart currently synthesizes two endpoints rather than using an actual stored series; the Monte Carlo reader expects `fan_chart_curves`, unlike the illustrative `fan_chart_trajectories` schema in document 05. W4 owns evidence-backed reconciliation. T2b is complete in `43d85bb`; W2 consumes its existing snapshot fidelity and sticky-uncertainty behavior, while T3 runtime wiring remains pending; W3 builds the proposed Operations view only after W1/W2. A “LIVE” label in this diagram does not demonstrate a live source.
 
 The frontend is structured around three primary views with a permanent top KPI ribbon:
 
@@ -161,7 +173,7 @@ The frontend is structured around three primary views with a permanent top KPI r
 
 ### 4.2 View 1: Real-Time Live Monitor (`/live`)
 - **Interactive Candlestick Chart**:
-  - Displays finalized [`DollarBar`](file:///home/f92esmup/Projects/ATSNT/crates/domain/src/aggregator.rs) candles.
+  - Displays finalized [`DollarBar`](../../crates/domain/src/aggregator.rs) candles.
   - Plots Buy/Sell entry arrows and Stop-Loss/Take-Profit target levels dynamically.
 - **Active Position Card**:
   - Displays direction (`LONG` / `SHORT`), average entry price, liquidation barrier levels, and current ROI.
@@ -267,7 +279,9 @@ this documentation update nor the checklist below declares Milestone 5 complete.
 
 ## 6. Implementation Checklist
 
-- [ ] Add `axum`, `tower-http`, `tokio-stream`, and WebSocket dependencies to [`crates/web/Cargo.toml`](file:///home/f92esmup/Projects/ATSNT/crates/web/Cargo.toml).
+This original checklist is retained as historical planning, not current task status. REST/static/WebSocket implementations exist at the base; real paper-session binary wiring remains T3 pending. Use the [closure tracker](../../odd/tasks/milestone-5-6-closure.md) for T-task evidence and [canonical W plan](09-read-only-web-workspace.md#7-independent-w0w6-tasks) for the proposed redesign.
+
+- [ ] Add `axum`, `tower-http`, `tokio-stream`, and WebSocket dependencies to [`crates/web/Cargo.toml`](../../crates/web/Cargo.toml).
 - [ ] Implement REST handlers in `crates/web/src/handlers/` (`health`, `reports`, `state`).
 - [ ] Implement WebSocket upgrade and broadcast subscription in `crates/web/src/ws.rs`.
 - [ ] Create frontend static assets in `crates/web/static/` (`index.html`, `app.js`, `styles.css`).
