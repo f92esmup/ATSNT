@@ -54,6 +54,7 @@ pub trait AsyncMarketDataStream {
 ### 2.2 Binance WebSocket Adapter (`BinanceWebSocketStream`)
 
 - Endpoint: `wss://fstream.binance.com/ws/{symbol}@aggTrade` (Futures) or `wss://stream.binance.com:9443/ws/{symbol}@aggTrade` (Spot).
+- Strategy compatibility is checked before the stream connects. `DollarBarsCusum_v1` supports USD-M Futures only; `paper_trading --spot` is rejected rather than reinterpreting its signals as Spot orders.
 - Deserialization: Strict fixed-point decimal parsing via `rust_decimal::Decimal` (zero floating-point math).
 - Aggressor resolution: `is_buyer_maker == true` $\rightarrow$ `Side::Sell`, `false` $\rightarrow$ `Side::Buy`.
 - Resilience: Background task with exponential backoff reconnection, periodic Ping/Pong heartbeats, and bounded MPSC backpressure buffer (`capacity: 10,000`).

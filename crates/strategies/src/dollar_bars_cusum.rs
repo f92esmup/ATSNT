@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
-use crate::strategy::Strategy;
+use crate::strategy::{MarketType, Strategy};
 
 /// Hyperparameters governing the Dollar Bars + CUSUM + Z-Score Strategy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +67,10 @@ impl DollarBarsCusumStrategy {
 impl Strategy for DollarBarsCusumStrategy {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn compatible_market_types(&self) -> &'static [MarketType] {
+        &[MarketType::UsdMPerpetual]
     }
 
     fn reset(&mut self) {
@@ -182,6 +186,18 @@ mod tests {
             let bar = create_test_bar(i * 1000, dec!(50000));
             assert!(strategy.on_bar(&bar).is_none());
         }
+    }
+
+    #[test]
+    fn dollar_bars_cusum_declares_usd_m_futures_only_compatibility() {
+        let strategy = DollarBarsCusumStrategy::new(DollarBarsCusumConfig::default()).unwrap();
+
+        assert!(strategy
+            .compatible_market_types()
+            .contains(&crate::strategy::MarketType::UsdMPerpetual));
+        assert!(!strategy
+            .compatible_market_types()
+            .contains(&crate::strategy::MarketType::Spot));
     }
 
     #[test]

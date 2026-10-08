@@ -97,6 +97,8 @@ The gateway seamlessly switches between testnet and production with a single con
   - `create_listen_key() -> Result<String, GatewayError>`: Creates a User Data Stream session key.
   - `keep_alive_listen_key(listen_key) -> Result<(), GatewayError>`: Pings session key every 30 minutes.
 
+For standard Spot orders, `place_order` also fails closed before dispatch unless the symbol is an active Spot pair, the account response has valid free balances, and the order is funded (quote asset for buys, base asset for sells). It loads the account's symbol-specific commission rates, accounts for maker/taker plus side and special/tax rates, and checks the configured discount asset when applicable. Missing, malformed, unpriceable, or insufficient preflight data prevents order submission. USD-M Futures retain the existing risk-policy path.
+
 ### 3.4 User Data Stream Listener (`BinanceUserDataStream`)
 - Located at [`crates/adapters/src/binance_user_stream.rs`](../../crates/adapters/src/binance_user_stream.rs).
 - Connects to WebSocket using `listenKey`.

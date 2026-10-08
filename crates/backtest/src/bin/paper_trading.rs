@@ -16,7 +16,7 @@ use domain::PositionSide;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde_json::json;
-use strategies::DollarBarsCusumConfig;
+use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType, Strategy};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -36,7 +36,7 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Connect to Binance Spot WebSocket instead of USDT-M Futures
+    /// Select Spot; the configured DollarBarsCusum_v1 strategy is currently Futures-only
     #[arg(long, default_value_t = false)]
     spot: bool,
 
@@ -94,6 +94,14 @@ async fn main() -> Result<()> {
         println!("[*] Using default CUSUM + Z-Score strategy hyperparameters");
         DollarBarsCusumConfig::default()
     };
+
+    let selected_strategy = DollarBarsCusumStrategy::new(strat_config.clone())?;
+    let market_type = if args.spot {
+        MarketType::Spot
+    } else {
+        MarketType::UsdMPerpetual
+    };
+    validate_strategy_market(&selected_strategy, market_type)?;
 
     println!(
         "[*] Strategy Hyperparameters: Window={}, VolMultiplier={}, Z_Entry={}, Z_Stop={}, TimeBarrier={}",
@@ -358,4 +366,30 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_strategy_market(strategy: &impl Strategy, market_type: MarketType) -> Result<()> {
+    if strategy.supports_market_type(market_type) {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Strategy '{}' does not support the selected {:?} market; refusing to reinterpret its signals",
+        strategy.name(),
+        market_type
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_strategy_market;
+    use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType};
+
+    #[test]
+    fn paper_runner_rejects_the_futures_only_strategy_for_spot() {
+        let strategy = DollarBarsCusumStrategy::new(DollarBarsCusumConfig::default()).unwrap();
+
+        assert!(validate_strategy_market(&strategy, MarketType::Spot).is_err());
+        assert!(validate_strategy_market(&strategy, MarketType::UsdMPerpetual).is_ok());
+    }
 }
