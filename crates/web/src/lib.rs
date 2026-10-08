@@ -6,6 +6,7 @@
 
 pub mod handlers;
 pub mod mock;
+pub mod paper;
 pub mod security;
 pub mod state;
 pub mod ws;

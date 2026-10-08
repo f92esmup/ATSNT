@@ -41,6 +41,10 @@ struct Cli {
     /// Run synthetic market ticker generator for development and UI demonstration.
     #[arg(long, default_value_t = false)]
     mock: bool,
+
+    /// Own an in-process paper session, waiting for a future trade source.
+    #[arg(long, conflicts_with = "mock")]
+    paper: bool,
 }
 
 #[tokio::main]
@@ -73,12 +77,25 @@ async fn main() -> anyhow::Result<()> {
     if cli.mock {
         mock::spawn_mock_ticker(event_sender);
     }
+    // Retain the bounded input even without a source so the session waits.
+    // Shutdown/finalization coordination is a separate lifecycle work unit.
+    let _paper_runtime = if cli.paper {
+        let (owner, input) = web::paper::PaperSessionOwner::new(
+            backtest::PaperTradingConfig::default(),
+            None,
+            app_state.event_sender.clone(),
+        )?;
+        Some((input, tokio::spawn(owner.run())))
+    } else {
+        None
+    };
     let app = create_router_with_security(app_state, cli.static_dir, security);
 
     info!(
         host = %cli.host,
         port = cli.port,
         mock_mode = cli.mock,
+        paper_mode = cli.paper,
         "ATSNT Web Telemetry Dashboard starting on http://{addr}"
     );
 
@@ -127,6 +144,29 @@ mod tests {
                 "{host}"
             );
         }
+    }
+
+    #[test]
+    fn cli_accepts_explicit_paper_mode() {
+        let cli = Cli::try_parse_from(["web", "--paper"]).unwrap();
+        assert!(cli.paper);
+        assert!(!cli.mock);
+    }
+
+    #[test]
+    fn cli_rejects_conflicting_mock_and_paper_modes() {
+        for args in [["web", "--mock", "--paper"], ["web", "--paper", "--mock"]] {
+            let error = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn cli_default_and_mock_modes_remain_distinct() {
+        let default = Cli::try_parse_from(["web"]).unwrap();
+        assert!(!default.mock && !default.paper);
+        let mock = Cli::try_parse_from(["web", "--mock"]).unwrap();
+        assert!(mock.mock && !mock.paper);
     }
 
     #[test]
