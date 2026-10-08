@@ -11,7 +11,7 @@ Delivery: local work-unit commit only; no push/PR. Test runner: Cargo offline.
 
 ## Tasks
 
-- [ ] **T4.1 — Implement Spot compatibility and funds/commission preflight.** Route: inline. Status: implementation and independent verification passed; native review pending. Commit: pending.
+- [x] **T4.1 — Implement Spot compatibility and funds/commission preflight.** Route: inline. Status: complete. Commit: `e22b575`.
 
 ## Log
 
@@ -23,3 +23,4 @@ Delivery: local work-unit commit only; no push/PR. Test runner: Cargo offline.
 - **L6 (2026-10-08):** Implemented `MarketType` compatibility (`DollarBarsCusum_v1` is USD-M-only), rejected `--spot` before WebSocket setup, and added fail-closed standard Spot symbol/account/commission/asset preflight before POST. Commission upper bound sums standard, special, tax, and side rates; a funded discount asset is checked using a fresh direct/inverse ticker price, otherwise fees must fit the received asset. Updated architecture docs and CLI help.
 - **L7 (2026-10-08):** All focused tests, `cargo test --locked --offline --workspace --no-fail-fast`, `cargo fmt --all -- --check`, `cargo clippy --locked --offline --workspace --all-targets -- -D warnings`, and `git diff --check` passed. Independent verifier passed S1-S4; first identified stale `--spot` help, corrected the wording, and independently rechecked `cargo run --locked --offline -p backtest --bin paper_trading -- --help` (exit 0, correct help). The offline adapter/workspace tests required approved local loopback; no exchange access occurred.
 - **L8 (2026-10-08):** Risk: item 3 (public `Strategy` contract and Spot order-dispatch guard). RDD is on; native review is pending after the work-unit commit. No commit, review consent, or delivery approval is implied yet.
+- **L9 (2026-10-08):** Work-unit commit `e22b575` was reviewed at medium risk and acknowledged under lineage `review-c49c5bd38cd0a9ae`; native approval was burned for this exact target. No blocking finding remained. One informational warning (`R3-commission-coverage`, reliability lens, `binance_gateway.rs:543`) remains a separate follow-up; it did not open correction or reopen review. The review does not authorize push, PR, merge, or release.
