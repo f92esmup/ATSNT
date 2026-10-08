@@ -19,6 +19,12 @@ pub struct StrategyMetadata {
     pub status: &'static str,
     /// Quantitative description of the methodology.
     pub description: &'static str,
+    /// Version string for immutable tracking.
+    pub version: &'static str,
+    /// Declared compatible market types ("spot" | "usdm_futures").
+    pub compatible_markets: &'static [&'static str],
+    /// Whether the strategy is strictly restricted to Futures contracts.
+    pub is_futures_only: bool,
 }
 
 /// GET /api/state - Returns current real-time telemetry snapshot.
@@ -35,5 +41,8 @@ pub async fn get_strategies_handler() -> Json<Vec<StrategyMetadata>> {
         symbol: "BTCUSDT",
         status: "ACTIVE",
         description: "Information-driven volume sampling with symmetric CUSUM filter and Triple Barrier exits",
+        version: "1.0.0",
+        compatible_markets: &["usdm_futures"],
+        is_futures_only: true,
     }])
 }

@@ -53,6 +53,7 @@ pub fn create_router_with_security(
         .route("/health", get(handlers::health_handler))
         .route("/state", get(handlers::get_state_handler))
         .route("/strategies", get(handlers::get_strategies_handler))
+        .route("/contexts", get(handlers::get_contexts_handler))
         .route("/reports", get(handlers::list_reports_handler))
         .route("/reports/:id", get(handlers::get_report_by_id_handler));
 

@@ -938,3 +938,176 @@ async fn test_static_asset_serving() {
     let res_css = router.oneshot(req_css).await.unwrap();
     assert_eq!(res_css.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_contexts_endpoint() {
+    let (tx, _) = broadcast::channel(100);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let app_state = AppState::new(tx, temp_dir.path().to_path_buf());
+    let router = create_router(app_state, None);
+
+    let req = Request::builder()
+        .uri("/api/contexts")
+        .header(header::HOST, "localhost:3000")
+        .body(Body::empty())
+        .unwrap();
+    let res = router.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.is_array());
+    assert_eq!(json.as_array().unwrap().len(), 2);
+
+    let spot = &json[0];
+    assert_eq!(spot["id"], "spot");
+    assert_eq!(spot["margin_mode"], "cash");
+    assert_eq!(spot["position_mode"], "cash");
+    assert_eq!(spot["is_supported"], true);
+    assert_eq!(spot["sole_order_writer"], false);
+
+    let futures = &json[1];
+    assert_eq!(futures["id"], "usdm_futures");
+    assert_eq!(futures["margin_mode"], "isolated");
+    assert_eq!(futures["position_mode"], "one_way");
+    assert_eq!(futures["is_supported"], true);
+    assert_eq!(futures["sole_order_writer"], true);
+}
+
+#[tokio::test]
+async fn test_enhanced_strategy_metadata_contract() {
+    let (tx, _) = broadcast::channel(100);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let app_state = AppState::new(tx, temp_dir.path().to_path_buf());
+    let router = create_router(app_state, None);
+
+    let req = Request::builder()
+        .uri("/api/strategies")
+        .header(header::HOST, "localhost:3000")
+        .body(Body::empty())
+        .unwrap();
+    let res = router.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json[0]["id"], "dollar_bars_cusum");
+    assert_eq!(json[0]["version"], "1.0.0");
+    assert_eq!(
+        json[0]["compatible_markets"],
+        serde_json::json!(["usdm_futures"])
+    );
+    assert_eq!(json[0]["is_futures_only"], true);
+}
+
+#[tokio::test]
+async fn test_read_only_negative_mutation_routes() {
+    let (tx, _) = broadcast::channel(100);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let app_state = AppState::new(tx, temp_dir.path().to_path_buf());
+    let router = create_router(app_state, None);
+
+    // POST /api/state must be rejected
+    let req_post_state = Request::builder()
+        .method("POST")
+        .uri("/api/state")
+        .header(header::HOST, "localhost:3000")
+        .body(Body::empty())
+        .unwrap();
+    let res_post_state = router.clone().oneshot(req_post_state).await.unwrap();
+    assert_eq!(res_post_state.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    // POST /api/orders (non-existent order mutation endpoint) must be rejected
+    let req_post_orders = Request::builder()
+        .method("POST")
+        .uri("/api/orders")
+        .header(header::HOST, "localhost:3000")
+        .body(Body::empty())
+        .unwrap();
+    let res_post_orders = router.clone().oneshot(req_post_orders).await.unwrap();
+    assert!(
+        res_post_orders.status() == StatusCode::NOT_FOUND
+            || res_post_orders.status() == StatusCode::METHOD_NOT_ALLOWED
+    );
+
+    // DELETE /api/positions must be rejected
+    let req_del = Request::builder()
+        .method("DELETE")
+        .uri("/api/positions")
+        .header(header::HOST, "localhost:3000")
+        .body(Body::empty())
+        .unwrap();
+    let res_del = router.oneshot(req_del).await.unwrap();
+    assert!(
+        res_del.status() == StatusCode::NOT_FOUND
+            || res_del.status() == StatusCode::METHOD_NOT_ALLOWED
+    );
+}
+
+#[tokio::test]
+async fn test_monte_carlo_fan_chart_normalization() {
+    let (tx, _) = broadcast::channel(100);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let reports_path = temp_dir.path().to_path_buf();
+
+    // Create report with fan_chart_trajectories
+    let rep1_path = reports_path.join("mc_trajectories.json");
+    fs::write(
+        &rep1_path,
+        r#"{"symbol":"BTCUSDT","fan_chart_trajectories":[[10000,10500],[10000,9800]]}"#,
+    )
+    .unwrap();
+
+    // Create report with fan_chart_curves
+    let rep2_path = reports_path.join("mc_curves.json");
+    fs::write(
+        &rep2_path,
+        r#"{"symbol":"BTCUSDT","fan_chart_curves":[[10000,10200]]}"#,
+    )
+    .unwrap();
+
+    // Create a corrupted/malformed JSON file
+    let corrupt_path = reports_path.join("corrupt.json");
+    fs::write(&corrupt_path, r#"{"invalid_json": true"#).unwrap();
+
+    let app_state = AppState::new(tx, reports_path);
+    let router = create_router(app_state, None);
+
+    // Test list reports skips corrupt file and lists valid ones
+    let req_list = Request::builder()
+        .uri("/api/reports")
+        .header(header::HOST, "localhost:3000")
+        .body(Body::empty())
+        .unwrap();
+    let res_list = router.clone().oneshot(req_list).await.unwrap();
+    assert_eq!(res_list.status(), StatusCode::OK);
+    let list_body = res_list.into_body().collect().await.unwrap().to_bytes();
+    let list_json: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+    assert_eq!(list_json.as_array().unwrap().len(), 2);
+
+    // Test mc_trajectories normalizes fan_chart_curves
+    let req_get1 = Request::builder()
+        .uri("/api/reports/mc_trajectories")
+        .header(header::HOST, "localhost:3000")
+        .body(Body::empty())
+        .unwrap();
+    let res_get1 = router.clone().oneshot(req_get1).await.unwrap();
+    assert_eq!(res_get1.status(), StatusCode::OK);
+    let body1 = res_get1.into_body().collect().await.unwrap().to_bytes();
+    let json1: serde_json::Value = serde_json::from_slice(&body1).unwrap();
+    assert!(json1.get("fan_chart_trajectories").is_some());
+    assert!(json1.get("fan_chart_curves").is_some());
+
+    // Test mc_curves normalizes fan_chart_trajectories
+    let req_get2 = Request::builder()
+        .uri("/api/reports/mc_curves")
+        .header(header::HOST, "localhost:3000")
+        .body(Body::empty())
+        .unwrap();
+    let res_get2 = router.oneshot(req_get2).await.unwrap();
+    assert_eq!(res_get2.status(), StatusCode::OK);
+    let body2 = res_get2.into_body().collect().await.unwrap().to_bytes();
+    let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+    assert!(json2.get("fan_chart_curves").is_some());
+    assert!(json2.get("fan_chart_trajectories").is_some());
+}

@@ -176,11 +176,11 @@ Every phase below is proposed and separately trackable. Checks describe future p
 
 **Objective:** attributable, resilient read models. **Entry/dependencies:** W0 plus T2b snapshot fidelity/sticky-uncertainty resilience (complete in `43d85bb`) and T3 real paper-session wiring (pending). **Consume the existing T2b behavior and future T3 results; do not duplicate or bypass their implementation tasks.**
 
-**Numbered deliverables:**
-1. Validate T2b snapshot restoration, continued aggregation after lag and sticky uncertainty as existing input evidence; validate T3 explicit paper/mock lifecycle when available. Do not treat T2b projections as authoritative recovery.
-2. Define versioned account/asset/strategy-instance models with distinct Spot/USDⓈ-M Futures contexts, declared strategy market compatibility, stable IDs and Decimal serialization, preserving T2a compatibility. Consume T6 private account evidence for both markets when available; do not imply live readiness.
-3. Specify complete reconnect snapshots, coherent event ordering/gaps, timestamps and missing/stale semantics.
-4. Agree report contract boundaries for W4 and test that web routes remain read-only.
+**Numbered deliverables (Completed in [`odd/tasks/w2-read-only-contracts.md`](../../odd/tasks/w2-read-only-contracts.md)):**
+1. [x] Validate T2b snapshot restoration, continued aggregation after lag and sticky uncertainty as existing input evidence; validate T3 explicit paper/mock lifecycle when available. Do not treat T2b projections as authoritative recovery.
+2. [x] Define versioned account/asset/strategy-instance models with distinct Spot/USDⓈ-M Futures contexts, declared strategy market compatibility, stable IDs and Decimal serialization, preserving T2a compatibility. Consume T6 private account evidence for both markets when available; do not imply live readiness.
+3. [x] Specify complete reconnect snapshots, coherent event ordering/gaps, timestamps and missing/stale semantics.
+4. [x] Agree report contract boundaries for W4 and test that web routes remain read-only.
 
 **Observable acceptance:** real paper data is attributable; contexts cannot be conflated; reconnect/lag uncertainty is observable; decimal strings are preserved; unsupported live state is unavailable rather than fabricated.
 

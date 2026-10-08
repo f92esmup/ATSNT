@@ -72,25 +72,31 @@ pub async fn list_reports_handler(State(app_state): State<AppState>) -> Json<Vec
                 let mut total_trades = None;
 
                 if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                        symbol = val.get("symbol").and_then(|v| v.as_str()).map(String::from);
-                        if let Some(metrics) = val.get("metrics") {
-                            net_profit = metrics
-                                .get("net_profit")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
-                            win_rate = metrics
-                                .get("win_rate")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
-                            sortino_ratio = metrics
-                                .get("sortino_ratio")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
-                            total_trades = metrics
-                                .get("total_trades")
-                                .and_then(|v| v.as_u64())
-                                .map(|n| n as usize);
+                    match serde_json::from_str::<serde_json::Value>(&content) {
+                        Ok(val) => {
+                            symbol = val.get("symbol").and_then(|v| v.as_str()).map(String::from);
+                            if let Some(metrics) = val.get("metrics") {
+                                net_profit = metrics
+                                    .get("net_profit")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                win_rate = metrics
+                                    .get("win_rate")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                sortino_ratio = metrics
+                                    .get("sortino_ratio")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                total_trades = metrics
+                                    .get("total_trades")
+                                    .and_then(|v| v.as_u64())
+                                    .map(|n| n as usize);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(file = %filename, error = %e, "Skipping malformed report JSON file");
+                            continue;
                         }
                     }
                 }
@@ -149,12 +155,21 @@ pub async fn get_report_by_id_handler(
         )
     })?;
 
-    let json_val = serde_json::from_str::<serde_json::Value>(&content).map_err(|e| {
+    let mut json_val = serde_json::from_str::<serde_json::Value>(&content).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Invalid JSON structure: {e}"),
         )
     })?;
+
+    // W2 Schema Normalization: Reconcile Monte Carlo fan chart keys without altering stored bytes.
+    if let Some(obj) = json_val.as_object_mut() {
+        if let Some(trajectories) = obj.get("fan_chart_trajectories").cloned() {
+            obj.entry("fan_chart_curves").or_insert(trajectories);
+        } else if let Some(curves) = obj.get("fan_chart_curves").cloned() {
+            obj.entry("fan_chart_trajectories").or_insert(curves);
+        }
+    }
 
     Ok(Json(json_val))
 }
