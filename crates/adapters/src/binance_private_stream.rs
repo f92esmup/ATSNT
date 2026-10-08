@@ -83,15 +83,14 @@ impl BinancePrivateUserDataStream {
         auth: &BinanceAuth,
         testnet: bool,
     ) -> Result<Self, BinancePrivateStreamError> {
-        let timestamp_ms = current_unix_time_ms()?;
         let sequence = SPOT_REQUEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let request_id = format!("atsnt-spot-{timestamp_ms}-{sequence}");
+        let request_id = format!("atsnt-spot-{sequence}");
         let endpoint = if testnet {
             SPOT_USER_STREAM_TESTNET
         } else {
             SPOT_USER_STREAM_PRODUCTION
         };
-        Self::connect_spot_with_endpoint(endpoint, auth, timestamp_ms, &request_id).await
+        Self::connect_spot_with_endpoint(endpoint, auth, current_unix_time_ms, &request_id).await
     }
 
     /// Connects to the USD-M Futures listen-key stream and renews its key every 30 minutes.
@@ -137,10 +136,11 @@ impl BinancePrivateUserDataStream {
     async fn connect_spot_with_endpoint(
         endpoint: &str,
         auth: &BinanceAuth,
-        timestamp_ms: u64,
+        timestamp_provider: impl FnOnce() -> Result<u64, BinancePrivateStreamError>,
         request_id: &str,
     ) -> Result<Self, BinancePrivateStreamError> {
         let mut websocket = connect_private_socket(endpoint).await?;
+        let timestamp_ms = timestamp_provider()?;
         let request = build_spot_subscription_request(auth, timestamp_ms, request_id)?;
         tokio::time::timeout(
             USER_STREAM_SEND_TIMEOUT,
@@ -259,6 +259,7 @@ async fn run_private_reader(
 
     let mut last_event_time_ms = None;
     let mut shutdown_requested = false;
+    let mut terminal_error = None;
     'reader: loop {
         tokio::select! {
             biased;
@@ -283,8 +284,14 @@ async fn run_private_reader(
                     Some(true) => {}
                     Some(false) => {
                         let error = BinancePrivateStreamError::ListenKeyRenewalFailed;
-                        if !send_stream_result(&event_tx, &mut shutdown_rx, Err(error)).await {
-                            shutdown_requested = true;
+                        match event_tx.try_send(Err(error.clone())) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                terminal_error = Some(error);
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                shutdown_requested = true;
+                            }
                         }
                         break 'reader;
                     }
@@ -305,9 +312,24 @@ async fn run_private_reader(
                         });
                         let invalid = parsed.is_err();
                         let expired = matches!(parsed, Ok(BinancePrivateEvent::FuturesListenKeyExpired { .. }));
-                        if !send_stream_result(&event_tx, &mut shutdown_rx, parsed).await {
-                            shutdown_requested = true;
-                            break 'reader;
+                        match send_stream_result_with_renewal(
+                            &event_tx,
+                            &mut shutdown_rx,
+                            parsed,
+                            &mut renewal_interval,
+                            renewal.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                shutdown_requested = true;
+                                break 'reader;
+                            }
+                            Err(error) => {
+                                terminal_error = Some(error);
+                                break 'reader;
+                            }
                         }
                         if expired {
                             if !send_stream_result(
@@ -388,6 +410,9 @@ async fn run_private_reader(
             return Err(error);
         }
     }
+    if let Some(error) = terminal_error {
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -420,6 +445,45 @@ async fn send_stream_result(
         biased;
         _ = shutdown_rx => false,
         sent = sender.send(result) => sent.is_ok(),
+    }
+}
+
+async fn send_stream_result_with_renewal(
+    sender: &mpsc::Sender<Result<BinancePrivateEvent, BinancePrivateStreamError>>,
+    shutdown_rx: &mut oneshot::Receiver<()>,
+    result: Result<BinancePrivateEvent, BinancePrivateStreamError>,
+    renewal_interval: &mut Option<tokio::time::Interval>,
+    renewal: Option<&(String, Arc<dyn ListenKeyRenewer>, FuturesRenewalPolicy)>,
+) -> Result<bool, BinancePrivateStreamError> {
+    let reserve = sender.reserve();
+    tokio::pin!(reserve);
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut *shutdown_rx => return Ok(false),
+            _ = renewal_tick(renewal_interval) => {
+                if let Some((listen_key, renewer, policy)) = renewal {
+                    tokio::select! {
+                        biased;
+                        _ = &mut *shutdown_rx => return Ok(false),
+                        result = renew_listen_key_with_policy(
+                            renewer.as_ref(),
+                            listen_key,
+                            *policy,
+                        ) => result?,
+                    }
+                }
+            }
+            permit = &mut reserve => {
+                match permit {
+                    Ok(permit) => {
+                        permit.send(result);
+                        return Ok(true);
+                    }
+                    Err(_) => return Ok(false),
+                }
+            }
+        }
     }
 }
 
@@ -982,11 +1046,14 @@ mod tests {
             .await
             .expect("local test listener should bind");
         let address = listener.local_addr().expect("listener has local address");
+        let handshake_complete = Arc::new(AtomicBool::new(false));
+        let server_handshake_complete = Arc::clone(&handshake_complete);
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.expect("local client connects");
             let mut websocket = accept_async(socket)
                 .await
                 .expect("WebSocket handshake works");
+            server_handshake_complete.store(true, Ordering::SeqCst);
             let request = websocket
                 .next()
                 .await
@@ -1020,10 +1087,17 @@ mod tests {
         });
 
         let auth = BinanceAuth::new("test-api-key", "test-secret");
+        let clock_handshake_complete = Arc::clone(&handshake_complete);
         let mut stream = BinancePrivateUserDataStream::connect_spot_with_endpoint(
             &format!("ws://{address}"),
             &auth,
-            1_700_000_000_000,
+            move || {
+                assert!(
+                    clock_handshake_complete.load(Ordering::SeqCst),
+                    "signed subscription timestamp must be sampled after the handshake"
+                );
+                Ok(1_700_000_000_000)
+            },
             "local-spot-1",
         )
         .await
@@ -1073,7 +1147,7 @@ mod tests {
         let mut stream = BinancePrivateUserDataStream::connect_spot_with_endpoint(
             &format!("ws://{address}"),
             &auth,
-            1_700_000_000_000,
+            || Ok(1_700_000_000_000),
             "stale-spot-1",
         )
         .await
@@ -1092,6 +1166,105 @@ mod tests {
 
     struct RecordingRenewer {
         close_count: AtomicUsize,
+        renew_count: AtomicUsize,
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_cancels_pending_renewal_during_backpressured_delivery() {
+        let policy = FuturesRenewalPolicy::default();
+        let (sender, _receiver) = mpsc::channel(1);
+        sender
+            .try_send(Err(BinancePrivateStreamError::EventReconciliationRequired))
+            .expect("the test should fill the delivery channel");
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let renewer = Arc::new(PendingRenewer {
+            attempts: AtomicUsize::new(0),
+        });
+        let renewer_trait: Arc<dyn ListenKeyRenewer> = renewer.clone();
+        let renewal = ("synthetic-key".to_string(), renewer_trait, policy);
+        let mut interval = Some(tokio::time::interval_at(
+            tokio::time::Instant::now() + policy.interval,
+            policy.interval,
+        ));
+
+        let task = tokio::spawn(async move {
+            send_stream_result_with_renewal(
+                &sender,
+                &mut shutdown_rx,
+                Err(BinancePrivateStreamError::ProtocolReconciliationRequired),
+                &mut interval,
+                Some(&renewal),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(policy.interval).await;
+        tokio::task::yield_now().await;
+        assert_eq!(renewer.attempts.load(Ordering::SeqCst), 1);
+
+        shutdown_tx
+            .send(())
+            .expect("shutdown should reach the pending task");
+        tokio::task::yield_now().await;
+        let finished = task.is_finished();
+        let outcome = if finished {
+            Some(task.await.expect("send task joins"))
+        } else {
+            task.abort();
+            None
+        };
+
+        assert!(finished, "shutdown must cancel the pending renewal");
+        assert!(matches!(outcome, Some(Ok(false))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn futures_key_renewal_continues_while_event_delivery_is_backpressured() {
+        let policy = FuturesRenewalPolicy::default();
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .send(Err(BinancePrivateStreamError::EventReconciliationRequired))
+            .await
+            .expect("the test should fill the delivery channel");
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let renewer = Arc::new(RecordingRenewer {
+            close_count: AtomicUsize::new(0),
+            renew_count: AtomicUsize::new(0),
+        });
+        let renewer_trait: Arc<dyn ListenKeyRenewer> = renewer.clone();
+        let renewal = ("synthetic-key".to_string(), renewer_trait, policy);
+        let mut interval = Some(tokio::time::interval_at(
+            tokio::time::Instant::now() + policy.interval,
+            policy.interval,
+        ));
+
+        let task = tokio::spawn(async move {
+            send_stream_result_with_renewal(
+                &sender,
+                &mut shutdown_rx,
+                Err(BinancePrivateStreamError::ProtocolReconciliationRequired),
+                &mut interval,
+                Some(&renewal),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(policy.interval).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(renewer.renew_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            receiver.recv().await,
+            Some(Err(BinancePrivateStreamError::EventReconciliationRequired))
+        );
+        assert_eq!(task.await.expect("send task joins"), Ok(true));
+        assert_eq!(
+            receiver.recv().await,
+            Some(Err(
+                BinancePrivateStreamError::ProtocolReconciliationRequired
+            ))
+        );
+        let _ = shutdown_tx.send(());
     }
 
     impl ListenKeyRenewer for RecordingRenewer {
@@ -1099,6 +1272,7 @@ mod tests {
             &'a self,
             _listen_key: &'a str,
         ) -> Pin<Box<dyn Future<Output = Result<(), ()>> + Send + 'a>> {
+            self.renew_count.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(()) })
         }
 
@@ -1215,6 +1389,7 @@ mod tests {
         });
         let renewer = Arc::new(RecordingRenewer {
             close_count: AtomicUsize::new(0),
+            renew_count: AtomicUsize::new(0),
         });
         let mut stream = BinancePrivateUserDataStream::connect_futures_with_endpoint(
             &format!("ws://{address}/synthetic-key"),
