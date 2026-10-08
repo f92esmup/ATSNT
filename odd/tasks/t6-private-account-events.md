@@ -25,7 +25,7 @@ Acceptance: add compact fixtures derived from official Binance event schemas wit
 
 ## Tasks
 
-- [ ] **T6** — Implement S1–S5 inline; verify the focused adapter tests and workspace checks; commit the coherent work unit on the feature branch. Implementation and checks are complete; work-unit commit and native review remain pending.
+- [ ] **T6** — Implement S1–S5 inline; verify the focused adapter tests and workspace checks; commit the coherent work unit on the feature branch. Implementation and checks are complete in work-unit commit `2f88dc1`; native review remains pending.
 
 ## Log
 
@@ -38,4 +38,4 @@ Acceptance: add compact fixtures derived from official Binance event schemas wit
 - **L6 — Initial next step:** implement S1–S5, run checks, obtain independent high-risk verification, then record the work-unit commit and assessment outcome.
 - **L7 — Independent findings and correction:** the first high-risk verification found that Spot messages were parsed without unwrapping the signed-subscription envelope, event-time regressions were accepted, shutdown could poll a completed oneshot during renewal, and dropping the stream could leave a stuck reader detached. It also found renewal HTTP-200 bodies were not validated; that gap existed at baseline but violated S3. Added regression tests and fixed all five behaviors; subscription and Pong sends now have deadlines, and a shutdown timeout aborts and joins the reader.
 - **L8 — Verification:** focused private-stream tests passed (17), listen-key gateway tests passed (7), and the offline workspace suite passed (160 tests, 0 failures). `cargo fmt --all -- --check` and workspace Clippy passed. Independent bounded recheck passed all prior findings in a fresh scratch copy. Tests use loopback/fakes only; no live Binance calls.
-- **L9 — Delivery and next step:** the project tracker already records the user's `stacked-to-main` choice for this branch; reuse that cached chain strategy, but do not push or create a PR. The local T6 work unit is 1,908 authored additions/deletions, above the 400-line review budget; PR slicing remains a separate delivery decision. Next, create the local T6 work-unit commit, then assess this committed candidate under the enabled native review switch. Engram mirror remains pending until the runtime registers its authoritative session ID.
+- **L9 — Delivery and next step:** the project tracker already records the user's `stacked-to-main` choice for this branch; reuse that cached chain strategy, but do not push or create a PR. The local T6 work unit is commit `2f88dc1` with 1,908 authored additions/deletions, above the 400-line review budget; PR slicing remains a separate delivery decision. Next, complete the native review lifecycle for the committed range; no START or review consent is implied. Engram mirror remains pending until the runtime registers its authoritative session ID.
