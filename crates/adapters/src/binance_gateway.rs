@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex as StdMutex;
 
 use domain::{OrderIntent, RiskError, RiskPolicy, Side};
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -14,6 +16,8 @@ use thiserror::Error;
 use tracing::{debug, error, info};
 
 use crate::binance_auth::BinanceAuth;
+
+static NEXT_FUTURES_CLIENT_ORDER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Gateway execution errors.
 #[derive(Debug, Error)]
@@ -27,6 +31,17 @@ pub enum GatewayError {
     /// USD-M account state, contract rules, margin, or fee data could not be validated.
     #[error("USD-M pre-trade check failed: {0}")]
     FuturesPreflight(String),
+    /// Another USD-M order is currently being reconciled by this gateway.
+    #[error("USD-M order submission is already in progress (client order ID {client_order_id})")]
+    FuturesSubmissionInProgress { client_order_id: String },
+    /// Binance could not confirm whether the USD-M order was accepted; automatic retries are unsafe.
+    #[error(
+        "USD-M order submission is uncertain for {symbol} (client order ID {client_order_id})"
+    )]
+    FuturesSubmissionUncertain {
+        symbol: String,
+        client_order_id: String,
+    },
     /// The available Spot balance cannot cover the order's required funds.
     #[error("Insufficient Spot funds for {asset}: required {required}, available {available}")]
     InsufficientSpotFunds {
@@ -153,6 +168,107 @@ struct FuturesPreflightSnapshot {
 }
 
 #[derive(Debug)]
+enum FuturesSubmissionState {
+    Available,
+    Reserved { client_order_id: String },
+    Dispatching { order: FuturesOrderRequest },
+    Uncertain { order: FuturesOrderRequest },
+}
+
+#[derive(Debug, Clone)]
+struct FuturesOrderRequest {
+    symbol: String,
+    client_order_id: String,
+    side: Side,
+    price: Decimal,
+    quantity: Decimal,
+}
+
+enum FuturesOrderLookup {
+    Found(OrderExecutionReport),
+    NotFound,
+    Unavailable,
+}
+
+struct FuturesSubmissionLease<'a> {
+    gateway: &'a BinanceGateway,
+    client_order_id: String,
+}
+
+impl FuturesSubmissionLease<'_> {
+    fn mark_dispatching(&self, order: FuturesOrderRequest) -> Result<(), GatewayError> {
+        let mut state = self.gateway.futures_submission_state.lock().map_err(|_| {
+            GatewayError::FuturesPreflight(
+                "USD-M submission reservation state is unavailable".to_string(),
+            )
+        })?;
+        if matches!(
+            &*state,
+            FuturesSubmissionState::Reserved { client_order_id }
+                if client_order_id == &self.client_order_id
+        ) {
+            *state = FuturesSubmissionState::Dispatching { order };
+            return Ok(());
+        }
+        Err(GatewayError::FuturesPreflight(
+            "USD-M submission reservation changed before dispatch".to_string(),
+        ))
+    }
+
+    fn mark_resolved(&self) {
+        if let Ok(mut state) = self.gateway.futures_submission_state.lock() {
+            let matches_order = match &*state {
+                FuturesSubmissionState::Reserved { client_order_id } => {
+                    client_order_id == &self.client_order_id
+                }
+                FuturesSubmissionState::Dispatching { order }
+                | FuturesSubmissionState::Uncertain { order } => {
+                    order.client_order_id == self.client_order_id
+                }
+                FuturesSubmissionState::Available => false,
+            };
+            if matches_order {
+                *state = FuturesSubmissionState::Available;
+            }
+        }
+    }
+
+    fn mark_uncertain(&self, order: FuturesOrderRequest) {
+        if let Ok(mut state) = self.gateway.futures_submission_state.lock() {
+            if matches!(
+                &*state,
+                FuturesSubmissionState::Dispatching { order: current }
+                    if current.client_order_id == self.client_order_id
+            ) {
+                *state = FuturesSubmissionState::Uncertain { order };
+            }
+        }
+    }
+}
+
+impl Drop for FuturesSubmissionLease<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.gateway.futures_submission_state.lock() {
+            match &*state {
+                FuturesSubmissionState::Reserved { client_order_id }
+                    if client_order_id == &self.client_order_id =>
+                {
+                    *state = FuturesSubmissionState::Available;
+                }
+                FuturesSubmissionState::Dispatching { order }
+                    if order.client_order_id == self.client_order_id =>
+                {
+                    *state = FuturesSubmissionState::Uncertain {
+                        order: order.clone(),
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 struct CommissionRates {
     maker: Decimal,
     taker: Decimal,
@@ -195,6 +311,7 @@ pub struct BinanceGateway {
     auth: BinanceAuth,
     client: reqwest::Client,
     base_url: String,
+    futures_submission_state: StdMutex<FuturesSubmissionState>,
 }
 
 impl BinanceGateway {
@@ -235,7 +352,45 @@ impl BinanceGateway {
             auth,
             client,
             base_url,
+            futures_submission_state: StdMutex::new(FuturesSubmissionState::Available),
         })
+    }
+
+    fn reserve_futures_submission(&self) -> Result<FuturesSubmissionLease<'_>, GatewayError> {
+        let client_order_id = new_futures_client_order_id()?;
+        let mut state = self.futures_submission_state.lock().map_err(|_| {
+            GatewayError::FuturesPreflight(
+                "USD-M submission reservation state is unavailable".to_string(),
+            )
+        })?;
+
+        match &*state {
+            FuturesSubmissionState::Available => {
+                *state = FuturesSubmissionState::Reserved {
+                    client_order_id: client_order_id.clone(),
+                };
+                Ok(FuturesSubmissionLease {
+                    gateway: self,
+                    client_order_id,
+                })
+            }
+            FuturesSubmissionState::Reserved { client_order_id } => {
+                Err(GatewayError::FuturesSubmissionInProgress {
+                    client_order_id: client_order_id.clone(),
+                })
+            }
+            FuturesSubmissionState::Dispatching { order } => {
+                Err(GatewayError::FuturesSubmissionInProgress {
+                    client_order_id: order.client_order_id.clone(),
+                })
+            }
+            FuturesSubmissionState::Uncertain { order } => {
+                Err(GatewayError::FuturesSubmissionUncertain {
+                    symbol: order.symbol.clone(),
+                    client_order_id: order.client_order_id.clone(),
+                })
+            }
+        }
     }
 
     /// Access the underlying pre-trade risk policy.
@@ -360,6 +515,152 @@ impl BinanceGateway {
             return Err(GatewayError::BinanceApi { code, message });
         }
         Ok(body)
+    }
+
+    async fn submit_futures_order(
+        &self,
+        symbol: &str,
+        intent: &OrderIntent,
+        quantity: Decimal,
+        snapshot: &FuturesPreflightSnapshot,
+        lease: &FuturesSubmissionLease<'_>,
+    ) -> Result<OrderExecutionReport, GatewayError> {
+        let side = match intent.side {
+            Side::Buy => "BUY",
+            Side::Sell => "SELL",
+        };
+        let order = FuturesOrderRequest {
+            symbol: symbol.to_string(),
+            client_order_id: lease.client_order_id.clone(),
+            side: intent.side,
+            price: intent.price,
+            quantity,
+        };
+        let parameters = format!(
+            "symbol={}&side={side}&type=LIMIT&timeInForce=GTC&quantity={quantity}&price={}&newClientOrderId={}",
+            order.symbol, intent.price, order.client_order_id
+        );
+        let signed_query = self
+            .auth
+            .sign_query(&parameters, Some(self.config.recv_window_ms));
+        let url = format!("{}/fapi/v1/order?{signed_query}", self.base_url);
+
+        validate_futures_snapshot_age(&snapshot.observed_at, std::time::Instant::now())?;
+        validate_futures_mark_timestamp(snapshot.mark_time_ms, current_unix_time_ms()?)?;
+
+        lease.mark_dispatching(order.clone())?;
+        let response = match self.client.post(&url).send().await {
+            Ok(response) => response,
+            Err(_) => return self.reconcile_futures_submission(order, lease).await,
+        };
+        let status = response.status();
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(_) => return self.reconcile_futures_submission(order, lease).await,
+        };
+        let body = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(body) => body,
+            Err(_) => return self.reconcile_futures_submission(order, lease).await,
+        };
+
+        if !status.is_success() {
+            let code = body.get("code").and_then(|value| value.as_i64());
+            let message = body
+                .get("msg")
+                .and_then(|value| value.as_str())
+                .unwrap_or("USD-M order placement failed")
+                .to_string();
+            if status.is_server_error()
+                || code.is_none()
+                || matches!(code, Some(-1000 | -1001 | -1004 | -1006 | -1007))
+            {
+                return self.reconcile_futures_submission(order, lease).await;
+            }
+            if status.is_client_error() {
+                error!(code = code.unwrap_or(-1), message = %message, "Exchange rejected USD-M order");
+                lease.mark_resolved();
+                return Err(GatewayError::BinanceApi {
+                    code: code.unwrap_or(-1),
+                    message,
+                });
+            }
+            return self.reconcile_futures_submission(order, lease).await;
+        }
+
+        match parse_futures_order_report(&body, &order) {
+            Ok(report) => {
+                lease.mark_resolved();
+                Ok(report)
+            }
+            Err(_) => self.reconcile_futures_submission(order, lease).await,
+        }
+    }
+
+    async fn reconcile_futures_submission(
+        &self,
+        order: FuturesOrderRequest,
+        lease: &FuturesSubmissionLease<'_>,
+    ) -> Result<OrderExecutionReport, GatewayError> {
+        if let Some(report) = self.lookup_futures_order_until_resolved(&order).await {
+            lease.mark_resolved();
+            return Ok(report);
+        }
+
+        lease.mark_uncertain(order.clone());
+        Err(GatewayError::FuturesSubmissionUncertain {
+            symbol: order.symbol,
+            client_order_id: order.client_order_id,
+        })
+    }
+
+    async fn lookup_futures_order_until_resolved(
+        &self,
+        order: &FuturesOrderRequest,
+    ) -> Option<OrderExecutionReport> {
+        const LOOKUP_ATTEMPTS: usize = 3;
+        for attempt in 0..LOOKUP_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            if let FuturesOrderLookup::Found(report) = self.query_futures_order(order).await {
+                return Some(report);
+            }
+        }
+        None
+    }
+
+    async fn query_futures_order(&self, order: &FuturesOrderRequest) -> FuturesOrderLookup {
+        let parameters = format!(
+            "symbol={}&origClientOrderId={}",
+            order.symbol, order.client_order_id
+        );
+        let path = self.signed_futures_path("/fapi/v1/order", &parameters);
+        let url = format!("{}{path}", self.base_url);
+        let response = match self.client.get(&url).send().await {
+            Ok(response) => response,
+            Err(_) => return FuturesOrderLookup::Unavailable,
+        };
+        let status = response.status();
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(_) => return FuturesOrderLookup::Unavailable,
+        };
+        let body = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(body) => body,
+            Err(_) => return FuturesOrderLookup::Unavailable,
+        };
+
+        if !status.is_success() {
+            if body.get("code").and_then(|value| value.as_i64()) == Some(-2013) {
+                return FuturesOrderLookup::NotFound;
+            }
+            return FuturesOrderLookup::Unavailable;
+        }
+
+        match parse_futures_order_report(&body, order) {
+            Ok(report) => FuturesOrderLookup::Found(report),
+            Err(_) => FuturesOrderLookup::Unavailable,
+        }
     }
 
     async fn fetch_futures_preflight_snapshot(
@@ -833,6 +1134,11 @@ impl BinanceGateway {
         session_peak_equity: Decimal,
         current_position_notional: Decimal,
     ) -> Result<OrderExecutionReport, GatewayError> {
+        let submission_lease = if self.config.spot {
+            None
+        } else {
+            Some(self.reserve_futures_submission()?)
+        };
         let futures_snapshot = if self.config.spot {
             None
         } else {
@@ -861,6 +1167,14 @@ impl BinanceGateway {
         } else if let Some(snapshot) = futures_snapshot.as_ref() {
             self.validate_futures_preflight(symbol, intent, quantity, snapshot)
                 .await?;
+        }
+
+        if let (Some(snapshot), Some(lease)) =
+            (futures_snapshot.as_ref(), submission_lease.as_ref())
+        {
+            return self
+                .submit_futures_order(symbol, intent, quantity, snapshot, lease)
+                .await;
         }
 
         // 2. Prepare query payload
@@ -957,6 +1271,67 @@ impl BinanceGateway {
             cumulative_quote_qty: cum_quote,
             timestamp_ms: time_ms,
         })
+    }
+
+    /// Rechecks the client order ID retained after an uncertain USD-M submission.
+    ///
+    /// A matching exchange record returns its report and releases the gateway's
+    /// submission latch. A missing or invalid lookup keeps the latch closed.
+    pub async fn reconcile_uncertain_futures_submission(
+        &self,
+    ) -> Result<OrderExecutionReport, GatewayError> {
+        if self.config.spot {
+            return Err(GatewayError::FuturesPreflight(
+                "USD-M submission reconciliation is unavailable in Spot mode".to_string(),
+            ));
+        }
+
+        let order = {
+            let state = self.futures_submission_state.lock().map_err(|_| {
+                GatewayError::FuturesPreflight(
+                    "USD-M submission reservation state is unavailable".to_string(),
+                )
+            })?;
+            match &*state {
+                FuturesSubmissionState::Available => {
+                    return Err(GatewayError::FuturesPreflight(
+                        "there is no uncertain USD-M submission to reconcile".to_string(),
+                    ));
+                }
+                FuturesSubmissionState::Reserved { client_order_id } => {
+                    return Err(GatewayError::FuturesSubmissionInProgress {
+                        client_order_id: client_order_id.clone(),
+                    });
+                }
+                FuturesSubmissionState::Dispatching { order } => {
+                    return Err(GatewayError::FuturesSubmissionInProgress {
+                        client_order_id: order.client_order_id.clone(),
+                    });
+                }
+                FuturesSubmissionState::Uncertain { order } => order.clone(),
+            }
+        };
+
+        let Some(report) = self.lookup_futures_order_until_resolved(&order).await else {
+            return Err(GatewayError::FuturesSubmissionUncertain {
+                symbol: order.symbol,
+                client_order_id: order.client_order_id,
+            });
+        };
+
+        let mut state = self.futures_submission_state.lock().map_err(|_| {
+            GatewayError::FuturesPreflight(
+                "USD-M submission reservation state is unavailable".to_string(),
+            )
+        })?;
+        if matches!(
+            &*state,
+            FuturesSubmissionState::Uncertain { order: current }
+                if current.client_order_id == order.client_order_id
+        ) {
+            *state = FuturesSubmissionState::Available;
+        }
+        Ok(report)
     }
 
     /// Cancels an existing open order on the exchange.
@@ -1088,6 +1463,92 @@ impl BinanceGateway {
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
+}
+
+fn new_futures_client_order_id() -> Result<String, GatewayError> {
+    let timestamp_ms = current_unix_time_ms()?;
+    let sequence = NEXT_FUTURES_CLIENT_ORDER_ID.fetch_add(1, Ordering::Relaxed);
+    let client_order_id = format!("atsnt_{timestamp_ms:x}_{sequence:x}");
+    if client_order_id.len() > 36 {
+        return Err(GatewayError::Config(
+            "generated USD-M client order ID exceeds Binance's 36-character limit".to_string(),
+        ));
+    }
+    Ok(client_order_id)
+}
+
+fn parse_futures_order_report(
+    body: &serde_json::Value,
+    expected: &FuturesOrderRequest,
+) -> Result<OrderExecutionReport, GatewayError> {
+    let symbol = required_futures_string(body, "symbol", "USD-M order response")?;
+    let client_order_id = required_futures_string(body, "clientOrderId", "USD-M order response")?;
+    let side = required_futures_string(body, "side", "USD-M order response")?;
+    let status = required_futures_string(body, "status", "USD-M order response")?;
+    let order_id = body
+        .get("orderId")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|order_id| *order_id > 0)
+        .ok_or_else(|| {
+            GatewayError::FuturesPreflight(
+                "USD-M order response is missing a valid order ID".to_string(),
+            )
+        })?;
+    let original_qty = futures_decimal_field(body, "origQty", "USD-M order response")?;
+    let executed_qty = futures_decimal_field(body, "executedQty", "USD-M order response")?;
+    let cumulative_quote_qty = futures_decimal_field(body, "cumQuote", "USD-M order response")?;
+    let price = futures_decimal_field(body, "price", "USD-M order response")?;
+    let timestamp_ms = ["updateTime", "time", "transactTime"]
+        .into_iter()
+        .find_map(|field| {
+            body.get(field).and_then(|value| {
+                value.as_i64().or_else(|| {
+                    value
+                        .as_u64()
+                        .and_then(|timestamp| i64::try_from(timestamp).ok())
+                })
+            })
+        })
+        .filter(|timestamp| *timestamp > 0)
+        .ok_or_else(|| {
+            GatewayError::FuturesPreflight(
+                "USD-M order response is missing a valid exchange timestamp".to_string(),
+            )
+        })?;
+    let expected_side = match expected.side {
+        Side::Buy => "BUY",
+        Side::Sell => "SELL",
+    };
+
+    if symbol != expected.symbol
+        || client_order_id != expected.client_order_id
+        || side != expected_side
+        || original_qty != expected.quantity
+        || price != expected.price
+        || original_qty <= Decimal::ZERO
+        || executed_qty < Decimal::ZERO
+        || executed_qty > original_qty
+        || cumulative_quote_qty < Decimal::ZERO
+        || price <= Decimal::ZERO
+        || status.is_empty()
+    {
+        return Err(GatewayError::FuturesPreflight(
+            "USD-M order response does not match the submitted order".to_string(),
+        ));
+    }
+
+    Ok(OrderExecutionReport {
+        symbol: symbol.to_string(),
+        order_id,
+        client_order_id: client_order_id.to_string(),
+        side: expected.side,
+        status: status.to_string(),
+        price,
+        original_qty,
+        executed_qty,
+        cumulative_quote_qty,
+        timestamp_ms,
+    })
 }
 
 fn is_valid_asset(value: &str) -> bool {
@@ -1851,11 +2312,82 @@ mod tests {
     fn spawn_futures_mock_server(
         responses: HashMap<&'static str, String>,
     ) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+        spawn_futures_mock_server_with_order_behavior(
+            responses,
+            MockFuturesOrderBehavior::default(),
+        )
+    }
+
+    #[derive(Clone, Copy)]
+    enum MockFuturesPostBehavior {
+        Accepted,
+        DropResponse,
+        MalformedResponse,
+        Rejected,
+    }
+
+    #[derive(Clone, Copy)]
+    enum MockFuturesQueryBehavior {
+        Found,
+        NotFound,
+        Malformed,
+        FoundAfter(usize),
+    }
+
+    #[derive(Clone)]
+    struct MockFuturesOrderBehavior {
+        post: MockFuturesPostBehavior,
+        query: MockFuturesQueryBehavior,
+        post_gate: Option<Arc<(Mutex<bool>, std::sync::Condvar)>>,
+    }
+
+    impl Default for MockFuturesOrderBehavior {
+        fn default() -> Self {
+            Self {
+                post: MockFuturesPostBehavior::Accepted,
+                query: MockFuturesQueryBehavior::Found,
+                post_gate: None,
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockFuturesOrder {
+        symbol: String,
+        side: String,
+        quantity: String,
+        price: String,
+        client_order_id: String,
+    }
+
+    fn request_parameter(request_line: &str, name: &str) -> Option<String> {
+        let query = request_line.split_whitespace().nth(1)?.split_once('?')?.1;
+        query.split('&').find_map(|parameter| {
+            let (key, value) = parameter.split_once('=')?;
+            (key == name).then(|| value.to_string())
+        })
+    }
+
+    fn mock_futures_order_response(order: &MockFuturesOrder) -> String {
+        format!(
+            r#"{{"symbol":"{}","orderId":1,"clientOrderId":"{}","side":"{}","status":"NEW","origQty":"{}","executedQty":"0","cumQuote":"0","price":"{}","updateTime":1700000000000}}"#,
+            order.symbol, order.client_order_id, order.side, order.quantity, order.price
+        )
+    }
+
+    fn spawn_futures_mock_server_with_order_behavior(
+        responses: HashMap<&'static str, String>,
+        order_behavior: MockFuturesOrderBehavior,
+    ) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
+        let orders = Arc::new(Mutex::new(HashMap::<String, MockFuturesOrder>::new()));
+        let captured_orders = Arc::clone(&orders);
+        let query_count = Arc::new(Mutex::new(0_usize));
+        let captured_query_count = Arc::clone(&query_count);
 
         let handle = thread::spawn(move || {
             let mut last_request = Instant::now();
@@ -1897,17 +2429,131 @@ mod tests {
                     .split('?')
                     .next()
                     .unwrap_or_default();
-                let body = if request_line.starts_with("POST /fapi/v1/leverage") {
-                    r#"{"symbol":"BTCUSDT","leverage":2,"maxNotionalValue":"50000"}"#.to_string()
+                let (status, body, drop_response) = if request_line
+                    .starts_with("POST /fapi/v1/leverage")
+                {
+                    (
+                        200,
+                        r#"{"symbol":"BTCUSDT","leverage":2,"maxNotionalValue":"50000"}"#
+                            .to_string(),
+                        false,
+                    )
                 } else if request_line.starts_with("POST /fapi/v1/order") {
-                    r#"{"orderId":1,"clientOrderId":"test-order","status":"NEW","origQty":"10","executedQty":"0","cummulativeQuoteQty":"0","transactTime":1}"#.to_string()
+                    let order = MockFuturesOrder {
+                        symbol: request_parameter(&request_line, "symbol")
+                            .unwrap_or_else(|| "BTCUSDT".to_string()),
+                        side: request_parameter(&request_line, "side")
+                            .unwrap_or_else(|| "BUY".to_string()),
+                        quantity: request_parameter(&request_line, "quantity")
+                            .unwrap_or_else(|| "0".to_string()),
+                        price: request_parameter(&request_line, "price")
+                            .unwrap_or_else(|| "0".to_string()),
+                        client_order_id: request_parameter(&request_line, "newClientOrderId")
+                            .unwrap_or_default(),
+                    };
+                    captured_orders
+                        .lock()
+                        .unwrap()
+                        .insert(order.client_order_id.clone(), order.clone());
+                    if let Some(gate) = order_behavior.post_gate.as_ref() {
+                        let (released, condition) = &**gate;
+                        let mut released = released.lock().unwrap();
+                        while !*released {
+                            released = condition.wait(released).unwrap();
+                        }
+                    }
+                    match order_behavior.post {
+                        MockFuturesPostBehavior::Accepted => {
+                            (200, mock_futures_order_response(&order), false)
+                        }
+                        MockFuturesPostBehavior::DropResponse => (200, String::new(), true),
+                        MockFuturesPostBehavior::MalformedResponse => {
+                            (200, "{}".to_string(), false)
+                        }
+                        MockFuturesPostBehavior::Rejected => (
+                            400,
+                            r#"{"code":-2010,"msg":"Order rejected"}"#.to_string(),
+                            false,
+                        ),
+                    }
+                } else if request_line.starts_with("GET /fapi/v1/order") {
+                    match order_behavior.query {
+                        MockFuturesQueryBehavior::Found => {
+                            let client_order_id =
+                                request_parameter(&request_line, "origClientOrderId")
+                                    .unwrap_or_default();
+                            let order = captured_orders
+                                .lock()
+                                .unwrap()
+                                .get(&client_order_id)
+                                .cloned();
+                            match order {
+                                Some(order) => (200, mock_futures_order_response(&order), false),
+                                None => (
+                                    400,
+                                    r#"{"code":-2013,"msg":"Order does not exist"}"#.to_string(),
+                                    false,
+                                ),
+                            }
+                        }
+                        MockFuturesQueryBehavior::NotFound => (
+                            400,
+                            r#"{"code":-2013,"msg":"Order does not exist"}"#.to_string(),
+                            false,
+                        ),
+                        MockFuturesQueryBehavior::Malformed => (200, "{}".to_string(), false),
+                        MockFuturesQueryBehavior::FoundAfter(required_attempts) => {
+                            let mut count = captured_query_count.lock().unwrap();
+                            *count += 1;
+                            if *count < required_attempts {
+                                (
+                                    400,
+                                    r#"{"code":-2013,"msg":"Order does not exist"}"#.to_string(),
+                                    false,
+                                )
+                            } else {
+                                let client_order_id =
+                                    request_parameter(&request_line, "origClientOrderId")
+                                        .unwrap_or_default();
+                                match captured_orders
+                                    .lock()
+                                    .unwrap()
+                                    .get(&client_order_id)
+                                    .cloned()
+                                {
+                                    Some(order) => {
+                                        (200, mock_futures_order_response(&order), false)
+                                    }
+                                    None => (
+                                        400,
+                                        r#"{"code":-2013,"msg":"Order does not exist"}"#
+                                            .to_string(),
+                                        false,
+                                    ),
+                                }
+                            }
+                        }
+                    }
                 } else {
-                    responses.get(path).cloned().unwrap_or_else(|| {
-                        r#"{"code":-1121,"msg":"Invalid mock request"}"#.to_string()
-                    })
+                    (
+                        200,
+                        responses.get(path).cloned().unwrap_or_else(|| {
+                            r#"{"code":-1121,"msg":"Invalid mock request"}"#.to_string()
+                        }),
+                        false,
+                    )
+                };
+                if drop_response {
+                    drop(stream);
+                    continue;
+                }
+                let status_text = match status {
+                    200 => "OK",
+                    400 => "BAD REQUEST",
+                    _ => "MOCK STATUS",
                 };
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body
                 );
@@ -2202,6 +2848,386 @@ mod tests {
         assert!(requests
             .iter()
             .any(|request| request.starts_with("POST /fapi/v1/order?")));
+    }
+
+    fn futures_submission_test_gateway(base_url: String) -> BinanceGateway {
+        let mut gateway = BinanceGateway::new(BinanceGatewayConfig {
+            spot: false,
+            ..Default::default()
+        })
+        .unwrap();
+        gateway.base_url = base_url;
+        gateway
+    }
+
+    fn futures_submission_test_intent() -> OrderIntent {
+        OrderIntent::new(1, Side::Buy, dec!(100), dec!(90), dec!(110), 5).unwrap()
+    }
+
+    async fn submit_futures_test_order(
+        gateway: &BinanceGateway,
+    ) -> Result<OrderExecutionReport, GatewayError> {
+        gateway
+            .place_order(
+                "BTCUSDT",
+                &futures_submission_test_intent(),
+                dec!(10_000),
+                dec!(10_000),
+                Decimal::ZERO,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn futures_submission_recovers_lost_response_by_client_order_id() {
+        let behavior = MockFuturesOrderBehavior {
+            post: MockFuturesPostBehavior::DropResponse,
+            query: MockFuturesQueryBehavior::Found,
+            ..Default::default()
+        };
+        let (base_url, requests, server) = spawn_futures_mock_server_with_order_behavior(
+            valid_futures_responses(current_unix_time_ms().unwrap()),
+            behavior,
+        );
+        let gateway = futures_submission_test_gateway(base_url);
+
+        let report = submit_futures_test_order(&gateway).await.unwrap();
+
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        let post = requests
+            .iter()
+            .find(|request| request.starts_with("POST /fapi/v1/order?"))
+            .expect("order should be submitted once");
+        let query = requests
+            .iter()
+            .find(|request| request.starts_with("GET /fapi/v1/order?"))
+            .expect("lost response should trigger an order lookup");
+        let submitted_id = request_parameter(post, "newClientOrderId")
+            .expect("submission should have a client order ID");
+        assert!(!submitted_id.is_empty());
+        assert!(submitted_id.len() <= 36);
+        assert!(submitted_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_:/.-".contains(&byte)));
+        assert_eq!(
+            request_parameter(query, "origClientOrderId"),
+            Some(submitted_id.clone())
+        );
+        assert_eq!(report.client_order_id, submitted_id);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.starts_with("POST /fapi/v1/order?"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn futures_submission_remains_blocked_when_order_lookup_stays_missing() {
+        let behavior = MockFuturesOrderBehavior {
+            post: MockFuturesPostBehavior::DropResponse,
+            query: MockFuturesQueryBehavior::NotFound,
+            ..Default::default()
+        };
+        let (base_url, requests, server) = spawn_futures_mock_server_with_order_behavior(
+            valid_futures_responses(current_unix_time_ms().unwrap()),
+            behavior,
+        );
+        let gateway = futures_submission_test_gateway(base_url);
+
+        let first = submit_futures_test_order(&gateway).await;
+        let client_order_id = match first {
+            Err(GatewayError::FuturesSubmissionUncertain {
+                symbol,
+                client_order_id,
+            }) => {
+                assert_eq!(symbol, "BTCUSDT");
+                client_order_id
+            }
+            other => panic!("expected an uncertain submission, got {other:?}"),
+        };
+        let retry = submit_futures_test_order(&gateway).await;
+
+        assert!(matches!(
+            retry,
+            Err(GatewayError::FuturesSubmissionUncertain {
+                symbol,
+                client_order_id: retry_id,
+            }) if symbol == "BTCUSDT" && retry_id == client_order_id
+        ));
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.starts_with("POST /fapi/v1/order?"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.starts_with("GET /fapi/v1/order?"))
+                .count(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn futures_submission_remains_blocked_when_order_lookup_is_malformed() {
+        let behavior = MockFuturesOrderBehavior {
+            post: MockFuturesPostBehavior::DropResponse,
+            query: MockFuturesQueryBehavior::Malformed,
+            ..Default::default()
+        };
+        let (base_url, requests, server) = spawn_futures_mock_server_with_order_behavior(
+            valid_futures_responses(current_unix_time_ms().unwrap()),
+            behavior,
+        );
+        let gateway = futures_submission_test_gateway(base_url);
+
+        assert!(matches!(
+            submit_futures_test_order(&gateway).await,
+            Err(GatewayError::FuturesSubmissionUncertain { .. })
+        ));
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.starts_with("GET /fapi/v1/order?"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.starts_with("POST /fapi/v1/order?"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn futures_submission_can_be_reconciled_later_without_resubmitting_it() {
+        let behavior = MockFuturesOrderBehavior {
+            post: MockFuturesPostBehavior::DropResponse,
+            query: MockFuturesQueryBehavior::FoundAfter(4),
+            ..Default::default()
+        };
+        let (base_url, requests, server) = spawn_futures_mock_server_with_order_behavior(
+            valid_futures_responses(current_unix_time_ms().unwrap()),
+            behavior,
+        );
+        let gateway = futures_submission_test_gateway(base_url);
+
+        let uncertain_id = match submit_futures_test_order(&gateway).await {
+            Err(GatewayError::FuturesSubmissionUncertain {
+                client_order_id, ..
+            }) => client_order_id,
+            other => panic!("expected uncertainty after three missing lookups, got {other:?}"),
+        };
+        let reconciled = gateway
+            .reconcile_uncertain_futures_submission()
+            .await
+            .unwrap();
+        assert_eq!(reconciled.client_order_id, uncertain_id);
+
+        let next_order = submit_futures_test_order(&gateway).await.unwrap();
+        assert_ne!(next_order.client_order_id, uncertain_id);
+        server.join().unwrap();
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.starts_with("POST /fapi/v1/order?"))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn futures_submission_recovers_malformed_success_response_from_order_lookup() {
+        let behavior = MockFuturesOrderBehavior {
+            post: MockFuturesPostBehavior::MalformedResponse,
+            query: MockFuturesQueryBehavior::Found,
+            ..Default::default()
+        };
+        let (base_url, requests, server) = spawn_futures_mock_server_with_order_behavior(
+            valid_futures_responses(current_unix_time_ms().unwrap()),
+            behavior,
+        );
+        let gateway = futures_submission_test_gateway(base_url);
+
+        let report = submit_futures_test_order(&gateway).await.unwrap();
+
+        assert_eq!(report.order_id, 1);
+        server.join().unwrap();
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.starts_with("GET /fapi/v1/order?")));
+    }
+
+    #[tokio::test]
+    async fn futures_submission_releases_reservation_after_definitive_rejection() {
+        let behavior = MockFuturesOrderBehavior {
+            post: MockFuturesPostBehavior::Rejected,
+            ..Default::default()
+        };
+        let (base_url, requests, server) = spawn_futures_mock_server_with_order_behavior(
+            valid_futures_responses(current_unix_time_ms().unwrap()),
+            behavior,
+        );
+        let gateway = futures_submission_test_gateway(base_url);
+
+        for _ in 0..2 {
+            assert!(matches!(
+                submit_futures_test_order(&gateway).await,
+                Err(GatewayError::BinanceApi { code: -2010, .. })
+            ));
+        }
+
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.starts_with("POST /fapi/v1/order?"))
+                .count(),
+            2
+        );
+        assert!(!requests
+            .iter()
+            .any(|r| r.starts_with("GET /fapi/v1/order?")));
+    }
+
+    #[tokio::test]
+    async fn futures_submission_cancellation_after_dispatch_keeps_reservation_uncertain() {
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let behavior = MockFuturesOrderBehavior {
+            post: MockFuturesPostBehavior::Accepted,
+            query: MockFuturesQueryBehavior::Found,
+            post_gate: Some(Arc::clone(&gate)),
+        };
+        let (base_url, requests, server) = spawn_futures_mock_server_with_order_behavior(
+            valid_futures_responses(current_unix_time_ms().unwrap()),
+            behavior,
+        );
+        let gateway = Arc::new(futures_submission_test_gateway(base_url));
+        let first_gateway = Arc::clone(&gateway);
+        let first = tokio::spawn(async move { submit_futures_test_order(&first_gateway).await });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.starts_with("POST /fapi/v1/order?"))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("submission should reach its gated dispatch");
+
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            submit_futures_test_order(&gateway).await,
+            Err(GatewayError::FuturesSubmissionUncertain { .. })
+        ));
+
+        let (released, condition) = &*gate;
+        *released.lock().unwrap() = true;
+        condition.notify_all();
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /fapi/v1/order?"))
+                .count(),
+            1
+        );
+        assert!(!requests
+            .iter()
+            .any(|request| request.starts_with("GET /fapi/v1/order?")));
+    }
+
+    #[tokio::test]
+    async fn futures_submission_blocks_overlapping_orders_before_dispatch() {
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let behavior = MockFuturesOrderBehavior {
+            post: MockFuturesPostBehavior::Accepted,
+            query: MockFuturesQueryBehavior::Found,
+            post_gate: Some(Arc::clone(&gate)),
+        };
+        let (base_url, requests, server) = spawn_futures_mock_server_with_order_behavior(
+            valid_futures_responses(current_unix_time_ms().unwrap()),
+            behavior,
+        );
+        let gateway = Arc::new(futures_submission_test_gateway(base_url));
+        let first_gateway = Arc::clone(&gateway);
+        let first = tokio::spawn(async move { submit_futures_test_order(&first_gateway).await });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.starts_with("POST /fapi/v1/order?"))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("first submission should reach its gated dispatch");
+
+        let second_gateway = Arc::clone(&gateway);
+        let mut second =
+            tokio::spawn(async move { submit_futures_test_order(&second_gateway).await });
+        let second_result_while_gated =
+            tokio::time::timeout(Duration::from_millis(250), &mut second)
+                .await
+                .ok();
+        let second_completed_while_gated = second_result_while_gated.is_some();
+
+        let (released, condition) = &*gate;
+        *released.lock().unwrap() = true;
+        condition.notify_all();
+        let first_result = first.await.unwrap();
+        let second_result = match second_result_while_gated {
+            Some(result) => result.unwrap(),
+            None => second.await.unwrap(),
+        };
+
+        assert!(first_result.is_ok());
+        assert!(second_completed_while_gated);
+        assert!(matches!(
+            second_result,
+            Err(GatewayError::FuturesSubmissionInProgress { .. })
+        ));
+        server.join().unwrap();
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.starts_with("POST /fapi/v1/order?"))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
