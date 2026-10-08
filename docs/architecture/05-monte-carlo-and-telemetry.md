@@ -113,7 +113,7 @@ Equity ($)
 
 ## 5. Structured Telemetry Schemas
 
-All simulation, HPO, and backtest results are serialized to `storage/reports/` as machine-readable JSON artifacts, ready to be ingested by the `crates/web` REST/WebSocket API.
+All simulation, HPO, and backtest results are serialized to `storage/reports/` as machine-readable JSON artifacts, and can be streamed directly to Google Cloud BigQuery and Google Cloud Storage (GCS Parquet) via `crates/adapters::gcp` for visualization in Looker Studio.
 
 ### 5.1 Monte Carlo Report (`storage/reports/monte_carlo_<id>.json`)
 ```json
@@ -171,5 +171,4 @@ Contains:
 To respect our architectural principles:
 - **`crates/domain`**: Implements pure mathematical functions (`bootstrap_resample`, `compute_drawdown_distribution`, `calculate_ruin_probability`). Zero I/O, zero network, 100% deterministic via seeded RNG.
 - **`crates/backtest`**: Coordinates execution of the strategy over the event stream, invokes domain Monte Carlo routines, and compiles the `BacktestReport`.
-- **`crates/adapters`**: Implements file system storage (`FileSystemReportStore`) or future database adapters (`SqliteReportStore`) to persist reports.
-- **`crates/web`**: Exposes read endpoints (`GET /api/v1/reports/backtests`, `GET /api/v1/reports/monte-carlo/:id`) and streams updates via WebSockets.
+- **`crates/adapters`**: Implements file system storage (`FileSystemReportStore`) as well as Cloud-First export sinks (`BigQuerySink`, `GcsParquetSink`) in `crates/adapters::gcp` to stream metrics, trades, and compressed Parquet simulation trajectories directly to BigQuery and GCS for BI visualization in Looker Studio, and `TelegramNotifier` for real-time mobile push alerting.

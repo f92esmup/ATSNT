@@ -8,7 +8,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 ## Roadmap Milestones
 
 ### Milestone 1: Core Domain, CUSUM Strategy & 1:1 Backtest Engine
-- [x] Cargo Workspace multi-crate setup (`domain`, `strategies`, `adapters`, `backtest`, `web`).
+- [x] Cargo Workspace multi-crate setup (`domain`, `strategies`, `adapters`, `backtest`; `web` decommissioned in Milestone 5).
 - [x] Zero floating-point rule enforced with `rust_decimal::Decimal`.
 - [x] Domain models (`Trade`, `DollarBar`, `DollarBarAggregator` with continuous rollover).
 - [x] Mathematical indicators: `RollingZScore` and symmetric `CusumFilter`.

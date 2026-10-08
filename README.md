@@ -21,9 +21,8 @@ ATSNT/
 ├── crates/
 │   ├── domain/       # Pure business logic (DollarBar, Aggregator, CusumFilter, Z-Score, Order FSM, Position)
 │   ├── strategies/   # Strategy traits & implementations (DollarBarsCusumStrategy with Triple Barrier exits)
-│   ├── adapters/     # Ports & infrastructure adapters (Binance CSV, Parquet columnar, Binance ETL fetcher, Binance WebSocket Stream)
-│   ├── backtest/     # 1:1 Event Simulator, Walk-Forward Splitter, Rayon HPO Engine, Monte Carlo, Real-Time Paper Trading
-│   └── web/          # REST & WebSocket telemetry server (Axum)
+│   ├── adapters/     # Ports & infrastructure adapters (Binance CSV, Parquet columnar, Binance ETL fetcher, Binance WebSocket Stream, GCP BigQuery/GCS/Telegram)
+│   └── backtest/     # 1:1 Event Simulator, Walk-Forward Splitter, Rayon HPO Engine, Monte Carlo, Real-Time Paper Trading
 ├── data/             # Historical market data (CSV samples & compressed Parquet archives)
 ├── configs/          # Serialized strategy parameters and winning HPO artifacts
 ├── storage/reports/  # Machine-readable JSON telemetry reports (Backtests, HPO sweeps, Monte Carlo fan charts)
@@ -52,16 +51,15 @@ cargo fmt --check
 
 ### CLI Tools & Binaries Index
 
-The repository provides 7 specialized CLI binaries built with `clap` (run any with `--help` for full parameter documentation):
+The repository provides 6 specialized CLI binaries built with `clap` (run any with `--help` for full parameter documentation):
 
 | Binary / Tool | Crate | Purpose | Quick Command | Detailed Guide |
 | :--- | :--- | :--- | :--- | :--- |
 | `fetch_data` | `adapters` | Official Binance ETL: downloads historical `aggTrades` & converts to Parquet | `cargo run -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2024 --month 1` | [Step 1](#step-1-download--convert-real-market-data-binance-etl) |
-| `backtest` | `backtest` | Deterministic 1:1 event simulator and Monte Carlo stress testing | `cargo run -p backtest -- --data data/sample_trades.csv --dollar-bar 50000` | [Step 2](#step-2-run-deterministic-11-backtest) & [Step 3](#step-3-run-monte-carlo-stress-simulation) |
-| `run_hpo` | `backtest` | Multi-core CPU parallel hyperparameter optimization (Rayon + WFO) | `cargo run -p backtest --bin run_hpo -- --data <PATH> --folds 3` | [Step 4](#step-4-run-parallel-walk-forward-hyperparameter-optimization-hpo) |
+| `backtest` | `backtest` | Deterministic 1:1 event simulator and Monte Carlo stress testing (BigQuery & GCS Parquet export) | `cargo run -p backtest -- --data data/sample_trades.csv --dollar-bar 50000 --gcp-bigquery` | [Step 2](#step-2-run-deterministic-11-backtest) & [Step 3](#step-3-run-monte-carlo-stress-simulation) |
+| `run_hpo` | `backtest` | Multi-core CPU parallel hyperparameter optimization (Rayon + WFO, BigQuery export) | `cargo run -p backtest --bin run_hpo -- --data <PATH> --folds 3 --gcp-bigquery` | [Step 4](#step-4-run-parallel-walk-forward-hyperparameter-optimization-hpo) |
 | `stream_trades`| `adapters` | Live Binance WebSocket feed accumulating and printing Dollar Bars | `cargo run -p adapters --bin stream_trades -- --symbol btcusdt --threshold 50000` | [Step 5](#step-5-live-market-data-ingestion--dollar-bar-streaming) |
-| `paper_trading`| `backtest` | Real-time simulated execution with continuous mark-to-market PnL | `cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot` | [Step 6](#step-6-run-real-time-paper-trading-engine) |
-| `web` | `web` | Axum REST/WebSocket server and TradingView financial dashboard SPA | `cargo run -p web -- --mock` | [Step 7](#step-7-run-real-time-web-telemetry-dashboard) |
+| `paper_trading`| `backtest` | Real-time simulated execution with continuous mark-to-market PnL, BigQuery & Telegram alerts | `cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --gcp-bigquery --telegram-alerts` | [Step 6](#step-6-run-real-time-paper-trading-engine) |
 | `live_gateway` | `adapters` | Authenticated live order gateway with HMAC signing and circuit breakers | `cargo run -p adapters --bin live_gateway -- --testnet --check-balance` | [Step 8](#step-8-live-execution-gateway-binance-testnet--production) |
 
 
@@ -108,7 +106,7 @@ cargo run -p backtest -- --data data/historical/BTCUSDT/BTCUSDT-aggTrades-2024-0
 - Performs **Circular Block Bootstrap (CBB)** resampling over realized trades.
 - Computes drawdown percentiles ($p_1, p_5, p_{25}, p_{50}, p_{75}, p_{95}, p_{99}$, worst case).
 - Calculates Probability of Ruin ($P_{\text{ruin}}$) for critical account drawdowns (e.g. 30%).
-- Exports a 50-curve **Fan Chart** to `storage/reports/` for instant web dashboard rendering.
+- Exports a 50-curve **Fan Chart** to `storage/reports/` and supports exporting 10,000+ compressed trajectory paths to GCS Parquet (`--gcs-parquet`).
 
 ---
 
@@ -162,26 +160,39 @@ cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --config co
 - Matches simulated orders with realistic maker/taker fees and slippage.
 - Computes real-time *mark-to-market* unrealized PnL and drawdown tracking.
 - Implements Triple Barrier exits (Stop Loss, Take Profit, Time Barrier).
-- Broadcasts real-time trading events via `tokio::sync::broadcast` (Milestone 5 web-ready).
+- Streams real-time trading events, closed trades, and periodic equity snapshots to BigQuery (`--gcp-bigquery`) and sends instant push alerts to Telegram (`--telegram-alerts`).
 - Graceful shutdown on `Ctrl+C`: liquidates open position at current mark price, compiles full quantitative performance attribution (Sharpe/Sortino, Win Rate, Profit Factor), and persists audit JSON to `storage/reports/paper_trading_<timestamp>.json`.
 
 ---
 
-### Step 7: Run Real-Time Web Telemetry Dashboard
-Launch the standalone web telemetry server and browser dashboard:
+### Step 7: Cloud-First BI Telemetry & Mobile Alerting
+
+ATSNT runs headless and air-gapped without exposing inbound HTTP/WebSocket ports. Telemetry and metrics are streamed directly to Google Cloud BigQuery for Looker Studio visualization, and critical trade events are dispatched to Telegram:
 
 ```bash
-# Run server in live mock/demo mode on localhost:3000
-cargo run -p web -- --mock
+# 1. Run paper trading with BigQuery streaming and Telegram alerts
+cargo run -p backtest --bin paper_trading -- \
+  --symbol btcusdt \
+  --capital 10000 \
+  --gcp-bigquery \
+  --telegram-alerts
 
-# Run server binding to a custom port
-cargo run -p web -- --port 8080
+# 2. Run HPO and stream parameter evaluations to BigQuery
+cargo run -p backtest --bin run_hpo -- \
+  --data data/historical/BTCUSDT/BTCUSDT-aggTrades-2024-01-01.parquet \
+  --candidates 60 \
+  --gcp-bigquery
+
+# 3. Run backtest with Monte Carlo and export Parquet trajectories to GCS
+cargo run -p backtest -- \
+  --monte-carlo \
+  --mc-iterations 10000 \
+  --gcp-bigquery \
+  --gcs-parquet
 ```
-- Serves the Single Page Application (SPA) dashboard at `http://127.0.0.1:3000`.
-- Streams real-time Dollar Bars, order executions, and mark-to-market PnL over `/ws/telemetry`.
-- Renders high-performance financial candlestick charts with TradingView Lightweight Charts at 60 FPS.
-- Allows browsing historical backtests and Monte Carlo fan chart distributions from `storage/reports/`.
-- Air-gapped read-only architecture ready for Cloudflare Zero Trust deployment.
+- **Looker Studio**: Connects natively to BigQuery dataset `atsnt_bi` (`trades`, `equity_snapshots`, `hpo_evaluations`, `monte_carlo_runs`) for zero-code, read-only BI dashboards.
+- **Telegram Bot Webhook**: Dispatches instant push notifications (<200ms) for position entries, exits, stop loss triggers, and circuit breakers.
+- **Fail-Open / Offline Safe**: If GCP/Telegram environment variables (`GCP_PROJECT_ID`, `TELEGRAM_BOT_TOKEN`, etc.) are omitted, sinks safely log information and continue without interruption.
 
 ---
 
@@ -252,7 +263,7 @@ cargo run -p adapters --bin live_gateway -- \
 - [`docs/architecture/04-hpo-and-walk-forward.md`](docs/architecture/04-hpo-and-walk-forward.md): Walk-Forward Optimization, parameter stability scoring, DSR, and Rayon parallelism.
 - [`docs/architecture/05-monte-carlo-and-telemetry.md`](docs/architecture/05-monte-carlo-and-telemetry.md): Discrete Event Monte Carlo Stress-Testing, trade sequence bootstrap, and web telemetry schemas.
 - [`docs/architecture/06-paper-trading-and-realtime-execution.md`](docs/architecture/06-paper-trading-and-realtime-execution.md): Real-time Paper Trading architecture, event broadcasting, and mark-to-market telemetry.
-- [`docs/architecture/07-web-telemetry-dashboard.md`](docs/architecture/07-web-telemetry-dashboard.md): Web presentation layer, Axum REST & WebSocket streaming, and Lightweight Charts dashboard.
+- [`docs/architecture/07-web-telemetry-dashboard.md`](docs/architecture/07-web-telemetry-dashboard.md): Cloud-First BI telemetry, BigQuery schemas, GCS Parquet export, and Telegram mobile alerting (supersedes web presentation).
 - [`docs/architecture/08-live-execution-gateway.md`](docs/architecture/08-live-execution-gateway.md): Live Execution Gateway, HMAC-SHA256 authentication, Pre-Trade Risk Manager, and User Data Stream reconciliation.
 
 ---

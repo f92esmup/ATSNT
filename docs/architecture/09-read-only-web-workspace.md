@@ -1,4 +1,10 @@
-# Read-Only Web Workspace: Product Contract & Phased Plan
+# Read-Only Web Workspace: Product Contract & Phased Plan (DECOMMISSIONED)
+
+> [!IMPORTANT]
+> **Status: Decommissioned & Archived**
+> As part of **Milestone 5 ("Web Decommission & Decoupled Cloud-First Analytics")**, the in-process web application (`crates/web`, W0–W6) has been **completely retired** from the repository.
+> The engine now runs strictly headless and air-gapped without open ports. All read-only visualization, post-trade reporting, and performance tracking have been transitioned to **Google Cloud BigQuery (`atsnt_bi`) + Looker Studio**, with real-time alerting handled via **Telegram Bot Webhooks**.
+> This document is retained solely for historical reference regarding early UI designs.
 
 ## 1. Status, Authority & Review Path
 

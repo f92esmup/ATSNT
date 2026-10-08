@@ -1,6 +1,10 @@
 # W3 — Trading Operations Center
 
-Branch: `main` | Status: Complete (`[x]`)
+> [!NOTE]
+> **Status: Decommissioned & Archived (Milestone 5)**
+> As part of **Milestone 5 ("Web Decommission & Decoupled Cloud-First Analytics")**, the in-process web application (`crates/web`, W0–W6) was retired. Real-time observational views are now delivered via **Google Cloud BigQuery (`atsnt_bi`) + Looker Studio**, with immediate alerts dispatched to **Telegram Bot**. This task specification is retained solely for historical audit.
+
+Branch: `main` | Status: Archived
 Document Version: 1.0.0
 Authoritative Architecture: [`docs/architecture/09-read-only-web-workspace.md`](../../docs/architecture/09-read-only-web-workspace.md)
 Prerequisite Gates: [`odd/tasks/w0-decision-gates.md`](w0-decision-gates.md) | Shell: [`odd/tasks/w1-shared-shell.md`](w1-shared-shell.md) | Contracts: [`odd/tasks/w2-read-only-contracts.md`](w2-read-only-contracts.md)

@@ -25,17 +25,16 @@ Complete only M5/M6 task T3: add an explicit `--paper` runtime that owns an in-p
 - Command-running verification follows the native risk/verification plan; no parallel writers.
 - T3.1 committed 260 authored lines. Forecast T3.2 from the worker's scoped implementation plan before its commit; if accumulated branch lines or the next-slice forecast crosses ~400 lines, apply the default `ask-on-risk` delivery strategy before committing. Keep behavior/tests/docs together; no push/PR is authorized.
 
-## Allowed edit surfaces
-- `crates/web/src/main.rs`
-- `crates/web/src/lib.rs`
-- `crates/web/src/paper.rs`
-- `crates/web/tests/api_tests.rs`
+## Allowed edit surfaces (Historical)
+- `crates/web/src/main.rs` (Historical - migrated to `crates/backtest/src/bin/paper_trading.rs`)
+- `crates/web/src/lib.rs` (Historical)
+- `crates/web/src/paper.rs` (Historical - migrated to `crates/backtest/src/paper.rs`)
+- `crates/web/tests/api_tests.rs` (Historical)
 - `docs/architecture/07-web-telemetry-dashboard.md`
-- `odd/tasks/milestone-5-6-closure.md` (only to record T3 completion after all acceptance checks pass)
+- `odd/tasks/milestone-5-6-closure.md`
 - `odd/tasks/t3-paper-session.md`
-- `crates/web/Cargo.toml` only if an already-available workspace dependency cannot support the required channel/session boundary
 
-Do not edit other paths without first reconciling the task scope.
+*(Note: Under Milestone 5 Web Decommission, PaperSessionRuntime and its tests were relocated directly into `crates/backtest`)*
 
 ## Verification and acceptance
 - For each behavioral work unit, add/observe a meaningful deterministic RED test before implementation, then GREEN and focused regression checks.

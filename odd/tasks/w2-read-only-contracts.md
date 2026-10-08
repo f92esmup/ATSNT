@@ -1,6 +1,10 @@
 # W2 — Stabilize Read-Only Data and Report Contracts
 
-Branch: `main` | Status: Complete (`[x]`)
+> [!NOTE]
+> **Status: Decommissioned & Archived (Milestone 5)**
+> As part of **Milestone 5 ("Web Decommission & Decoupled Cloud-First Analytics")**, the in-process web application (`crates/web`, W0–W6) was retired. Read-only data contracts are now fulfilled via **Google Cloud BigQuery (`atsnt_bi`) + Looker Studio**, and real-time alerts via **Telegram Bot**. This task specification is retained solely for historical audit.
+
+Branch: `main` | Status: Archived
 Document Version: 1.0.0
 Authoritative Architecture: [`docs/architecture/09-read-only-web-workspace.md`](../../docs/architecture/09-read-only-web-workspace.md)
 Prerequisite Gates: [`odd/tasks/w0-decision-gates.md`](w0-decision-gates.md) | Shell: [`odd/tasks/w1-shared-shell.md`](w1-shared-shell.md)

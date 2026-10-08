@@ -1,6 +1,10 @@
 # W0 — Technical & Design Decision Gates (Read-Only Web Workspace)
 
-Branch: `main` | Status: Complete (`[x]`)
+> [!NOTE]
+> **Status: Decommissioned & Archived (Milestone 5)**
+> As part of **Milestone 5 ("Web Decommission & Decoupled Cloud-First Analytics")**, the in-process web application (`crates/web`, W0–W6) was retired. Read-only visualization and BI reporting are now fulfilled via **Google Cloud BigQuery (`atsnt_bi`) + Looker Studio**, and real-time alerts via **Telegram Bot**. This task specification is retained solely for historical audit.
+
+Branch: `main` | Status: Archived
 Document Version: 1.0.0
 Authoritative Contract: [`docs/architecture/09-read-only-web-workspace.md`](../../docs/architecture/09-read-only-web-workspace.md)
 

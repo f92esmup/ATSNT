@@ -1,4 +1,8 @@
-# Web Workspace Contract Documentation
+# Web Workspace Contract Documentation (DECOMMISSIONED)
+
+> [!NOTE]
+> **Status: Decommissioned & Archived (Milestone 5)**
+> As part of **Milestone 5 ("Web Decommission & Decoupled Cloud-First Analytics")**, the in-process web application (`crates/web`, W0–W6) was retired. Read-only visualization and BI reporting are now fulfilled via **Google Cloud BigQuery (`atsnt_bi`) + Looker Studio**, and real-time alerts via **Telegram Bot**. This task specification is retained solely for historical audit.
 
 ## Goal
 Maintain the canonical `docs/` contract and phased plan for ATSNT's reusable, read-only trading and research workspace. Record confirmed product decisions before any later W0-W6 implementation, while avoiding overlap with active T* work.

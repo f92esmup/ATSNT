@@ -64,10 +64,20 @@ Close the authorized M5/M6 reliability and execution-gateway work, T1–T7. This
 - The full W0–W6 plan and product decisions live only in the separate workspace contract named above. Do not copy its phase list, design gates or future UI requirements into this M5/M6 tracker.
 - W2 may consume T2b/T3 outputs; it must not reimplement their telemetry reliability or Paper runtime. T4–T6 remain separate gateway tasks and do not block read-only Paper views. Live account panels require real supported sources, including T6 where applicable. T7 verifies this M5/M6 scope; later W6 coordinates any overlapping browser verification.
 
-## Current status and next step
-**Milestone 5 and Milestone 6 (T1–T7) are 100% complete, verified, and closed locally on `main`.** All tasks T1 through T7 have fulfilled their engineering constraints and offline acceptance criteria:
-- **T1–T3:** Zero-trust loopback and trusted origin enforcement, resilient telemetry envelopes with sticky uncertainty, and explicit `--paper` session lifecycle.
-- **T4–T6:** Spot funding checks, shared risk sizing (1% trade risk, 10k/50k notional caps, 5% session drawdown) with USD-M isolated margin guard, and private account event normalization for Spot (signed WebSocket API) and USD-M (bounded listenKey).
-- **T7:** Full workspace suite (162 tests), formatting, Clippy, and functional smoke verification of both `--mock` and `--paper` modes passed cleanly.
+## Current status and Milestone 5 Evolution
 
-**Next step:** The foundation is clean and sealed. Implementation moves forward to **Workstream W (Read-Only Web Workspace Redesign, W0–W6)** starting with **W0** (resolution of technical and design gates defined in [`docs/architecture/09-read-only-web-workspace.md`](../../docs/architecture/09-read-only-web-workspace.md)).
+**Milestone 5 Evolution: Web Decommission & Decoupled Cloud-First Analytics (Complete)**
+
+Following strategic architectural evaluation to eliminate inbound web attack surfaces and local frontend maintenance:
+1. **Phase 1: Web Decommission & Modular Quant Refactor**:
+   - `crates/web` completely decommissioned and removed (Axum server, static SPA, WebSockets, Lightweight Charts, and HTTP dependencies).
+   - Asynchronous paper trading runtime (`PaperSessionRuntime` & `PaperSessionOwner`) migrated natively to `crates/backtest`.
+   - Quantitative sampling and filters modularized into `crates/domain/src/analytics/` (`sampling`, `filters`, `stats`) following Marcos López de Prado (*AFML*).
+2. **Phase 2: GCP Cloud-First Data Layer & Telegram Alerting**:
+   - Implemented `AlertNotifier` trait and `TelegramNotifier` in `crates/adapters/src/gcp/telegram.rs` (<200ms mobile push alerts).
+   - Implemented `BigQuerySink` in `crates/adapters/src/gcp/bigquery.rs` streaming to `atsnt_bi.trades`, `atsnt_bi.equity_snapshots`, `atsnt_bi.hpo_evaluations`, and `atsnt_bi.monte_carlo_runs` for zero-code Looker Studio BI visualization.
+   - Implemented `GcsParquetSink` in `crates/adapters/src/gcp/gcs.rs` for massive Monte Carlo trajectory compression and Cloud Storage upload.
+   - Connected CLI flags `--gcp-bigquery`, `--gcs-parquet`, and `--telegram-alerts` into `paper_trading`, `run_hpo`, and `backtest`.
+   - Verified 100% test pass rate (69 unit/integration tests), 0 clippy warnings, and clean formatting. Pushed to `origin/main` in commit `1bf9cb6`.
+
+Workstream W (`crates/web`, W0–W6) is formally archived; read-only reporting is now handled via **Looker Studio + BigQuery** and live alerting via **Telegram Bot**.
