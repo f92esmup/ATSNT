@@ -1,250 +1,508 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ATSNT Quantitative Telemetry Terminal</title>
+    <title>ATSNT Quantitative Trading Workspace</title>
     <link rel="stylesheet" href="styles.css">
     <script src="vendor/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
-    <!-- Top Header -->
-    <header>
-        <div class="brand-section">
-            <span class="logo-badge">ATSNT</span>
-            <span class="system-title">QUANTITATIVE TRADING ENGINE</span>
-            <div id="ws-status" class="status-badge">
-                <span class="status-dot"></span>
-                <span id="ws-status-text">CONNECTING</span>
+    <div class="app-shell">
+        <!-- 1. Global Product Rail (Portal | Trading | Econoweb) -->
+        <aside id="global-rail" class="global-rail" aria-label="Navegación de Producto">
+            <div style="width: 100%;">
+                <a href="#operations" class="global-brand">
+                    <div class="brand-icon">AT</div>
+                    <span class="brand-title">ATSNT</span>
+                </a>
+
+                <div class="product-links">
+                    <button class="product-link" data-i18n-tooltip="product.portal" title="Portal Launcher">
+                        <span class="product-icon">⊞</span>
+                        <span class="product-label" data-i18n="product.portal">Portal</span>
+                        <span class="product-ext-tag" data-i18n="product.external">Ext</span>
+                    </button>
+                    <button class="product-link active" data-i18n-tooltip="product.trading" title="Trading Workspace">
+                        <span class="product-icon">📈</span>
+                        <span class="product-label" data-i18n="product.trading">Trading</span>
+                    </button>
+                    <button class="product-link" data-i18n-tooltip="product.econoweb" title="Econoweb Analytics">
+                        <span class="product-icon">🌐</span>
+                        <span class="product-label" data-i18n="product.econoweb">Econoweb</span>
+                        <span class="product-ext-tag" data-i18n="product.external">Ext</span>
+                    </button>
+                </div>
             </div>
-        </div>
 
-        <div class="controls-section">
-            <select id="asset-selector" title="Select Asset Ticker">
-                <option value="BTCUSDT">BTC/USDT</option>
-                <option value="ETHUSDT" disabled>ETH/USDT (Upcoming)</option>
-            </select>
-
-            <select id="strategy-selector" title="Select Strategy Attribution">
-                <option value="all">All Strategies</option>
-                <option value="dollar_bars_cusum" selected>CUSUM Breakout (BTC)</option>
-            </select>
-
-            <div class="nav-tabs">
-                <button class="nav-tab active" data-tab="live">● LIVE STREAM</button>
-                <button class="nav-tab" data-tab="backtest">📊 BACKTESTS</button>
-                <button class="nav-tab" data-tab="hpo">🔬 HPO & MONTE CARLO</button>
+            <div class="global-rail-footer">
+                <button id="btn-toggle-rail" class="btn-toggle-rail" aria-label="Alternar riel lateral" title="Colapsar / Expandir">
+                    <span>⇄</span>
+                </button>
             </div>
-        </div>
-    </header>
+        </aside>
 
-    <!-- Top KPI Ribbon -->
-    <div class="kpi-ribbon">
-        <div class="kpi-card">
-            <div class="kpi-title">Portfolio Equity</div>
-            <div id="kpi-equity" class="kpi-value">$10,000.00</div>
-            <div id="kpi-cash" class="kpi-sub">Cash: $10,000.00</div>
+        <!-- 2. Module Rail (Trading Navigation) -->
+        <nav id="module-rail" class="module-rail" aria-label="Módulos de Trading">
+            <div class="module-header" data-i18n="nav.title">Espacio de Trading</div>
+            <ul class="module-nav">
+                <li>
+                    <button class="module-btn" data-module="overview" id="mod-overview">
+                        <span class="module-icon">📊</span>
+                        <span data-i18n="module.overview">Resumen Global</span>
+                    </button>
+                </li>
+                <li>
+                    <button class="module-btn active" data-module="operations" id="mod-operations" aria-current="page">
+                        <span class="module-icon">⚡</span>
+                        <span data-i18n="module.operations">Operaciones</span>
+                    </button>
+                </li>
+                <li>
+                    <button class="module-btn" data-module="laboratory" id="mod-laboratory">
+                        <span class="module-icon">🔬</span>
+                        <span data-i18n="module.laboratory">Laboratorio</span>
+                    </button>
+                </li>
+                <li>
+                    <button class="module-btn" data-module="strategies" id="mod-strategies">
+                        <span class="module-icon">⚙️</span>
+                        <span data-i18n="module.strategies">Estrategias</span>
+                    </button>
+                </li>
+                <li>
+                    <button class="module-btn" data-module="data" id="mod-data">
+                        <span class="module-icon">📁</span>
+                        <span data-i18n="module.data">Datos y Mercado</span>
+                    </button>
+                </li>
+                <li>
+                    <button class="module-btn" data-module="system" id="mod-system">
+                        <span class="module-icon">🛡️</span>
+                        <span data-i18n="module.system">Sistema y Red</span>
+                    </button>
+                </li>
+            </ul>
+        </nav>
+
+        <!-- 3. Main Workspace Area -->
+        <div class="workspace-main">
+            <!-- Top Header & Context Strip -->
+            <header class="workspace-header">
+                <div class="header-left">
+                    <button id="btn-open-drawer" class="mobile-menu-btn" aria-label="Abrir menú de navegación">
+                        <span>☰</span>
+                    </button>
+
+                    <div class="breadcrumbs">
+                        <span>Trading</span>
+                        <span>/</span>
+                        <span id="breadcrumb-section" class="breadcrumb-active" data-i18n="module.operations">Operaciones</span>
+                    </div>
+
+                    <div class="header-context-strip">
+                        <select id="wallet-select" class="wallet-select" title="Contexto de Cuenta Binance">
+                            <option value="spot" data-i18n="wallet.spot">Binance Spot</option>
+                            <option value="futures" selected data-i18n="wallet.futures">USDⓈ-M Futuros (USDT)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="header-right">
+                    <!-- WebSocket Transport & Engine Status -->
+                    <div id="ws-status" class="status-badge">
+                        <span class="status-dot"></span>
+                        <span id="ws-status-text">CONNECTING</span>
+                    </div>
+
+                    <!-- Dual Clock -->
+                    <div class="dual-clock" title="Reloj Dual (UTC / Local)">
+                        <div class="clock-item">
+                            <span class="clock-label" data-i18n="clock.utc">UTC</span>
+                            <span id="clock-utc" class="clock-val">00:00:00</span>
+                        </div>
+                        <span class="clock-divider">|</span>
+                        <div class="clock-item">
+                            <span id="clock-tz" class="clock-label">LOCAL</span>
+                            <span id="clock-local" class="clock-val">00:00:00</span>
+                        </div>
+                    </div>
+
+                    <!-- Bilingual Toggle -->
+                    <button id="btn-lang-toggle" class="btn-lang-toggle" aria-label="Cambiar idioma">ES</button>
+                </div>
+            </header>
+
+            <!-- Scrollable Content Region -->
+            <main class="workspace-content">
+                <!-- VIEW 1: OVERVIEW -->
+                <section id="view-overview" class="view-section">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title" data-i18n="module.overview">Resumen Global</h2>
+                            <span class="badge badge-paper" data-i18n="status.read_only">Modo Solo Lectura</span>
+                        </div>
+                        <p style="color: var(--text-secondary); margin-bottom: var(--space-4);">
+                            Supervisión unificada del motor ATSNT. Consulte el estado de las sesiones activas, la frescura de los datos de mercado y la distribución del riesgo en las secciones correspondientes.
+                        </p>
+                        <div class="kpi-grid">
+                            <div class="metric-card">
+                                <span class="metric-label" data-i18n="metric.equity">Valor del Portafolio</span>
+                                <span class="metric-value">$10,000.00</span>
+                                <span class="metric-subtext">USDT (USDⓈ-M)</span>
+                            </div>
+                            <div class="metric-card">
+                                <span class="metric-label">Arquitectura</span>
+                                <span class="metric-value" style="font-size: 16px; color: var(--accent-blue);">Hexagonal Rust</span>
+                                <span class="metric-subtext">Zero-Float Precision</span>
+                            </div>
+                            <div class="metric-card">
+                                <span class="metric-label">Hito Activo</span>
+                                <span class="metric-value" style="font-size: 16px; color: var(--positive-green);">W1 Shell Ready</span>
+                                <span class="metric-subtext">WCAG 2.2 AA Verified</span>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- VIEW 2: OPERATIONS (Live & Paper Trading Terminal) -->
+                <section id="view-operations" class="view-section active">
+                    <!-- KPI Ribbon -->
+                    <div class="kpi-grid">
+                        <div class="metric-card">
+                            <span class="metric-label" data-i18n="metric.equity">Portfolio Equity</span>
+                            <div id="kpi-equity" class="metric-value">$10,000.00</div>
+                            <div id="kpi-cash" class="metric-subtext">Cash: $10,000.00</div>
+                        </div>
+                        <div class="metric-card">
+                            <span class="metric-label" data-i18n="metric.upnl">Unrealized PnL</span>
+                            <div id="kpi-upnl" class="metric-value neutral">$0.00</div>
+                            <div id="kpi-upnl-pct" class="metric-subtext neutral">+0.00%</div>
+                        </div>
+                        <div class="metric-card">
+                            <span class="metric-label" data-i18n="metric.position">Active Exposure</span>
+                            <div id="kpi-position" class="metric-value">FLAT</div>
+                            <div id="kpi-position-details" class="metric-subtext">0.00 BTC ($0.00)</div>
+                        </div>
+                        <div class="metric-card">
+                            <span class="metric-label" data-i18n="metric.drawdown">Max Drawdown</span>
+                            <div id="kpi-drawdown" class="metric-value neutral">0.00%</div>
+                            <div class="metric-subtext">Peak to trough</div>
+                        </div>
+                        <div class="metric-card">
+                            <span class="metric-label" data-i18n="metric.uptime">Engine Uptime</span>
+                            <div id="kpi-uptime" class="metric-value neutral">0s</div>
+                            <div id="kpi-clients" class="metric-subtext">WS Clients: 0</div>
+                        </div>
+                    </div>
+
+                    <!-- Operational Layout (Chart & Position Columns) -->
+                    <div class="live-layout">
+                        <!-- Left: Candlestick Chart -->
+                        <div class="chart-panel">
+                            <div class="panel-header">
+                                <div class="panel-title">
+                                    <span>BTCUSDT (DOLLAR BARS)</span>
+                                    <span style="color: var(--text-muted); font-size: 11px;">$50,000 Threshold</span>
+                                </div>
+                                <div class="live-ticker-price" id="live-price">---</div>
+                            </div>
+                            <div id="chart-live" class="chart-container"></div>
+                        </div>
+
+                        <!-- Right: Active Position & Strategy Telemetry -->
+                        <div class="side-column">
+                            <div class="terminal-card">
+                                <div class="card-title">
+                                    <span data-i18n="metric.position">Active Position</span>
+                                    <span id="pos-badge" class="position-badge flat">FLAT</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Entry Price</span>
+                                    <span id="pos-entry" class="detail-val">---</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Mark Price</span>
+                                    <span id="pos-mark" class="detail-val">---</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Position Size</span>
+                                    <span id="pos-qty" class="detail-val">---</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Stop Loss Barrier</span>
+                                    <span id="pos-sl" class="detail-val negative">---</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Take Profit Barrier</span>
+                                    <span id="pos-tp" class="detail-val positive">---</span>
+                                </div>
+                            </div>
+
+                            <div class="terminal-card">
+                                <div class="card-title" data-i18n="module.strategies">Strategy Engine</div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Algorithm</span>
+                                    <span class="detail-val" style="color: var(--accent-blue);">DollarBarsCusum</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Z-Score Window</span>
+                                    <span class="detail-val">20 Bars</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">CUSUM Multiplier</span>
+                                    <span class="detail-val">2.00x Vol</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Time Barrier</span>
+                                    <span class="detail-val">15 Bars</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Execution Mode</span>
+                                    <span class="detail-val" style="color: var(--accent-green);">PAPER TRADING</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Bottom: Real-Time Event & Execution Journal -->
+                    <div class="events-section">
+                        <div class="panel-header">
+                            <span class="panel-title">LIVE TELEMETRY JOURNAL & ORDER FILLS</span>
+                            <span style="font-size: 11px; color: var(--text-muted);" id="events-count">0 events</span>
+                        </div>
+                        <div class="table-wrapper">
+                            <table id="events-table">
+                                <thead>
+                                    <tr>
+                                        <th>Timestamp</th>
+                                        <th>Event Type</th>
+                                        <th>Symbol</th>
+                                        <th>Price / Value</th>
+                                        <th>Details / Payload</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="events-body">
+                                    <!-- Dynamic streaming rows -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- VIEW 3: LABORATORY (Backtest, HPO, Monte Carlo) -->
+                <section id="view-laboratory" class="view-section">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title" data-i18n="module.laboratory">Laboratorio de Investigación</h2>
+                            <span class="badge badge-demo">Storage / Reports</span>
+                        </div>
+
+                        <!-- Backtests Explorer Component -->
+                        <div class="report-bar" style="margin-bottom: var(--space-4);">
+                            <select id="backtest-select" style="min-width: 320px;">
+                                <option value="">Select an audit report from storage/reports...</option>
+                            </select>
+                            <button id="btn-load-report" class="btn-filter">Inspect Report</button>
+                        </div>
+
+                        <div class="kpi-grid">
+                            <div class="metric-card">
+                                <span class="metric-label">Net Profit</span>
+                                <div id="bt-pnl" class="metric-value neutral">---</div>
+                            </div>
+                            <div class="metric-card">
+                                <span class="metric-label">Win Rate</span>
+                                <div id="bt-winrate" class="metric-value neutral">---</div>
+                            </div>
+                            <div class="metric-card">
+                                <span class="metric-label">Sortino Ratio</span>
+                                <div id="bt-sortino" class="metric-value neutral">---</div>
+                            </div>
+                            <div class="metric-card">
+                                <span class="metric-label">Total Trades</span>
+                                <div id="bt-trades" class="metric-value neutral">---</div>
+                            </div>
+                            <div class="metric-card">
+                                <span class="metric-label">Max Drawdown</span>
+                                <div id="bt-drawdown" class="metric-value neutral">---</div>
+                            </div>
+                        </div>
+
+                        <div class="chart-panel" style="margin-bottom: var(--space-5);">
+                            <div class="panel-header">
+                                <span class="panel-title">EQUITY PERFORMANCE CURVE</span>
+                            </div>
+                            <div id="chart-backtest" class="chart-container" style="height: 380px;"></div>
+                        </div>
+
+                        <!-- HPO / Monte Carlo Component -->
+                        <div class="report-bar" style="margin-bottom: var(--space-4);">
+                            <select id="hpo-select" style="min-width: 320px;">
+                                <option value="">Select HPO or Monte Carlo Report...</option>
+                            </select>
+                            <button id="btn-load-hpo" class="btn-filter">Analyze Run</button>
+                        </div>
+
+                        <div class="kpi-grid">
+                            <div class="metric-card">
+                                <span class="metric-label">P_ruin (30% Account DD)</span>
+                                <div id="mc-ruin" class="metric-value positive">0.00%</div>
+                            </div>
+                            <div class="metric-card">
+                                <span class="metric-label">Median Drawdown (p50)</span>
+                                <div id="mc-p50" class="metric-value neutral">---</div>
+                            </div>
+                            <div class="metric-card">
+                                <span class="metric-label">95th Percentile DD (p95)</span>
+                                <div id="mc-p95" class="metric-value neutral">---</div>
+                            </div>
+                            <div class="metric-card">
+                                <span class="metric-label">Worst Case Drawdown</span>
+                                <div id="mc-worst" class="metric-value negative">---</div>
+                            </div>
+                        </div>
+
+                        <div class="chart-panel">
+                            <div class="panel-header">
+                                <span class="panel-title">MONTE CARLO TRADE RESAMPLING (50 PATHS)</span>
+                            </div>
+                            <div id="chart-montecarlo" class="chart-container" style="height: 420px;"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- VIEW 4: STRATEGIES -->
+                <section id="view-strategies" class="view-section">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title" data-i18n="module.strategies">Catálogo de Estrategias</h2>
+                            <span class="badge badge-paper">Instancia Activa: 1</span>
+                        </div>
+                        <div class="data-table-container">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Estrategia</th>
+                                        <th>Versión</th>
+                                        <th>Mercados Compatibles</th>
+                                        <th>Parámetros Clave</th>
+                                        <th>Estado</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td><strong>DollarBarsCusum</strong></td>
+                                        <td>v1.0.0</td>
+                                        <td><span class="badge badge-paper">USDⓈ-M Futures Only</span></td>
+                                        <td>Z-Score 20, Multiplier 2.0x, Barrier 15 bars</td>
+                                        <td><span class="badge badge-connected">Activo (Loopback)</span></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- VIEW 5: DATA & MARKET -->
+                <section id="view-data" class="view-section">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title" data-i18n="module.data">Datos y Mercado</h2>
+                            <span class="badge badge-demo">Volume Clock</span>
+                        </div>
+                        <p style="color: var(--text-secondary); margin-bottom: var(--space-4);">
+                            Proveniencia de flujos de ticks y barras formadas por volumen.
+                        </p>
+                        <div class="kpi-grid">
+                            <div class="metric-card">
+                                <span class="metric-label">Tipo de Barra</span>
+                                <span class="metric-value" style="font-size: 18px; color: var(--accent-blue);">Dollar Bars</span>
+                                <span class="metric-subtext">Duración Variable</span>
+                            </div>
+                            <div class="metric-card">
+                                <span class="metric-label">Umbral Notional</span>
+                                <span class="metric-value" style="font-size: 18px;">$50,000 USDT</span>
+                                <span class="metric-subtext">BTCUSDT</span>
+                            </div>
+                            <div class="metric-card">
+                                <span class="metric-label">Fuente Primaria</span>
+                                <span class="metric-value" style="font-size: 18px;">Binance aggTrade</span>
+                                <span class="metric-subtext">WebSocket / Fakes</span>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- VIEW 6: SYSTEM & HEALTH -->
+                <section id="view-system" class="view-section">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title" data-i18n="module.system">Sistema y Diagnóstico</h2>
+                            <span class="badge badge-connected">Perímetro 127.0.0.1</span>
+                        </div>
+                        <div class="data-table-container">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Componente</th>
+                                        <th>Dirección / Enlace</th>
+                                        <th>Protocolo</th>
+                                        <th>Estado</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>Servidor Telemetría</td>
+                                        <td>127.0.0.1:3000</td>
+                                        <td>HTTP/1.1 REST (Axum)</td>
+                                        <td><span class="badge badge-connected">OK (Loopback)</span></td>
+                                    </tr>
+                                    <tr>
+                                        <td>Canal WebSocket</td>
+                                        <td>/ws/telemetry</td>
+                                        <td>WebSocket (101 Protocols)</td>
+                                        <td><span class="badge badge-connected">OK</span></td>
+                                    </tr>
+                                    <tr>
+                                        <td>Sesión Paper Trading</td>
+                                        <td>En proceso</td>
+                                        <td>Canales Acotados MPSC</td>
+                                        <td><span class="badge badge-paper">Activa</span></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+            </main>
         </div>
-        <div class="kpi-card">
-            <div class="kpi-title">Unrealized PnL</div>
-            <div id="kpi-upnl" class="kpi-value neutral">$0.00</div>
-            <div id="kpi-upnl-pct" class="kpi-sub neutral">+0.00%</div>
-        </div>
-        <div class="kpi-card">
-            <div class="kpi-title">Active Exposure</div>
-            <div id="kpi-position" class="kpi-value">FLAT</div>
-            <div id="kpi-position-details" class="kpi-sub">0.00 BTC ($0.00)</div>
-        </div>
-        <div class="kpi-card">
-            <div class="kpi-title">Max Drawdown</div>
-            <div id="kpi-drawdown" class="kpi-value neutral">0.00%</div>
-            <div class="kpi-sub">Peak to trough</div>
-        </div>
-        <div class="kpi-card">
-            <div class="kpi-title">Engine Uptime</div>
-            <div id="kpi-uptime" class="kpi-value neutral">0s</div>
-            <div id="kpi-clients" class="kpi-sub">WS Clients: 0</div>
+
+        <!-- 4. Mobile Drawer Backdrop & Panel (<768px) -->
+        <div id="drawer-backdrop" class="drawer-backdrop" aria-hidden="true">
+            <div id="mobile-drawer" class="mobile-drawer" role="dialog" aria-modal="true" aria-label="Menú Móvil">
+                <div class="drawer-header">
+                    <div class="brand-icon">AT</div>
+                    <span style="font-weight: 700; font-size: 14px;">ATSNT Workspace</span>
+                    <button id="btn-close-drawer" class="btn-close-drawer" aria-label="Cerrar menú">✕</button>
+                </div>
+
+                <div class="module-header" data-i18n="nav.title">Navegación</div>
+                <ul class="module-nav">
+                    <li><button class="module-btn" data-module="overview">📊 <span data-i18n="module.overview">Resumen</span></button></li>
+                    <li><button class="module-btn active" data-module="operations">⚡ <span data-i18n="module.operations">Operaciones</span></button></li>
+                    <li><button class="module-btn" data-module="laboratory">🔬 <span data-i18n="module.laboratory">Laboratorio</span></button></li>
+                    <li><button class="module-btn" data-module="strategies">⚙️ <span data-i18n="module.strategies">Estrategias</span></button></li>
+                    <li><button class="module-btn" data-module="data">📁 <span data-i18n="module.data">Datos</span></button></li>
+                    <li><button class="module-btn" data-module="system">🛡️ <span data-i18n="module.system">Sistema</span></button></li>
+                </ul>
+            </div>
         </div>
     </div>
 
-    <!-- Main View Content Area -->
-    <div class="view-content">
-
-        <!-- TAB 1: LIVE PAPER TRADING VIEW -->
-        <div id="tab-live" class="tab-pane active">
-            <div class="live-layout">
-                <!-- Left: Candlestick Chart -->
-                <div class="chart-panel">
-                    <div class="panel-header">
-                        <div class="panel-title">
-                            <span>BTCUSDT (DOLLAR BARS)</span>
-                            <span style="color: var(--text-muted); font-size: 11px;">$50,000 Threshold</span>
-                        </div>
-                        <div class="live-ticker-price" id="live-price">---</div>
-                    </div>
-                    <div id="chart-live" class="chart-container"></div>
-                </div>
-
-                <!-- Right: Active Position & Strategy Telemetry -->
-                <div class="side-column">
-                    <div class="terminal-card">
-                        <div class="card-title">
-                            <span>Active Position</span>
-                            <span id="pos-badge" class="position-badge flat">FLAT</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Entry Price</span>
-                            <span id="pos-entry" class="detail-val">---</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Mark Price</span>
-                            <span id="pos-mark" class="detail-val">---</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Position Size</span>
-                            <span id="pos-qty" class="detail-val">---</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Stop Loss Barrier</span>
-                            <span id="pos-sl" class="detail-val negative">---</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Take Profit Barrier</span>
-                            <span id="pos-tp" class="detail-val positive">---</span>
-                        </div>
-                    </div>
-
-                    <div class="terminal-card">
-                        <div class="card-title">Strategy Engine</div>
-                        <div class="detail-row">
-                            <span class="detail-label">Algorithm</span>
-                            <span class="detail-val" style="color: var(--accent-blue);">DollarBarsCusum</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Z-Score Window</span>
-                            <span class="detail-val">20 Bars</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">CUSUM Multiplier</span>
-                            <span class="detail-val">2.00x Vol</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Time Barrier</span>
-                            <span class="detail-val">15 Bars</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Execution Mode</span>
-                            <span class="detail-val" style="color: var(--accent-green);">PAPER TRADING</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Bottom: Real-Time Event & Execution Journal -->
-            <div class="events-section">
-                <div class="panel-header">
-                    <span class="panel-title">LIVE TELEMETRY JOURNAL & ORDER FILLS</span>
-                    <span style="font-size: 11px; color: var(--text-muted);" id="events-count">0 events</span>
-                </div>
-                <div class="table-wrapper">
-                    <table id="events-table">
-                        <thead>
-                            <tr>
-                                <th>Timestamp</th>
-                                <th>Event Type</th>
-                                <th>Symbol</th>
-                                <th>Price / Value</th>
-                                <th>Details / Payload</th>
-                            </tr>
-                        </thead>
-                        <tbody id="events-body">
-                            <!-- Dynamic streaming rows -->
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-
-        <!-- TAB 2: HISTORICAL BACKTEST EXPLORER -->
-        <div id="tab-backtest" class="tab-pane">
-            <div class="report-bar">
-                <select id="backtest-select" style="min-width: 320px;">
-                    <option value="">Select an audit report from storage/reports...</option>
-                </select>
-                <button id="btn-load-report">Inspect Report</button>
-            </div>
-
-            <div class="metrics-grid">
-                <div class="kpi-card">
-                    <div class="kpi-title">Net Profit</div>
-                    <div id="bt-pnl" class="kpi-value neutral">---</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-title">Win Rate</div>
-                    <div id="bt-winrate" class="kpi-value neutral">---</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-title">Sortino Ratio</div>
-                    <div id="bt-sortino" class="kpi-value neutral">---</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-title">Total Trades</div>
-                    <div id="bt-trades" class="kpi-value neutral">---</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-title">Max Drawdown</div>
-                    <div id="bt-drawdown" class="kpi-value neutral">---</div>
-                </div>
-            </div>
-
-            <div class="chart-panel" style="margin-bottom: 16px;">
-                <div class="panel-header">
-                    <span class="panel-title">EQUITY PERFORMANCE CURVE</span>
-                </div>
-                <div id="chart-backtest" class="chart-container" style="height: 380px;"></div>
-            </div>
-        </div>
-
-        <!-- TAB 3: HPO & MONTE CARLO AUDIT -->
-        <div id="tab-hpo" class="tab-pane">
-            <div class="report-bar">
-                <select id="hpo-select" style="min-width: 320px;">
-                    <option value="">Select HPO or Monte Carlo Report...</option>
-                </select>
-                <button id="btn-load-hpo">Analyze Run</button>
-            </div>
-
-            <div class="metrics-grid">
-                <div class="kpi-card">
-                    <div class="kpi-title">Probability of Ruin (P_ruin)</div>
-                    <div id="mc-ruin" class="kpi-value positive">0.00%</div>
-                    <div class="kpi-sub">At 30% Account DD</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-title">Median Drawdown (p50)</div>
-                    <div id="mc-p50" class="kpi-value neutral">---</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-title">95th Percentile DD (p95)</div>
-                    <div id="mc-p95" class="kpi-value neutral">---</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-title">Worst Case Drawdown</div>
-                    <div id="mc-worst" class="kpi-value negative">---</div>
-                </div>
-            </div>
-
-            <div class="chart-panel">
-                <div class="panel-header">
-                    <span class="panel-title">MONTE CARLO TRADE RESAMPLING FAN CHART (50 SIMULATION PATHS)</span>
-                </div>
-                <div id="chart-montecarlo" class="chart-container" style="height: 420px;"></div>
-            </div>
-        </div>
-
-    </div>
-
-    <!-- Application Script -->
+    <!-- Scripts in dependency order -->
+    <script src="js/i18n.js"></script>
+    <script src="js/shell.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

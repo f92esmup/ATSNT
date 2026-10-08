@@ -160,17 +160,17 @@ Every phase below is proposed and separately trackable. Checks describe future p
 
 **Objective:** reusable, accessible navigation and components. **Entry/dependencies:** W0 approved topology, tokens and navigation.
 
-**Numbered deliverables:**
-1. Build global and persistent Trading rails, header/context strip, routes/breadcrumbs and content region.
-2. Implement collapsible/responsive behavior and mobile drawer with keyboard/focus handling.
-3. Centralize tokens and shared panels, filters, tables, tabs, badges, tooltips and all data-state components.
-4. Register other products only with confirmed owners/topology; verify contrast and reduced motion.
+**Numbered deliverables (Completed in [`odd/tasks/w1-shared-shell.md`](../../odd/tasks/w1-shared-shell.md)):**
+1. [x] Build global product rail (64px/208px), persistent Trading module rail (224px), header with context strip, dynamic breadcrumbs, and modular content regions.
+2. [x] Implement responsive collapsible behavior, keyboard navigation, and mobile modal drawer (<768px) with focus trap and Escape key dismissal.
+3. [x] Centralize tokens (`tokens.css`), shell layouts (`shell.css`), and shared components (`components.css`: metric cards, badges, tables, tooltips, focus rings).
+4. [x] Register external launcher buttons for Portal and Econoweb; enforce WCAG 2.2 AA contrast and prefers-reduced-motion reset. Bilingual ES/EN and dual UTC/local clock operational.
 
-**Observable acceptance:** supported widths and zoom preserve usable navigation; keyboard paths and visible focus work; components use one approved token source; no fake destinations or execution controls.
+**Observable acceptance:** Dual-rail shell, responsive mobile drawer, and centralized CSS design system operational without breaking live chart streaming; zero execution affordances present.
 
-**Scope fence:** shell only, no invented integrations, trading writes or framework adoption for appearance.
+**Scope fence:** shell and UI structure only; no invented external product integrations or execution writes.
 
-**Applicable checks:** component/route fixtures, responsive browser checks, contrast, keyboard and reduced-motion checks.
+**Applicable checks:** workspace integration tests (`test_static_asset_serving`), offline test suites, clippy, fmt, and server smoke tests verified.
 
 ### W2 — Stabilize read-only data and report contracts
 

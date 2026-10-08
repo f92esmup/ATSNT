@@ -1,20 +1,19 @@
-/* ATSNT Quantitative Trading Terminal Theme */
+/* ATSNT Quantitative Trading Terminal Theme — Modular Architecture (W1) */
+@import url('./css/tokens.css');
+@import url('./css/shell.css');
+@import url('./css/components.css');
+
 :root {
-    --bg-main: #0b0f17;
-    --bg-card: #121824;
-    --bg-card-hover: #172030;
-    --border-color: #1e293b;
-    --text-primary: #f8fafc;
-    --text-secondary: #94a3b8;
-    --text-muted: #64748b;
-    --accent-blue: #38bdf8;
-    --accent-green: #10b981;
-    --accent-green-bg: rgba(16, 185, 129, 0.12);
-    --accent-red: #f43f5e;
-    --accent-red-bg: rgba(244, 63, 94, 0.12);
-    --accent-amber: #f59e0b;
-    --font-mono: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
-    --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --bg-main: var(--bg-base);
+    --bg-card: var(--bg-surface);
+    --bg-card-hover: var(--bg-elevated);
+    --border-color: var(--border-subtle);
+    --accent-blue: var(--accent-blue);
+    --accent-green: var(--positive-green);
+    --accent-green-bg: var(--positive-green-bg);
+    --accent-red: var(--negative-red);
+    --accent-red-bg: var(--negative-red-bg);
+    --accent-amber: var(--warning-amber);
 }
 
 * {
