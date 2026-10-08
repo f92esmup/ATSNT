@@ -71,7 +71,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - W4 research history/detail may proceed independently of paper runtime after W0/W1 and report-contract agreement; W5 analysis/recorded replay depends on W4.
 - W6 integrates supporting sections and reversible UI retirement, intersecting T7 milestone closure/browser evidence.
 
-The Milestone 5/6 checkmarks above preserve historical milestone scope; they do not declare the later [T-task closure work](../odd/tasks/milestone-5-6-closure.md) complete. At base HEAD `c7ae8f4107b9214a3c7f4fc20193393b65da617c`, that tracker records T1/T2a complete and T2b/T3 pending. T4–T6 are separate execution-gateway tasks, not prerequisites for read-only paper views; live values remain unavailable/stale until sourced. Portal/Econoweb were not found in this repository, so topology and integration ownership remain W0 gates, not implemented modules.
+The Milestone 5/6 closure work (T1–T7) is now 100% complete, verified and closed on `main` (detailed evidence in the [milestone closure tracker](../odd/tasks/milestone-5-6-closure.md)). All prerequisites for telemetry reliability, explicit in-process paper trading, Spot funding guards, shared risk sizing and private account events are fulfilled. The upcoming work focuses on the [Read-Only Web Workspace (W0–W6)](architecture/09-read-only-web-workspace.md), gated by W0 decisions. Portal/Econoweb were not found in this repository, so topology and integration ownership remain W0 gates, not implemented modules.
 
 ---
 

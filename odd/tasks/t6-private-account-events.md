@@ -25,7 +25,7 @@ Acceptance: add compact fixtures derived from official Binance event schemas wit
 
 ## Tasks
 
-- [ ] **T6** — Implement S1–S5 inline; verify the focused adapter tests and workspace checks; commit the coherent work unit on the feature branch. Implementation `2f88dc1` and correction `8963773` are functionally verified; native review remains blocked and unacknowledged.
+- [x] **T6** — Implement S1–S5 inline; verify the focused adapter tests and workspace checks; commit the coherent work unit on the feature branch. Implementation `2f88dc1` and correction `8963773` are functionally verified; native review remains blocked and unacknowledged. Merged to `main` with user delivery authorization.
 
 ## Log
 
