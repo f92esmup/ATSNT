@@ -240,3 +240,162 @@
 .global-rail.expanded [data-tooltip]::after {
     display: none;
 }
+
+/* 6. Demo & Simulation Mode Warning Banner */
+.demo-banner {
+    background-color: rgba(245, 158, 11, 0.12);
+    border: 1px solid var(--warning-amber);
+    border-radius: var(--radius-panel);
+    padding: var(--space-2) var(--space-4);
+    margin-bottom: var(--space-4);
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    color: var(--warning-amber);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+}
+
+.demo-banner-icon {
+    font-size: 16px;
+    flex-shrink: 0;
+}
+
+/* 7. Risk & Session Policy Strip */
+.risk-policy-ribbon {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-panel);
+    padding: var(--space-2) var(--space-4);
+    margin-bottom: var(--space-4);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    font-size: 11px;
+    font-family: var(--font-mono);
+}
+
+.policy-items-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-4);
+}
+
+.policy-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+}
+
+.policy-item-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: var(--accent-blue);
+}
+
+/* 8. Operational Tab Navigation & Time Filters */
+.operational-nav-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    border-bottom: 1px solid var(--border-subtle);
+    padding: var(--space-2) var(--space-4);
+    background-color: var(--bg-surface);
+}
+
+.op-tab-group {
+    display: flex;
+    gap: var(--space-1);
+}
+
+.op-tab-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: var(--radius-control);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.op-tab-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-elevated);
+}
+
+.op-tab-btn.active {
+    color: var(--accent-blue);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.op-tab-count {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    background: rgba(148, 163, 184, 0.15);
+    padding: 1px 5px;
+    border-radius: 8px;
+}
+
+.time-filter-group {
+    display: inline-flex;
+    gap: 2px;
+    background: var(--bg-base);
+    padding: 2px;
+    border-radius: var(--radius-control);
+    border: 1px solid var(--border-subtle);
+}
+
+.time-filter-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    padding: 3px 8px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.time-filter-btn:hover {
+    color: var(--text-primary);
+}
+
+.time-filter-btn.active {
+    background: var(--bg-surface);
+    color: var(--accent-blue);
+    font-weight: 700;
+    border: 1px solid var(--border-subtle);
+}
+
+/* 9. Formula Info Icon Tooltip */
+.formula-info-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 11px;
+    cursor: help;
+    padding: 0 2px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+}
+
+.formula-info-btn:hover {
+    color: var(--accent-blue);
+}

@@ -70,6 +70,8 @@ async fn main() -> anyhow::Result<()> {
             cli.reports_dir,
             mock::demo_telemetry_config(),
         )
+    } else if cli.paper {
+        AppState::new(event_sender.clone(), cli.reports_dir).with_execution_mode("paper")
     } else {
         AppState::new(event_sender.clone(), cli.reports_dir)
     };

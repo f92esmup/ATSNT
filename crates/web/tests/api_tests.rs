@@ -362,6 +362,7 @@ async fn test_health_endpoint() {
     assert_eq!(json["status"], "ok");
     assert!(json["uptime_secs"].is_number());
     assert!(json["version"].is_string());
+    assert_eq!(json["execution_mode"], "idle");
 }
 
 #[tokio::test]
@@ -1110,4 +1111,78 @@ async fn test_monte_carlo_fan_chart_normalization() {
     let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
     assert!(json2.get("fan_chart_curves").is_some());
     assert!(json2.get("fan_chart_trajectories").is_some());
+}
+
+#[tokio::test]
+async fn test_telemetry_state_session_fills_and_closed_trades() {
+    use backtest::TelemetryEnvelope;
+    use domain::PositionSide;
+
+    let (tx, _) = broadcast::channel(100);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let app_state =
+        AppState::new(tx.clone(), temp_dir.path().to_path_buf()).with_execution_mode("paper");
+    let router = create_router(app_state, None);
+
+    // 1. Send PositionOpened
+    let _ = tx.send(TelemetryEnvelope {
+        timestamp: Some(1700000000000),
+        strategy_id: "dollar_bars_cusum".to_string(),
+        symbol: "BTCUSDT".to_string(),
+        event_type: "PositionOpened".to_string(),
+        payload: PaperTradingEvent::PositionOpened {
+            side: PositionSide::Long,
+            entry_price: dec!(65000.00),
+            quantity: dec!(0.25),
+            stop_loss: dec!(64000.00),
+            take_profit: dec!(67000.00),
+        },
+    });
+
+    // 2. Send PositionClosed
+    let _ = tx.send(TelemetryEnvelope {
+        timestamp: Some(1700000005000),
+        strategy_id: "dollar_bars_cusum".to_string(),
+        symbol: "BTCUSDT".to_string(),
+        event_type: "PositionClosed".to_string(),
+        payload: PaperTradingEvent::PositionClosed {
+            exit_reason: "TakeProfit".to_string(),
+            exit_price: dec!(67000.00),
+            net_pnl: dec!(500.00),
+            total_equity: dec!(10500.00),
+        },
+    });
+
+    // Small delay for the background event listener to process events
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let req = Request::builder()
+        .uri("/api/state")
+        .header(header::HOST, "localhost:3000")
+        .body(Body::empty())
+        .unwrap();
+    let res = router.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["execution_mode"], "paper");
+    assert_eq!(json["cash_balance"], "10500.00");
+    assert_eq!(json["portfolio_value"], "10500.00");
+
+    let fills = json["recent_fills"].as_array().unwrap();
+    assert_eq!(fills.len(), 2);
+    assert_eq!(fills[0]["side"], "BUY");
+    assert_eq!(fills[0]["price"], "65000.00");
+    assert_eq!(fills[0]["quantity"], "0.25");
+    assert_eq!(fills[1]["side"], "SELL");
+    assert_eq!(fills[1]["price"], "67000.00");
+
+    let closed = json["recent_closed_trades"].as_array().unwrap();
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0]["exit_reason"], "TakeProfit");
+    assert_eq!(closed[0]["entry_price"], "65000.00");
+    assert_eq!(closed[0]["exit_price"], "67000.00");
+    assert_eq!(closed[0]["net_pnl"], "500.00");
 }

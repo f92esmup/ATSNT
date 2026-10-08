@@ -43,16 +43,47 @@
             'metric.equity': 'Valor del Portafolio',
             'metric.cash': 'Saldo en Efectivo',
             'metric.upnl': 'PnL No Realizado',
+            'metric.rpnl': 'PnL Realizado (Sesión)',
             'metric.position': 'Posición Activa',
             'metric.drawdown': 'Drawdown de Sesión',
+            'metric.capital_at_risk': 'Capital en Riesgo',
+            'metric.margin': 'Margen Aislado',
+            'metric.leverage': 'Apalancamiento',
+            'metric.funding': 'Tasa Financiación (8h)',
             'metric.uptime': 'Tiempo Activo',
             'metric.clients': 'Clientes Conectados',
             'metric.last_price': 'Último Precio',
+            'metric.not_applicable': 'N/A (Spot Cash)',
+
+            // Policies & Limits
+            'policy.title': 'Políticas de Riesgo de Sesión',
+            'policy.order_cap': 'Máx Notional/Orden: 10,000 USDT',
+            'policy.pos_cap': 'Máx Notional/Posición: 50,000 USDT',
+            'policy.risk_per_trade': 'Riesgo Máx/Trade: 1.00%',
+            'policy.dd_limit': 'Límite DD Sesión: 5.00% HWM',
+            'policy.status_normal': 'LÍMITES ACTIVOS',
+            'policy.status_tripped': 'CIRCUIT BREAKER ACTIVADO',
+
+            // Tabs
+            'tab.positions': 'Posición Activa',
+            'tab.orders': 'Órdenes Vivas',
+            'tab.fills': 'Fills / Ejecuciones',
+            'tab.closed_trades': 'Operaciones Cerradas',
+            'tab.journal': 'Bitácora de Telemetría',
+
+            // Time Filters
+            'filter.all': 'Todo',
+            'filter.1h': '1h',
+            'filter.24h': '24h',
+            'filter.session': 'Sesión',
 
             // Status & Alerts
             'status.loading': 'Cargando datos...',
             'status.no_data': 'Serie no disponible',
-            'status.read_only': 'Modo Solo Lectura'
+            'status.read_only': 'Modo Solo Lectura',
+            'banner.demo_warning': 'MODO DEMO / SIMULACIÓN — Datos sintéticos generados en memoria. No representan saldos reales ni órdenes en exchange.',
+            'strategy.incompatible_spot': 'Incompatible con Spot (Requiere USDⓈ-M Futuros)',
+            'strategy.compatible_futures': 'Compatible con USDⓈ-M Futuros'
         },
         en: {
             // Products
@@ -91,16 +122,47 @@
             'metric.equity': 'Portfolio Value',
             'metric.cash': 'Cash Balance',
             'metric.upnl': 'Unrealized PnL',
+            'metric.rpnl': 'Realized PnL (Session)',
             'metric.position': 'Active Position',
             'metric.drawdown': 'Session Drawdown',
+            'metric.capital_at_risk': 'Capital at Risk',
+            'metric.margin': 'Isolated Margin',
+            'metric.leverage': 'Effective Leverage',
+            'metric.funding': 'Funding Rate (8h)',
             'metric.uptime': 'Server Uptime',
             'metric.clients': 'Connected Clients',
             'metric.last_price': 'Last Price',
+            'metric.not_applicable': 'N/A (Spot Cash)',
+
+            // Policies & Limits
+            'policy.title': 'Session Risk Policies',
+            'policy.order_cap': 'Max Notional/Order: 10,000 USDT',
+            'policy.pos_cap': 'Max Notional/Position: 50,000 USDT',
+            'policy.risk_per_trade': 'Max Risk/Trade: 1.00%',
+            'policy.dd_limit': 'Session DD Limit: 5.00% HWM',
+            'policy.status_normal': 'LIMITS ACTIVE',
+            'policy.status_tripped': 'CIRCUIT BREAKER TRIPPED',
+
+            // Tabs
+            'tab.positions': 'Active Position',
+            'tab.orders': 'Live Orders',
+            'tab.fills': 'Fills & Executions',
+            'tab.closed_trades': 'Closed Trades',
+            'tab.journal': 'Telemetry Journal',
+
+            // Time Filters
+            'filter.all': 'All',
+            'filter.1h': '1h',
+            'filter.24h': '24h',
+            'filter.session': 'Session',
 
             // Status & Alerts
             'status.loading': 'Loading data...',
             'status.no_data': 'Series not available',
-            'status.read_only': 'Read-Only Mode'
+            'status.read_only': 'Read-Only Mode',
+            'banner.demo_warning': 'DEMO / SIMULATION MODE — In-memory synthetic data. Does not represent real balances or exchange executions.',
+            'strategy.incompatible_spot': 'Incompatible with Spot (Requires USDⓈ-M Futures)',
+            'strategy.compatible_futures': 'Compatible with USDⓈ-M Futures'
         }
     };
 

@@ -27,6 +27,54 @@ pub struct PositionInfo {
     pub take_profit: Decimal,
 }
 
+/// Summary of a closed trade for session history in telemetry snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosedTradeSummary {
+    /// Unique trade identifier.
+    pub id: String,
+    /// Traded asset symbol.
+    pub symbol: String,
+    /// Direction: Long or Short.
+    pub side: String,
+    /// Execution entry price.
+    pub entry_price: Decimal,
+    /// Execution exit price.
+    pub exit_price: Decimal,
+    /// Trade quantity in base units.
+    pub quantity: Decimal,
+    /// Realized net PnL.
+    pub net_pnl: Decimal,
+    /// Reason for position exit (e.g. StopLoss, TakeProfit, TimeBarrier).
+    pub exit_reason: String,
+    /// Exit timestamp in Unix milliseconds.
+    pub timestamp: i64,
+}
+
+/// Summary of an executed order fill for session telemetry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FillSummary {
+    /// Unique fill identifier.
+    pub id: String,
+    /// Traded asset symbol.
+    pub symbol: String,
+    /// Order side: Buy or Sell.
+    pub side: String,
+    /// Execution fill price.
+    pub price: Decimal,
+    /// Filled quantity.
+    pub quantity: Decimal,
+    /// Execution fee (USDT).
+    pub fee: Decimal,
+    /// Execution type: "simulated" or "actual".
+    pub execution_type: String,
+    /// Fill timestamp in Unix milliseconds.
+    pub timestamp: i64,
+}
+
+fn default_execution_mode() -> String {
+    "idle".to_string()
+}
+
 /// Instantaneous telemetry state of the trading portfolio and engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryState {
@@ -51,6 +99,15 @@ pub struct TelemetryState {
     pub last_price: Option<Decimal>,
     /// Current peak-to-trough drawdown percentage.
     pub drawdown_pct: Decimal,
+    /// Execution mode: "mock", "paper", or "idle".
+    #[serde(default = "default_execution_mode")]
+    pub execution_mode: String,
+    /// Recent closed trades from this session (bounded at 50).
+    #[serde(default)]
+    pub recent_closed_trades: Vec<ClosedTradeSummary>,
+    /// Recent order fills from this session (bounded at 50).
+    #[serde(default)]
+    pub recent_fills: Vec<FillSummary>,
 }
 
 impl Default for TelemetryState {
@@ -66,6 +123,9 @@ impl Default for TelemetryState {
             active_strategy: String::new(),
             last_price: None,
             drawdown_pct: dec!(0.00),
+            execution_mode: "idle".to_string(),
+            recent_closed_trades: Vec::new(),
+            recent_fills: Vec::new(),
         }
     }
 }
@@ -85,6 +145,8 @@ pub struct AppState {
     pub connected_clients: Arc<AtomicUsize>,
     /// Process start time for uptime tracking.
     pub start_time: Instant,
+    /// Current execution mode ("mock", "paper", or "idle").
+    pub execution_mode: &'static str,
 }
 
 impl AppState {
@@ -95,13 +157,14 @@ impl AppState {
         event_sender: broadcast::Sender<TelemetryEnvelope<PaperTradingEvent>>,
         reports_dir: PathBuf,
     ) -> Self {
-        Self::with_telemetry(
+        Self::with_telemetry_and_mode(
             event_sender,
             reports_dir,
             TelemetryConfig {
                 symbol: String::new(),
                 strategy_id: String::new(),
             },
+            "idle",
         )
     }
 
@@ -112,9 +175,20 @@ impl AppState {
         reports_dir: PathBuf,
         telemetry: TelemetryConfig,
     ) -> Self {
+        Self::with_telemetry_and_mode(event_sender, reports_dir, telemetry, "mock")
+    }
+
+    /// Creates dashboard state with explicit telemetry producer configuration and execution mode.
+    pub fn with_telemetry_and_mode(
+        event_sender: broadcast::Sender<TelemetryEnvelope<PaperTradingEvent>>,
+        reports_dir: PathBuf,
+        telemetry: TelemetryConfig,
+        execution_mode: &'static str,
+    ) -> Self {
         let state = Arc::new(RwLock::new(TelemetryState {
             active_symbol: telemetry.symbol,
             active_strategy: telemetry.strategy_id,
+            execution_mode: execution_mode.to_string(),
             ..TelemetryState::default()
         }));
         let connected_clients = Arc::new(AtomicUsize::new(0));
@@ -139,7 +213,7 @@ impl AppState {
                 };
                 let mut st = state_updater.write().await;
                 st.timestamp = event.timestamp;
-                st.active_symbol = event.symbol;
+                st.active_symbol = event.symbol.clone();
                 st.active_strategy = event.strategy_id;
                 match event.payload {
                     PaperTradingEvent::BarFormed(bar) => {
@@ -163,6 +237,25 @@ impl AppState {
                         stop_loss,
                         take_profit,
                     } => {
+                        let now = event.timestamp.unwrap_or(0);
+                        let fill_id = format!("fill-{}", now);
+                        let side_str = match side {
+                            PositionSide::Long => "BUY",
+                            PositionSide::Short => "SELL",
+                        };
+                        st.recent_fills.push(FillSummary {
+                            id: fill_id,
+                            symbol: event.symbol.clone(),
+                            side: side_str.to_string(),
+                            price: entry_price,
+                            quantity,
+                            fee: Decimal::ZERO,
+                            execution_type: "simulated".to_string(),
+                            timestamp: now,
+                        });
+                        if st.recent_fills.len() > 50 {
+                            st.recent_fills.remove(0);
+                        }
                         st.active_position = Some(PositionInfo {
                             side,
                             entry_price,
@@ -171,7 +264,51 @@ impl AppState {
                             take_profit,
                         });
                     }
-                    PaperTradingEvent::PositionClosed { total_equity, .. } => {
+                    PaperTradingEvent::PositionClosed {
+                        exit_reason,
+                        exit_price,
+                        net_pnl,
+                        total_equity,
+                    } => {
+                        let now = event.timestamp.unwrap_or(0);
+                        let (entry_px, qty, pos_side) = if let Some(ref pos) = st.active_position {
+                            (pos.entry_price, pos.quantity, pos.side)
+                        } else {
+                            (exit_price, Decimal::ZERO, PositionSide::Long)
+                        };
+                        let exit_side_str = match pos_side {
+                            PositionSide::Long => "SELL",
+                            PositionSide::Short => "BUY",
+                        };
+                        let fill_id = format!("fill-{}", now);
+                        st.recent_fills.push(FillSummary {
+                            id: fill_id,
+                            symbol: event.symbol.clone(),
+                            side: exit_side_str.to_string(),
+                            price: exit_price,
+                            quantity: qty,
+                            fee: Decimal::ZERO,
+                            execution_type: "simulated".to_string(),
+                            timestamp: now,
+                        });
+                        if st.recent_fills.len() > 50 {
+                            st.recent_fills.remove(0);
+                        }
+                        let trade_id = format!("trade-{}", now);
+                        st.recent_closed_trades.push(ClosedTradeSummary {
+                            id: trade_id,
+                            symbol: event.symbol.clone(),
+                            side: format!("{:?}", pos_side),
+                            entry_price: entry_px,
+                            exit_price,
+                            quantity: qty,
+                            net_pnl,
+                            exit_reason,
+                            timestamp: now,
+                        });
+                        if st.recent_closed_trades.len() > 50 {
+                            st.recent_closed_trades.remove(0);
+                        }
                         st.active_position = None;
                         st.cash_balance = total_equity;
                         st.portfolio_value = total_equity;
@@ -189,6 +326,7 @@ impl AppState {
             reports_dir,
             connected_clients,
             start_time,
+            execution_mode,
         }
     }
 
@@ -214,5 +352,14 @@ impl AppState {
     #[inline]
     pub fn uptime_secs(&self) -> u64 {
         self.start_time.elapsed().as_secs()
+    }
+
+    /// Sets or overrides the current execution mode.
+    pub fn with_execution_mode(mut self, mode: &'static str) -> Self {
+        self.execution_mode = mode;
+        if let Ok(mut st) = self.state.try_write() {
+            st.execution_mode = mode.to_string();
+        }
+        self
     }
 }

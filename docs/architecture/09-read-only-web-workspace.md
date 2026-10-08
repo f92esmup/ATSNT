@@ -192,11 +192,11 @@ Every phase below is proposed and separately trackable. Checks describe future p
 
 **Objective:** implement the observation contract in Section 4. **Entry/dependencies:** W1 and W2 accepted.
 
-**Numbered deliverables:**
-1. Implement selected-wallet/environment global views and asset/instance drill-down with non-duplicating attribution, Spot USDT valuation and the confirmed risk/session policy.
-2. Separate mode, connections, engine state and freshness; add formula-backed metric cards including capital-at-risk and applicable margin/funding/leverage.
-3. Render sourced Dollar Bars, forming/formed states, gaps, signals and actual/simulated fill evidence.
-4. Add read-only positions/orders/fills/closed-trades/events views and time filters.
+**Numbered deliverables (Completed in [`odd/tasks/w3-trading-operations-center.md`](../../odd/tasks/w3-trading-operations-center.md)):**
+1. [x] Implement selected-wallet/environment global views and asset/instance drill-down with non-duplicating attribution, Spot USDT valuation and the confirmed risk/session policy.
+2. [x] Separate mode, connections, engine state and freshness; add formula-backed metric cards including capital-at-risk and applicable margin/funding/leverage.
+3. [x] Render sourced Dollar Bars, forming/formed states, gaps, signals and actual/simulated fill evidence.
+4. [x] Add read-only positions/orders/fills/closed-trades/events views and time filters.
 
 **Observable acceptance:** shared-account fixtures reconcile totals once; metrics expose units/time/source/applicability; irregular bar duration and fill provenance are visible; no execution or strategy-write affordances exist.
 

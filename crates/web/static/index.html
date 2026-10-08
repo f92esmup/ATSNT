@@ -167,32 +167,97 @@
 
                 <!-- VIEW 2: OPERATIONS (Live & Paper Trading Terminal) -->
                 <section id="view-operations" class="view-section active">
-                    <!-- KPI Ribbon -->
+                    <!-- Demo Mode Warning Banner (Shown when server is in --mock) -->
+                    <div id="demo-mode-banner" class="demo-banner" style="display: none;">
+                        <span class="demo-banner-icon">⚠️</span>
+                        <span data-i18n="banner.demo_warning">MODO DEMO / SIMULACIÓN — Datos sintéticos generados en memoria. No representan saldos reales ni órdenes en exchange.</span>
+                    </div>
+
+                    <!-- Risk & Session Policy Strip -->
+                    <div class="risk-policy-ribbon" title="Políticas de Riesgo de Sesión (Inmutables en UI)">
+                        <div class="policy-items-group">
+                            <span class="policy-item"><span class="policy-item-dot"></span><span data-i18n="policy.order_cap">Máx Notional/Orden: 10,000 USDT</span></span>
+                            <span class="policy-item"><span class="policy-item-dot"></span><span data-i18n="policy.pos_cap">Máx Notional/Posición: 50,000 USDT</span></span>
+                            <span class="policy-item"><span class="policy-item-dot"></span><span data-i18n="policy.risk_per_trade">Riesgo Máx/Trade: 1.00%</span></span>
+                            <span class="policy-item"><span class="policy-item-dot"></span><span data-i18n="policy.dd_limit">Límite DD Sesión: 5.00% HWM</span></span>
+                        </div>
+                        <div id="circuit-breaker-status" class="badge badge-live">
+                            <span data-i18n="policy.status_normal">LÍMITES ACTIVOS</span>
+                        </div>
+                    </div>
+
+                    <!-- Formula-Backed KPI Ribbon -->
                     <div class="kpi-grid">
-                        <div class="metric-card">
-                            <span class="metric-label" data-i18n="metric.equity">Portfolio Equity</span>
+                        <div class="metric-card" title="Valor total del portafolio = Saldo en efectivo + PnL no realizado (USDT)">
+                            <div class="metric-card-header">
+                                <span class="metric-label" data-i18n="metric.equity">Portfolio Equity</span>
+                                <span class="formula-info-btn" title="Equity = Cash + uPnL">ⓘ</span>
+                            </div>
                             <div id="kpi-equity" class="metric-value">$10,000.00</div>
                             <div id="kpi-cash" class="metric-subtext">Cash: $10,000.00</div>
                         </div>
-                        <div class="metric-card">
-                            <span class="metric-label" data-i18n="metric.upnl">Unrealized PnL</span>
+
+                        <div class="metric-card" title="PnL no realizado = (Mark - Entry) × Cantidad">
+                            <div class="metric-card-header">
+                                <span class="metric-label" data-i18n="metric.upnl">Unrealized PnL</span>
+                                <span class="formula-info-btn" title="uPnL = (P_mark - P_entry) × Qty">ⓘ</span>
+                            </div>
                             <div id="kpi-upnl" class="metric-value neutral">$0.00</div>
                             <div id="kpi-upnl-pct" class="metric-subtext neutral">+0.00%</div>
                         </div>
-                        <div class="metric-card">
-                            <span class="metric-label" data-i18n="metric.position">Active Exposure</span>
-                            <div id="kpi-position" class="metric-value">FLAT</div>
-                            <div id="kpi-position-details" class="metric-subtext">0.00 BTC ($0.00)</div>
+
+                        <div class="metric-card" title="PnL realizado acumulado en la sesión tras fricciones (comisiones y slippage)">
+                            <div class="metric-card-header">
+                                <span class="metric-label" data-i18n="metric.rpnl">Realized PnL</span>
+                                <span class="formula-info-btn" title="rPnL = Sum(Net PnL closed trades)">ⓘ</span>
+                            </div>
+                            <div id="kpi-rpnl" class="metric-value neutral">$0.00</div>
+                            <div id="kpi-trades-summary" class="metric-subtext">0 trades</div>
                         </div>
-                        <div class="metric-card">
-                            <span class="metric-label" data-i18n="metric.drawdown">Max Drawdown</span>
+
+                        <div class="metric-card" title="Caída desde el punto máximo histórico de la sesión (HWM). Límite disyuntor: 5.00%">
+                            <div class="metric-card-header">
+                                <span class="metric-label" data-i18n="metric.drawdown">Session Drawdown</span>
+                                <span class="formula-info-btn" title="DD = (HWM - Equity) / HWM × 100%">ⓘ</span>
+                            </div>
                             <div id="kpi-drawdown" class="metric-value neutral">0.00%</div>
-                            <div class="metric-subtext">Peak to trough</div>
+                            <div class="metric-subtext">Límite: 5.00% HWM</div>
                         </div>
-                        <div class="metric-card">
-                            <span class="metric-label" data-i18n="metric.uptime">Engine Uptime</span>
-                            <div id="kpi-uptime" class="metric-value neutral">0s</div>
-                            <div id="kpi-clients" class="metric-subtext">WS Clients: 0</div>
+
+                        <div class="metric-card" title="Capital en riesgo de la posición activa o límite máximo del 1% del portafolio">
+                            <div class="metric-card-header">
+                                <span class="metric-label" data-i18n="metric.capital_at_risk">Capital at Risk</span>
+                                <span class="formula-info-btn" title="Risk = |Entry - SL| × Qty">ⓘ</span>
+                            </div>
+                            <div id="kpi-capital-at-risk" class="metric-value neutral">$0.00</div>
+                            <div id="kpi-capital-at-risk-pct" class="metric-subtext">Máx 1% ($100.00)</div>
+                        </div>
+
+                        <div id="card-futures-margin" class="metric-card" title="Margen aislado y apalancamiento efectivo (solo USDⓈ-M Futuros)">
+                            <div class="metric-card-header">
+                                <span class="metric-label" data-i18n="metric.margin">Isolated Margin</span>
+                                <span class="formula-info-btn" title="Margin = Notional / Leverage">ⓘ</span>
+                            </div>
+                            <div id="kpi-margin" class="metric-value neutral">$0.00</div>
+                            <div id="kpi-leverage" class="metric-subtext">1x (Aislado)</div>
+                        </div>
+
+                        <div id="card-futures-funding" class="metric-card" title="Tasa de financiación de contratos perpetuos estimada para el próximo intervalo de 8h">
+                            <div class="metric-card-header">
+                                <span class="metric-label" data-i18n="metric.funding">Funding Rate</span>
+                                <span class="formula-info-btn" title="Perpetual funding rate / 8h">ⓘ</span>
+                            </div>
+                            <div id="kpi-funding" class="metric-value neutral">+0.0100%</div>
+                            <div class="metric-subtext">Próximo cobro: 8h</div>
+                        </div>
+
+                        <div class="metric-card" title="Frescura de telemetría y edad de la última barra formada">
+                            <div class="metric-card-header">
+                                <span class="metric-label">Frescura / Uptime</span>
+                                <span class="formula-info-btn" title="Dollar Bars tienen duración variable; tiempo no implica desconexión">ⓘ</span>
+                            </div>
+                            <div id="kpi-freshness" class="metric-value neutral">---</div>
+                            <div id="kpi-clients-fresh" class="metric-subtext">WS: Activo</div>
                         </div>
                     </div>
 
@@ -202,8 +267,9 @@
                         <div class="chart-panel">
                             <div class="panel-header">
                                 <div class="panel-title">
-                                    <span>BTCUSDT (DOLLAR BARS)</span>
+                                    <span id="chart-asset-title">BTCUSDT (DOLLAR BARS)</span>
                                     <span style="color: var(--text-muted); font-size: 11px;">$50,000 Threshold</span>
+                                    <span style="color: var(--accent-blue); font-size: 11px; margin-left: 8px;">Δt: <span id="bar-duration">---</span></span>
                                 </div>
                                 <div class="live-ticker-price" id="live-price">---</div>
                             </div>
@@ -237,13 +303,17 @@
                                     <span class="detail-label">Take Profit Barrier</span>
                                     <span id="pos-tp" class="detail-val positive">---</span>
                                 </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Live uPnL</span>
+                                    <span id="pos-upnl-detail" class="detail-val neutral">$0.00</span>
+                                </div>
                             </div>
 
                             <div class="terminal-card">
                                 <div class="card-title" data-i18n="module.strategies">Strategy Engine</div>
                                 <div class="detail-row">
                                     <span class="detail-label">Algorithm</span>
-                                    <span class="detail-val" style="color: var(--accent-blue);">DollarBarsCusum</span>
+                                    <span class="detail-val" style="color: var(--accent-blue);">DollarBarsCusum_v1</span>
                                 </div>
                                 <div class="detail-row">
                                     <span class="detail-label">Z-Score Window</span>
@@ -259,27 +329,152 @@
                                 </div>
                                 <div class="detail-row">
                                     <span class="detail-label">Execution Mode</span>
-                                    <span class="detail-val" style="color: var(--accent-green);">PAPER TRADING</span>
+                                    <span id="engine-mode-val" class="detail-val" style="color: var(--accent-green);">PAPER TRADING</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Mercado</span>
+                                    <span id="strategy-compat-badge" class="badge badge-paper">USDⓈ-M Futuros</span>
                                 </div>
                             </div>
                         </div>
                     </div>
 
-                    <!-- Bottom: Real-Time Event & Execution Journal -->
+                    <!-- Bottom: Tabbed Real-Time Journal & Execution Records -->
                     <div class="events-section">
-                        <div class="panel-header">
-                            <span class="panel-title">LIVE TELEMETRY JOURNAL & ORDER FILLS</span>
-                            <span style="font-size: 11px; color: var(--text-muted);" id="events-count">0 events</span>
+                        <div class="operational-nav-bar">
+                            <div class="op-tab-group">
+                                <button class="op-tab-btn active" data-op-tab="positions">
+                                    <span data-i18n="tab.positions">Posición Activa</span>
+                                </button>
+                                <button class="op-tab-btn" data-op-tab="orders">
+                                    <span data-i18n="tab.orders">Órdenes Vivas</span>
+                                </button>
+                                <button class="op-tab-btn" data-op-tab="fills">
+                                    <span data-i18n="tab.fills">Fills / Ejecuciones</span>
+                                    <span id="fills-count" class="op-tab-count">0</span>
+                                </button>
+                                <button class="op-tab-btn" data-op-tab="trades">
+                                    <span data-i18n="tab.closed_trades">Operaciones Cerradas</span>
+                                    <span id="trades-count" class="op-tab-count">0</span>
+                                </button>
+                                <button class="op-tab-btn" data-op-tab="journal">
+                                    <span data-i18n="tab.journal">Bitácora de Telemetría</span>
+                                    <span id="events-count" class="op-tab-count">0</span>
+                                </button>
+                            </div>
+
+                            <div class="time-filter-group" title="Filtro temporal de registros">
+                                <button class="time-filter-btn active" data-time-filter="all" data-i18n="filter.all">Todo</button>
+                                <button class="time-filter-btn" data-time-filter="1h" data-i18n="filter.1h">1h</button>
+                                <button class="time-filter-btn" data-time-filter="24h" data-i18n="filter.24h">24h</button>
+                                <button class="time-filter-btn" data-time-filter="session" data-i18n="filter.session">Sesión</button>
+                            </div>
                         </div>
-                        <div class="table-wrapper">
-                            <table id="events-table">
+
+                        <!-- Pane 1: Active Position Details -->
+                        <div id="op-pane-positions" class="table-wrapper op-pane active">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Símbolo</th>
+                                        <th>Dirección</th>
+                                        <th>Tamaño</th>
+                                        <th>Precio Entrada</th>
+                                        <th>Precio Mark</th>
+                                        <th>Stop Loss</th>
+                                        <th>Take Profit</th>
+                                        <th>PnL No Realizado</th>
+                                        <th>Margen Aislado</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="positions-body">
+                                    <tr>
+                                        <td colspan="9" style="text-align: center; color: var(--text-muted); padding: 16px;">Sin posición abierta (FLAT)</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Pane 2: Live Orders -->
+                        <div id="op-pane-orders" class="table-wrapper op-pane" style="display: none;">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>ID Orden</th>
+                                        <th>Símbolo</th>
+                                        <th>Tipo</th>
+                                        <th>Lado</th>
+                                        <th>Cantidad</th>
+                                        <th>Precio</th>
+                                        <th>Estado</th>
+                                        <th>Hora</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="orders-body">
+                                    <tr>
+                                        <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 16px;">Sin órdenes pendientes en el libro</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Pane 3: Fills & Executions -->
+                        <div id="op-pane-fills" class="table-wrapper op-pane" style="display: none;">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>ID Fill</th>
+                                        <th>Hora</th>
+                                        <th>Símbolo</th>
+                                        <th>Lado</th>
+                                        <th>Precio Ejecución</th>
+                                        <th>Cantidad</th>
+                                        <th>Comisión</th>
+                                        <th>Tipo</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="fills-body">
+                                    <tr>
+                                        <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 16px;">Sin ejecuciones registradas en esta sesión</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Pane 4: Closed Trades -->
+                        <div id="op-pane-trades" class="table-wrapper op-pane" style="display: none;">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>ID Trade</th>
+                                        <th>Hora Cierre</th>
+                                        <th>Símbolo</th>
+                                        <th>Lado</th>
+                                        <th>Entrada</th>
+                                        <th>Salida</th>
+                                        <th>Cantidad</th>
+                                        <th>Motivo Cierre</th>
+                                        <th>PnL Neto Realizado</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="trades-body">
+                                    <tr>
+                                        <td colspan="9" style="text-align: center; color: var(--text-muted); padding: 16px;">Sin operaciones cerradas en esta sesión</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Pane 5: Telemetry Raw Journal -->
+                        <div id="op-pane-journal" class="table-wrapper op-pane" style="display: none;">
+                            <table id="events-table" class="data-table">
                                 <thead>
                                     <tr>
                                         <th>Timestamp</th>
-                                        <th>Event Type</th>
-                                        <th>Symbol</th>
-                                        <th>Price / Value</th>
-                                        <th>Details / Payload</th>
+                                        <th>Tipo Evento</th>
+                                        <th>Símbolo</th>
+                                        <th>Precio / Valor</th>
+                                        <th>Detalles / Payload</th>
                                     </tr>
                                 </thead>
                                 <tbody id="events-body">
