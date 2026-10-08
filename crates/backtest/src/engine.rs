@@ -1,4 +1,4 @@
-use domain::{DollarBar, Position, PositionSide, Side};
+use domain::{DollarBar, Position, PositionSide, RiskPolicy, Side};
 use rust_decimal::Decimal;
 use strategies::Strategy;
 
@@ -53,13 +53,23 @@ impl BacktestEngine {
         }
     }
 
-    /// Current peak-to-trough drawdown percentage.
+    /// Current cash-equity drawdown percentage, excluding unrealized PnL.
     pub fn current_drawdown_pct(&self) -> Decimal {
         if self.peak_equity <= Decimal::ZERO {
             Decimal::ZERO
         } else {
             (self.peak_equity - self.equity) / self.peak_equity
         }
+    }
+
+    fn current_drawdown_pct_at(
+        &self,
+        current_price: Decimal,
+    ) -> Result<Decimal, domain::RiskError> {
+        RiskPolicy::calculate_session_drawdown_pct(
+            self.peak_equity,
+            self.total_equity(current_price),
+        )
     }
 
     /// Returns the currently active position, if any.
@@ -123,7 +133,7 @@ impl BacktestEngine {
         // 2. If no position was active at the start of this bar, query the strategy for signals
         if !had_position {
             if let Some(intent) = strategy.on_bar(bar) {
-                self.evaluate_entry(intent);
+                self.evaluate_entry(intent, bar.close);
             }
         }
 
@@ -198,25 +208,7 @@ impl BacktestEngine {
         }
     }
 
-    fn evaluate_entry(&mut self, intent: domain::OrderIntent) {
-        // Circuit breaker check
-        if self.current_drawdown_pct() >= self.config.max_daily_drawdown_pct {
-            return;
-        }
-
-        let per_unit_risk = (intent.price - intent.stop_loss).abs();
-        if per_unit_risk <= Decimal::ZERO {
-            return;
-        }
-
-        // Fixed Fractional Sizing: Risk Amount = Equity * RiskPct
-        let capital_at_risk = self.equity * self.config.risk_per_trade_pct;
-        let quantity = capital_at_risk / per_unit_risk;
-        if quantity <= Decimal::ZERO {
-            return;
-        }
-
-        // Apply entry slippage
+    fn evaluate_entry(&mut self, intent: domain::OrderIntent, mark_price: Decimal) {
         let (fill_price, slippage_per_unit) = match intent.side {
             Side::Buy => {
                 let slip = intent.price * self.config.slippage_pct;
@@ -226,6 +218,29 @@ impl BacktestEngine {
                 let slip = intent.price * self.config.slippage_pct;
                 (intent.price - slip, slip)
             }
+        };
+
+        let Ok(current_session_drawdown_pct) = self.current_drawdown_pct_at(mark_price) else {
+            return;
+        };
+        let defaults = RiskPolicy::default();
+        let Ok(risk_policy) = RiskPolicy::new(
+            defaults.max_position_notional,
+            defaults.max_order_notional,
+            self.config.max_daily_drawdown_pct,
+        ) else {
+            return;
+        };
+        let mark_to_market_equity = self.total_equity(mark_price);
+        let Ok(quantity) = risk_policy.size_order(
+            &intent,
+            fill_price,
+            mark_to_market_equity,
+            self.config.risk_per_trade_pct,
+            Decimal::ZERO,
+            current_session_drawdown_pct,
+        ) else {
+            return;
         };
 
         // Entry Fee (Taker)
@@ -340,6 +355,21 @@ mod tests {
             dollar_volume: close,
             trade_count: 5,
         }
+    }
+
+    #[test]
+    fn current_drawdown_at_price_includes_unrealized_pnl() {
+        let mut engine = BacktestEngine::new(BacktestConfig::default());
+        engine.equity = dec!(10_000);
+        engine.peak_equity = dec!(10_000);
+        engine.active_position = Some(
+            Position::new(PositionSide::Long, dec!(100), dec!(100)).expect("valid test position"),
+        );
+
+        assert_eq!(
+            engine.current_drawdown_pct_at(dec!(94)).unwrap(),
+            dec!(0.06)
+        );
     }
 
     #[test]

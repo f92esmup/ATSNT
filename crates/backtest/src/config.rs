@@ -18,7 +18,7 @@ pub struct BacktestConfig {
     pub slippage_pct: Decimal,
     /// Fixed fractional capital risk allocated per trade (e.g. 0.01 = 1.0%).
     pub risk_per_trade_pct: Decimal,
-    /// Circuit breaker threshold: halt trading if intraday drawdown reaches this fraction (e.g. 0.05 = 5.0%).
+    /// Session drawdown threshold from the marked-equity peak, with no daily reset (legacy field name retained).
     pub max_daily_drawdown_pct: Decimal,
 }
 

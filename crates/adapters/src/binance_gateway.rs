@@ -523,21 +523,25 @@ impl BinanceGateway {
         Ok(())
     }
 
-    /// Evaluates pre-trade risk checks and submits a signed live order to Binance.
+    /// Sizes with the shared session policy, then submits a signed live order to Binance.
     pub async fn place_order(
         &self,
         symbol: &str,
         intent: &OrderIntent,
-        quantity: Decimal,
+        mark_to_market_equity: Decimal,
+        session_peak_equity: Decimal,
         current_position_notional: Decimal,
-        daily_drawdown_pct: Decimal,
     ) -> Result<OrderExecutionReport, GatewayError> {
-        // 1. Mandatory Pre-Trade Risk Gatekeeping
-        self.config.risk_policy.evaluate_order(
+        // 1. Mandatory shared sizing and pre-trade risk gatekeeping.
+        let current_session_drawdown_pct =
+            RiskPolicy::calculate_session_drawdown_pct(session_peak_equity, mark_to_market_equity)?;
+        let quantity = self.config.risk_policy.size_order(
             intent,
-            quantity,
+            intent.price,
+            mark_to_market_equity,
+            Decimal::new(1, 2),
             current_position_notional,
-            daily_drawdown_pct,
+            current_session_drawdown_pct,
         )?;
 
         if self.config.spot {
@@ -959,10 +963,14 @@ mod tests {
             let (base_url, requests, server) = spawn_spot_mock_server(account_response);
             let mut gateway = BinanceGateway::new(BinanceGatewayConfig::default()).unwrap();
             gateway.base_url = base_url;
-            let intent = OrderIntent::new(1, side, dec!(50), dec!(49), dec!(51), 5).unwrap();
+            let (stop_loss, take_profit) = match side {
+                Side::Buy => (dec!(49), dec!(51)),
+                Side::Sell => (dec!(51), dec!(49)),
+            };
+            let intent = OrderIntent::new(1, side, dec!(50), stop_loss, take_profit, 5).unwrap();
 
             let result = gateway
-                .place_order("BTCUSDT", &intent, dec!(1), Decimal::ZERO, Decimal::ZERO)
+                .place_order("BTCUSDT", &intent, dec!(100), dec!(100), Decimal::ZERO)
                 .await;
 
             assert!(result.is_err(), "{name} must be rejected before dispatch");
@@ -984,7 +992,7 @@ mod tests {
         gateway.base_url = base_url;
         let intent = OrderIntent::new(1, Side::Buy, dec!(50), dec!(49), dec!(51), 5).unwrap();
         let result = gateway
-            .place_order("BTCUSDT", &intent, dec!(1), Decimal::ZERO, Decimal::ZERO)
+            .place_order("BTCUSDT", &intent, dec!(100), dec!(100), Decimal::ZERO)
             .await;
 
         assert!(result.is_err(), "missing commission rates must fail closed");
@@ -1004,7 +1012,7 @@ mod tests {
         gateway.base_url = base_url;
         let intent = OrderIntent::new(1, Side::Buy, dec!(50), dec!(49), dec!(51), 5).unwrap();
         let result = gateway
-            .place_order("BTCUSDT", &intent, dec!(1), Decimal::ZERO, Decimal::ZERO)
+            .place_order("BTCUSDT", &intent, dec!(100), dec!(100), Decimal::ZERO)
             .await;
 
         assert!(
@@ -1019,6 +1027,9 @@ mod tests {
         assert!(requests
             .iter()
             .any(|request| request.starts_with("GET /api/v3/ticker/price?")));
+        assert!(requests.iter().any(|request| {
+            request.starts_with("POST /api/v3/order") && request.contains("quantity=1")
+        }));
         assert_eq!(
             requests
                 .iter()
@@ -1092,7 +1103,7 @@ mod tests {
 
         // 1. Order size exceeds 5,000 (0.1 * 60,000 = 6,000 > 5,000)
         let res = gateway
-            .place_order("BTCUSDT", &intent, dec!(0.1), dec!(0.0), dec!(0.01))
+            .place_order("BTCUSDT", &intent, dec!(10_000), dec!(10_000), dec!(0))
             .await;
         assert!(matches!(
             res,
@@ -1101,9 +1112,9 @@ mod tests {
             ))
         ));
 
-        // 2. Circuit breaker blocks order (daily drawdown 6% >= 5% limit)
+        // 2. Circuit breaker blocks order at 5% session drawdown.
         let res_circuit = gateway
-            .place_order("BTCUSDT", &intent, dec!(0.05), dec!(0.0), dec!(0.06))
+            .place_order("BTCUSDT", &intent, dec!(950), dec!(1_000), dec!(0))
             .await;
         assert!(matches!(
             res_circuit,
