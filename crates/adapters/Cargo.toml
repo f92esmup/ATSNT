@@ -26,6 +26,7 @@ tempfile = "3"
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 ring.workspace = true
+chrono.workspace = true
 
 
 [[bin]]

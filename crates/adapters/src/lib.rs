@@ -7,6 +7,7 @@ pub mod binance_private_stream;
 pub mod binance_user_stream;
 pub mod binance_ws;
 pub mod error;
+pub mod gcp;
 pub mod traits;
 
 pub use binance_auth::BinanceAuth;
@@ -24,4 +25,8 @@ pub use binance_private_stream::{
 pub use binance_user_stream::{BinanceUserDataStream, ExecutionUpdate};
 pub use binance_ws::{BinanceAggTradePayload, BinanceWebSocketStream, BinanceWsConfig};
 pub use error::AdapterError;
-pub use traits::{AsyncMarketDataStream, MarketDataStream};
+pub use gcp::{
+    format_unix_ms_rfc3339, BigQuerySink, EquitySnapshotRow, GcsParquetSink, HpoEvaluationRow,
+    MonteCarloRow, TelegramNotifier, TradeRow,
+};
+pub use traits::{AlertNotifier, AsyncMarketDataStream, MarketDataStream};

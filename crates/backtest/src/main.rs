@@ -2,7 +2,10 @@ use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use adapters::{BinanceCsvReader, BinanceParquetReader, MarketDataStream};
+use adapters::{
+    format_unix_ms_rfc3339, BigQuerySink, BinanceCsvReader, BinanceParquetReader, GcsParquetSink,
+    MarketDataStream, MonteCarloRow, TradeRow,
+};
 use anyhow::{Context, Result};
 use backtest::{BacktestConfig, BacktestEngine, MonteCarloConfig, MonteCarloSimulator};
 use clap::Parser;
@@ -41,9 +44,18 @@ struct Args {
     /// Optional output file path for the Monte Carlo telemetry report
     #[arg(short, long)]
     report: Option<PathBuf>,
+
+    /// Stream completed trades and Monte Carlo metrics to Google Cloud BigQuery
+    #[arg(long, default_value_t = false)]
+    gcp_bigquery: bool,
+
+    /// Export Monte Carlo trajectories as columnar Parquet to GCS/staging
+    #[arg(long, default_value_t = false)]
+    gcs_parquet: bool,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Args::parse();
 
     println!("============================================================");
@@ -201,6 +213,36 @@ fn main() -> Result<()> {
         backtest_report_path.display()
     );
 
+    if args.gcp_bigquery && !closed_trades.is_empty() {
+        let bq = BigQuerySink::from_env();
+        let rows: Vec<TradeRow> = closed_trades
+            .iter()
+            .enumerate()
+            .map(|(idx, ct)| TradeRow {
+                trade_id: format!("bt_{}_{}", timestamp, idx),
+                session_id: format!("backtest_{}", timestamp),
+                strategy_id: strategy.name().to_string(),
+                symbol: "HISTORICAL".to_string(),
+                side: "Closed".to_string(),
+                entry_timestamp: format_unix_ms_rfc3339(ct.exit_time),
+                exit_timestamp: format_unix_ms_rfc3339(ct.exit_time),
+                entry_price: dec!(0),
+                exit_price: dec!(0),
+                quantity: dec!(0),
+                gross_pnl: ct.pnl_gross,
+                fees_paid: ct.fees_paid,
+                net_pnl: ct.pnl_net,
+                exit_reason: "BacktestTrade".to_string(),
+                holding_duration_seconds: 0,
+            })
+            .collect();
+        println!(
+            "[*] Streaming {} closed trades to BigQuery (atsnt_bi.trades)...",
+            rows.len()
+        );
+        let _ = bq.insert_trades(&rows).await;
+    }
+
     // 4. Monte Carlo Stress-Testing
     if args.monte_carlo {
         println!("\n============================================================");
@@ -286,6 +328,43 @@ fn main() -> Result<()> {
                 "[*] Monte Carlo fan-chart telemetry saved to: {}",
                 mc_path.display()
             );
+
+            if args.gcp_bigquery {
+                let bq = BigQuerySink::from_env();
+                let mc_row = MonteCarloRow {
+                    run_id: mc_report.report_id.clone(),
+                    timestamp: format_unix_ms_rfc3339((timestamp * 1000) as i64),
+                    strategy_id: strategy.name().to_string(),
+                    iterations: mc_report.metrics.total_simulations as u64,
+                    resample_method: "CircularBlockBootstrap".to_string(),
+                    historical_max_drawdown: mc_report.metrics.historical_max_drawdown_pct,
+                    p50_max_drawdown: mc_report.metrics.p50_max_drawdown_pct,
+                    p95_max_drawdown: mc_report.metrics.p95_max_drawdown_pct,
+                    p99_max_drawdown: mc_report.metrics.p99_max_drawdown_pct,
+                    probability_of_ruin_pct: mc_report.metrics.probability_of_ruin_pct,
+                };
+                println!(
+                    "[*] Streaming Monte Carlo summary to BigQuery (atsnt_bi.monte_carlo_runs)..."
+                );
+                let _ = bq.insert_monte_carlo_runs(&[mc_row]).await;
+            }
+
+            if args.gcs_parquet {
+                let gcs_sink = GcsParquetSink::from_env("storage/parquet");
+                let trajectories: Vec<(&str, &[Decimal])> = mc_report
+                    .fan_chart
+                    .iter()
+                    .map(|t| (t.label.as_str(), t.equity_curve.as_slice()))
+                    .collect();
+                println!("[*] Exporting Monte Carlo trajectories to Parquet / GCS...");
+                let parquet_path = gcs_sink
+                    .export_monte_carlo_trajectories(&mc_report.report_id, &trajectories)
+                    .await?;
+                println!(
+                    "[SAVED] Monte Carlo trajectories exported to: {}",
+                    parquet_path.display()
+                );
+            }
         }
     }
 

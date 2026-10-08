@@ -23,6 +23,7 @@ clap.workspace = true
 rayon.workspace = true
 rand.workspace = true
 indicatif.workspace = true
+chrono.workspace = true
 
 [[bin]]
 name = "backtest"

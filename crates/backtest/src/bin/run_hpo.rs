@@ -3,7 +3,10 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use adapters::{BinanceCsvReader, BinanceParquetReader, MarketDataStream};
+use adapters::{
+    format_unix_ms_rfc3339, BigQuerySink, BinanceCsvReader, BinanceParquetReader, HpoEvaluationRow,
+    MarketDataStream,
+};
 use anyhow::{Context, Result};
 use backtest::{
     BacktestConfig, ParameterSpace, WalkForwardConfig, WalkForwardOptimizer, WalkForwardSplitter,
@@ -56,9 +59,14 @@ struct Args {
         default_value = "configs/hpo_results.json"
     )]
     output_config: PathBuf,
+
+    /// Stream evaluated candidate parameters to Google Cloud BigQuery
+    #[arg(long, default_value_t = false)]
+    gcp_bigquery: bool,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Args::parse();
 
     println!("============================================================");
@@ -275,6 +283,33 @@ fn main() -> Result<()> {
             "[SAVED] Detailed audit telemetry saved to: {}",
             report_path.display()
         );
+
+        if args.gcp_bigquery {
+            let bq = BigQuerySink::from_env();
+            let timestamp_str = format_unix_ms_rfc3339((timestamp * 1000) as i64);
+            let rows: Vec<HpoEvaluationRow> = evaluations
+                .iter()
+                .enumerate()
+                .map(|(idx, eval)| HpoEvaluationRow {
+                    run_id: format!("hpo_{}_{}", timestamp, idx),
+                    timestamp: timestamp_str.clone(),
+                    strategy_id: "dollar_bars_cusum".to_string(),
+                    parameter_space: serde_json::to_string(&eval.config).unwrap_or_default(),
+                    is_sharpe: eval.mean_is_sortino,
+                    oos_sharpe: eval.mean_oos_sortino,
+                    deflated_sharpe_ratio: eval.fitness,
+                    parameter_stability_score: eval.stability_score,
+                    total_trades: 0,
+                    win_rate: dec!(0),
+                    max_drawdown_pct: dec!(0),
+                })
+                .collect();
+            println!(
+                "[*] Streaming {} evaluations to BigQuery (atsnt_bi.hpo_evaluations)...",
+                rows.len()
+            );
+            let _ = bq.insert_hpo_evaluations(&rows).await;
+        }
     }
 
     Ok(())

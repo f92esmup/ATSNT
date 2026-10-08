@@ -45,12 +45,13 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 
 ---
 
-### Milestone 5: Web Presentation & Telemetry Dashboard (`crates/web`)
-*(Architecture specification: [`docs/architecture/07-web-telemetry-dashboard.md`](architecture/07-web-telemetry-dashboard.md))*
-- [x] Axum HTTP & WebSocket server in `crates/web`.
-- [x] Real-time streaming of Dollar Bars, signals, and open positions over `/ws/telemetry`.
-- [x] Web dashboard Single Page Application with Lightweight Charts (TradingView) dark financial terminal.
-- [x] Multi-asset and multi-strategy ready architecture with Zero-Trust perimeter deployment model.
+### Milestone 5: Web Decommission & Decoupled Cloud-First Analytics
+*(Architecture transition: `crates/web` decommissioned in favor of zero-overhead, air-gapped Cloud-First reporting)*
+- [x] Decommission and remove `crates/web` (Axum server, static SPA assets, and web dependencies).
+- [x] Migrate asynchronous paper trading runtime (`PaperSessionRuntime` & `PaperSessionOwner`) to `crates/backtest`.
+- [x] Reorganize quantitative sampling and filters into pure module `domain::analytics` (`sampling`, `filters`, `stats`).
+- [x] Workspace dependencies sanitized (`axum`, `tower-http`, `tokio-stream` removed).
+- [x] *(Phase 2)* GCP Cloud-First Data Layer: BigQuery / GCS Parquet exporter and Telegram alerting.
 
 ---
 
@@ -63,15 +64,10 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 
 ---
 
-### Proposed Workstream: Read-Only Web Workspace (W0–W6)
-*(Canonical product/UI contract and phase acceptance: [Read-Only Web Workspace](architecture/09-read-only-web-workspace.md). Implementation remains gated by W0 decisions.)*
-
-- W0 approves product topology/package ownership, data sources/identity, Dollar Bars workflow, metric attribution/formulas, visual/accessibility and auth/deployment boundaries.
-- W1 builds the shared shell; W2 consumes existing T2b snapshot/freshness resilience and T3 real paper-session wiring, without duplicating their tasks. W3 Operations depends on W1/W2.
-- W4 research history/detail may proceed independently of paper runtime after W0/W1 and report-contract agreement; W5 analysis/recorded replay depends on W4.
-- W6 integrates supporting sections and reversible UI retirement, intersecting T7 milestone closure/browser evidence.
-
-The Milestone 5/6 closure work (T1–T7) is now 100% complete, verified and closed on `main` (detailed evidence in the [milestone closure tracker](../odd/tasks/milestone-5-6-closure.md)). All prerequisites for telemetry reliability, explicit in-process paper trading, Spot funding guards, shared risk sizing and private account events are fulfilled. The upcoming work focuses on the [Read-Only Web Workspace (W0–W6)](architecture/09-read-only-web-workspace.md), gated by W0 decisions. Portal/Econoweb were not found in this repository, so topology and integration ownership remain W0 gates, not implemented modules.
+### Proposed Workstream: Cloud-First Architecture & Looker Studio Integration
+- **De-risking & Zero-Trust**: In-process web servers are retired to ensure the trading engine runs headless, air-gapped in private VPC networks without public open ports.
+- **Reporting & Business Intelligence**: Post-trade auditing, Monte Carlo trajectories, and HPO parameter evaluations stream to BigQuery / GCS Parquet for visualization via Looker Studio (zero-code frontend maintenance).
+- **Proactive Mobile Alerts**: Execution fills, risk threshold breaches, and circuit breakers trigger outbound webhooks (Telegram/Discord) directly to operators' devices.
 
 ---
 

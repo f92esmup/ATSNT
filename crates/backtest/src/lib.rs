@@ -20,6 +20,7 @@ pub use optimization::{
     ParameterSpace, WalkForwardOptimizer,
 };
 pub use paper::{
-    PaperTradingConfig, PaperTradingEvent, PaperTradingSession, TelemetryConfig, TelemetryEnvelope,
+    PaperSessionOwner, PaperSessionRuntime, PaperTradingConfig, PaperTradingEvent,
+    PaperTradingSession, TelemetryConfig, TelemetryEnvelope,
 };
 pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};

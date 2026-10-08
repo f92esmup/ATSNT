@@ -8,7 +8,10 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use adapters::{AsyncMarketDataStream, BinanceWebSocketStream, BinanceWsConfig};
+use adapters::{
+    format_unix_ms_rfc3339, AlertNotifier, AsyncMarketDataStream, BigQuerySink,
+    BinanceWebSocketStream, BinanceWsConfig, EquitySnapshotRow, TelegramNotifier, TradeRow,
+};
 use anyhow::{Context, Result};
 use backtest::{BacktestConfig, PaperTradingConfig, PaperTradingEvent, PaperTradingSession};
 use clap::Parser;
@@ -57,6 +60,14 @@ struct Args {
         action = clap::ArgAction::Set
     )]
     save_report: bool,
+
+    /// Stream real-time equity snapshots and trades to Google Cloud BigQuery
+    #[arg(long, default_value_t = false)]
+    gcp_bigquery: bool,
+
+    /// Send execution and barrier exit alerts to Telegram
+    #[arg(long, default_value_t = false)]
+    telegram_alerts: bool,
 }
 
 #[tokio::main]
@@ -79,6 +90,36 @@ async fn main() -> Result<()> {
     println!(" Dollar Bar Threshold: ${}", args.dollar_bar);
     println!(" Initial Capital:      ${}", args.capital);
     println!(" Risk per Trade:       {:.2}%", args.risk_pct * dec!(100));
+
+    let bq_sink = if args.gcp_bigquery {
+        let sink = BigQuerySink::from_env();
+        println!(
+            " BigQuery Telemetry:   {}",
+            if sink.is_enabled() {
+                "ACTIVE (Streaming to atsnt_bi)"
+            } else {
+                "ENABLED (Pending GCP_PROJECT_ID / GCP_AUTH_TOKEN)"
+            }
+        );
+        Some(sink)
+    } else {
+        None
+    };
+
+    let telegram = if args.telegram_alerts {
+        let t = TelegramNotifier::from_env();
+        println!(
+            " Telegram Alerts:      {}",
+            if t.is_enabled() {
+                "ACTIVE (Connected to Telegram Bot API)"
+            } else {
+                "ENABLED (Pending TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)"
+            }
+        );
+        Some(t)
+    } else {
+        None
+    };
 
     // 1. Load Strategy Configuration
     let strat_config: DollarBarsCusumConfig = if let Some(config_path) = &args.config {
@@ -213,7 +254,7 @@ async fn main() -> Result<()> {
                                         intent.side, intent.price, intent.stop_loss, intent.take_profit, intent.max_bars_hold
                                     );
                                 }
-                                PaperTradingEvent::PositionOpened { side, entry_price, quantity, stop_loss, take_profit } => {
+                                 PaperTradingEvent::PositionOpened { side, entry_price, quantity, stop_loss, take_profit } => {
                                     println!(
                                         "[EXECUTION] Position Opened: {:?}\n\
                                          Entry Price:  ${}\n\
@@ -224,6 +265,22 @@ async fn main() -> Result<()> {
                                          ************************************************************\n",
                                         side, entry_price, quantity, stop_loss, take_profit, session.cash_equity()
                                     );
+                                    if let Some(t) = &telegram {
+                                        let side_str = match side {
+                                            PositionSide::Long => "Long",
+                                            PositionSide::Short => "Short",
+                                        };
+                                        let msg = TelegramNotifier::format_position_opened(
+                                            &args.symbol,
+                                            side_str,
+                                            entry_price,
+                                            quantity,
+                                            stop_loss,
+                                            take_profit,
+                                            session.cash_equity(),
+                                        );
+                                        let _ = t.send_alert(&msg).await;
+                                    }
                                 }
                                 PaperTradingEvent::PositionClosed { exit_reason, exit_price, net_pnl, total_equity } => {
                                     println!(
@@ -235,6 +292,36 @@ async fn main() -> Result<()> {
                                          ============================================================\n",
                                         exit_reason, exit_price, net_pnl, total_equity
                                     );
+                                    if let Some(t) = &telegram {
+                                        let msg = TelegramNotifier::format_position_closed(
+                                            &args.symbol,
+                                            &exit_reason,
+                                            exit_price,
+                                            net_pnl,
+                                            total_equity,
+                                        );
+                                        let _ = t.send_alert(&msg).await;
+                                    }
+                                    if let Some(bq) = &bq_sink {
+                                        let row = TradeRow {
+                                            trade_id: format!("{}_{}", args.symbol, trade.timestamp),
+                                            session_id: format!("paper_{}", args.symbol),
+                                            strategy_id: selected_strategy.name().to_string(),
+                                            symbol: args.symbol.to_uppercase(),
+                                            side: "ClosedPosition".to_string(),
+                                            entry_timestamp: format_unix_ms_rfc3339(trade.timestamp),
+                                            exit_timestamp: format_unix_ms_rfc3339(trade.timestamp),
+                                            entry_price: exit_price,
+                                            exit_price,
+                                            quantity: dec!(0),
+                                            gross_pnl: net_pnl,
+                                            fees_paid: dec!(0),
+                                            net_pnl,
+                                            exit_reason: exit_reason.clone(),
+                                            holding_duration_seconds: 0,
+                                        };
+                                        let _ = bq.insert_trades(&[row]).await;
+                                    }
                                 }
                                 PaperTradingEvent::MarkToMarket { current_price, unrealized_pnl, total_equity, drawdown_pct } => {
                                     // Periodic display to avoid terminal flooding
@@ -252,6 +339,23 @@ async fn main() -> Result<()> {
                                             total_equity,
                                             drawdown_pct * dec!(100)
                                         );
+                                        if let Some(bq) = &bq_sink {
+                                            let row = EquitySnapshotRow {
+                                                timestamp: format_unix_ms_rfc3339(trade.timestamp),
+                                                session_id: format!("paper_{}", args.symbol),
+                                                symbol: args.symbol.to_uppercase(),
+                                                cash_equity: session.cash_equity(),
+                                                unrealized_pnl,
+                                                total_equity,
+                                                drawdown_pct,
+                                                active_position_side: session.active_position().map(|p| match p.side {
+                                                    PositionSide::Long => "Long".to_string(),
+                                                    PositionSide::Short => "Short".to_string(),
+                                                }),
+                                                active_position_qty: session.active_position().map(|p| p.quantity),
+                                            };
+                                            let _ = bq.insert_equity_snapshots(&[row]).await;
+                                        }
                                     }
                                 }
                             }
@@ -363,6 +467,33 @@ async fn main() -> Result<()> {
             "[SAVED] Audit report successfully written to: {}",
             report_path.display()
         );
+
+        if let Some(bq) = &bq_sink {
+            let rows: Vec<TradeRow> = closed_trades
+                .iter()
+                .enumerate()
+                .map(|(idx, ct)| TradeRow {
+                    trade_id: format!("paper_{}_{}_{}", args.symbol, timestamp, idx),
+                    session_id: format!("paper_{}_{}", args.symbol, timestamp),
+                    strategy_id: selected_strategy.name().to_string(),
+                    symbol: args.symbol.to_uppercase(),
+                    side: "Closed".to_string(),
+                    entry_timestamp: format_unix_ms_rfc3339(ct.exit_time),
+                    exit_timestamp: format_unix_ms_rfc3339(ct.exit_time),
+                    entry_price: dec!(0),
+                    exit_price: dec!(0),
+                    quantity: dec!(0),
+                    gross_pnl: ct.pnl_gross,
+                    fees_paid: ct.fees_paid,
+                    net_pnl: ct.pnl_net,
+                    exit_reason: "ClosedTrade".to_string(),
+                    holding_duration_seconds: 0,
+                })
+                .collect();
+            if !rows.is_empty() {
+                let _ = bq.insert_trades(&rows).await;
+            }
+        }
     }
 
     Ok(())
