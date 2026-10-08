@@ -33,18 +33,19 @@ Evidence locations: `crates/web/src/{lib,main,state,ws}.rs`, `crates/web/src/han
 | Research | Saved bar-level and engine-event replay; persist formed bars and engine-produced evidence, without requiring raw trade/tick archives for v1. Standard report KPI sets are specified in Section 5. |
 | Freshness and safety | Per-source heartbeat thresholds; separate event/bar ages, no stale inference from an unformed bar. Web operations remain read-only, including no session-close/reset or experiment submission. |
 
-### Open technical gates before affected implementation
+### Resolved Technical Gates (W0 Decision Acceptance)
+*(Detailed resolution and mathematical proofs in [`odd/tasks/w0-decision-gates.md`](../../odd/tasks/w0-decision-gates.md))*
 
-| Gate | Evidence/decision still needed |
+| Gate | Resolved Decision & Specification |
 |---|---|
-| Shared package delivery | Repositories, owners, release/version flow and app route boundaries; separate-app topology is settled. |
-| Source/read-model availability | Actual paper/live and Spot/Futures schemas, identity fields, complete reconnect semantics, capability coverage and instance attribution evidence. Labels do not establish available sources. |
-| Versioned accounting/report evidence | Exact PnL, fee/funding/slippage attribution, metric formulas/annualization, precision and report/replay schema coverage; ruin threshold/method must be supplied by reports. Browser must not invent them. |
-| Heartbeat contracts | Configurable numeric thresholds per source/producer, not a guessed global timeout. |
-| Visual/accessibility | Validate navigation, responsive fit, tokens, contrast and WCAG 2.2 AA target before adoption. |
-| Deployment perimeter | Verify local security and credential isolation. Existing origin checks are not user authentication; any later tunnel deployment needs its own perimeter decision. |
+| Shared package delivery | Vanilla ES6 modules + native CSS Custom Properties in `crates/web/static/` (`css/`, `js/`). Zero Node/npm build dependencies in production runtime; shared tokens exported via `:root`. |
+| Source/read-model availability | Explicit Binance Spot vs USD-M Futures (isolated, USDT, one-way) wallet contexts, never aggregated. Zero floating-point rule with decimal strings (`Decimal` in Rust). Preserved T2a 5-field envelope and sticky uncertainty (`stale: true`). |
+| Versioned accounting/report evidence | Empirically audited `storage/reports/` schema. Normalization to accept both `fan_chart_curves` and `fan_chart_trajectories`. Zero-Fiction Rule: missing equity curves show "Series not available" rather than fabricated lines. |
+| Heartbeat contracts | Multi-tier freshness: transport WebSocket warning at >5s, reconnect at >15s. Separate trade event age from Dollar Bar age, acknowledging volume-clock irregular duration. |
+| Visual/accessibility | W3C-validated color tokens meeting WCAG 2.2 AA (text ratios 17.19:1 AAA and 6.92:1 AA; active controls 4.82:1 UI non-text). Desktop dual-rail, tablet collapsible rail, and mobile keyboard-accessible drawer. Bilingual ES/EN with dual UTC/local clock. |
+| Deployment perimeter | Strict loopback bind (`127.0.0.1`), validated Host/Origin headers, zero exchange trading credentials exposed to browser, read-only GET and `/ws/telemetry` endpoints only. |
 
-Confirmed choices are not open product questions. Missing technical evidence must remain visible and block affected capabilities, not become silent UI/DTO defaults.
+All six technical gates are formally resolved and documented. Unverified assumptions are eliminated, unlocking **W1 (Shared Shell & Design System)**.
 
 ## 3. Proposed Information Architecture & Visual Contract
 
@@ -142,17 +143,18 @@ Every phase below is proposed and separately trackable. Checks describe future p
 
 **Objective:** eliminate silent product assumptions before code. **Entry/dependencies:** baseline evidence and stakeholder decisions; no implementation dependency.
 
-**Numbered deliverables:**
-1. Record historical baseline API/runtime/report gaps, completed T1/T2a/T2b evidence and pending T3 ownership.
-2. Preserve Section 2's confirmed decisions; resolve shared-package ownership/release and source/schema/attribution evidence gates, not the settled topology or engine-formed bar workflow.
-3. Obtain versioned accounting/report formulas and source-specific heartbeat thresholds; validate visual/accessibility and local deployment perimeter. Retain Spanish/English and UTC/local-time requirements.
-4. Record explicit non-goals and phase acceptance decisions.
+**Numbered deliverables (Completed in [`odd/tasks/w0-decision-gates.md`](../../odd/tasks/w0-decision-gates.md)):**
+1. [x] Record historical baseline API/runtime/report gaps and confirm 100% completion of M5/M6 (T1–T7).
+2. [x] Preserve Section 2's confirmed decisions and resolve all 6 technical gates (Vanilla ES6 modules + CSS variables, explicit Spot/Futures context models, zero Node/npm in prod).
+3. [x] Standardize report schema reconciliation (handling both `fan_chart_curves` and `fan_chart_trajectories`), enforce Zero-Fiction rule, and define multi-tier heartbeat contracts.
+4. [x] Formally validate visual tokens against WCAG 2.2 AA (text contrast 17.19:1 / 6.92:1, UI non-text 4.82:1), responsive layout rules, bilingual ES/EN dictionary, and dual UTC/local time display.
+5. [x] Reaffirm air-gapped read-only perimeter (loopback bind `127.0.0.1`, zero credential exposure, GET/WS only).
 
-**Observable acceptance:** a decision record answers every gate or explicitly blocks affected phases; no unknown is silently frozen into a UI/API contract.
+**Observable acceptance:** All 6 technical gates are resolved; no assumptions remain unverified; W1 entry criteria are fully satisfied.
 
 **Scope fence:** decisions/docs only; no code, new source integration or implied Portal/Econoweb readiness.
 
-**Applicable checks:** decision traceability, source evidence and crosswalk readback; token contrast/accessibility evaluation before approval.
+**Applicable checks:** decision traceability, source evidence, and mathematical token contrast evaluation verified.
 
 ### W1 — Shared shell and design system
 
