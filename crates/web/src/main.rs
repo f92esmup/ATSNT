@@ -78,14 +78,14 @@ async fn main() -> anyhow::Result<()> {
         mock::spawn_mock_ticker(event_sender);
     }
     // Retain the bounded input even without a source so the session waits.
-    // Shutdown/finalization coordination is a separate lifecycle work unit.
-    let _paper_runtime = if cli.paper {
+    // Keep the task owned until the server stops, then close and join it.
+    let paper_runtime = if cli.paper {
         let (owner, input) = web::paper::PaperSessionOwner::new(
             backtest::PaperTradingConfig::default(),
             None,
             app_state.event_sender.clone(),
         )?;
-        Some((input, tokio::spawn(owner.run())))
+        Some(web::paper::PaperSessionRuntime::spawn(owner, input))
     } else {
         None
     };
@@ -99,10 +99,19 @@ async fn main() -> anyhow::Result<()> {
         "ATSNT Web Telemetry Dashboard starting on http://{addr}"
     );
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Cleanup also runs when binding or serving fails, rather than detaching
+    // the already-started Paper task through an early error return.
+    let server_result = async {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+    }
+    .await;
+    if let Some(runtime) = paper_runtime {
+        runtime.shutdown().await?;
+    }
+    server_result?;
 
     info!("ATSNT Web Telemetry server gracefully shut down");
     Ok(())

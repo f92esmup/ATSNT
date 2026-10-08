@@ -134,13 +134,13 @@ For lifecycle events, `payload` is `{ "<event_type>": { ... } }`.
 - `PaperTradingConfig` struct literals and the raw `PaperTradingEvent` API remain backward compatible: `new`, `subscribe`, `event_sender`, and `process_trade` retain raw-event behavior. `new_with_telemetry` adds a separate envelope channel via `subscribe_telemetry` (which returns `None` for raw-only sessions). The web application consumes envelopes; its JavaScript reads the existing tagged lifecycle payloads and uses envelope identity/time for attribution, logs, and position markers.
 - In `crates/web/tests/api_tests.rs`, `websocket_delivers_configured_paper_event_and_snapshot_envelopes` exercises a loopback HTTP 101 upgrade, text-frame delivery of all five paper event types, exact envelope/payload equality, and latest-time snapshots. `websocket_delivers_mock_metadata_and_observed_tick_timestamp` checks mock identity and tick time against the delivered bar's `end_time`. These are socket delivery tests, not just upgrade-extractor checks; they were inspected, not rerun for this documentation update.
 
-**Runtime boundary (T3 pending):** the web binary does not yet wire a real `PaperTradingSession` into its process. `--mock` is explicit opt-in, demo-only synthetic data (`BTCUSDT` / `SyntheticDemo` by default), not paper-session execution. Without it, the binary starts without a market-event producer; identity remains empty and timestamp `null` until events arrive. The paper-to-web bridge in the contract test does not complete T3 runtime wiring.
+**Runtime boundary (T3):** `--paper` owns an in-process `PaperTradingSession` with bounded trade input, but waits for a not-yet-connected trade source. It creates no synthetic producer, exchange connection, or live calls. Identity remains empty and timestamp `null` until actual configured source events arrive. On graceful server shutdown, the owned input is dropped, queued trades are drained, and the task is awaited through exactly one consuming `finish(None)` call. This compiles metrics without forcing position liquidation or inventing a final telemetry event. `--mock` remains explicit opt-in, demo-only synthetic telemetry (`BTCUSDT` / `SyntheticDemo` by default), not paper-session execution. The two flags are mutually exclusive; without either, there is no market-event producer.
 
 ---
 
 ## 4. UI Dashboard Architecture & Visual Hierarchy
 
-**Original design target, not a current capability inventory.** The current frontend uses live/backtest/HPO tabs, but does not implement every feature below. Its backtest chart currently synthesizes two endpoints rather than using an actual stored series; the Monte Carlo reader expects `fan_chart_curves`, unlike the illustrative `fan_chart_trajectories` schema in document 05. W4 owns evidence-backed reconciliation. T2b is complete in `43d85bb`; W2 consumes its existing snapshot fidelity and sticky-uncertainty behavior, while T3 runtime wiring remains pending; W3 builds the proposed Operations view only after W1/W2. A “LIVE” label in this diagram does not demonstrate a live source.
+**Original design target, not a current capability inventory.** The current frontend uses live/backtest/HPO tabs, but does not implement every feature below. Its backtest chart currently synthesizes two endpoints rather than using an actual stored series; the Monte Carlo reader expects `fan_chart_curves`, unlike the illustrative `fan_chart_trajectories` schema in document 05. W4 owns evidence-backed reconciliation. T2b is complete in `43d85bb`; W2 consumes its existing snapshot fidelity and sticky-uncertainty behavior, while T3's Paper runtime waits for an unconnected source; W3 builds the proposed Operations view only after W1/W2. A “LIVE” label in this diagram does not demonstrate a live source.
 
 The frontend is structured around three primary views with a permanent top KPI ribbon:
 
@@ -210,6 +210,17 @@ cargo run --locked --offline -p web -- --mock
 # Open http://localhost:3000 or http://127.0.0.1:3000
 ```
 
+To start the in-process Paper session instead of the synthetic demo:
+
+```sh
+cargo run --locked --offline -p web -- --paper
+```
+
+Paper waits for a trade source that is not yet connected; an idle dashboard is
+expected, not evidence of live trading. Do not combine `--paper` and `--mock`.
+Ctrl+C or SIGTERM initiates graceful server shutdown, then closes and joins the
+Paper session without forcing liquidation or publishing a fabricated final event.
+
 The default allowed origins are `http://localhost:<port>`,
 `http://127.0.0.1:<port>`, and `http://[::1]:<port>`. The selected loopback bind IP
 is also allowed. Changing `--port` changes these defaults; it does not leave port
@@ -272,14 +283,14 @@ policy. Embedders using another port or a tunnel should construct
 binding that validated loopback listener.
 
 The perimeter controls above cover closure task T1. Section 3.2 documents the T2
-telemetry contract; real paper-session process wiring remains T3 pending. Neither
+telemetry contract; T3 provides source-waiting Paper process ownership and shutdown. Neither
 this documentation update nor the checklist below declares Milestone 5 complete.
 
 ---
 
 ## 6. Implementation Checklist
 
-This original checklist is retained as historical planning, not current task status. REST/static/WebSocket implementations exist at the base; real paper-session binary wiring remains T3 pending. Use the [closure tracker](../../odd/tasks/milestone-5-6-closure.md) for T-task evidence and [canonical W plan](09-read-only-web-workspace.md#7-independent-w0w6-tasks) for the proposed redesign.
+This original checklist is retained as historical planning, not current task status. REST/static/WebSocket implementations exist at the base; T3 adds Paper binary ownership, but no market-data source is connected. Use the [closure tracker](../../odd/tasks/milestone-5-6-closure.md) for T-task evidence and [canonical W plan](09-read-only-web-workspace.md#7-independent-w0w6-tasks) for the proposed redesign.
 
 - [ ] Add `axum`, `tower-http`, `tokio-stream`, and WebSocket dependencies to [`crates/web/Cargo.toml`](../../crates/web/Cargo.toml).
 - [ ] Implement REST handlers in `crates/web/src/handlers/` (`health`, `reports`, `state`).
