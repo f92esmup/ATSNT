@@ -11,7 +11,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 /// Real-time execution update emitted on order fill or lifecycle change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,34 +40,48 @@ pub struct ExecutionUpdate {
     pub timestamp_ms: i64,
 }
 
-/// Asynchronous User Data Stream client.
+/// Legacy execution-only USD-M User Data Stream client.
+///
+/// Prefer [`crate::binance_private_stream::BinancePrivateUserDataStream`] for normalized events,
+/// explicit failure reporting, bounded listen-key renewal, and joined shutdown.
 pub struct BinanceUserDataStream {
     receiver: mpsc::Receiver<ExecutionUpdate>,
 }
 
 impl BinanceUserDataStream {
-    /// Connects to the User Data Stream WebSocket and starts background keepalive and reception loops.
+    /// Connects to the legacy execution-only stream.
+    ///
+    /// Spot listen-key streams are deprecated by Binance and are rejected here. This legacy
+    /// wrapper does not expose connection failures or an awaitable shutdown operation.
     pub async fn connect(
         listen_key: String,
         testnet: bool,
         spot: bool,
     ) -> Result<Self, crate::error::AdapterError> {
+        if spot {
+            return Err(crate::error::AdapterError::General(
+                "Spot user streams require the signed WebSocket API subscription".to_string(),
+            ));
+        }
+        if listen_key.is_empty() {
+            return Err(crate::error::AdapterError::General(
+                "USD-M listen key is required".to_string(),
+            ));
+        }
         let (tx, rx) = mpsc::channel(10_000);
 
-        let ws_url = if spot {
-            if testnet {
-                format!("wss://testnet.binance.vision/ws/{listen_key}")
-            } else {
-                format!("wss://stream.binance.com:9443/ws/{listen_key}")
-            }
-        } else if testnet {
+        let ws_url = if testnet {
             format!("wss://stream.binancefuture.com/ws/{listen_key}")
         } else {
             format!("wss://fstream.binance.com/ws/{listen_key}")
         };
 
-        info!(ws_url = %ws_url, "Connecting to Binance User Data Stream");
-        let (ws_stream, _) = connect_async(&ws_url).await?;
+        let (ws_stream, _) = connect_async(&ws_url).await.map_err(|_| {
+            crate::error::AdapterError::General(
+                "USD-M user stream connection failed; account reconciliation is required"
+                    .to_string(),
+            )
+        })?;
 
         let (_, mut reader) = ws_stream.split();
 
@@ -91,8 +105,8 @@ impl BinanceUserDataStream {
                         warn!("User data stream closed by exchange");
                         break;
                     }
-                    Err(e) => {
-                        error!(error = %e, "User data stream WebSocket reception error");
+                    Err(_) => {
+                        error!("USD-M user data stream failed; account reconciliation is required");
                         break;
                     }
                     _ => {}
@@ -118,26 +132,23 @@ pub fn parse_user_stream_event(json_str: &str) -> Option<ExecutionUpdate> {
     if event_type == "executionReport" {
         let symbol = v.get("s").and_then(|s| s.as_str())?.to_string();
         let order_id = v.get("i").and_then(|i| i.as_u64())?;
-        let client_order_id = v
-            .get("c")
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string();
+        let client_order_id = v.get("c").and_then(|c| c.as_str())?.to_string();
         let side = match v.get("S").and_then(|s| s.as_str())? {
             "BUY" => Side::Buy,
             "SELL" => Side::Sell,
             _ => return None,
         };
         let status = v.get("X").and_then(|x| x.as_str())?.to_string();
-        let last_price =
-            Decimal::from_str(v.get("L").and_then(|l| l.as_str()).unwrap_or("0")).ok()?;
-        let last_qty =
-            Decimal::from_str(v.get("l").and_then(|l| l.as_str()).unwrap_or("0")).ok()?;
-        let cum_qty = Decimal::from_str(v.get("z").and_then(|z| z.as_str()).unwrap_or("0")).ok()?;
-        let comm_amt = Decimal::from_str(v.get("n").and_then(|n| n.as_str()).unwrap_or("0"))
-            .unwrap_or(Decimal::ZERO);
-        let comm_asset = v.get("N").and_then(|n| n.as_str()).map(String::from);
-        let time_ms = v.get("T").and_then(|t| t.as_i64()).unwrap_or(0);
+        let last_price = Decimal::from_str(v.get("L").and_then(|l| l.as_str())?).ok()?;
+        let last_qty = Decimal::from_str(v.get("l").and_then(|l| l.as_str())?).ok()?;
+        let cum_qty = Decimal::from_str(v.get("z").and_then(|z| z.as_str())?).ok()?;
+        let comm_amt = Decimal::from_str(v.get("n").and_then(|n| n.as_str())?).ok()?;
+        let comm_asset = match v.get("N")? {
+            serde_json::Value::String(asset) => Some(asset.clone()),
+            serde_json::Value::Null => None,
+            _ => return None,
+        };
+        let time_ms = v.get("T").and_then(|t| t.as_i64())?;
 
         return Some(ExecutionUpdate {
             symbol,

@@ -1,11 +1,12 @@
 //! Binance Live Execution Gateway CLI runner.
 //!
 //! Provides command-line utilities to test account balances, verify HMAC signatures,
-//! and stream real-time order executions on Binance Testnet or Production.
+//! and stream normalized private account events on Binance Testnet or Production.
 
 use std::env;
+use std::sync::Arc;
 
-use adapters::{BinanceGateway, BinanceGatewayConfig, BinanceUserDataStream};
+use adapters::{BinanceAuth, BinanceGateway, BinanceGatewayConfig, BinancePrivateUserDataStream};
 use clap::Parser;
 use tracing::{error, info};
 
@@ -41,7 +42,7 @@ struct Cli {
     #[arg(long, default_value = "USDT")]
     asset: String,
 
-    /// Connect to User Data Stream WebSocket to listen for live order execution reports.
+    /// Connect to the private User Data Stream for normalized account and order events.
     #[arg(long, default_value_t = false)]
     listen: bool,
 }
@@ -73,6 +74,8 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    let stream_auth =
+        (cli.listen && is_spot).then(|| BinanceAuth::new(api_key.clone(), secret_key.clone()));
     let config = BinanceGatewayConfig {
         api_key,
         secret_key,
@@ -82,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         risk_policy: domain::RiskPolicy::default(),
     };
 
-    let gateway = BinanceGateway::new(config)?;
+    let gateway = Arc::new(BinanceGateway::new(config)?);
 
     if cli.check_balance {
         info!(asset = %cli.asset, "Querying account balance from Binance...");
@@ -95,24 +98,46 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if cli.listen {
-        info!("Requesting listenKey from Binance...");
-        let listen_key = gateway.create_listen_key().await?;
-        info!(listen_key = %listen_key, "Acquired listenKey for User Data Stream");
+        let mut user_stream = if is_spot {
+            let auth = stream_auth
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Spot stream credentials are unavailable"))?;
+            BinancePrivateUserDataStream::connect_spot(auth, cli.testnet).await?
+        } else {
+            let listen_key = gateway.create_listen_key().await?;
+            BinancePrivateUserDataStream::connect_futures(listen_key, cli.testnet, gateway.clone())
+                .await?
+        };
+        info!("Listening for private account events (Press Ctrl+C to exit)...");
 
-        let mut user_stream =
-            BinanceUserDataStream::connect(listen_key, cli.testnet, is_spot).await?;
-        info!("Listening for live execution reports (Press Ctrl+C to exit)...");
-
-        while let Some(update) = user_stream.next_update().await {
-            info!(
-                order_id = update.order_id,
-                symbol = %update.symbol,
-                side = ?update.side,
-                status = %update.status,
-                last_price = %update.last_filled_price,
-                last_qty = %update.last_filled_qty,
-                "Received Execution Update"
-            );
+        let shutdown_signal = tokio::signal::ctrl_c();
+        tokio::pin!(shutdown_signal);
+        loop {
+            tokio::select! {
+                signal_result = &mut shutdown_signal => {
+                    if let Err(error) = signal_result {
+                        user_stream.shutdown().await?;
+                        return Err(error.into());
+                    }
+                    user_stream.shutdown().await?;
+                    info!("Private account stream shut down; account reconciliation was not performed.");
+                    break;
+                }
+                event = user_stream.next_event() => {
+                    match event {
+                        Some(Ok(event)) => info!(event = ?event, "Received private account event"),
+                        Some(Err(error)) => {
+                            error!(error = %error, "Private account stream failed; reconciliation is required");
+                            user_stream.shutdown().await?;
+                            return Err(error.into());
+                        }
+                        None => {
+                            user_stream.shutdown().await?;
+                            anyhow::bail!("Private account stream ended without an explicit reconciliation result");
+                        }
+                    }
+                }
+            }
         }
     }
 
