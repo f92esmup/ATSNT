@@ -19,7 +19,7 @@ use crate::traits::AsyncMarketDataStream;
 /// Configuration parameters for the Binance WebSocket client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BinanceWsConfig {
-    /// WebSocket base endpoint URL. Default: `"wss://fstream.binance.com/ws/{symbol}@aggTrade"`.
+    /// WebSocket base endpoint URL. Default: `"wss://fstream.binancefuture.com/ws/{symbol}@aggTrade"`.
     pub base_url: String,
     /// Target trading symbol in lowercase (e.g., `"btcusdt"`).
     pub symbol: String,
@@ -36,7 +36,7 @@ pub struct BinanceWsConfig {
 impl Default for BinanceWsConfig {
     fn default() -> Self {
         Self {
-            base_url: "wss://fstream.binance.com/ws/{symbol}@aggTrade".to_string(),
+            base_url: "wss://fstream.binancefuture.com/ws/{symbol}@aggTrade".to_string(),
             symbol: "btcusdt".to_string(),
             channel_capacity: 10_000,
             initial_backoff_ms: 500,
@@ -55,10 +55,10 @@ impl BinanceWsConfig {
         }
     }
 
-    /// Creates a configuration for Binance Futures (`fstream.binance.com`).
+    /// Creates a configuration for Binance Futures (`fstream.binancefuture.com`).
     pub fn futures(symbol: impl Into<String>) -> Self {
         Self {
-            base_url: "wss://fstream.binance.com/ws/{symbol}@aggTrade".to_string(),
+            base_url: "wss://fstream.binancefuture.com/ws/{symbol}@aggTrade".to_string(),
             symbol: symbol.into().to_ascii_lowercase(),
             ..Self::default()
         }
@@ -440,13 +440,13 @@ mod tests {
         let config_default = BinanceWsConfig::default();
         assert_eq!(
             config_default.stream_url(),
-            "wss://fstream.binance.com/ws/btcusdt@aggTrade"
+            "wss://fstream.binancefuture.com/ws/btcusdt@aggTrade"
         );
 
         let config_eth = BinanceWsConfig::for_symbol("ETHUSDT");
         assert_eq!(
             config_eth.stream_url(),
-            "wss://fstream.binance.com/ws/ethusdt@aggTrade"
+            "wss://fstream.binancefuture.com/ws/ethusdt@aggTrade"
         );
 
         let custom_config = BinanceWsConfig {

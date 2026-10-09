@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use adapters::{
-    format_unix_ms_rfc3339, BigQuerySink, BinanceCsvReader, BinanceParquetReader, HpoEvaluationRow,
-    MarketDataStream,
+    format_unix_ms_rfc3339, BigQuerySink, BinanceCsvReader, BinanceParquetReader, GcsParquetSink,
+    HpoEvaluationRow, MarketDataStream,
 };
 use anyhow::{Context, Result};
 use backtest::{
@@ -63,6 +63,10 @@ struct Args {
     /// Stream evaluated candidate parameters to Google Cloud BigQuery
     #[arg(long, default_value_t = false)]
     gcp_bigquery: bool,
+
+    /// Export HPO evaluation report to Google Cloud Storage
+    #[arg(long, default_value_t = false)]
+    gcs_upload: bool,
 }
 
 #[tokio::main]
@@ -295,10 +299,10 @@ async fn main() -> Result<()> {
                     timestamp: timestamp_str.clone(),
                     strategy_id: "dollar_bars_cusum".to_string(),
                     parameter_space: serde_json::to_string(&eval.config).unwrap_or_default(),
-                    is_sharpe: eval.mean_is_sortino,
-                    oos_sharpe: eval.mean_oos_sortino,
-                    deflated_sharpe_ratio: eval.fitness,
-                    parameter_stability_score: eval.stability_score,
+                    is_sharpe: eval.mean_is_sortino.round_dp(4),
+                    oos_sharpe: eval.mean_oos_sortino.round_dp(4),
+                    deflated_sharpe_ratio: eval.fitness.round_dp(4),
+                    parameter_stability_score: eval.stability_score.round_dp(4),
                     total_trades: 0,
                     win_rate: dec!(0),
                     max_drawdown_pct: dec!(0),
@@ -309,6 +313,17 @@ async fn main() -> Result<()> {
                 rows.len()
             );
             let _ = bq.insert_hpo_evaluations(&rows).await;
+        }
+
+        if args.gcs_upload {
+            let gcs = GcsParquetSink::from_env("storage/reports");
+            let _ = gcs
+                .upload_file(
+                    &report_path,
+                    &format!("hpo/hpo_run_{}.json", timestamp),
+                    "application/json",
+                )
+                .await;
         }
     }
 

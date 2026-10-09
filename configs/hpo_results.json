@@ -2,6 +2,6 @@
   "rolling_window_len": 10,
   "cusum_vol_multiplier": "1.0",
   "z_entry_threshold": "1.2",
-  "z_stop_threshold": "2.5",
+  "z_stop_threshold": "3.5",
   "time_barrier_bars": 10
 }

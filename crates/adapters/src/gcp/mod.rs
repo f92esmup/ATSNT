@@ -5,10 +5,12 @@
 //! - [`gcs`]: Columnar Apache Parquet persistence for simulation trajectories and historical data.
 //! - [`telegram`]: Mobile push alerting via official Telegram Bot API webhooks.
 
+pub mod auth;
 pub mod bigquery;
 pub mod gcs;
 pub mod telegram;
 
+pub use auth::GcpAuthResolver;
 pub use bigquery::{BigQuerySink, EquitySnapshotRow, HpoEvaluationRow, MonteCarloRow, TradeRow};
 pub use gcs::GcsParquetSink;
 pub use telegram::TelegramNotifier;

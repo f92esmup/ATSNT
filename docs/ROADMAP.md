@@ -51,7 +51,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] Migrate asynchronous paper trading runtime (`PaperSessionRuntime` & `PaperSessionOwner`) to `crates/backtest`.
 - [x] Reorganize quantitative sampling and filters into pure module `domain::analytics` (`sampling`, `filters`, `stats`).
 - [x] Workspace dependencies sanitized (`axum`, `tower-http`, `tokio-stream` removed).
-- [x] *(Phase 2)* GCP Cloud-First Data Layer: BigQuery / GCS Parquet exporter and Telegram alerting.
+- [x] *(Phase 2)* GCP Cloud-First Data Layer: BigQuery / GCS Parquet exporter, Telegram alerting, and Looker Studio BI integration ([`docs/architecture/10-gcp-cloud-architecture.md`](architecture/10-gcp-cloud-architecture.md)).
 
 ---
 
@@ -64,10 +64,11 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 
 ---
 
-### Proposed Workstream: Cloud-First Architecture & Looker Studio Integration
-- **De-risking & Zero-Trust**: In-process web servers are retired to ensure the trading engine runs headless, air-gapped in private VPC networks without public open ports.
-- **Reporting & Business Intelligence**: Post-trade auditing, Monte Carlo trajectories, and HPO parameter evaluations stream to BigQuery / GCS Parquet for visualization via Looker Studio (zero-code frontend maintenance).
-- **Proactive Mobile Alerts**: Execution fills, risk threshold breaches, and circuit breakers trigger outbound webhooks (Telegram/Discord) directly to operators' devices.
+### Cloud-First Architecture & Looker Studio Integration (Milestone 5 Phase 2)
+*(Architecture specification: [`docs/architecture/10-gcp-cloud-architecture.md`](architecture/10-gcp-cloud-architecture.md))*
+- [x] **De-risking & Zero-Trust**: In-process web servers are retired to ensure the trading engine runs headless, air-gapped in private VPC networks without public open ports.
+- [x] **Reporting & Business Intelligence**: Post-trade auditing, Monte Carlo trajectories, and HPO parameter evaluations stream to BigQuery / GCS Parquet for visualization via Looker Studio (zero-code frontend maintenance).
+- [x] **Proactive Mobile Alerts**: Execution fills, risk threshold breaches, and circuit breakers trigger outbound webhooks (Telegram/Discord) directly to operators' devices.
 
 ---
 

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
 
+use super::auth::GcpAuthResolver;
 use crate::error::AdapterError;
 
 /// Individual closed trade audit record for BigQuery `trades` table.
@@ -131,12 +132,25 @@ impl BigQuerySink {
             return Ok(());
         }
 
-        let (Some(project_id), Some(token)) = (&self.project_id, &self.auth_token) else {
+        let project_id = match &self.project_id {
+            Some(p) => Some(p.clone()),
+            None => GcpAuthResolver::resolve_project_id(&self.client).await,
+        };
+        let token = match &self.auth_token {
+            Some(t) => Some(t.clone()),
+            None => GcpAuthResolver::resolve_token(&self.client).await,
+        };
+
+        let (Some(project_id), Some(token)) = (project_id, token) else {
+            println!(
+                "# [GCP :: BigQuery] Insert skipped for {}.{} (credentials or project not resolved)",
+                self.dataset_id, table_id
+            );
             info!(
                 target: "bigquery",
                 table = %table_id,
                 count = rows.len(),
-                "BigQuery insert skipped (GCP credentials/project not set)"
+                "BigQuery insert skipped (GCP credentials/project not resolved)"
             );
             return Ok(());
         };
@@ -155,14 +169,70 @@ impl BigQuerySink {
         let response = self
             .client
             .post(&url)
-            .bearer_auth(token)
+            .bearer_auth(&token)
             .json(&payload)
             .send()
             .await?;
 
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            warn!(
+                target: "bigquery",
+                table = %table_id,
+                "BigQuery returned 401 Unauthorized; attempting token renewal..."
+            );
+            if let Some(fresh_token) = GcpAuthResolver::resolve_token(&self.client).await {
+                let retry_resp = self
+                    .client
+                    .post(&url)
+                    .bearer_auth(fresh_token)
+                    .json(&payload)
+                    .send()
+                    .await?;
+                if retry_resp.status().is_success() {
+                    if table_id == "equity_snapshots" {
+                        println!(
+                            "# [GCP :: BigQuery] Telemetry snapshot streamed -> {}:{}.{} ({} row)",
+                            project_id,
+                            self.dataset_id,
+                            table_id,
+                            rows.len()
+                        );
+                    } else {
+                        println!(
+                            "\n############################################################\n\
+                             # [GCP :: BigQuery] STREAMING INSERT SUCCESSFUL            #\n\
+                             # Service: Google Cloud BigQuery                          #\n\
+                             # Table:   {}:{}.{}\n\
+                             # Rows:    {} row(s) streamed (token renewed)            #\n\
+                             ############################################################\n",
+                            project_id,
+                            self.dataset_id,
+                            table_id,
+                            rows.len()
+                        );
+                    }
+                    info!(
+                        target: "bigquery",
+                        table = %table_id,
+                        "BigQuery insert succeeded after token renewal"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            println!(
+                "\n############################################################\n\
+                 # [GCP :: BigQuery ERROR] Streaming Insert Failed          #\n\
+                 # Table:   {}:{}.{}\n\
+                 # Status:  {}\n\
+                 # Details: {}\n\
+                 ############################################################\n",
+                project_id, self.dataset_id, table_id, status, body
+            );
             warn!(
                 target: "bigquery",
                 status = %status,
@@ -170,6 +240,51 @@ impl BigQuerySink {
                 body = %body,
                 "BigQuery streaming insert returned non-success"
             );
+        } else if let Ok(resp_json) = response.json::<serde_json::Value>().await {
+            if let Some(errors) = resp_json.get("insertErrors") {
+                if let Some(arr) = errors.as_array() {
+                    if !arr.is_empty() {
+                        println!(
+                            "\n############################################################\n\
+                             # [GCP :: BigQuery WARNING] Row Validation Errors          #\n\
+                             # Table:   {}:{}.{}\n\
+                             # Errors:  {}\n\
+                             ############################################################\n",
+                            project_id, self.dataset_id, table_id, errors
+                        );
+                        warn!(
+                            target: "bigquery",
+                            table = %table_id,
+                            errors = %errors,
+                            "BigQuery streaming insert returned row validation errors"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+
+            if table_id == "equity_snapshots" {
+                println!(
+                    "# [GCP :: BigQuery] Telemetry snapshot streamed -> {}:{}.{} ({} row)",
+                    project_id,
+                    self.dataset_id,
+                    table_id,
+                    rows.len()
+                );
+            } else {
+                println!(
+                    "\n############################################################\n\
+                     # [GCP :: BigQuery] STREAMING INSERT SUCCESSFUL            #\n\
+                     # Service: Google Cloud BigQuery                          #\n\
+                     # Table:   {}:{}.{}\n\
+                     # Rows:    {} row(s) streamed successfully                 #\n\
+                     ############################################################\n",
+                    project_id,
+                    self.dataset_id,
+                    table_id,
+                    rows.len()
+                );
+            }
         }
 
         Ok(())

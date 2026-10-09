@@ -16,6 +16,7 @@ use parquet::file::properties::WriterProperties;
 use rust_decimal::Decimal;
 use tracing::{info, warn};
 
+use super::auth::GcpAuthResolver;
 use crate::error::AdapterError;
 
 /// Schema for Monte Carlo equity curve trajectories in Apache Parquet.
@@ -126,44 +127,163 @@ impl GcsParquetSink {
             "Monte Carlo trajectories saved to Parquet"
         );
 
-        // Upload to GCS if credentials and bucket are present
-        if let (Some(bucket), Some(token)) = (&self.bucket_name, &self.auth_token) {
-            let bytes = std::fs::read(&file_path)?;
-            let object_name = format!("simulations/{}", file_name);
-            let url = format!(
-                "https://storage.googleapis.com/upload/storage/v1/b/{}/o?uploadType=media&name={}",
-                bucket, object_name
+        // Upload to GCS if credentials or bucket can be resolved
+        let bytes = std::fs::read(&file_path)?;
+        let _ = self
+            .upload_bytes(
+                bytes,
+                &format!("simulations/{}", file_name),
+                "application/octet-stream",
+            )
+            .await;
+
+        Ok(file_path)
+    }
+
+    /// Uploads raw bytes directly to a GCS object in the configured or resolved bucket.
+    pub async fn upload_bytes(
+        &self,
+        bytes: Vec<u8>,
+        object_name: &str,
+        content_type: &str,
+    ) -> Result<(), AdapterError> {
+        let bucket = match &self.bucket_name {
+            Some(b) => Some(b.clone()),
+            None => {
+                let proj = GcpAuthResolver::resolve_project_id(&self.client).await;
+                proj.map(|p| format!("atsnt-lake-{}", p))
+            }
+        };
+
+        let token = match &self.auth_token {
+            Some(t) => Some(t.clone()),
+            None => GcpAuthResolver::resolve_token(&self.client).await,
+        };
+
+        let (Some(bucket), Some(token)) = (bucket, token) else {
+            println!(
+                "# [GCP :: Cloud Storage] Upload skipped for {} (credentials or bucket not resolved)",
+                object_name
             );
+            info!(
+                target: "gcs",
+                object = %object_name,
+                "GCS upload skipped (GCP credentials/bucket not resolved)"
+            );
+            return Ok(());
+        };
 
-            let res = self
-                .client
-                .post(&url)
-                .bearer_auth(token)
-                .header("Content-Type", "application/octet-stream")
-                .body(bytes)
-                .send()
-                .await?;
+        let url = format!(
+            "https://storage.googleapis.com/upload/storage/v1/b/{}/o?uploadType=media&name={}",
+            bucket, object_name
+        );
 
-            if !res.status().is_success() {
-                let status = res.status();
-                let body = res.text().await.unwrap_or_default();
-                warn!(
-                    target: "gcs",
-                    status = %status,
-                    body = %body,
-                    "GCS Parquet upload returned non-success"
-                );
-            } else {
-                info!(
-                    target: "gcs",
-                    bucket = %bucket,
-                    object = %object_name,
-                    "Parquet file successfully uploaded to GCS"
-                );
+        let res = self
+            .client
+            .post(&url)
+            .bearer_auth(&token)
+            .header("Content-Type", content_type)
+            .body(bytes.clone())
+            .send()
+            .await?;
+
+        if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+            warn!(
+                target: "gcs",
+                object = %object_name,
+                "GCS returned 401 Unauthorized; attempting token renewal..."
+            );
+            if let Some(fresh_token) = GcpAuthResolver::resolve_token(&self.client).await {
+                let retry = self
+                    .client
+                    .post(&url)
+                    .bearer_auth(fresh_token)
+                    .header("Content-Type", content_type)
+                    .body(bytes.clone())
+                    .send()
+                    .await?;
+                if retry.status().is_success() {
+                    let size_kb = bytes.len() as f64 / 1024.0;
+                    println!(
+                        "\n############################################################\n\
+                         # [GCP :: Cloud Storage] UPLOAD COMPLETE (Token Renewed)   #\n\
+                         # Service: Google Cloud Storage (GCS)                     #\n\
+                         # Target:  gs://{}/{}\n\
+                         # Size:    {} bytes ({:.2} KB)\n\
+                         # Type:    {}\n\
+                         ############################################################\n",
+                        bucket,
+                        object_name,
+                        bytes.len(),
+                        size_kb,
+                        content_type
+                    );
+                    info!(
+                        target: "gcs",
+                        bucket = %bucket,
+                        object = %object_name,
+                        "GCS upload succeeded after token renewal"
+                    );
+                    return Ok(());
+                }
             }
         }
 
-        Ok(file_path)
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            println!(
+                "\n############################################################\n\
+                 # [GCP :: Cloud Storage ERROR] Upload Failed               #\n\
+                 # Target: gs://{}/{}\n\
+                 # Status: {}\n\
+                 # Body:   {}\n\
+                 ############################################################\n",
+                bucket, object_name, status, body
+            );
+            warn!(
+                target: "gcs",
+                status = %status,
+                object = %object_name,
+                body = %body,
+                "GCS upload returned non-success"
+            );
+        } else {
+            let size_kb = bytes.len() as f64 / 1024.0;
+            println!(
+                "\n############################################################\n\
+                 # [GCP :: Cloud Storage] UPLOAD COMPLETE                   #\n\
+                 # Service: Google Cloud Storage (GCS)                     #\n\
+                 # Target:  gs://{}/{}\n\
+                 # Size:    {} bytes ({:.2} KB)\n\
+                 # Type:    {}\n\
+                 ############################################################\n",
+                bucket,
+                object_name,
+                bytes.len(),
+                size_kb,
+                content_type
+            );
+            info!(
+                target: "gcs",
+                bucket = %bucket,
+                object = %object_name,
+                "File successfully uploaded to GCS"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Uploads an arbitrary local file to GCS.
+    pub async fn upload_file<P: AsRef<Path>>(
+        &self,
+        local_path: P,
+        object_name: &str,
+        content_type: &str,
+    ) -> Result<(), AdapterError> {
+        let bytes = std::fs::read(local_path.as_ref())?;
+        self.upload_bytes(bytes, object_name, content_type).await
     }
 }
 

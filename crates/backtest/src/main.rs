@@ -215,6 +215,13 @@ async fn main() -> Result<()> {
 
     if args.gcp_bigquery && !closed_trades.is_empty() {
         let bq = BigQuerySink::from_env();
+        let symbol_name = args
+            .data
+            .file_name()
+            .and_then(|f| f.to_str())
+            .and_then(|s| s.split('-').next())
+            .unwrap_or("BTCUSDT")
+            .to_uppercase();
         let rows: Vec<TradeRow> = closed_trades
             .iter()
             .enumerate()
@@ -222,16 +229,16 @@ async fn main() -> Result<()> {
                 trade_id: format!("bt_{}_{}", timestamp, idx),
                 session_id: format!("backtest_{}", timestamp),
                 strategy_id: strategy.name().to_string(),
-                symbol: "HISTORICAL".to_string(),
+                symbol: symbol_name.clone(),
                 side: "Closed".to_string(),
                 entry_timestamp: format_unix_ms_rfc3339(ct.exit_time),
                 exit_timestamp: format_unix_ms_rfc3339(ct.exit_time),
                 entry_price: dec!(0),
                 exit_price: dec!(0),
                 quantity: dec!(0),
-                gross_pnl: ct.pnl_gross,
-                fees_paid: ct.fees_paid,
-                net_pnl: ct.pnl_net,
+                gross_pnl: ct.pnl_gross.round_dp(4),
+                fees_paid: ct.fees_paid.round_dp(4),
+                net_pnl: ct.pnl_net.round_dp(4),
                 exit_reason: "BacktestTrade".to_string(),
                 holding_duration_seconds: 0,
             })
@@ -241,6 +248,17 @@ async fn main() -> Result<()> {
             rows.len()
         );
         let _ = bq.insert_trades(&rows).await;
+    }
+
+    if args.gcs_parquet {
+        let gcs_sink = GcsParquetSink::from_env("storage/parquet");
+        let _ = gcs_sink
+            .upload_file(
+                &backtest_report_path,
+                &format!("backtests/backtest_{}.json", timestamp),
+                "application/json",
+            )
+            .await;
     }
 
     // 4. Monte Carlo Stress-Testing
@@ -337,11 +355,14 @@ async fn main() -> Result<()> {
                     strategy_id: strategy.name().to_string(),
                     iterations: mc_report.metrics.total_simulations as u64,
                     resample_method: "CircularBlockBootstrap".to_string(),
-                    historical_max_drawdown: mc_report.metrics.historical_max_drawdown_pct,
-                    p50_max_drawdown: mc_report.metrics.p50_max_drawdown_pct,
-                    p95_max_drawdown: mc_report.metrics.p95_max_drawdown_pct,
-                    p99_max_drawdown: mc_report.metrics.p99_max_drawdown_pct,
-                    probability_of_ruin_pct: mc_report.metrics.probability_of_ruin_pct,
+                    historical_max_drawdown: mc_report
+                        .metrics
+                        .historical_max_drawdown_pct
+                        .round_dp(4),
+                    p50_max_drawdown: mc_report.metrics.p50_max_drawdown_pct.round_dp(4),
+                    p95_max_drawdown: mc_report.metrics.p95_max_drawdown_pct.round_dp(4),
+                    p99_max_drawdown: mc_report.metrics.p99_max_drawdown_pct.round_dp(4),
+                    probability_of_ruin_pct: mc_report.metrics.probability_of_ruin_pct.round_dp(4),
                 };
                 println!(
                     "[*] Streaming Monte Carlo summary to BigQuery (atsnt_bi.monte_carlo_runs)..."

@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
         if args.spot {
             "Binance Spot (wss://stream.binance.com:9443)"
         } else {
-            "Binance Futures USDT-M (wss://fstream.binance.com)"
+            "Binance Futures USDT-M (wss://fstream.binancefuture.com)"
         }
     );
     println!(" Dollar Bar Threshold: ${}", args.dollar_bar);
@@ -188,6 +188,7 @@ async fn main() -> Result<()> {
     let mut last_mark_price = Decimal::ZERO;
     let mut last_mtm_print = Instant::now();
     let mtm_interval = Duration::from_secs(1);
+    let mut last_entry_info: Option<(PositionSide, Decimal, Decimal, i64)> = None;
 
     loop {
         tokio::select! {
@@ -254,7 +255,8 @@ async fn main() -> Result<()> {
                                         intent.side, intent.price, intent.stop_loss, intent.take_profit, intent.max_bars_hold
                                     );
                                 }
-                                 PaperTradingEvent::PositionOpened { side, entry_price, quantity, stop_loss, take_profit } => {
+                                PaperTradingEvent::PositionOpened { side, entry_price, quantity, stop_loss, take_profit } => {
+                                    last_entry_info = Some((side, entry_price, quantity, trade.timestamp));
                                     println!(
                                         "[EXECUTION] Position Opened: {:?}\n\
                                          Entry Price:  ${}\n\
@@ -283,14 +285,32 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 PaperTradingEvent::PositionClosed { exit_reason, exit_price, net_pnl, total_equity } => {
+                                    let (side_str, entry_p, qty, entry_ts) = match last_entry_info.take() {
+                                        Some((s, ep, q, et)) => (
+                                            match s {
+                                                PositionSide::Long => "Long".to_string(),
+                                                PositionSide::Short => "Short".to_string(),
+                                            },
+                                            ep,
+                                            q,
+                                            et,
+                                        ),
+                                        None => ("ClosedPosition".to_string(), exit_price, dec!(0), trade.timestamp),
+                                    };
+                                    let holding_duration = ((trade.timestamp - entry_ts) / 1000).max(0);
+
                                     println!(
                                         "\n============================================================\n\
                                          [BARRIER EXIT] Position Closed: Reason: {}\n\
+                                         Side:         {}\n\
+                                         Entry Price:  ${}\n\
                                          Exit Price:   ${}\n\
+                                         Quantity:     {} units\n\
+                                         Duration:     {}s\n\
                                          Realized PnL: ${:.2} (net of fees and slippage)\n\
                                          Total Equity: ${:.2}\n\
                                          ============================================================\n",
-                                        exit_reason, exit_price, net_pnl, total_equity
+                                        exit_reason, side_str, entry_p, exit_price, qty, holding_duration, net_pnl, total_equity
                                     );
                                     if let Some(t) = &telegram {
                                         let msg = TelegramNotifier::format_position_closed(
@@ -308,17 +328,17 @@ async fn main() -> Result<()> {
                                             session_id: format!("paper_{}", args.symbol),
                                             strategy_id: selected_strategy.name().to_string(),
                                             symbol: args.symbol.to_uppercase(),
-                                            side: "ClosedPosition".to_string(),
-                                            entry_timestamp: format_unix_ms_rfc3339(trade.timestamp),
+                                            side: side_str,
+                                            entry_timestamp: format_unix_ms_rfc3339(entry_ts),
                                             exit_timestamp: format_unix_ms_rfc3339(trade.timestamp),
-                                            entry_price: exit_price,
-                                            exit_price,
-                                            quantity: dec!(0),
-                                            gross_pnl: net_pnl,
-                                            fees_paid: dec!(0),
-                                            net_pnl,
+                                            entry_price: entry_p.round_dp(4),
+                                            exit_price: exit_price.round_dp(4),
+                                            quantity: qty.round_dp(4),
+                                            gross_pnl: net_pnl.round_dp(4),
+                                            fees_paid: dec!(0).round_dp(4),
+                                            net_pnl: net_pnl.round_dp(4),
                                             exit_reason: exit_reason.clone(),
-                                            holding_duration_seconds: 0,
+                                            holding_duration_seconds: holding_duration,
                                         };
                                         let _ = bq.insert_trades(&[row]).await;
                                     }
@@ -344,15 +364,15 @@ async fn main() -> Result<()> {
                                                 timestamp: format_unix_ms_rfc3339(trade.timestamp),
                                                 session_id: format!("paper_{}", args.symbol),
                                                 symbol: args.symbol.to_uppercase(),
-                                                cash_equity: session.cash_equity(),
-                                                unrealized_pnl,
-                                                total_equity,
-                                                drawdown_pct,
+                                                cash_equity: session.cash_equity().round_dp(4),
+                                                unrealized_pnl: unrealized_pnl.round_dp(4),
+                                                total_equity: total_equity.round_dp(4),
+                                                drawdown_pct: drawdown_pct.round_dp(4),
                                                 active_position_side: session.active_position().map(|p| match p.side {
                                                     PositionSide::Long => "Long".to_string(),
                                                     PositionSide::Short => "Short".to_string(),
                                                 }),
-                                                active_position_qty: session.active_position().map(|p| p.quantity),
+                                                active_position_qty: session.active_position().map(|p| p.quantity.round_dp(4)),
                                             };
                                             let _ = bq.insert_equity_snapshots(&[row]).await;
                                         }
