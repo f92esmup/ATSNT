@@ -263,46 +263,7 @@ Looker Studio connects directly to BigQuery using the standard Google connector.
    WHERE row_num = 1;
    ```
 
-2. **`v_daily_pnl`**:
-   Aggregates net PnL, trade volume, and win rate by day, session, and strategy for performance charting:
-   ```sql
-   CREATE OR REPLACE VIEW `atsnt_bi.v_daily_pnl` AS
-   SELECT
-       DATE(exit_timestamp) AS trade_date,
-       symbol,
-       strategy_id,
-       session_id,
-       COUNT(1) AS total_trades,
-       COUNTIF(net_pnl > 0) AS winning_trades,
-       SAFE_DIVIDE(COUNTIF(net_pnl > 0), COUNT(1)) AS win_rate,
-       SUM(gross_pnl) AS daily_gross_pnl,
-       SUM(fees_paid) AS daily_fees,
-       SUM(net_pnl) AS daily_net_pnl
-   FROM `atsnt_bi.v_trades`
-   GROUP BY trade_date, symbol, strategy_id, session_id;
-   ```
-
-3. **`v_strategy_performance`**:
-   Summarizes high-level strategy and session attribution (Profit Factor, Total Net Return, Average Holding Time):
-   ```sql
-   CREATE OR REPLACE VIEW `atsnt_bi.v_strategy_performance` AS
-   SELECT
-       strategy_id,
-       session_id,
-       symbol,
-       COUNT(1) AS total_trades,
-       COUNTIF(net_pnl > 0) AS winning_trades,
-       COUNTIF(net_pnl <= 0) AS losing_trades,
-       ROUND(SAFE_DIVIDE(COUNTIF(net_pnl > 0), COUNT(1)) * 100, 2) AS win_rate_pct,
-       ROUND(SUM(net_pnl), 2) AS total_net_profit,
-       ROUND(SUM(fees_paid), 2) AS total_fees_paid,
-       ROUND(SAFE_DIVIDE(SUM(IF(net_pnl > 0, net_pnl, 0)), ABS(SUM(IF(net_pnl < 0, net_pnl, 0)))), 2) AS profit_factor,
-       ROUND(AVG(holding_duration_seconds) / 60, 1) AS avg_holding_minutes
-   FROM `atsnt_bi.v_trades`
-   GROUP BY strategy_id, session_id, symbol;
-   ```
-
-4. **`v_live_paper_monitor`**:
+2. **`v_live_paper_monitor`**:
    Returns the latest mark-to-market state of each active paper/live trading session:
    ```sql
    CREATE OR REPLACE VIEW `atsnt_bi.v_live_paper_monitor` AS
