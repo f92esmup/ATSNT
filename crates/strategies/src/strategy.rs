@@ -32,3 +32,46 @@ pub trait Strategy: Send {
     /// Clears internal state buffers to allow clean replay or backtest isolation.
     fn reset(&mut self);
 }
+
+/// Universal contract for hyperparameter search spaces and stability perturbations.
+pub trait HyperparameterSpace: Send + Sync + Clone {
+    /// Strategy configuration type parameterized by this space.
+    type Config: Clone
+        + Send
+        + Sync
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug
+        + std::fmt::Display
+        + 'static;
+
+    /// Generates candidate parameter combinations within this space, bounded by `max_candidates`.
+    fn generate_candidates(&self, max_candidates: usize) -> Vec<Self::Config>;
+
+    /// Generates neighboring configurations around `base` for local parameter stability analysis (AFML Ch. 14).
+    fn perturb_neighbors(&self, base: &Self::Config) -> Vec<Self::Config>;
+}
+
+/// Extension trait for quantitative trading strategies that support automated hyperparameter optimization.
+pub trait OptimizableStrategy: Strategy + Sync + Sized {
+    /// Configuration type that parameterizes this strategy.
+    type Config: Clone
+        + Send
+        + Sync
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug
+        + std::fmt::Display
+        + 'static;
+    /// Search space defining hyperparameter domains and stability perturbations.
+    type Space: HyperparameterSpace<Config = Self::Config>;
+
+    /// Canonical identifier for the strategy (e.g. "dollar_bars_cusum").
+    fn id() -> &'static str;
+
+    /// Constructs an active strategy instance from its configuration parameters.
+    fn from_config(config: Self::Config) -> Result<Self, domain::DomainError>;
+
+    /// Default search space defining hyperparameter candidate domains and ranges.
+    fn default_space() -> Self::Space;
+}

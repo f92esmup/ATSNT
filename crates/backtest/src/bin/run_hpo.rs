@@ -8,9 +8,7 @@ use adapters::{
     HpoEvaluationRow, MarketDataStream,
 };
 use anyhow::{Context, Result};
-use backtest::{
-    BacktestConfig, ParameterSpace, WalkForwardConfig, WalkForwardOptimizer, WalkForwardSplitter,
-};
+use backtest::{BacktestConfig, WalkForwardConfig, WalkForwardOptimizer, WalkForwardSplitter};
 use clap::Parser;
 use domain::DollarBarAggregator;
 use rust_decimal::Decimal;
@@ -59,6 +57,14 @@ struct Args {
         default_value = "configs/hpo_results.json"
     )]
     output_config: PathBuf,
+
+    /// Target strategy identifier to optimize (e.g. 'dollar_bars_cusum')
+    #[arg(long, default_value = "dollar_bars_cusum")]
+    strategy: String,
+
+    /// Optional path to JSON file overriding the strategy's default parameter search space
+    #[arg(long)]
+    param_space: Option<PathBuf>,
 
     /// Stream evaluated candidate parameters to Google Cloud BigQuery
     #[arg(long, default_value_t = false)]
@@ -168,9 +174,33 @@ async fn main() -> Result<()> {
         max_daily_drawdown_pct: dec!(0.05),
     };
 
-    let param_space = ParameterSpace::default();
-    let optimizer = WalkForwardOptimizer::new(engine_config, param_space);
-    let evaluations = optimizer.run_optimization(&bars, &folds, args.candidates)?;
+    let (evaluations, winner) = match args.strategy.as_str() {
+        "dollar_bars_cusum" | "cusum" => {
+            let param_space = if let Some(path) = &args.param_space {
+                let content = fs::read_to_string(path).with_context(|| {
+                    format!("Failed to read parameter space file: {}", path.display())
+                })?;
+                serde_json::from_str::<strategies::DollarBarsCusumSpace>(&content)
+                    .with_context(|| "Failed to parse parameter space JSON")?
+            } else {
+                strategies::DollarBarsCusumSpace::default()
+            };
+
+            let optimizer = WalkForwardOptimizer::<strategies::DollarBarsCusumStrategy>::new(
+                engine_config,
+                param_space,
+            );
+            let evals = optimizer.run_optimization(&bars, &folds, args.candidates)?;
+            let win = evals.first().cloned();
+            (evals, win)
+        }
+        unknown => {
+            anyhow::bail!(
+                "Unknown strategy '{}'. Available strategies: 'dollar_bars_cusum'",
+                unknown
+            );
+        }
+    };
 
     let opt_duration = opt_start.elapsed().as_secs_f64();
     println!(
@@ -186,22 +216,15 @@ async fn main() -> Result<()> {
     println!(" TOP 5 CANDIDATES (Ranked by Stability-Penalized Fitness)   ");
     println!("============================================================");
     println!(
-        "{:<4} | {:<20} | {:<7} | {:<7} | {:<6} | {:<7} | {:<6}",
-        "Rank", "Params (W/V/Ze/Zs/Tb)", "IS Sort", "OOS Sort", "Stab.", "Fitness", "DSR Sig"
+        "{:<4} | {:<25} | {:<7} | {:<7} | {:<6} | {:<7} | {:<6}",
+        "Rank", "Parameters", "IS Sort", "OOS Sort", "Stab.", "Fitness", "DSR Sig"
     );
     println!("------------------------------------------------------------");
 
     for (rank, eval) in evaluations.iter().take(5).enumerate() {
-        let p_str = format!(
-            "{}/{}/{}/{}/{}",
-            eval.config.rolling_window_len,
-            eval.config.cusum_vol_multiplier,
-            eval.config.z_entry_threshold,
-            eval.config.z_stop_threshold,
-            eval.config.time_barrier_bars
-        );
+        let p_str = format!("{}", eval.config);
         println!(
-            "#{:<3} | {:<20} | {:<7.2} | {:<7.2} | {:<6.2} | {:<7.2} | {}",
+            "#{:<3} | {:<25} | {:<7.2} | {:<7.2} | {:<6.2} | {:<7.2} | {}",
             rank + 1,
             p_str,
             eval.mean_is_sortino,
@@ -217,28 +240,10 @@ async fn main() -> Result<()> {
     }
     println!("============================================================");
 
-    if let Some(winner) = evaluations.first() {
+    if let Some(winner) = &winner {
         println!("\n[WINNER] Selected Robust Parameter Configuration:");
-        println!(
-            "  • Rolling Window Lookback:   {} bars",
-            winner.config.rolling_window_len
-        );
-        println!(
-            "  • Dynamic CUSUM Vol Mult:    {}",
-            winner.config.cusum_vol_multiplier
-        );
-        println!(
-            "  • Z-Score Entry Threshold:   {}",
-            winner.config.z_entry_threshold
-        );
-        println!(
-            "  • Z-Score Stop Loss Barrier: {}",
-            winner.config.z_stop_threshold
-        );
-        println!(
-            "  • Time Barrier:              {} bars",
-            winner.config.time_barrier_bars
-        );
+        println!("  • Strategy:                  {}", args.strategy);
+        println!("  • Configuration:             {}", winner.config);
         println!(
             "  • Mean In-Sample Sortino:    {:.2}",
             winner.mean_is_sortino
@@ -274,6 +279,7 @@ async fn main() -> Result<()> {
 
         let report = json!({
             "timestamp": timestamp,
+            "strategy": args.strategy,
             "data_source": args.data.display().to_string(),
             "total_bars": bars.len(),
             "folds_count": folds.len(),
@@ -297,7 +303,7 @@ async fn main() -> Result<()> {
                 .map(|(idx, eval)| HpoEvaluationRow {
                     run_id: format!("hpo_{}_{}", timestamp, idx),
                     timestamp: timestamp_str.clone(),
-                    strategy_id: "dollar_bars_cusum".to_string(),
+                    strategy_id: args.strategy.clone(),
                     parameter_space: serde_json::to_string(&eval.config).unwrap_or_default(),
                     is_sharpe: eval.mean_is_sortino.round_dp(4),
                     oos_sharpe: eval.mean_oos_sortino.round_dp(4),

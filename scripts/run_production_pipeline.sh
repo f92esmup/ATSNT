@@ -18,6 +18,8 @@ cd "${PROJECT_ROOT}"
 
 # Default parameters
 SYMBOL="BTCUSDT"
+STRATEGY="dollar_bars_cusum"
+PARAM_SPACE=""
 YEAR="$(date +%Y)"
 MONTH=""
 DOLLAR_BAR="1000000"
@@ -55,6 +57,8 @@ Options:
   -i, --mc-iterations <N>    Monte Carlo bootstrap paths (default: ${MC_ITERATIONS})
   -o, --output-dir <DIR>     Root destination for Parquet dataset (default: data/historical_<YEAR>)
       --config <PATH>        Output/input path for winning HPO configuration JSON
+      --strategy <NAME>      Target strategy identifier (default: ${STRATEGY})
+      --param-space <PATH>   Optional JSON path overriding default search space
       --report <PATH>        Output path for Monte Carlo telemetry report JSON
       --gcp-bigquery         Stream telemetry and closed trades to BigQuery
       --skip-fetch           Skip Phase 1 (use already downloaded data in output-dir)
@@ -121,6 +125,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --config)
             CONFIG_PATH="$2"
+            shift 2
+            ;;
+        --strategy)
+            STRATEGY="$2"
+            shift 2
+            ;;
+        --param-space)
+            PARAM_SPACE="$2"
             shift 2
             ;;
         --report)
@@ -200,6 +212,8 @@ if [ "${NO_INHIBIT}" = "false" ] && [ "${DETACH}" = "false" ] && [ -z "${SYSTEMD
         --mc-iterations "${MC_ITERATIONS}" \
         --output-dir "${OUTPUT_DIR}" \
         --config "${CONFIG_PATH}" \
+        --strategy "${STRATEGY}" \
+        ${PARAM_SPACE:+--param-space "${PARAM_SPACE}"} \
         --report "${REPORT_PATH}" \
         $( [ "${GCP_BIGQUERY}" = "true" ] && echo "--gcp-bigquery" ) \
         $( [ "${SKIP_FETCH}" = "true" ] && echo "--skip-fetch" ) \
@@ -213,6 +227,7 @@ if [ "${DETACH}" = "true" ]; then
     echo " ATSNT - Launching Pipeline in Background"
     echo "============================================================"
     echo "Symbol:       ${SYMBOL}"
+    echo "Strategy:     ${STRATEGY}"
     echo "Year:         ${YEAR}"
     echo "Log Output:   ${LOG_FILE}"
     echo "------------------------------------------------------------"
@@ -235,6 +250,8 @@ if [ "${DETACH}" = "true" ]; then
         --mc-iterations "${MC_ITERATIONS}" \
         --output-dir "${OUTPUT_DIR}" \
         --config "${CONFIG_PATH}" \
+        --strategy "${STRATEGY}" \
+        ${PARAM_SPACE:+--param-space "${PARAM_SPACE}"} \
         --report "${REPORT_PATH}" \
         $( [ "${GCP_BIGQUERY}" = "true" ] && echo "--gcp-bigquery" ) \
         $( [ "${SKIP_FETCH}" = "true" ] && echo "--skip-fetch" ) \
@@ -300,6 +317,7 @@ if [ "${SKIP_HPO}" = "true" ]; then
 else
     echo -e "\n[2/3] Running Parallel Walk-Forward HPO (Rayon multi-core)..."
     HPO_ARGS=(
+        "--strategy" "${STRATEGY}"
         "--data" "${DATA_PATH}"
         "--dollar-bar" "${DOLLAR_BAR}"
         "--folds" "${FOLDS}"
@@ -308,6 +326,9 @@ else
         "--candidates" "${CANDIDATES}"
         "--output-config" "${CONFIG_PATH}"
     )
+    if [ -n "${PARAM_SPACE}" ]; then
+        HPO_ARGS+=("--param-space" "${PARAM_SPACE}")
+    fi
     if [ "${GCP_BIGQUERY}" = "true" ]; then
         HPO_ARGS+=("--gcp-bigquery")
     fi

@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use rust_decimal::{Decimal, MathematicalOps};
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy};
+use strategies::{HyperparameterSpace, OptimizableStrategy};
 
 use crate::config::BacktestConfig;
 use crate::engine::BacktestEngine;
@@ -12,14 +12,17 @@ use crate::error::BacktestError;
 use crate::metrics::BacktestMetrics;
 use crate::walk_forward::WalkForwardFold;
 
+/// Backwards-compatibility alias for DollarBarsCusumSpace.
+pub type ParameterSpace = strategies::DollarBarsCusumSpace;
+
 /// Runs a deterministic backtest against a contiguous slice of `DollarBar`s.
-pub fn run_backtest_slice(
+pub fn run_backtest_slice<S: OptimizableStrategy>(
     config: BacktestConfig,
-    strat_config: &DollarBarsCusumConfig,
+    strat_config: &S::Config,
     bars: &[DollarBar],
 ) -> Result<BacktestMetrics, BacktestError> {
-    let mut strategy = DollarBarsCusumStrategy::new(strat_config.clone())
-        .map_err(|e| BacktestError::Strategy(e.to_string()))?;
+    let mut strategy =
+        S::from_config(strat_config.clone()).map_err(|e| BacktestError::Strategy(e.to_string()))?;
     let mut engine = BacktestEngine::new(config);
 
     for bar in bars {
@@ -32,9 +35,9 @@ pub fn run_backtest_slice(
 
 /// Evaluation outcome for a single hyperparameter candidate across Walk-Forward folds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CandidateEvaluation {
+pub struct CandidateEvaluation<C> {
     /// Evaluated parameter configuration.
-    pub config: DollarBarsCusumConfig,
+    pub config: C,
     /// Mean In-Sample Sortino Ratio across all folds.
     pub mean_is_sortino: Decimal,
     /// Mean Out-of-Sample Sortino Ratio across all folds.
@@ -53,102 +56,22 @@ pub struct CandidateEvaluation {
     pub is_statistically_significant: bool,
 }
 
-/// Parameter search space definition for `DollarBarsCusumConfig`.
-#[derive(Debug, Clone)]
-pub struct ParameterSpace {
-    pub rolling_window_lens: Vec<usize>,
-    pub cusum_vol_multipliers: Vec<Decimal>,
-    pub z_entry_thresholds: Vec<Decimal>,
-    pub z_stop_thresholds: Vec<Decimal>,
-    pub time_barrier_bars: Vec<usize>,
-}
-
-impl Default for ParameterSpace {
-    fn default() -> Self {
-        Self {
-            rolling_window_lens: vec![10, 15, 20, 25, 30],
-            cusum_vol_multipliers: vec![dec!(1.0), dec!(1.5), dec!(2.0), dec!(2.5)],
-            z_entry_thresholds: vec![dec!(1.2), dec!(1.5), dec!(1.8), dec!(2.2)],
-            z_stop_thresholds: vec![dec!(2.5), dec!(3.0), dec!(3.5)],
-            time_barrier_bars: vec![10, 15, 20],
-        }
-    }
-}
-
-impl ParameterSpace {
-    /// Generates grid combinations within the search space.
-    pub fn generate_grid(&self, max_combinations: usize) -> Vec<DollarBarsCusumConfig> {
-        let mut configs = Vec::new();
-
-        for &win in &self.rolling_window_lens {
-            for &vol in &self.cusum_vol_multipliers {
-                for &z_entry in &self.z_entry_thresholds {
-                    for &z_stop in &self.z_stop_thresholds {
-                        for &tb in &self.time_barrier_bars {
-                            configs.push(DollarBarsCusumConfig {
-                                rolling_window_len: win,
-                                cusum_vol_multiplier: vol,
-                                z_entry_threshold: z_entry,
-                                z_stop_threshold: z_stop,
-                                time_barrier_bars: tb,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        if configs.len() > max_combinations {
-            use rand::seq::SliceRandom;
-            use rand::SeedableRng;
-            let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-            configs.shuffle(&mut rng);
-            configs.truncate(max_combinations);
-        }
-
-        configs
-    }
-}
-
 /// Evaluates parameter stability by perturbing parameters by $\pm \delta$ on In-Sample bars.
-pub fn calculate_parameter_stability(
-    base: &DollarBarsCusumConfig,
+pub fn calculate_parameter_stability<S: OptimizableStrategy>(
+    space: &S::Space,
+    base: &S::Config,
     bars: &[DollarBar],
     engine_config: BacktestConfig,
 ) -> Decimal {
-    let mut neighbors = Vec::with_capacity(4);
-
-    // Perturbation 1: cusum_vol_multiplier +/- 0.2
-    if base.cusum_vol_multiplier > dec!(0.5) {
-        let mut c = base.clone();
-        c.cusum_vol_multiplier -= dec!(0.2);
-        neighbors.push(c);
-    }
-    {
-        let mut c = base.clone();
-        c.cusum_vol_multiplier += dec!(0.2);
-        neighbors.push(c);
-    }
-
-    // Perturbation 2: z_entry_threshold +/- 0.2
-    if base.z_entry_threshold > dec!(0.5) {
-        let mut c = base.clone();
-        c.z_entry_threshold -= dec!(0.2);
-        neighbors.push(c);
-    }
-    {
-        let mut c = base.clone();
-        c.z_entry_threshold += dec!(0.2);
-        neighbors.push(c);
-    }
-
+    let neighbors = space.perturb_neighbors(base);
     let mut sortinos = Vec::with_capacity(neighbors.len() + 1);
-    if let Ok(m) = run_backtest_slice(engine_config, base, bars) {
+
+    if let Ok(m) = run_backtest_slice::<S>(engine_config, base, bars) {
         sortinos.push(m.sortino_ratio);
     }
 
     for neighbor in &neighbors {
-        if let Ok(m) = run_backtest_slice(engine_config, neighbor, bars) {
+        if let Ok(m) = run_backtest_slice::<S>(engine_config, neighbor, bars) {
             sortinos.push(m.sortino_ratio);
         }
     }
@@ -167,7 +90,6 @@ pub fn calculate_parameter_stability(
         / count;
 
     // Standard deviation of Sortinos across neighborhood
-    // Using rust_decimal sqrt feature
     let std_dev = variance.sqrt().unwrap_or(Decimal::ZERO);
 
     // Stability Score = 1 / (1 + lambda * std_dev)
@@ -222,18 +144,25 @@ fn erf(x: f64) -> f64 {
 }
 
 /// High-throughput parallel Walk-Forward optimizer powered by `Rayon`.
-pub struct WalkForwardOptimizer {
+pub struct WalkForwardOptimizer<S: OptimizableStrategy> {
     engine_config: BacktestConfig,
-    parameter_space: ParameterSpace,
+    parameter_space: S::Space,
+    _marker: std::marker::PhantomData<fn() -> S>,
 }
 
-impl WalkForwardOptimizer {
-    /// Creates a new optimizer instance.
-    pub fn new(engine_config: BacktestConfig, parameter_space: ParameterSpace) -> Self {
+impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
+    /// Creates a new optimizer instance with the specified parameter space.
+    pub fn new(engine_config: BacktestConfig, parameter_space: S::Space) -> Self {
         Self {
             engine_config,
             parameter_space,
+            _marker: std::marker::PhantomData,
         }
+    }
+
+    /// Creates a new optimizer instance using the strategy's default parameter space.
+    pub fn with_default_space(engine_config: BacktestConfig) -> Self {
+        Self::new(engine_config, S::default_space())
     }
 
     /// Evaluates candidate configurations in parallel across all CPU cores with `Rayon`.
@@ -242,14 +171,14 @@ impl WalkForwardOptimizer {
         bars: &[DollarBar],
         folds: &[WalkForwardFold],
         max_candidates: usize,
-    ) -> Result<Vec<CandidateEvaluation>, BacktestError> {
+    ) -> Result<Vec<CandidateEvaluation<S::Config>>, BacktestError> {
         if folds.is_empty() {
             return Err(BacktestError::InvalidFoldConfig(
                 "at least one fold required".to_string(),
             ));
         }
 
-        let candidates = self.parameter_space.generate_grid(max_candidates);
+        let candidates = self.parameter_space.generate_candidates(max_candidates);
         let total_candidates = candidates.len();
         let total_bars = bars.len();
         let config = self.engine_config;
@@ -263,7 +192,7 @@ impl WalkForwardOptimizer {
         );
         pb.set_message("Evaluating HPO parameter space");
 
-        let mut evaluations: Vec<CandidateEvaluation> = candidates
+        let mut evaluations: Vec<CandidateEvaluation<S::Config>> = candidates
             .par_iter()
             .filter_map(|candidate| {
                 let mut is_sortinos = Vec::with_capacity(folds.len());
@@ -275,8 +204,10 @@ impl WalkForwardOptimizer {
                     let train_slice = fold.train_slice(bars);
                     let test_slice = fold.test_slice(bars);
 
-                    let is_metrics = run_backtest_slice(config, candidate, train_slice).ok()?;
-                    let oos_metrics = run_backtest_slice(config, candidate, test_slice).ok()?;
+                    let is_metrics =
+                        run_backtest_slice::<S>(config, candidate, train_slice).ok()?;
+                    let oos_metrics =
+                        run_backtest_slice::<S>(config, candidate, test_slice).ok()?;
 
                     is_sortinos.push(is_metrics.sortino_ratio);
                     oos_sortinos.push(oos_metrics.sortino_ratio);
@@ -293,7 +224,12 @@ impl WalkForwardOptimizer {
 
                 // Parameter stability evaluated on the first fold's In-Sample slice
                 let first_train = folds[0].train_slice(bars);
-                let stability_score = calculate_parameter_stability(candidate, first_train, config);
+                let stability_score = calculate_parameter_stability::<S>(
+                    &self.parameter_space,
+                    candidate,
+                    first_train,
+                    config,
+                );
 
                 // Fitness = max(0, mean_is_sortino) * stability_score
                 let clamped_is_sortino = mean_is_sortino.max(Decimal::ZERO);
@@ -333,6 +269,7 @@ mod tests {
     use super::*;
     use crate::walk_forward::WalkForwardConfig;
     use crate::walk_forward::WalkForwardSplitter;
+    use strategies::DollarBarsCusumStrategy;
 
     fn generate_synthetic_bars(count: usize) -> Vec<DollarBar> {
         let mut bars = Vec::with_capacity(count);
@@ -387,11 +324,146 @@ mod tests {
             time_barrier_bars: vec![5],
         };
 
-        let optimizer = WalkForwardOptimizer::new(engine_config, param_space);
+        let optimizer =
+            WalkForwardOptimizer::<DollarBarsCusumStrategy>::new(engine_config, param_space);
         let results = optimizer.run_optimization(&bars, &folds, 8).unwrap();
 
         assert!(!results.is_empty());
         // Verify results are sorted descending by fitness
+        for i in 1..results.len() {
+            assert!(results[i - 1].fitness >= results[i].fitness);
+        }
+    }
+
+    // Custom Mock Strategy to verify that WalkForwardOptimizer is 100% generic
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct MockConfig {
+        window: usize,
+        threshold: Decimal,
+    }
+
+    impl std::fmt::Display for MockConfig {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "window:{}|threshold:{}", self.window, self.threshold)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockSpace {
+        windows: Vec<usize>,
+        thresholds: Vec<Decimal>,
+    }
+
+    impl HyperparameterSpace for MockSpace {
+        type Config = MockConfig;
+
+        fn generate_candidates(&self, max_candidates: usize) -> Vec<Self::Config> {
+            let mut res = Vec::new();
+            for &w in &self.windows {
+                for &t in &self.thresholds {
+                    res.push(MockConfig {
+                        window: w,
+                        threshold: t,
+                    });
+                }
+            }
+            res.truncate(max_candidates);
+            res
+        }
+
+        fn perturb_neighbors(&self, base: &Self::Config) -> Vec<Self::Config> {
+            vec![
+                MockConfig {
+                    window: base.window.saturating_sub(1).max(1),
+                    threshold: base.threshold,
+                },
+                MockConfig {
+                    window: base.window + 1,
+                    threshold: base.threshold,
+                },
+            ]
+        }
+    }
+
+    struct MockStrategy {
+        config: MockConfig,
+        counter: usize,
+    }
+
+    impl strategies::Strategy for MockStrategy {
+        fn name(&self) -> &str {
+            "MockStrategy"
+        }
+
+        fn compatible_market_types(&self) -> &'static [strategies::MarketType] {
+            &[strategies::MarketType::UsdMPerpetual]
+        }
+
+        fn on_bar(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
+            self.counter += 1;
+            if self.counter >= self.config.window {
+                self.counter = 0;
+                domain::OrderIntent::new(
+                    bar.end_time,
+                    domain::Side::Buy,
+                    bar.close,
+                    bar.close - dec!(100),
+                    bar.close + dec!(100),
+                    5,
+                )
+                .ok()
+            } else {
+                None
+            }
+        }
+
+        fn reset(&mut self) {
+            self.counter = 0;
+        }
+    }
+
+    impl OptimizableStrategy for MockStrategy {
+        type Config = MockConfig;
+        type Space = MockSpace;
+
+        fn id() -> &'static str {
+            "mock_strategy"
+        }
+
+        fn from_config(config: Self::Config) -> Result<Self, domain::DomainError> {
+            Ok(Self { config, counter: 0 })
+        }
+
+        fn default_space() -> Self::Space {
+            MockSpace {
+                windows: vec![3, 5, 8],
+                thresholds: vec![dec!(1.0), dec!(2.0)],
+            }
+        }
+    }
+
+    #[test]
+    fn run_optimization_for_custom_mock_strategy() {
+        let bars = generate_synthetic_bars(200);
+        let wf_config = WalkForwardConfig {
+            num_folds: 2,
+            train_ratio: 0.70,
+            embargo_bars: 5,
+        };
+        let folds = WalkForwardSplitter::generate_rolling_folds(bars.len(), &wf_config).unwrap();
+        let engine_config = BacktestConfig {
+            initial_capital: dec!(10000.0),
+            maker_fee_pct: dec!(0.0002),
+            taker_fee_pct: dec!(0.0005),
+            slippage_pct: dec!(0.0005),
+            risk_per_trade_pct: dec!(0.01),
+            max_daily_drawdown_pct: dec!(0.05),
+        };
+
+        let optimizer = WalkForwardOptimizer::<MockStrategy>::with_default_space(engine_config);
+        let results = optimizer.run_optimization(&bars, &folds, 6).unwrap();
+
+        assert!(!results.is_empty());
         for i in 1..results.len() {
             assert!(results[i - 1].fitness >= results[i].fitness);
         }

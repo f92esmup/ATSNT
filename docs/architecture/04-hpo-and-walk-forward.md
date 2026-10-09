@@ -85,62 +85,111 @@ let results: Vec<OptimizationResult> = parameter_candidates
 
 ---
 
-## 4. Configuration Persistence & Strategy Loading
+## 4. Generic Multi-Strategy Architecture (Open-Closed Principle)
 
-### 4.1 Output Schema (`configs/hpo_results.json`)
+The optimization engine is completely decoupled from any single trading strategy. It interacts with strategies exclusively through traits defined in `crates/strategies`:
+
+### 4.1 Trait Contracts: `HyperparameterSpace` & `OptimizableStrategy`
+
+```rust
+pub trait HyperparameterSpace: Send + Sync + Clone {
+    /// Associated hyperparameter configuration type.
+    type Config: Clone + Send + Sync + Serialize + DeserializeOwned + Debug + Display + 'static;
+
+    /// Generates combinations/samples within the bounded parameter space.
+    fn generate_candidates(&self, max_candidates: usize) -> Vec<Self::Config>;
+
+    /// Perturbs neighboring coordinates around `base` for AFML local stability scoring.
+    fn perturb_neighbors(&self, base: &Self::Config) -> Vec<Self::Config>;
+}
+
+pub trait OptimizableStrategy: Strategy + Sync + Sized {
+    type Config: Clone + Send + Sync + Serialize + DeserializeOwned + Debug + Display + 'static;
+    type Space: HyperparameterSpace<Config = Self::Config>;
+
+    /// Canonical identifier for the strategy (e.g. "dollar_bars_cusum").
+    fn id() -> &'static str;
+
+    /// Constructs a strategy instance from its parameters.
+    fn from_config(config: Self::Config) -> Result<Self, DomainError>;
+
+    /// Provides the default hyperparameter search space.
+    fn default_space() -> Self::Space;
+}
+```
+
+### 4.2 Decoupled Engine Execution
+The `WalkForwardOptimizer<S: OptimizableStrategy>` operates agnostically across Rayon worker threads:
+- **Candidate Generation**: Delegated to `parameter_space.generate_candidates(max_candidates)`.
+- **Plateau Stability**: Evaluated mathematically via `calculate_parameter_stability::<S>()`, delegating local coordinate perturbation to `space.perturb_neighbors(base)`.
+- **Simulation**: Executed in isolation across folds via `run_backtest_slice::<S>(config, candidate, slice)`.
+
+### 4.3 Integrating a New Strategy
+To enable automated hyperparameter optimization for any new strategy, implement `HyperparameterSpace` and `OptimizableStrategy`:
+
+```rust
+impl OptimizableStrategy for MyNewStrategy {
+    type Config = MyNewConfig;
+    type Space = MyNewSpace;
+
+    fn id() -> &'static str { "my_new_strategy" }
+    fn from_config(config: Self::Config) -> Result<Self, DomainError> { Self::new(config) }
+    fn default_space() -> Self::Space { MyNewSpace::default() }
+}
+
+// Optimization runs seamlessly with zero engine modifications:
+let optimizer = WalkForwardOptimizer::<MyNewStrategy>::with_default_space(engine_config);
+let results = optimizer.run_optimization(&bars, &folds, 60)?;
+```
+
+---
+
+## 5. Configuration Persistence & Strategy Loading
+
+### 5.1 Output Schema (`configs/hpo_results.json`)
 The HPO engine produces a structured JSON artifact summarizing the optimization run:
 
 ```json
 {
   "timestamp": 1700000000000,
+  "strategy": "dollar_bars_cusum",
   "dataset": "BTCUSDT_2024_Q1_aggTrades",
-  "trials_evaluated": 500,
-  "best_configuration": {
-    "rolling_window_len": 24,
-    "cusum_vol_multiplier": "2.10",
-    "z_entry_threshold": "1.85",
-    "z_stop_threshold": "3.40",
-    "time_barrier_bars": 12
-  },
-  "in_sample_metrics": {
-    "sortino_ratio": "2.45",
-    "profit_factor": "1.82",
-    "expectancy": "42.50"
-  },
-  "out_of_sample_metrics": {
-    "sortino_ratio": "2.10",
-    "profit_factor": "1.65",
-    "expectancy": "36.20"
-  },
-  "statistical_validation": {
-    "deflated_sharpe_ratio": "0.985",
-    "is_statistically_significant": true,
-    "stability_score": "0.92"
+  "trials_evaluated": 60,
+  "winner": {
+    "config": {
+      "rolling_window_len": 20,
+      "cusum_vol_multiplier": "2.00",
+      "z_entry_threshold": "1.80",
+      "z_stop_threshold": "3.50",
+      "time_barrier_bars": 15
+    },
+    "mean_is_sortino": "2.45",
+    "mean_oos_sortino": "2.10",
+    "stability_score": "0.92",
+    "fitness": "2.25",
+    "dsr_p_value": "0.0120",
+    "is_statistically_significant": true
   }
 }
 ```
 
-### 4.2 Seamless Strategy Loading
-Because `DollarBarsCusumConfig` implements `serde::Deserialize`, the strategy can be initialized directly from the verified HPO artifact:
-
-```rust
-let config = DollarBarsCusumConfig::from_file("configs/hpo_results.json")?;
-let strategy = DollarBarsCusumStrategy::new(config)?;
-```
-
 ---
 
-## 5. Automated Production Pipeline Integration
+## 6. Automated Production Pipeline Integration
 
 For unattended staging sweeps, the HPO engine is orchestrated automatically by [`scripts/run_production_pipeline.sh`](../../scripts/run_production_pipeline.sh):
 
 ```bash
-# Orchestrated end-to-end with automated OS sleep inhibition:
+# Standard execution (defaults to dollar_bars_cusum):
 ./scripts/run_production_pipeline.sh --symbol BTCUSDT --year 2026 --candidates 60 --folds 5
+
+# Custom strategy with runtime parameter space override:
+./scripts/run_production_pipeline.sh --strategy dollar_bars_cusum --param-space configs/custom_space.json
 ```
 
 1. **Purged Walk-Forward Folds**: Dynamically constructs rolling train/embargo/test folds across the in-memory Dollar Bar series.
 2. **Rayon Thread Pool**: Evaluates candidate parameter combinations concurrently across all physical CPU cores.
 3. **Artifact Serialization**: Persists the winning parameter set to `configs/hpo_<symbol>_<year>.json` and complete audit metrics to `storage/reports/hpo_run_<timestamp>.json`.
 4. **Instant Backtest Handshake**: The downstream Backtest and Monte Carlo stage ingests the winning configuration artifact immediately with zero manual intervention.
+
 

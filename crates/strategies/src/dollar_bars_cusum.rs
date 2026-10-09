@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
-use crate::strategy::{MarketType, Strategy};
+use crate::strategy::{HyperparameterSpace, MarketType, OptimizableStrategy, Strategy};
 
 /// Hyperparameters governing the Dollar Bars + CUSUM + Z-Score Strategy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +29,108 @@ impl Default for DollarBarsCusumConfig {
             z_stop_threshold: dec!(3.5),
             time_barrier_bars: 15,
         }
+    }
+}
+
+impl std::fmt::Display for DollarBarsCusumConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "W:{}|V:{}|Ze:{}|Zs:{}|Tb:{}",
+            self.rolling_window_len,
+            self.cusum_vol_multiplier,
+            self.z_entry_threshold,
+            self.z_stop_threshold,
+            self.time_barrier_bars
+        )
+    }
+}
+
+/// Parameter search space definition for `DollarBarsCusumConfig`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DollarBarsCusumSpace {
+    pub rolling_window_lens: Vec<usize>,
+    pub cusum_vol_multipliers: Vec<Decimal>,
+    pub z_entry_thresholds: Vec<Decimal>,
+    pub z_stop_thresholds: Vec<Decimal>,
+    pub time_barrier_bars: Vec<usize>,
+}
+
+impl Default for DollarBarsCusumSpace {
+    fn default() -> Self {
+        Self {
+            rolling_window_lens: vec![10, 15, 20, 25, 30],
+            cusum_vol_multipliers: vec![dec!(1.0), dec!(1.5), dec!(2.0), dec!(2.5)],
+            z_entry_thresholds: vec![dec!(1.2), dec!(1.5), dec!(1.8), dec!(2.2)],
+            z_stop_thresholds: vec![dec!(2.5), dec!(3.0), dec!(3.5)],
+            time_barrier_bars: vec![10, 15, 20],
+        }
+    }
+}
+
+impl HyperparameterSpace for DollarBarsCusumSpace {
+    type Config = DollarBarsCusumConfig;
+
+    fn generate_candidates(&self, max_candidates: usize) -> Vec<DollarBarsCusumConfig> {
+        let mut configs = Vec::new();
+
+        for &win in &self.rolling_window_lens {
+            for &vol in &self.cusum_vol_multipliers {
+                for &z_entry in &self.z_entry_thresholds {
+                    for &z_stop in &self.z_stop_thresholds {
+                        for &tb in &self.time_barrier_bars {
+                            configs.push(DollarBarsCusumConfig {
+                                rolling_window_len: win,
+                                cusum_vol_multiplier: vol,
+                                z_entry_threshold: z_entry,
+                                z_stop_threshold: z_stop,
+                                time_barrier_bars: tb,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if configs.len() > max_candidates {
+            use rand::seq::SliceRandom;
+            use rand::SeedableRng;
+            let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+            configs.shuffle(&mut rng);
+            configs.truncate(max_candidates);
+        }
+
+        configs
+    }
+
+    fn perturb_neighbors(&self, base: &DollarBarsCusumConfig) -> Vec<DollarBarsCusumConfig> {
+        let mut neighbors = Vec::with_capacity(4);
+
+        // Perturbation 1: cusum_vol_multiplier +/- 0.2
+        if base.cusum_vol_multiplier > dec!(0.5) {
+            let mut c = base.clone();
+            c.cusum_vol_multiplier -= dec!(0.2);
+            neighbors.push(c);
+        }
+        {
+            let mut c = base.clone();
+            c.cusum_vol_multiplier += dec!(0.2);
+            neighbors.push(c);
+        }
+
+        // Perturbation 2: z_entry_threshold +/- 0.2
+        if base.z_entry_threshold > dec!(0.5) {
+            let mut c = base.clone();
+            c.z_entry_threshold -= dec!(0.2);
+            neighbors.push(c);
+        }
+        {
+            let mut c = base.clone();
+            c.z_entry_threshold += dec!(0.2);
+            neighbors.push(c);
+        }
+
+        neighbors
     }
 }
 
@@ -153,6 +255,23 @@ impl Strategy for DollarBarsCusumStrategy {
 
             _ => None,
         }
+    }
+}
+
+impl OptimizableStrategy for DollarBarsCusumStrategy {
+    type Config = DollarBarsCusumConfig;
+    type Space = DollarBarsCusumSpace;
+
+    fn id() -> &'static str {
+        "dollar_bars_cusum"
+    }
+
+    fn from_config(config: Self::Config) -> Result<Self, domain::DomainError> {
+        Self::new(config)
+    }
+
+    fn default_space() -> Self::Space {
+        DollarBarsCusumSpace::default()
     }
 }
 

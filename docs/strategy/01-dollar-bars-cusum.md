@@ -120,6 +120,17 @@ If $\text{Leverage}_{\text{eff}} > \text{Leverage}_{\text{max}}$ (exchange or ac
 | `risk_per_trade_pct` | `Decimal` | `0.01` | Maximum risk per trade ($1\%$ of account equity). |
 | `max_daily_drawdown_pct`| `Decimal` | `0.05` | Circuit breaker threshold for daily loss ($5\%$). |
 
+### 5.1 Optimization Search Space (`DollarBarsCusumSpace`)
+The strategy implements `OptimizableStrategy` and defines its parameter search space and perturbation rules in `DollarBarsCusumSpace`:
+- **Default Ranges**:
+  - `rolling_window_lens`: `[10, 15, 20, 25, 30]`
+  - `cusum_vol_multipliers`: `[1.0, 1.5, 2.0, 2.5]`
+  - `z_entry_thresholds`: `[1.2, 1.5, 1.8, 2.2]`
+  - `z_stop_thresholds`: `[2.5, 3.0, 3.5]`
+  - `time_barrier_bars`: `[10, 15, 20]`
+- **Stability Perturbation (`perturb_neighbors`)**:
+  - Perturbs `cusum_vol_multiplier ± 0.2` and `z_entry_threshold ± 0.2` to evaluate performance plateaus against overfitting.
+
 ---
 
 ## 6. Backtest & Performance Evaluation Metrics
