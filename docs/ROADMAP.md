@@ -28,6 +28,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] Deflated Sharpe Ratio (DSR) statistical significance testing.
 - [x] Discrete Event Monte Carlo Stress-Testing (Trade bootstrapping, Ruin probability, Drawdown percentiles).
 - [x] Automated JSON persistence for HPO results, Backtest manifests, and audit telemetry (`storage/reports/`).
+- [x] Automated end-to-end production staging pipeline (`scripts/run_production_pipeline.sh`) with native YTD ETL and `systemd-inhibit` sleep locking.
 
 ---
 

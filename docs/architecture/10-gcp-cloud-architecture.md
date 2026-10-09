@@ -72,9 +72,13 @@ The architecture is deliberately dimensioned to run at **0,00 € / mes** indefi
 | **Standard Persistent Disk** | 30 GB HDD / month | 10 - 20 GB operating system boot disk | **0,00 €** |
 | **BigQuery Ingestion & Storage** | 10 GB storage free / month | < 50 MB / month (tabular logs and snapshots) | **0,00 €** |
 | **BigQuery Query Engine** | 1 TB analytical queries free / month | < 2 GB / month (Looker Studio dashboard caching) | **0,00 €** |
-| **Google Cloud Storage (GCS)** | 5 GB Standard Storage / month | < 250 MB / month (compressed Parquet files) | **0,00 €** |
+| **Google Cloud Storage (GCS)** | 5 GB Standard Storage / month (US regions) | < 250 MB / month (compressed Parquet files) | **0,00 € - 0,01 €** |
 | **Looker Studio** | 100% Free Google SaaS product | Unlimited dashboards and scheduled reports | **0,00 €** |
 | **Total Monthly Spend** | | | **0,00 €** |
+
+> [!NOTE]
+> **Regional Placement (Madrid `europe-southwest1`)**:
+> By default, the repository provisions BigQuery (`atsnt_bi`) and GCS (`atsnt-lake-${PROJECT_ID}`) in single-region **Madrid (`europe-southwest1`)** for minimal latency, data residency, and 1:1 synchronization with Madrid time (`20:00 Madrid daily reports`). In European single-regions, GCS standard storage is billed at ~0,02 €/GB/month (fractions of a cent for ATSNT's megabyte-sized audit files). If strict zero-cent tier is desired for GCS, the bucket location can be set to `us-central1`.
 
 ---
 

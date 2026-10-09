@@ -73,3 +73,19 @@ Both historical CSVs from `data.binance.vision` and live WebSocket streams from 
    - High-throughput batch read    - In-memory simulated execution   - Authenticated REST / WebSocket
    - Deterministic event replay    - Real market ticks / no money    - Signed API keys / Real orders
 ```
+
+---
+
+## 5. Automated Historical Market Data ETL (`fetch_data`)
+
+The `adapters` crate provides the official ETL CLI binary [`fetch_data`](crates/adapters/src/bin/fetch_data.rs):
+
+### 5.1 Architecture & Pipeline Mechanics
+1. **Direct Public Ingestion**: Downloads official Binance Futures USDT-M `aggTrades` archives from `data.binance.vision` with zero authenticated API rate limits.
+2. **Streaming Conversion to Columnar Parquet**: Streams ZIP archives directly through memory, parsing CSV lines and writing Snappy-compressed Arrow `RecordBatch` chunks using [`BinanceParquetWriter`]. Memory consumption remains constant (< 100 MB) even on multi-gigabyte monthly archives.
+3. **Native Year-to-Date (YTD) Intelligence**: Automatically handles the active ongoing year (e.g., 2026):
+   - Ingests closed months as comprehensive monthly archives.
+   - For the current month in progress, automatically discovers and converts daily archives (`day 1..N`) up to today.
+   - Gracefully finalizes without error if today's ongoing session has not yet closed on Binance Vision.
+4. **Isolated Partitioning**: Stores Parquet datasets cleanly partitioned by year and symbol (e.g. `data/historical_2026/BTCUSDT/*.parquet`), enabling chronological multi-file streaming via [`BinanceParquetReader`].
+

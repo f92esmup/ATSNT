@@ -127,3 +127,20 @@ Because `DollarBarsCusumConfig` implements `serde::Deserialize`, the strategy ca
 let config = DollarBarsCusumConfig::from_file("configs/hpo_results.json")?;
 let strategy = DollarBarsCusumStrategy::new(config)?;
 ```
+
+---
+
+## 5. Automated Production Pipeline Integration
+
+For unattended staging sweeps, the HPO engine is orchestrated automatically by [`scripts/run_production_pipeline.sh`](../../scripts/run_production_pipeline.sh):
+
+```bash
+# Orchestrated end-to-end with automated OS sleep inhibition:
+./scripts/run_production_pipeline.sh --symbol BTCUSDT --year 2026 --candidates 60 --folds 5
+```
+
+1. **Purged Walk-Forward Folds**: Dynamically constructs rolling train/embargo/test folds across the in-memory Dollar Bar series.
+2. **Rayon Thread Pool**: Evaluates candidate parameter combinations concurrently across all physical CPU cores.
+3. **Artifact Serialization**: Persists the winning parameter set to `configs/hpo_<symbol>_<year>.json` and complete audit metrics to `storage/reports/hpo_run_<timestamp>.json`.
+4. **Instant Backtest Handshake**: The downstream Backtest and Monte Carlo stage ingests the winning configuration artifact immediately with zero manual intervention.
+
