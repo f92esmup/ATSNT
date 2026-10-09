@@ -65,12 +65,57 @@ The repository provides 6 specialized CLI binaries built with `clap` (run any wi
 
 ---
 
+### Automated End-to-End Production Pipeline (`run_production_pipeline.sh`)
+
+For full-year unattended production staging, the script [`scripts/run_production_pipeline.sh`](scripts/run_production_pipeline.sh) chains the entire quant research workflow into a single execution:
+1. **Compiles Release Binaries**: Pre-compiles `fetch_data`, `run_hpo`, and `backtest` once with full optimizations.
+2. **Phase 1 (Binance ETL)**: Ingests Binance `aggTrades` (full monthly archives + daily YTD up to today) into compressed Parquet.
+3. **Phase 2 (Parallel Walk-Forward HPO)**: Evaluates candidate configurations across purged rolling folds with embargo buffering, saving the winning config to JSON.
+4. **Phase 3 (Backtest & Monte Carlo)**: Replays trade events through the 1:1 simulator and runs 10,000 Circular Block Bootstrap (CBB) resampled trajectories to audit drawdown percentiles and ruin probability ($P_{\text{ruin}}$).
+5. **Sleep/Idle Immunity**: Automatically wraps execution in `systemd-inhibit` (locks sleep, idle, and laptop lid-switch while running).
+
+```bash
+# 1. Standard execution in foreground (auto-inhibits sleep):
+./scripts/run_production_pipeline.sh --symbol BTCUSDT --year 2026
+
+# 2. Run in background (unattended with nohup & log tracking):
+./scripts/run_production_pipeline.sh --symbol BTCUSDT --year 2026 --detach
+tail -f pipeline_btcusdt_2026.log
+
+# 3. High-resolution parameter sweep on existing local data:
+./scripts/run_production_pipeline.sh --skip-fetch --candidates 100 --mc-iterations 25000
+```
+
+#### Pipeline Configuration Flags:
+| Flag | Description | Default |
+| :--- | :--- | :--- |
+| `-s, --symbol <SYM>` | Trading pair symbol | `BTCUSDT` |
+| `-y, --year <YYYY>` | Historical or current year | Current year (`2026`) |
+| `-m, --month <MM>` | Optional specific single month | All months YTD |
+| `-b, --dollar-bar <N>` | Dollar bar volume threshold (USD) | `1000000` ($1M) |
+| `-f, --folds <N>` | Walk-Forward rolling validation folds | `5` |
+| `-r, --train-ratio <F>` | In-sample train window ratio | `0.70` (70%) |
+| `-e, --embargo-bars <N>`| Quarantined embargo bars between train/test | `30` |
+| `-c, --candidates <N>` | Parameter combinations to evaluate | `60` |
+| `-i, --mc-iterations <N>`| Monte Carlo bootstrap resample paths | `10000` |
+| `-o, --output-dir <DIR>` | Parquet destination root directory | `data/historical_<YEAR>` |
+| `--config <PATH>` | Output/input path for winning HPO JSON | `configs/hpo_<sym>_<year>.json` |
+| `--report <PATH>` | Output path for Monte Carlo JSON report | `storage/reports/monte_carlo_<sym>_<year>.json` |
+| `--gcp-bigquery` | Stream evaluation rows & trades to BigQuery | `false` |
+| `--skip-fetch` | Skip ETL download (use existing cached Parquet) | `false` |
+| `--skip-hpo` | Skip HPO (replay backtest with existing config) | `false` |
+| `--no-inhibit` | Disable automatic `systemd-inhibit` wrapper | `false` |
+| `-d, --detach` | Run in background via `nohup` | `false` |
+| `-l, --log <PATH>` | Custom logfile path when detached | `pipeline_<sym>_<year>.log` |
+
+---
+
 ### Step 1: Download & Convert Real Market Data (Binance ETL)
 Download official Binance Futures USDT-M `aggTrades` archives directly from `data.binance.vision` and convert them into compressed Apache Parquet format:
 
 ```bash
-# Download and convert an entire year automatically (all 12 months)
-cargo run --release -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2024
+# Download and convert an entire year automatically (historical year or Year-to-Date up to today):
+cargo run --release -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2026 --output-dir data/historical_2026
 
 # Download a specific month (e.g. January 2024)
 cargo run --release -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2024 --month 1
