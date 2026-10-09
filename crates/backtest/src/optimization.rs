@@ -92,13 +92,18 @@ impl ParameterSpace {
                                 z_stop_threshold: z_stop,
                                 time_barrier_bars: tb,
                             });
-                            if configs.len() >= max_combinations {
-                                return configs;
-                            }
                         }
                     }
                 }
             }
+        }
+
+        if configs.len() > max_combinations {
+            use rand::seq::SliceRandom;
+            use rand::SeedableRng;
+            let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+            configs.shuffle(&mut rng);
+            configs.truncate(max_combinations);
         }
 
         configs
