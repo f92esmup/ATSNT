@@ -9,7 +9,7 @@ use adapters::{
 use anyhow::{Context, Result};
 use backtest::{BacktestConfig, BacktestEngine, MonteCarloConfig, MonteCarloSimulator};
 use clap::Parser;
-use domain::DollarBarAggregator;
+use domain::{DollarBarAggregator, PositionSide};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde_json::json;
@@ -222,25 +222,32 @@ async fn main() -> Result<()> {
             .and_then(|s| s.split('-').next())
             .unwrap_or("BTCUSDT")
             .to_uppercase();
+        let session_id = format!("bt_{}_{}", symbol_name.to_lowercase(), timestamp);
         let rows: Vec<TradeRow> = closed_trades
             .iter()
             .enumerate()
-            .map(|(idx, ct)| TradeRow {
-                trade_id: format!("bt_{}_{}", timestamp, idx),
-                session_id: format!("backtest_{}", timestamp),
-                strategy_id: strategy.name().to_string(),
-                symbol: symbol_name.clone(),
-                side: "Closed".to_string(),
-                entry_timestamp: format_unix_ms_rfc3339(ct.exit_time),
-                exit_timestamp: format_unix_ms_rfc3339(ct.exit_time),
-                entry_price: dec!(0),
-                exit_price: dec!(0),
-                quantity: dec!(0),
-                gross_pnl: ct.pnl_gross.round_dp(4),
-                fees_paid: ct.fees_paid.round_dp(4),
-                net_pnl: ct.pnl_net.round_dp(4),
-                exit_reason: "BacktestTrade".to_string(),
-                holding_duration_seconds: 0,
+            .map(|(idx, ct)| {
+                let side_str = match ct.side {
+                    PositionSide::Long => "Long",
+                    PositionSide::Short => "Short",
+                };
+                TradeRow {
+                    trade_id: format!("{}_t{:05}", session_id, idx + 1),
+                    session_id: session_id.clone(),
+                    strategy_id: strategy.name().to_string(),
+                    symbol: symbol_name.clone(),
+                    side: side_str.to_string(),
+                    entry_timestamp: format_unix_ms_rfc3339(ct.entry_time),
+                    exit_timestamp: format_unix_ms_rfc3339(ct.exit_time),
+                    entry_price: ct.entry_price.round_dp(4),
+                    exit_price: ct.exit_price.round_dp(4),
+                    quantity: ct.quantity.round_dp(4),
+                    gross_pnl: ct.pnl_gross.round_dp(4),
+                    fees_paid: ct.fees_paid.round_dp(4),
+                    net_pnl: ct.pnl_net.round_dp(4),
+                    exit_reason: ct.exit_reason.clone(),
+                    holding_duration_seconds: ct.holding_duration_seconds,
+                }
             })
             .collect();
         println!(

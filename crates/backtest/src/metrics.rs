@@ -1,3 +1,4 @@
+use domain::PositionSide;
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
 use serde::{Deserialize, Serialize};
@@ -5,12 +6,19 @@ use serde::{Deserialize, Serialize};
 /// Record of an individually closed trade for performance attribution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClosedTrade {
+    pub entry_time: i64,
     pub exit_time: i64,
+    pub entry_price: Decimal,
+    pub exit_price: Decimal,
+    pub quantity: Decimal,
+    pub side: PositionSide,
     pub pnl_gross: Decimal,
     pub fees_paid: Decimal,
     pub slippage_paid: Decimal,
     pub pnl_net: Decimal,
     pub return_pct: Decimal,
+    pub exit_reason: String,
+    pub holding_duration_seconds: i64,
 }
 
 /// Comprehensive risk and return metrics adhering to Section 6 of strategy specifications.

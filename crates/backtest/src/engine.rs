@@ -20,6 +20,10 @@ pub struct BacktestEngine {
     active_intent: Option<domain::OrderIntent>,
     bars_held: usize,
     closed_trades: Vec<ClosedTrade>,
+    entry_time: Option<i64>,
+    entry_fee: Decimal,
+    entry_slippage: Decimal,
+    last_bar_end_time: Option<i64>,
 }
 
 impl BacktestEngine {
@@ -36,6 +40,10 @@ impl BacktestEngine {
             active_intent: None,
             bars_held: 0,
             closed_trades: Vec::new(),
+            entry_time: None,
+            entry_fee: Decimal::ZERO,
+            entry_slippage: Decimal::ZERO,
+            last_bar_end_time: None,
         }
     }
 
@@ -122,6 +130,7 @@ impl BacktestEngine {
 
     /// Ingests a closed DollarBar, updates position barriers, and steps the strategy.
     pub fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &DollarBar) {
+        self.last_bar_end_time = Some(bar.end_time);
         let had_position = self.active_position.is_some();
 
         // 1. If an active position exists, evaluate Triple Barrier Exits
@@ -133,7 +142,7 @@ impl BacktestEngine {
         // 2. If no position was active at the start of this bar, query the strategy for signals
         if !had_position {
             if let Some(intent) = strategy.on_bar(bar) {
-                self.evaluate_entry(intent, bar.close);
+                self.evaluate_entry(intent, bar.close, bar.end_time);
             }
         }
 
@@ -162,7 +171,7 @@ impl BacktestEngine {
             _ => return,
         };
 
-        let mut exit_fill: Option<(Decimal, Decimal, bool)> = None; // (exit_price, slippage, is_taker)
+        let mut exit_fill: Option<(Decimal, Decimal, bool, &'static str)> = None; // (exit_price, slippage, is_taker, exit_reason)
 
         match pos.side {
             PositionSide::Long => {
@@ -170,17 +179,17 @@ impl BacktestEngine {
                 if bar.low <= intent.stop_loss {
                     let slip = intent.stop_loss * self.config.slippage_pct;
                     let fill_price = intent.stop_loss - slip;
-                    exit_fill = Some((fill_price, slip, true));
+                    exit_fill = Some((fill_price, slip, true, "StopLoss"));
                 }
                 // Take Profit hit
                 else if bar.high >= intent.take_profit {
-                    exit_fill = Some((intent.take_profit, Decimal::ZERO, false));
+                    exit_fill = Some((intent.take_profit, Decimal::ZERO, false, "TakeProfit"));
                 }
                 // Time barrier reached
                 else if self.bars_held >= intent.max_bars_hold {
                     let slip = bar.close * self.config.slippage_pct;
                     let fill_price = bar.close - slip;
-                    exit_fill = Some((fill_price, slip, true));
+                    exit_fill = Some((fill_price, slip, true, "TimeBarrier"));
                 }
             }
             PositionSide::Short => {
@@ -188,27 +197,38 @@ impl BacktestEngine {
                 if bar.high >= intent.stop_loss {
                     let slip = intent.stop_loss * self.config.slippage_pct;
                     let fill_price = intent.stop_loss + slip;
-                    exit_fill = Some((fill_price, slip, true));
+                    exit_fill = Some((fill_price, slip, true, "StopLoss"));
                 }
                 // Take Profit hit
                 else if bar.low <= intent.take_profit {
-                    exit_fill = Some((intent.take_profit, Decimal::ZERO, false));
+                    exit_fill = Some((intent.take_profit, Decimal::ZERO, false, "TakeProfit"));
                 }
                 // Time barrier reached
                 else if self.bars_held >= intent.max_bars_hold {
                     let slip = bar.close * self.config.slippage_pct;
                     let fill_price = bar.close + slip;
-                    exit_fill = Some((fill_price, slip, true));
+                    exit_fill = Some((fill_price, slip, true, "TimeBarrier"));
                 }
             }
         }
 
-        if let Some((exit_price, slippage_per_unit, is_taker)) = exit_fill {
-            self.execute_close(bar.end_time, exit_price, slippage_per_unit, is_taker);
+        if let Some((exit_price, slippage_per_unit, is_taker, exit_reason)) = exit_fill {
+            self.execute_close(
+                bar.end_time,
+                exit_price,
+                slippage_per_unit,
+                is_taker,
+                exit_reason,
+            );
         }
     }
 
-    fn evaluate_entry(&mut self, intent: domain::OrderIntent, mark_price: Decimal) {
+    fn evaluate_entry(
+        &mut self,
+        intent: domain::OrderIntent,
+        mark_price: Decimal,
+        entry_time: i64,
+    ) {
         let (fill_price, slippage_per_unit) = match intent.side {
             Side::Buy => {
                 let slip = intent.price * self.config.slippage_pct;
@@ -246,7 +266,8 @@ impl BacktestEngine {
         // Entry Fee (Taker)
         let entry_notional = fill_price * quantity;
         let entry_fee = entry_notional * self.config.taker_fee_pct;
-        self.equity -= entry_fee;
+        let entry_slippage = slippage_per_unit * quantity;
+        self.equity -= entry_fee + entry_slippage;
 
         let pos_side = match intent.side {
             Side::Buy => PositionSide::Long,
@@ -257,8 +278,9 @@ impl BacktestEngine {
             self.active_position = Some(pos);
             self.active_intent = Some(intent);
             self.bars_held = 0;
-            // Record initial entry friction
-            self.equity -= slippage_per_unit * quantity;
+            self.entry_time = Some(entry_time);
+            self.entry_fee = entry_fee;
+            self.entry_slippage = entry_slippage;
         }
     }
 
@@ -268,12 +290,16 @@ impl BacktestEngine {
         exit_price: Decimal,
         slippage_per_unit: Decimal,
         is_taker: bool,
+        exit_reason: &str,
     ) {
         let pos = match self.active_position.take() {
             Some(p) => p,
             None => return,
         };
         self.active_intent = None;
+        let entry_time = self.entry_time.take().unwrap_or(exit_time);
+        let entry_fee = std::mem::take(&mut self.entry_fee);
+        let entry_slippage = std::mem::take(&mut self.entry_slippage);
 
         let pnl_gross = pos.unrealized_pnl(exit_price);
         let exit_notional = exit_price * pos.quantity;
@@ -285,23 +311,35 @@ impl BacktestEngine {
 
         let exit_fee = exit_notional * fee_rate;
         let exit_slippage = slippage_per_unit * pos.quantity;
-        let pnl_net = pnl_gross - exit_fee - exit_slippage;
+        let total_fees = entry_fee + exit_fee;
+        let total_slippage = entry_slippage + exit_slippage;
+        let pnl_net = pnl_gross - total_fees - total_slippage;
 
-        self.equity += pnl_net;
+        // self.equity already had entry_fee and entry_slippage deducted upon entry
+        self.equity += pnl_gross - exit_fee - exit_slippage;
 
-        let return_pct = if pos.entry_price > Decimal::ZERO {
+        let return_pct = if pos.entry_price > Decimal::ZERO && pos.quantity > Decimal::ZERO {
             pnl_net / (pos.entry_price * pos.quantity)
         } else {
             Decimal::ZERO
         };
 
+        let holding_duration_seconds = ((exit_time - entry_time) / 1000).max(0);
+
         self.closed_trades.push(ClosedTrade {
+            entry_time,
             exit_time,
+            entry_price: pos.entry_price,
+            exit_price,
+            quantity: pos.quantity,
+            side: pos.side,
             pnl_gross,
-            fees_paid: exit_fee,
-            slippage_paid: exit_slippage,
+            fees_paid: total_fees,
+            slippage_paid: total_slippage,
             pnl_net,
             return_pct,
+            exit_reason: exit_reason.to_string(),
+            holding_duration_seconds,
         });
     }
 
@@ -312,7 +350,8 @@ impl BacktestEngine {
     ) -> (BacktestMetrics, Vec<ClosedTrade>) {
         if self.active_position.is_some() {
             if let Some(mark) = last_mark_price {
-                self.execute_close(0, mark, Decimal::ZERO, true);
+                let exit_time = self.last_bar_end_time.unwrap_or(0);
+                self.execute_close(exit_time, mark, Decimal::ZERO, true, "EndOfSimulation");
             }
         }
 

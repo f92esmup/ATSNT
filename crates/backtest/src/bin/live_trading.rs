@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use adapters::{
     format_unix_ms_rfc3339, AlertNotifier, AsyncMarketDataStream, BigQuerySink, BinanceGateway,
     BinanceGatewayConfig, BinancePrivateEvent, BinancePrivateUserDataStream,
-    BinanceWebSocketStream, BinanceWsConfig, EquitySnapshotRow, GcpSecretManager, TelegramNotifier,
-    TradeRow,
+    BinanceWebSocketStream, BinanceWsConfig, DollarBarRow, EquitySnapshotRow, GcpSecretManager,
+    TelegramNotifier, TradeRow,
 };
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -241,6 +241,11 @@ async fn main() -> Result<()> {
     let mut market_stream = BinanceWebSocketStream::connect(ws_config)
         .with_context(|| "Failed to connect to public Binance WebSocket feed")?;
 
+    let session_start_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let session_id = format!("live_{}_{}", args.symbol.to_lowercase(), session_start_ts);
+
     let mut aggregator = DollarBarAggregator::new(args.dollar_bar)?;
     let mut peak_equity = initial_balance;
     let mut current_equity = initial_balance;
@@ -307,9 +312,10 @@ async fn main() -> Result<()> {
                                     Side::Sell => "Sell",
                                 };
                                 let ts_i64 = update.transaction_time_ms as i64;
+                                let trade_identifier = update.trade_id.unwrap_or(0);
                                 let row = TradeRow {
-                                    trade_id: format!("{}_{}", update.symbol, ts_i64),
-                                    session_id: format!("live_{}", args.symbol),
+                                    trade_id: format!("{}_{}_{}", update.symbol, update.order_id, trade_identifier),
+                                    session_id: session_id.clone(),
                                     strategy_id: strategy.name().to_string(),
                                     symbol: update.symbol.clone(),
                                     side: side_str.to_string(),
@@ -370,7 +376,7 @@ async fn main() -> Result<()> {
                             if let Some(bq) = &bq_sink {
                                 let snapshot = EquitySnapshotRow {
                                     timestamp: format_unix_ms_rfc3339(trade.timestamp),
-                                    session_id: format!("live_{}", args.symbol),
+                                    session_id: session_id.clone(),
                                     symbol: symbol_upper.clone(),
                                     cash_equity: current_equity.round_dp(4),
                                     unrealized_pnl: Decimal::ZERO.round_dp(4),
@@ -406,6 +412,25 @@ async fn main() -> Result<()> {
                                 bar.dollar_volume,
                                 bar.trade_count
                             );
+
+                            if let Some(bq) = &bq_sink {
+                                let bar_row = DollarBarRow {
+                                    bar_id: format!("bar_{:06}", total_bars),
+                                    session_id: session_id.clone(),
+                                    symbol: symbol_upper.clone(),
+                                    start_timestamp: format_unix_ms_rfc3339(bar.start_time),
+                                    close_timestamp: format_unix_ms_rfc3339(bar.end_time),
+                                    open: bar.open.round_dp(4),
+                                    high: bar.high.round_dp(4),
+                                    low: bar.low.round_dp(4),
+                                    close: bar.close.round_dp(4),
+                                    volume: bar.volume.round_dp(4),
+                                    dollar_volume: bar.dollar_volume.round_dp(4),
+                                    trade_count: bar.trade_count,
+                                    duration_ms: (bar.end_time - bar.start_time).max(0),
+                                };
+                                let _ = bq.insert_dollar_bars(&[bar_row]).await;
+                            }
 
                             // Strategy signal evaluation
                             if let Some(intent) = strategy.on_bar(&bar) {

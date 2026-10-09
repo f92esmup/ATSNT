@@ -12,7 +12,10 @@ pub mod secret_manager;
 pub mod telegram;
 
 pub use auth::GcpAuthResolver;
-pub use bigquery::{BigQuerySink, EquitySnapshotRow, HpoEvaluationRow, MonteCarloRow, TradeRow};
+pub use bigquery::{
+    BigQueryRecord, BigQuerySink, DollarBarRow, EquitySnapshotRow, HpoEvaluationRow, MonteCarloRow,
+    TradeRow,
+};
 pub use gcs::GcsParquetSink;
 pub use secret_manager::GcpSecretManager;
 pub use telegram::TelegramNotifier;

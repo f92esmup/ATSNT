@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use adapters::{
     format_unix_ms_rfc3339, AlertNotifier, AsyncMarketDataStream, BigQuerySink,
-    BinanceWebSocketStream, BinanceWsConfig, EquitySnapshotRow, TelegramNotifier, TradeRow,
+    BinanceWebSocketStream, BinanceWsConfig, DollarBarRow, EquitySnapshotRow, TelegramNotifier,
+    TradeRow,
 };
 use anyhow::{Context, Result};
 use backtest::{BacktestConfig, PaperTradingConfig, PaperTradingEvent, PaperTradingSession};
@@ -183,6 +184,12 @@ async fn main() -> Result<()> {
 
     println!("[*] Engine initialized. Awaiting market trades (Press Ctrl+C to terminate)...\n");
 
+    let session_start_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let session_id = format!("paper_{}_{}", args.symbol.to_lowercase(), session_start_ts);
+    let mut trade_counter: u64 = 0;
+
     let mut total_ticks: u64 = 0;
     let mut total_bars: u64 = 0;
     let mut last_mark_price = Decimal::ZERO;
@@ -243,6 +250,24 @@ async fn main() -> Result<()> {
                                         bar.dollar_volume,
                                         bar.trade_count
                                     );
+                                    if let Some(bq) = &bq_sink {
+                                        let bar_row = DollarBarRow {
+                                            bar_id: format!("bar_{:06}", total_bars),
+                                            session_id: session_id.clone(),
+                                            symbol: args.symbol.to_uppercase(),
+                                            start_timestamp: format_unix_ms_rfc3339(bar.start_time),
+                                            close_timestamp: format_unix_ms_rfc3339(bar.end_time),
+                                            open: bar.open.round_dp(4),
+                                            high: bar.high.round_dp(4),
+                                            low: bar.low.round_dp(4),
+                                            close: bar.close.round_dp(4),
+                                            volume: bar.volume.round_dp(4),
+                                            dollar_volume: bar.dollar_volume.round_dp(4),
+                                            trade_count: bar.trade_count,
+                                            duration_ms: (bar.end_time - bar.start_time).max(0),
+                                        };
+                                        let _ = bq.insert_dollar_bars(&[bar_row]).await;
+                                    }
                                 }
                                 PaperTradingEvent::SignalGenerated(intent) => {
                                     println!(
@@ -323,9 +348,10 @@ async fn main() -> Result<()> {
                                         let _ = t.send_alert(&msg).await;
                                     }
                                     if let Some(bq) = &bq_sink {
+                                        trade_counter += 1;
                                         let row = TradeRow {
-                                            trade_id: format!("{}_{}", args.symbol, trade.timestamp),
-                                            session_id: format!("paper_{}", args.symbol),
+                                            trade_id: format!("{}_t{:05}", session_id, trade_counter),
+                                            session_id: session_id.clone(),
                                             strategy_id: selected_strategy.name().to_string(),
                                             symbol: args.symbol.to_uppercase(),
                                             side: side_str,
@@ -362,7 +388,7 @@ async fn main() -> Result<()> {
                                         if let Some(bq) = &bq_sink {
                                             let row = EquitySnapshotRow {
                                                 timestamp: format_unix_ms_rfc3339(trade.timestamp),
-                                                session_id: format!("paper_{}", args.symbol),
+                                                session_id: session_id.clone(),
                                                 symbol: args.symbol.to_uppercase(),
                                                 cash_equity: session.cash_equity().round_dp(4),
                                                 unrealized_pnl: unrealized_pnl.round_dp(4),
@@ -409,6 +435,31 @@ async fn main() -> Result<()> {
             "\n[LIQUIDATION] Open position marked to market and liquidated at price ${}",
             last_mark_price
         );
+        if let (Some(bq), Some(last_trade)) = (&bq_sink, closed_trades.last()) {
+            trade_counter += 1;
+            let side_str = match last_trade.side {
+                PositionSide::Long => "Long",
+                PositionSide::Short => "Short",
+            };
+            let row = TradeRow {
+                trade_id: format!("{}_t{:05}", session_id, trade_counter),
+                session_id: session_id.clone(),
+                strategy_id: selected_strategy.name().to_string(),
+                symbol: args.symbol.to_uppercase(),
+                side: side_str.to_string(),
+                entry_timestamp: format_unix_ms_rfc3339(last_trade.entry_time),
+                exit_timestamp: format_unix_ms_rfc3339(last_trade.exit_time),
+                entry_price: last_trade.entry_price.round_dp(4),
+                exit_price: last_trade.exit_price.round_dp(4),
+                quantity: last_trade.quantity.round_dp(4),
+                gross_pnl: last_trade.pnl_gross.round_dp(4),
+                fees_paid: last_trade.fees_paid.round_dp(4),
+                net_pnl: last_trade.pnl_net.round_dp(4),
+                exit_reason: last_trade.exit_reason.clone(),
+                holding_duration_seconds: last_trade.holding_duration_seconds,
+            };
+            let _ = bq.insert_trades(&[row]).await;
+        }
     }
 
     // 5. Display Quantitative Performance Report
@@ -487,33 +538,6 @@ async fn main() -> Result<()> {
             "[SAVED] Audit report successfully written to: {}",
             report_path.display()
         );
-
-        if let Some(bq) = &bq_sink {
-            let rows: Vec<TradeRow> = closed_trades
-                .iter()
-                .enumerate()
-                .map(|(idx, ct)| TradeRow {
-                    trade_id: format!("paper_{}_{}_{}", args.symbol, timestamp, idx),
-                    session_id: format!("paper_{}_{}", args.symbol, timestamp),
-                    strategy_id: selected_strategy.name().to_string(),
-                    symbol: args.symbol.to_uppercase(),
-                    side: "Closed".to_string(),
-                    entry_timestamp: format_unix_ms_rfc3339(ct.exit_time),
-                    exit_timestamp: format_unix_ms_rfc3339(ct.exit_time),
-                    entry_price: dec!(0),
-                    exit_price: dec!(0),
-                    quantity: dec!(0),
-                    gross_pnl: ct.pnl_gross,
-                    fees_paid: ct.fees_paid,
-                    net_pnl: ct.pnl_net,
-                    exit_reason: "ClosedTrade".to_string(),
-                    holding_duration_seconds: 0,
-                })
-                .collect();
-            if !rows.is_empty() {
-                let _ = bq.insert_trades(&rows).await;
-            }
-        }
     }
 
     Ok(())

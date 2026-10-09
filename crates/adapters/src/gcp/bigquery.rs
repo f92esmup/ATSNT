@@ -77,6 +77,62 @@ pub struct MonteCarloRow {
     pub probability_of_ruin_pct: Decimal,
 }
 
+/// Formed Dollar Bar record for BigQuery `dollar_bars` table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DollarBarRow {
+    pub bar_id: String,
+    pub session_id: String,
+    pub symbol: String,
+    pub start_timestamp: String,
+    pub close_timestamp: String,
+    pub open: Decimal,
+    pub high: Decimal,
+    pub low: Decimal,
+    pub close: Decimal,
+    pub volume: Decimal,
+    pub dollar_volume: Decimal,
+    pub trade_count: u64,
+    pub duration_ms: i64,
+}
+
+/// Trait representing rows destined for BigQuery streaming tables, providing deduplication keys.
+pub trait BigQueryRecord: Serialize {
+    /// Unique identifier attached as `insertId` in `tabledata.insertAll` for ingestion idempotency.
+    fn insert_id(&self) -> Option<String> {
+        None
+    }
+}
+
+impl BigQueryRecord for TradeRow {
+    fn insert_id(&self) -> Option<String> {
+        Some(self.trade_id.clone())
+    }
+}
+
+impl BigQueryRecord for EquitySnapshotRow {
+    fn insert_id(&self) -> Option<String> {
+        Some(format!("{}_{}", self.session_id, self.timestamp))
+    }
+}
+
+impl BigQueryRecord for HpoEvaluationRow {
+    fn insert_id(&self) -> Option<String> {
+        Some(format!("{}_{}", self.run_id, self.timestamp))
+    }
+}
+
+impl BigQueryRecord for MonteCarloRow {
+    fn insert_id(&self) -> Option<String> {
+        Some(format!("{}_{}", self.run_id, self.strategy_id))
+    }
+}
+
+impl BigQueryRecord for DollarBarRow {
+    fn insert_id(&self) -> Option<String> {
+        Some(format!("{}_{}", self.session_id, self.bar_id))
+    }
+}
+
 /// BigQuery streaming data sink.
 ///
 /// Dispatches rows directly to the BigQuery `tabledata.insertAll` REST API.
@@ -122,8 +178,8 @@ impl BigQuerySink {
         self.project_id.is_some() && self.auth_token.is_some()
     }
 
-    /// Streaming insert of generic rows into a BigQuery table.
-    pub async fn insert_rows<T: Serialize>(
+    /// Streaming insert of generic rows into a BigQuery table with idempotency deduplication keys.
+    pub async fn insert_rows<T: BigQueryRecord>(
         &self,
         table_id: &str,
         rows: &[T],
@@ -160,7 +216,21 @@ impl BigQuerySink {
             project_id, self.dataset_id, table_id
         );
 
-        let row_envelopes: Vec<_> = rows.iter().map(|r| json!({ "json": r })).collect();
+        let row_envelopes: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                if let Some(id) = r.insert_id() {
+                    json!({
+                        "insertId": id,
+                        "json": r
+                    })
+                } else {
+                    json!({
+                        "json": r
+                    })
+                }
+            })
+            .collect();
         let payload = json!({
             "kind": "bigquery#tableDataInsertAllRequest",
             "rows": row_envelopes,
@@ -312,11 +382,17 @@ impl BigQuerySink {
     }
 
     /// Convenience wrapper for inserting Monte Carlo summary metrics.
+    /// Convenience wrapper for inserting Monte Carlo summary metrics.
     pub async fn insert_monte_carlo_runs(
         &self,
         rows: &[MonteCarloRow],
     ) -> Result<(), AdapterError> {
         self.insert_rows("monte_carlo_runs", rows).await
+    }
+
+    /// Convenience wrapper for inserting aggregated dollar bars.
+    pub async fn insert_dollar_bars(&self, rows: &[DollarBarRow]) -> Result<(), AdapterError> {
+        self.insert_rows("dollar_bars", rows).await
     }
 }
 
@@ -369,5 +445,32 @@ mod tests {
         assert_eq!(json_val["symbol"], "btcusdt");
         assert_eq!(json_val["cash_equity"], "10000");
         assert_eq!(json_val["active_position_side"], "Long");
+    }
+
+    #[test]
+    fn dollar_bar_row_serialization_and_insert_id() {
+        let bar = DollarBarRow {
+            bar_id: "bar_000001".into(),
+            session_id: "paper_btcusdt_1791544244".into(),
+            symbol: "BTCUSDT".into(),
+            start_timestamp: "2026-10-09T12:00:00Z".into(),
+            close_timestamp: "2026-10-09T12:01:00Z".into(),
+            open: dec!(65000),
+            high: dec!(65200),
+            low: dec!(64950),
+            close: dec!(65100),
+            volume: dec!(1.5),
+            dollar_volume: dec!(97600),
+            trade_count: 142,
+            duration_ms: 60000,
+        };
+
+        assert_eq!(
+            bar.insert_id(),
+            Some("paper_btcusdt_1791544244_bar_000001".to_string())
+        );
+        let json_val = serde_json::to_value(&bar).unwrap();
+        assert_eq!(json_val["bar_id"], "bar_000001");
+        assert_eq!(json_val["trade_count"], 142);
     }
 }

@@ -101,33 +101,85 @@ OPTIONS (
     description = "Discrete Event Monte Carlo stress simulation results and ruin probability metrics"
 );
 
+-- -----------------------------------------------------------------------------
+-- 5. Table: `dollar_bars` (Aggregated Dollar Volume Bars)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `atsnt_bi.dollar_bars` (
+    bar_id STRING NOT NULL,
+    session_id STRING NOT NULL,
+    symbol STRING NOT NULL,
+    start_timestamp TIMESTAMP NOT NULL,
+    close_timestamp TIMESTAMP NOT NULL,
+    open NUMERIC NOT NULL,
+    high NUMERIC NOT NULL,
+    low NUMERIC NOT NULL,
+    close NUMERIC NOT NULL,
+    volume NUMERIC NOT NULL,
+    dollar_volume NUMERIC NOT NULL,
+    trade_count INT64 NOT NULL,
+    duration_ms INT64 NOT NULL
+)
+PARTITION BY DATE(close_timestamp)
+CLUSTER BY symbol, session_id
+OPTIONS (
+    description = "Formed Dollar Bars with microsecond/millisecond timestamps and OHLCV aggregates"
+);
+
 -- =============================================================================
--- ANALYTICAL VIEWS FOR GOOGLE LOOKER STUDIO
+-- ANALYTICAL VIEWS FOR GOOGLE LOOKER STUDIO (DEDUPLICATED & PARTITION-AWARE)
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
--- View: `v_daily_pnl` (Daily P&L Performance & Win Rate)
+-- View: `v_trades` (Clean, Idempotent Trade Audit Records)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `atsnt_bi.v_trades` AS
+SELECT * EXCEPT(row_num)
+FROM (
+    SELECT
+        *,
+        ROW_NUMBER() OVER(PARTITION BY trade_id ORDER BY exit_timestamp DESC) AS row_num
+    FROM `atsnt_bi.trades`
+)
+WHERE row_num = 1;
+
+-- -----------------------------------------------------------------------------
+-- View: `v_dollar_bars` (Clean, Idempotent Dollar Bar Records)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `atsnt_bi.v_dollar_bars` AS
+SELECT * EXCEPT(row_num)
+FROM (
+    SELECT
+        *,
+        ROW_NUMBER() OVER(PARTITION BY session_id, bar_id ORDER BY close_timestamp DESC) AS row_num
+    FROM `atsnt_bi.dollar_bars`
+)
+WHERE row_num = 1;
+
+-- -----------------------------------------------------------------------------
+-- View: `v_daily_pnl` (Daily P&L Performance, Win Rate & Fees by Strategy & Session)
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `atsnt_bi.v_daily_pnl` AS
 SELECT
     DATE(exit_timestamp) AS trade_date,
     symbol,
     strategy_id,
+    session_id,
     COUNT(1) AS total_trades,
     COUNTIF(net_pnl > 0) AS winning_trades,
     SAFE_DIVIDE(COUNTIF(net_pnl > 0), COUNT(1)) AS win_rate,
     SUM(gross_pnl) AS daily_gross_pnl,
     SUM(fees_paid) AS daily_fees,
     SUM(net_pnl) AS daily_net_pnl
-FROM `atsnt_bi.trades`
-GROUP BY trade_date, symbol, strategy_id;
+FROM `atsnt_bi.v_trades`
+GROUP BY trade_date, symbol, strategy_id, session_id;
 
 -- -----------------------------------------------------------------------------
--- View: `v_strategy_performance` (High-Level Strategy Attribution)
+-- View: `v_strategy_performance` (High-Level Strategy & Session Attribution)
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `atsnt_bi.v_strategy_performance` AS
 SELECT
     strategy_id,
+    session_id,
     symbol,
     COUNT(1) AS total_trades,
     COUNTIF(net_pnl > 0) AS winning_trades,
@@ -137,11 +189,11 @@ SELECT
     ROUND(SUM(fees_paid), 2) AS total_fees_paid,
     ROUND(SAFE_DIVIDE(SUM(IF(net_pnl > 0, net_pnl, 0)), ABS(SUM(IF(net_pnl < 0, net_pnl, 0)))), 2) AS profit_factor,
     ROUND(AVG(holding_duration_seconds) / 60, 1) AS avg_holding_minutes
-FROM `atsnt_bi.trades`
-GROUP BY strategy_id, symbol;
+FROM `atsnt_bi.v_trades`
+GROUP BY strategy_id, session_id, symbol;
 
 -- -----------------------------------------------------------------------------
--- View: `v_live_paper_monitor` (Real-Time Engine Monitor)
+-- View: `v_live_paper_monitor` (Real-Time Engine Monitor - Latest Mark-to-Market)
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `atsnt_bi.v_live_paper_monitor` AS
 SELECT * EXCEPT(row_num)
