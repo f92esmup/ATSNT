@@ -7,7 +7,7 @@ Este documento define la especificación técnica completa y reproducible para c
 ## 1. Arquitectura de Fuentes de Datos (Google BigQuery)
 
 - **Proyecto GCP**: `mi-facturador-bot-01` (o `${GCP_PROJECT_ID}`)
-- **Región**: `EU`
+- **Región**: `europe-southwest1` (Madrid)
 - **Conjunto de Datos (Dataset)**: `atsnt_bi`
 - **Conector**: Conector nativo de BigQuery para Looker Studio (Direct Query, sin costes de extracción periódica).
 

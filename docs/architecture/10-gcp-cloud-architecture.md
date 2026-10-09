@@ -300,7 +300,7 @@ Every dashboard report in Looker Studio can incorporate interactive control drop
 ### Step 1: Provision GCP Resources (Once)
 ```bash
 export GCP_PROJECT_ID="your-project-id"
-export GCP_REGION="EU" # o europe-west1, europe-southwest1, etc.
+export GCP_REGION="europe-southwest1" # Madrid
 
 ./scripts/gcp/setup_gcp_resources.sh
 ```
