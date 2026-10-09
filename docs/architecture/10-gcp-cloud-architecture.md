@@ -163,29 +163,7 @@ PARTITION BY DATE(timestamp)
 CLUSTER BY strategy_id;
 ```
 
-### 4.5 Table: `atsnt_bi.dollar_bars`
-Stores information-driven Dollar Volume Bars formed during live execution and paper trading:
-```sql
-CREATE TABLE IF NOT EXISTS `atsnt_bi.dollar_bars` (
-    bar_id STRING NOT NULL,
-    session_id STRING NOT NULL,
-    symbol STRING NOT NULL,
-    start_timestamp TIMESTAMP NOT NULL,
-    close_timestamp TIMESTAMP NOT NULL,
-    open NUMERIC NOT NULL,
-    high NUMERIC NOT NULL,
-    low NUMERIC NOT NULL,
-    close NUMERIC NOT NULL,
-    volume NUMERIC NOT NULL,
-    dollar_volume NUMERIC NOT NULL,
-    trade_count INT64 NOT NULL,
-    duration_ms INT64 NOT NULL
-)
-PARTITION BY DATE(close_timestamp)
-CLUSTER BY symbol, session_id;
-```
-
-### 4.6 Idempotency & Data Contract Principles
+### 4.5 Idempotency & Data Contract Principles
 To guarantee deterministic reproducibility, zero duplicate rows, and seamless BI filtering:
 1. **Streaming Deduplication (`insertId`)**: All BigQuery streaming inserts via `BigQuerySink::insert_rows` attach a unique `insertId` envelope for each row. BigQuery uses this key for automatic 1-minute deduplication on network retries.
 2. **Deterministic ID Taxonomy**:
@@ -196,8 +174,7 @@ To guarantee deterministic reproducibility, zero duplicate rows, and seamless BI
    - `trade_id`:
      - Backtest & Paper: `{session_id}_t{idx:05}` (e.g. `paper_btcusdt_1791544244_t00001`)
      - Live Gateway: `{symbol}_{binance_order_id}_{trade_id}`
-   - `bar_id`: `{session_id}_{bar_index}`
-3. **Analytical View Layer Idempotency**: All analytical reporting queries read through deduplicating views (`v_trades`, `v_dollar_bars`) using windowed `ROW_NUMBER() OVER (...) = 1` to guarantee absolute data consistency even across manual table reloads.
+3. **Analytical View Layer Idempotency**: All analytical reporting queries read through deduplicating views (`v_trades`, `v_live_paper_monitor`) using windowed `ROW_NUMBER() OVER (...) = 1` to guarantee absolute data consistency even across manual table reloads.
 
 ---
 
@@ -286,21 +263,7 @@ Looker Studio connects directly to BigQuery using the standard Google connector.
    WHERE row_num = 1;
    ```
 
-2. **`v_dollar_bars`**:
-   Deduplicated Dollar Volume Bars for microstructure analysis:
-   ```sql
-   CREATE OR REPLACE VIEW `atsnt_bi.v_dollar_bars` AS
-   SELECT * EXCEPT(row_num)
-   FROM (
-       SELECT
-           *,
-           ROW_NUMBER() OVER(PARTITION BY session_id, bar_id ORDER BY close_timestamp DESC) AS row_num
-       FROM `atsnt_bi.dollar_bars`
-   )
-   WHERE row_num = 1;
-   ```
-
-3. **`v_daily_pnl`**:
+2. **`v_daily_pnl`**:
    Aggregates net PnL, trade volume, and win rate by day, session, and strategy for performance charting:
    ```sql
    CREATE OR REPLACE VIEW `atsnt_bi.v_daily_pnl` AS
@@ -319,7 +282,7 @@ Looker Studio connects directly to BigQuery using the standard Google connector.
    GROUP BY trade_date, symbol, strategy_id, session_id;
    ```
 
-4. **`v_strategy_performance`**:
+3. **`v_strategy_performance`**:
    Summarizes high-level strategy and session attribution (Profit Factor, Total Net Return, Average Holding Time):
    ```sql
    CREATE OR REPLACE VIEW `atsnt_bi.v_strategy_performance` AS
@@ -339,7 +302,7 @@ Looker Studio connects directly to BigQuery using the standard Google connector.
    GROUP BY strategy_id, session_id, symbol;
    ```
 
-5. **`v_live_paper_monitor`**:
+4. **`v_live_paper_monitor`**:
    Returns the latest mark-to-market state of each active paper/live trading session:
    ```sql
    CREATE OR REPLACE VIEW `atsnt_bi.v_live_paper_monitor` AS
@@ -366,7 +329,7 @@ Every dashboard report in Looker Studio can incorporate interactive control drop
 - **Strategy Selector**: Dropdown on `strategy_id` (e.g. `DollarBarsCusum_v1`, `TrendFollowing_v1`).
 - **Session Filter**: Dropdown on `session_id` to compare individual live runs against historical backtests (`bt_...`, `paper_...`, `live_...`).
 - **Instrument Selector**: Dropdown on `symbol` (`BTCUSDT`, `ETHUSDT`).
-- **Date Range Picker**: Native calendar control bound to `exit_timestamp` / `close_timestamp`.
+- **Date Range Picker**: Native calendar control bound to `exit_timestamp`.
 - **Optimization Surface Explorer**: Multi-metric scatter plot on `hpo_evaluations` filtered by `strategy_id` and sorted by `deflated_sharpe_ratio`.
 
 ---

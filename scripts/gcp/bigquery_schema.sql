@@ -100,31 +100,6 @@ CLUSTER BY strategy_id
 OPTIONS (
     description = "Discrete Event Monte Carlo stress simulation results and ruin probability metrics"
 );
-
--- -----------------------------------------------------------------------------
--- 5. Table: `dollar_bars` (Aggregated Dollar Volume Bars)
--- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS `atsnt_bi.dollar_bars` (
-    bar_id STRING NOT NULL,
-    session_id STRING NOT NULL,
-    symbol STRING NOT NULL,
-    start_timestamp TIMESTAMP NOT NULL,
-    close_timestamp TIMESTAMP NOT NULL,
-    open NUMERIC NOT NULL,
-    high NUMERIC NOT NULL,
-    low NUMERIC NOT NULL,
-    close NUMERIC NOT NULL,
-    volume NUMERIC NOT NULL,
-    dollar_volume NUMERIC NOT NULL,
-    trade_count INT64 NOT NULL,
-    duration_ms INT64 NOT NULL
-)
-PARTITION BY DATE(close_timestamp)
-CLUSTER BY symbol, session_id
-OPTIONS (
-    description = "Formed Dollar Bars with microsecond/millisecond timestamps and OHLCV aggregates"
-);
-
 -- =============================================================================
 -- ANALYTICAL VIEWS FOR GOOGLE LOOKER STUDIO (DEDUPLICATED & PARTITION-AWARE)
 -- =============================================================================
@@ -139,19 +114,6 @@ FROM (
         *,
         ROW_NUMBER() OVER(PARTITION BY trade_id ORDER BY exit_timestamp DESC) AS row_num
     FROM `atsnt_bi.trades`
-)
-WHERE row_num = 1;
-
--- -----------------------------------------------------------------------------
--- View: `v_dollar_bars` (Clean, Idempotent Dollar Bar Records)
--- -----------------------------------------------------------------------------
-CREATE OR REPLACE VIEW `atsnt_bi.v_dollar_bars` AS
-SELECT * EXCEPT(row_num)
-FROM (
-    SELECT
-        *,
-        ROW_NUMBER() OVER(PARTITION BY session_id, bar_id ORDER BY close_timestamp DESC) AS row_num
-    FROM `atsnt_bi.dollar_bars`
 )
 WHERE row_num = 1;
 
