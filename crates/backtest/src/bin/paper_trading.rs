@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use adapters::{
-    format_unix_ms_rfc3339, AlertNotifier, AsyncMarketDataStream, BigQuerySink,
-    BinanceWebSocketStream, BinanceWsConfig, DollarBarRow, EquitySnapshotRow, TelegramNotifier,
+    format_unix_ms_rfc3339, now_in_madrid, AlertNotifier, AsyncMarketDataStream, BigQuerySink,
+    BinanceWebSocketStream, BinanceWsConfig, EquitySnapshotRow, GcpSecretManager, TelegramNotifier,
     TradeRow,
 };
 use anyhow::{Context, Result};
 use backtest::{BacktestConfig, PaperTradingConfig, PaperTradingEvent, PaperTradingSession};
+use chrono::Timelike;
 use clap::Parser;
 use domain::PositionSide;
 use rust_decimal::Decimal;
@@ -69,6 +70,10 @@ struct Args {
     /// Send execution and barrier exit alerts to Telegram
     #[arg(long, default_value_t = false)]
     telegram_alerts: bool,
+
+    /// Print individual raw market trade ticks to stdout (verbose debug mode)
+    #[arg(long, default_value_t = false)]
+    show_ticks: bool,
 }
 
 #[tokio::main]
@@ -107,8 +112,9 @@ async fn main() -> Result<()> {
         None
     };
 
+    let secret_manager = GcpSecretManager::from_env();
     let telegram = if args.telegram_alerts {
-        let t = TelegramNotifier::from_env();
+        let t = TelegramNotifier::from_gcp_or_env(&secret_manager).await;
         println!(
             " Telegram Alerts:      {}",
             if t.is_enabled() {
@@ -197,6 +203,16 @@ async fn main() -> Result<()> {
     let mtm_interval = Duration::from_secs(1);
     let mut last_entry_info: Option<(PositionSide, Decimal, Decimal, i64)> = None;
 
+    let mut current_day = now_in_madrid().date_naive();
+    let mut last_daily_report_date: Option<chrono::NaiveDate> = None;
+    let mut daily_trades_count: usize = 0;
+    let mut daily_wins: usize = 0;
+    let mut daily_losses: usize = 0;
+    let mut daily_gross_pnl = Decimal::ZERO;
+    let mut daily_fees = Decimal::ZERO;
+    let mut daily_net_pnl = Decimal::ZERO;
+    let mut daily_timer = tokio::time::interval(Duration::from_secs(10));
+
     loop {
         tokio::select! {
             biased;
@@ -206,22 +222,78 @@ async fn main() -> Result<()> {
                 break;
             }
 
+            _ = daily_timer.tick() => {
+                let now_madrid = now_in_madrid();
+                if now_madrid.date_naive() != current_day {
+                    current_day = now_madrid.date_naive();
+                    daily_trades_count = 0;
+                    daily_wins = 0;
+                    daily_losses = 0;
+                    daily_gross_pnl = Decimal::ZERO;
+                    daily_fees = Decimal::ZERO;
+                    daily_net_pnl = Decimal::ZERO;
+                }
+
+                if now_madrid.hour() == 20 && last_daily_report_date != Some(now_madrid.date_naive()) {
+                    last_daily_report_date = Some(now_madrid.date_naive());
+                    if let Some(t) = &telegram {
+                        let active_pos_desc = match session.active_position() {
+                            Some(pos) => format!("{:?} (qty: {}, entry: ${})", pos.side, pos.quantity, pos.entry_price),
+                            None => "Flat (No open position)".to_string(),
+                        };
+                        let mark = if last_mark_price > Decimal::ZERO { last_mark_price } else { args.capital };
+                        let total_eq = session.total_equity(mark);
+                        let dd = session.engine().current_drawdown_pct();
+                        let date_str = now_madrid.format("%Y-%m-%d").to_string();
+                        let msg = TelegramNotifier::format_daily_summary(
+                            &date_str,
+                            "Paper Trading",
+                            &args.symbol,
+                            daily_trades_count,
+                            daily_wins,
+                            daily_losses,
+                            daily_gross_pnl,
+                            daily_fees,
+                            daily_net_pnl,
+                            session.cash_equity(),
+                            total_eq,
+                            dd,
+                            &active_pos_desc,
+                            total_ticks,
+                            total_bars,
+                        );
+                        let _ = t.send_alert(&msg).await;
+                        tracing::info!(target: "telegram", "Dispatched 20:00 Madrid daily performance summary via Telegram");
+                    }
+                }
+            }
+
             trade_res = stream.next_trade() => {
                 match trade_res {
                     Ok(Some(trade)) => {
                         total_ticks += 1;
                         last_mark_price = trade.price;
 
-                        // Print trade tick telemetry
-                        println!(
-                            "[TICK #{:>6}] ts: {} | price: {:>10} | qty: {:>8} | side: {:<4} | notional: ${:>10}",
-                            total_ticks,
-                            trade.timestamp,
-                            trade.price,
-                            trade.quantity,
-                            format!("{:?}", trade.side),
-                            trade.dollar_value()
-                        );
+                        if args.show_ticks {
+                            println!(
+                                "[TICK #{:>6}] ts: {} | price: {:>10} | qty: {:>8} | side: {:<4} | notional: ${:>10}",
+                                total_ticks,
+                                trade.timestamp,
+                                trade.price,
+                                trade.quantity,
+                                format!("{:?}", trade.side),
+                                trade.dollar_value()
+                            );
+                        } else {
+                            tracing::trace!(
+                                target: "paper_trading",
+                                tick = total_ticks,
+                                price = %trade.price,
+                                qty = %trade.quantity,
+                                side = ?trade.side,
+                                "Tick processed"
+                            );
+                        }
 
                         // Process trade through PaperTradingSession
                         let events = session.process_trade(&trade);
@@ -230,14 +302,19 @@ async fn main() -> Result<()> {
                             match event {
                                 PaperTradingEvent::BarFormed(bar) => {
                                     total_bars += 1;
+                                    tracing::info!(
+                                        target: "paper_trading",
+                                        bar_id = total_bars,
+                                        open = %bar.open,
+                                        high = %bar.high,
+                                        low = %bar.low,
+                                        close = %bar.close,
+                                        volume = %bar.volume,
+                                        dollar_volume = %bar.dollar_volume,
+                                        "Dollar Bar finalized"
+                                    );
                                     println!(
-                                        "\n------------------------------------------------------------\n\
-                                         >>> DOLLAR BAR #{:04} FINALIZED <<<\n\
-                                         Time Window:  {} -> {} ({} ms)\n\
-                                         OHLC:         O: {} | H: {} | L: {} | C: {}\n\
-                                         Volume:       {} base | ${} dollar volume\n\
-                                         Trade Count:  {}\n\
-                                         ------------------------------------------------------------\n",
+                                        "[BAR #{:04}] Window: {} -> {} ({} ms) | O: {} | H: {} | L: {} | C: {} | Vol: ${:.0}",
                                         total_bars,
                                         bar.start_time,
                                         bar.end_time,
@@ -246,28 +323,10 @@ async fn main() -> Result<()> {
                                         bar.high,
                                         bar.low,
                                         bar.close,
-                                        bar.volume,
-                                        bar.dollar_volume,
-                                        bar.trade_count
+                                        bar.dollar_volume
                                     );
-                                    if let Some(bq) = &bq_sink {
-                                        let bar_row = DollarBarRow {
-                                            bar_id: format!("bar_{:06}", total_bars),
-                                            session_id: session_id.clone(),
-                                            symbol: args.symbol.to_uppercase(),
-                                            start_timestamp: format_unix_ms_rfc3339(bar.start_time),
-                                            close_timestamp: format_unix_ms_rfc3339(bar.end_time),
-                                            open: bar.open.round_dp(4),
-                                            high: bar.high.round_dp(4),
-                                            low: bar.low.round_dp(4),
-                                            close: bar.close.round_dp(4),
-                                            volume: bar.volume.round_dp(4),
-                                            dollar_volume: bar.dollar_volume.round_dp(4),
-                                            trade_count: bar.trade_count,
-                                            duration_ms: (bar.end_time - bar.start_time).max(0),
-                                        };
-                                        let _ = bq.insert_dollar_bars(&[bar_row]).await;
-                                    }
+                                    // NOTE: Real-time Dollar Bar BigQuery streaming is omitted to preserve network bandwidth.
+                                    // Bars are deterministically reproducible offline from raw trade archives.
                                 }
                                 PaperTradingEvent::SignalGenerated(intent) => {
                                     println!(
@@ -310,19 +369,49 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 PaperTradingEvent::PositionClosed { exit_reason, exit_price, net_pnl, total_equity } => {
-                                    let (side_str, entry_p, qty, entry_ts) = match last_entry_info.take() {
-                                        Some((s, ep, q, et)) => (
-                                            match s {
+                                    let closed_trade_opt = session.engine().closed_trades().last().cloned();
+                                    let (side_str, entry_p, qty, entry_ts, gross_pnl, fees_paid, duration, ret_pct) = match &closed_trade_opt {
+                                        Some(ct) => (
+                                            match ct.side {
                                                 PositionSide::Long => "Long".to_string(),
                                                 PositionSide::Short => "Short".to_string(),
                                             },
-                                            ep,
-                                            q,
-                                            et,
+                                            ct.entry_price,
+                                            ct.quantity,
+                                            ct.entry_time,
+                                            ct.pnl_gross,
+                                            ct.fees_paid + ct.slippage_paid,
+                                            ct.holding_duration_seconds,
+                                            ct.return_pct,
                                         ),
-                                        None => ("ClosedPosition".to_string(), exit_price, dec!(0), trade.timestamp),
+                                        None => {
+                                            let (s, ep, q, et) = match last_entry_info.take() {
+                                                Some((s, ep, q, et)) => (
+                                                    match s {
+                                                        PositionSide::Long => "Long".to_string(),
+                                                        PositionSide::Short => "Short".to_string(),
+                                                    },
+                                                    ep,
+                                                    q,
+                                                    et,
+                                                ),
+                                                None => ("ClosedPosition".to_string(), exit_price, dec!(0), trade.timestamp),
+                                            };
+                                            let dur = ((trade.timestamp - et) / 1000).max(0);
+                                            let ret = if ep > Decimal::ZERO && q > Decimal::ZERO { net_pnl / (ep * q) } else { Decimal::ZERO };
+                                            (s, ep, q, et, net_pnl, Decimal::ZERO, dur, ret)
+                                        }
                                     };
-                                    let holding_duration = ((trade.timestamp - entry_ts) / 1000).max(0);
+
+                                    daily_trades_count += 1;
+                                    if net_pnl > Decimal::ZERO {
+                                        daily_wins += 1;
+                                    } else if net_pnl < Decimal::ZERO {
+                                        daily_losses += 1;
+                                    }
+                                    daily_gross_pnl += gross_pnl;
+                                    daily_fees += fees_paid;
+                                    daily_net_pnl += net_pnl;
 
                                     println!(
                                         "\n============================================================\n\
@@ -335,14 +424,21 @@ async fn main() -> Result<()> {
                                          Realized PnL: ${:.2} (net of fees and slippage)\n\
                                          Total Equity: ${:.2}\n\
                                          ============================================================\n",
-                                        exit_reason, side_str, entry_p, exit_price, qty, holding_duration, net_pnl, total_equity
+                                        exit_reason, side_str, entry_p, exit_price, qty, duration, net_pnl, total_equity
                                     );
                                     if let Some(t) = &telegram {
-                                        let msg = TelegramNotifier::format_position_closed(
+                                        let msg = TelegramNotifier::format_trade_summary(
                                             &args.symbol,
+                                            &side_str,
                                             &exit_reason,
+                                            entry_p,
                                             exit_price,
+                                            qty,
+                                            duration,
+                                            gross_pnl,
+                                            fees_paid,
                                             net_pnl,
+                                            ret_pct,
                                             total_equity,
                                         );
                                         let _ = t.send_alert(&msg).await;
@@ -360,11 +456,11 @@ async fn main() -> Result<()> {
                                             entry_price: entry_p.round_dp(4),
                                             exit_price: exit_price.round_dp(4),
                                             quantity: qty.round_dp(4),
-                                            gross_pnl: net_pnl.round_dp(4),
-                                            fees_paid: dec!(0).round_dp(4),
+                                            gross_pnl: gross_pnl.round_dp(4),
+                                            fees_paid: fees_paid.round_dp(4),
                                             net_pnl: net_pnl.round_dp(4),
                                             exit_reason: exit_reason.clone(),
-                                            holding_duration_seconds: holding_duration,
+                                            holding_duration_seconds: duration,
                                         };
                                         let _ = bq.insert_trades(&[row]).await;
                                     }
@@ -435,30 +531,49 @@ async fn main() -> Result<()> {
             "\n[LIQUIDATION] Open position marked to market and liquidated at price ${}",
             last_mark_price
         );
-        if let (Some(bq), Some(last_trade)) = (&bq_sink, closed_trades.last()) {
-            trade_counter += 1;
+        if let Some(last_trade) = closed_trades.last() {
             let side_str = match last_trade.side {
                 PositionSide::Long => "Long",
                 PositionSide::Short => "Short",
             };
-            let row = TradeRow {
-                trade_id: format!("{}_t{:05}", session_id, trade_counter),
-                session_id: session_id.clone(),
-                strategy_id: selected_strategy.name().to_string(),
-                symbol: args.symbol.to_uppercase(),
-                side: side_str.to_string(),
-                entry_timestamp: format_unix_ms_rfc3339(last_trade.entry_time),
-                exit_timestamp: format_unix_ms_rfc3339(last_trade.exit_time),
-                entry_price: last_trade.entry_price.round_dp(4),
-                exit_price: last_trade.exit_price.round_dp(4),
-                quantity: last_trade.quantity.round_dp(4),
-                gross_pnl: last_trade.pnl_gross.round_dp(4),
-                fees_paid: last_trade.fees_paid.round_dp(4),
-                net_pnl: last_trade.pnl_net.round_dp(4),
-                exit_reason: last_trade.exit_reason.clone(),
-                holding_duration_seconds: last_trade.holding_duration_seconds,
-            };
-            let _ = bq.insert_trades(&[row]).await;
+            if let Some(t) = &telegram {
+                let msg = TelegramNotifier::format_trade_summary(
+                    &args.symbol,
+                    side_str,
+                    &last_trade.exit_reason,
+                    last_trade.entry_price,
+                    last_trade.exit_price,
+                    last_trade.quantity,
+                    last_trade.holding_duration_seconds,
+                    last_trade.pnl_gross,
+                    last_trade.fees_paid + last_trade.slippage_paid,
+                    last_trade.pnl_net,
+                    last_trade.return_pct,
+                    args.capital + metrics.net_profit,
+                );
+                let _ = t.send_alert(&msg).await;
+            }
+            if let Some(bq) = &bq_sink {
+                trade_counter += 1;
+                let row = TradeRow {
+                    trade_id: format!("{}_t{:05}", session_id, trade_counter),
+                    session_id: session_id.clone(),
+                    strategy_id: selected_strategy.name().to_string(),
+                    symbol: args.symbol.to_uppercase(),
+                    side: side_str.to_string(),
+                    entry_timestamp: format_unix_ms_rfc3339(last_trade.entry_time),
+                    exit_timestamp: format_unix_ms_rfc3339(last_trade.exit_time),
+                    entry_price: last_trade.entry_price.round_dp(4),
+                    exit_price: last_trade.exit_price.round_dp(4),
+                    quantity: last_trade.quantity.round_dp(4),
+                    gross_pnl: last_trade.pnl_gross.round_dp(4),
+                    fees_paid: (last_trade.fees_paid + last_trade.slippage_paid).round_dp(4),
+                    net_pnl: last_trade.pnl_net.round_dp(4),
+                    exit_reason: last_trade.exit_reason.clone(),
+                    holding_duration_seconds: last_trade.holding_duration_seconds,
+                };
+                let _ = bq.insert_trades(&[row]).await;
+            }
         }
     }
 

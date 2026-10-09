@@ -407,34 +407,112 @@ cargo run -p backtest --bin run_hpo -- \
 
 ---
 
-## 9. Observability & Cloud Upload Traceability
+## 9. Professional Observability Architecture
 
-To guarantee full operator confidence and operational transparency, all GCP cloud export actions emit explicit console banners and status logs:
+To ensure high reliability, zero terminal lockup on constrained cloud virtual machines (e.g., `e2-micro`), and zero disk saturation, ATSNT enforces a clean multi-tier observability architecture:
 
-### 9.1 BigQuery Streaming Insert Banners
-Whenever trades, HPO evaluations, or Monte Carlo statistics are sent to BigQuery:
+### 9.1 Multi-Tier Observability Matrix
+
+| Channel | Data Type | Frequency | Destination | Example |
+| :--- | :--- | :--- | :--- | :--- |
+| **Operational Push Alerts** | Key business execution events | Very low (minutes/hours) | Telegram Bot API | Position Opened, Stop Loss hit, Trade Closed summary, Daily 20:00 Madrid report |
+| **Structured System Logs** | Engine lifecycle & audit | Medium (seconds/minutes) | `journald` (100 MB rotating disk) | Bar finalized, order executed, socket reconnect, network error |
+| **Hot Path Market Ticks** | High-throughput trade ticks | High (10-100s per second) | `tracing::trace!` (stdout only if `--show-ticks`) | `[TICK #1042] ts: ... price: 65420.50` (silent in production) |
+| **Analytical BI Telemetry** | Aggregated equity curves & PnL | Periodic (1s / 5s) | BigQuery (`atsnt_bi`) | Streaming inserts for real-time Looker Studio dashboards |
+
+### 9.2 Hot-Path Tick Telemetry (`--show-ticks`)
+In production, streaming thousands of individual trade ticks to standard output saturates CPU, network, and terminal buffers.
+- By default, incoming trade ticks are evaluated in-memory and logged at `tracing::trace!` level without console output.
+- Pass `--show-ticks` only when debugging interactively in local terminal environments.
+
+### 9.3 Clean Single-Line Cloud Telemetry Markers
+Multi-line ASCII boxes have been eliminated in favor of concise, single-line cloud stream notifications and structured tracing events:
 ```text
-############################################################
-# [GCP :: BigQuery] STREAMING INSERT SUCCESSFUL            #
-# Service: Google Cloud BigQuery                          #
-# Table:   mi-facturador-bot-01:atsnt_bi.trades           #
-# Rows:    12 row(s) streamed successfully                 #
-############################################################
-```
-Periodic mark-to-market equity snapshots emit a concise 1-line stream marker:
-```text
-# [GCP :: BigQuery] Telemetry snapshot streamed -> mi-facturador-bot-01:atsnt_bi.equity_snapshots (1 row)
+# [GCP :: BigQuery] Streamed 1 row(s) -> mi-facturador-bot-01:atsnt_bi.trades
+# [GCP :: Secret Manager] Secret 'BOT_TOKEN' resolved from project 'mi-facturador-bot-01'
+# [GCP :: Cloud Storage] File uploaded -> gs://atsnt-lake/simulations/monte_carlo_1791544244.parquet
 ```
 
-### 9.2 Cloud Storage Upload Banners
-Whenever files (simulation reports, JSON configs, Parquet trajectories) are uploaded to GCS:
-```text
-############################################################
-# [GCP :: Cloud Storage] UPLOAD COMPLETE                   #
-# Service: Google Cloud Storage (GCS)                     #
-# Target:  gs://atsnt-lake-mi-facturador-bot-01/simulations/monte_carlo_1791544244.parquet
-# Size:    45230 bytes (44.17 KB)                         #
-# Type:    application/octet-stream                       #
-############################################################
+### 9.4 Real-Time & Executive Telegram Notifications
+
+ATSNT connects directly to Telegram using bot credentials resolved from Google Cloud Secret Manager (`BOT_TOKEN` / `TELEGRAM_BOT_TOKEN`, `CHAT_ID` / `TELEGRAM_CHAT_ID`) or local `.env`:
+
+1. **Position Opened Alert**:
+   Emits instrument, direction, execution entry price, quantity, stop loss, take profit, and current cash equity upon fill.
+2. **Comprehensive Trade Closed Summary**:
+   Emits exit reason (`TakeProfit`, `StopLoss`, `TimeBarrier`), holding duration (`Xm Ys`), entry/exit prices, gross PnL, fees and slippage friction, net realized PnL in USD, percentage return, and total equity.
+3. **Daily Executive Performance Summary (20:00 Europe/Madrid)**:
+   An automated daily scheduler triggers at **20:00 Madrid CET/CEST** every day, calculating:
+   - Date and execution mode (Paper / Live)
+   - Total trades today, winning trades count, losing trades count, win rate percentage
+   - Gross profit, total fees/friction drag, net realized PnL
+   - Cash equity, mark-to-market portfolio equity, session drawdown percentage
+   - Current open position status (or Flat)
+   - Engine telemetry: total ticks processed and dollar bars aggregated today.
+
+---
+
+## 10. Production Deployment: Systemd & Journald Log Rotation
+
+To guarantee 24/7 uptime and prevent disk exhaustion on GCP `e2-micro` instances (30 GB standard disk):
+
+### 10.1 Systemd Service Unit (`atsnt.service`)
+Reference unit installed in `/etc/systemd/system/atsnt.service`:
+
+```ini
+[Unit]
+Description=ATSNT Algorithmic Trading Engine
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=f92esmup
+WorkingDirectory=/home/f92esmup/Projects/ATSNT
+Environment="RUST_LOG=info,adapters=info"
+ExecStart=/home/f92esmup/Projects/ATSNT/target/release/paper_trading --symbol btcusdt --telegram-alerts --gcp-bigquery
+Restart=always
+RestartSec=5s
+KillSignal=SIGINT
+TimeoutStopSec=30s
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
 ```
+
+Enable and start the service:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable atsnt.service
+sudo systemctl start atsnt.service
+```
+
+### 10.2 Journald 100 MB Disk Quota (`journald.conf`)
+Configure `/etc/systemd/journald.conf.d/atsnt-quota.conf` (or edit `/etc/systemd/journald.conf`):
+
+```ini
+[Journal]
+Storage=persistent
+Compress=yes
+SystemMaxUse=100M
+SystemKeepFree=500M
+SystemMaxFileSize=10M
+MaxRetentionSec=1month
+```
+
+Restart `systemd-journald`:
+```bash
+sudo systemctl restart systemd-journald
+```
+
+### 10.3 Inspecting Engine Telemetry
+```bash
+# Follow live structured logs:
+journalctl -u atsnt.service -f
+
+# View last 100 log lines:
+journalctl -u atsnt.service -n 100 --no-pager
+```
+
 

@@ -18,7 +18,7 @@ pub use bigquery::{
 };
 pub use gcs::GcsParquetSink;
 pub use secret_manager::GcpSecretManager;
-pub use telegram::TelegramNotifier;
+pub use telegram::{datetime_in_madrid, now_in_madrid, TelegramNotifier};
 
 /// Formats a Unix timestamp in milliseconds as an RFC3339 UTC string.
 pub fn format_unix_ms_rfc3339(ms: i64) -> String {

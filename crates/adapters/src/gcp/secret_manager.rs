@@ -8,7 +8,7 @@
 
 use base64::prelude::*;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::auth::GcpAuthResolver;
 
@@ -110,13 +110,14 @@ impl GcpSecretManager {
 
         if !trimmed.is_empty() {
             println!(
-                "############################################################\n\
-                 # [GCP :: Secret Manager] SECRET RESOLVED                  #\n\
-                 # Secret:  {:<47} #\n\
-                 # Project: {:<47} #\n\
-                 # Status:  SUCCESS (Retrieved from Cloud)                  #\n\
-                 ############################################################",
+                "# [GCP :: Secret Manager] Secret '{}' resolved from project '{}'",
                 secret_id, project_id
+            );
+            info!(
+                target: "gcp_secrets",
+                secret = %secret_id,
+                project = %project_id,
+                "Secret resolved from GCP Secret Manager"
             );
             Some(trimmed)
         } else {

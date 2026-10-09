@@ -11,12 +11,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use adapters::{
-    format_unix_ms_rfc3339, AlertNotifier, AsyncMarketDataStream, BigQuerySink, BinanceGateway,
-    BinanceGatewayConfig, BinancePrivateEvent, BinancePrivateUserDataStream,
-    BinanceWebSocketStream, BinanceWsConfig, DollarBarRow, EquitySnapshotRow, GcpSecretManager,
-    TelegramNotifier, TradeRow,
+    format_unix_ms_rfc3339, now_in_madrid, AlertNotifier, AsyncMarketDataStream, BigQuerySink,
+    BinanceGateway, BinanceGatewayConfig, BinancePrivateEvent, BinancePrivateUserDataStream,
+    BinanceWebSocketStream, BinanceWsConfig, EquitySnapshotRow, GcpSecretManager, TelegramNotifier,
+    TradeRow,
 };
 use anyhow::{Context, Result};
+use chrono::Timelike;
 use clap::Parser;
 use domain::{DollarBarAggregator, OrderIntent, RiskPolicy, Side};
 use rust_decimal::Decimal;
@@ -69,6 +70,10 @@ struct Args {
     /// Binance Secret Key (defaults to BINANCE_SECRET_KEY env var)
     #[arg(long)]
     secret_key: Option<String>,
+
+    /// Print individual raw market trade ticks to stdout (verbose debug mode)
+    #[arg(long, default_value_t = false)]
+    show_ticks: bool,
 }
 
 fn validate_strategy_market(strategy: &DollarBarsCusumStrategy, market: MarketType) -> Result<()> {
@@ -157,7 +162,7 @@ async fn main() -> Result<()> {
     };
 
     let telegram = if args.telegram_alerts {
-        let t = TelegramNotifier::from_env();
+        let t = TelegramNotifier::from_gcp_or_env(&secret_manager).await;
         println!(
             " Telegram Alerts:      {}",
             if t.is_enabled() {
@@ -253,8 +258,19 @@ async fn main() -> Result<()> {
     let mut total_bars: u64 = 0;
     let mut last_mtm_print = Instant::now();
     let mtm_interval = Duration::from_secs(5);
-    let mut _active_order_intent: Option<OrderIntent> = None;
+    let mut active_order_intent: Option<OrderIntent> = None;
     let mut position_open: bool = false;
+    let mut active_position_tracker: Option<(Side, Decimal, Decimal, u64)> = None;
+
+    let mut current_day = now_in_madrid().date_naive();
+    let mut last_daily_report_date: Option<chrono::NaiveDate> = None;
+    let mut daily_trades_count: usize = 0;
+    let mut daily_wins: usize = 0;
+    let mut daily_losses: usize = 0;
+    let mut daily_gross_pnl = Decimal::ZERO;
+    let mut daily_fees = Decimal::ZERO;
+    let mut daily_net_pnl = Decimal::ZERO;
+    let mut daily_timer = tokio::time::interval(Duration::from_secs(10));
 
     println!("------------------------------------------------------------");
     println!(">>> ATSNT LIVE TRADING ENGINE ARMED AND READY <<<");
@@ -272,6 +288,54 @@ async fn main() -> Result<()> {
                 println!("\n[SHUTDOWN] Interruption signal received (Ctrl+C). Terminating engine...");
                 let _ = user_stream.shutdown().await;
                 break;
+            }
+
+            _ = daily_timer.tick() => {
+                let now_madrid = now_in_madrid();
+                if now_madrid.date_naive() != current_day {
+                    current_day = now_madrid.date_naive();
+                    daily_trades_count = 0;
+                    daily_wins = 0;
+                    daily_losses = 0;
+                    daily_gross_pnl = Decimal::ZERO;
+                    daily_fees = Decimal::ZERO;
+                    daily_net_pnl = Decimal::ZERO;
+                }
+
+                if now_madrid.hour() == 20 && last_daily_report_date != Some(now_madrid.date_naive()) {
+                    last_daily_report_date = Some(now_madrid.date_naive());
+                    if let Some(t) = &telegram {
+                        let active_pos_desc = match &active_position_tracker {
+                            Some((s, ep, q, _)) => format!("{:?} (qty: {}, entry: ${})", s, q, ep),
+                            None => "Flat (No open position)".to_string(),
+                        };
+                        let dd = if peak_equity > Decimal::ZERO && peak_equity > current_equity {
+                            (peak_equity - current_equity) / peak_equity
+                        } else {
+                            Decimal::ZERO
+                        };
+                        let date_str = now_madrid.format("%Y-%m-%d").to_string();
+                        let msg = TelegramNotifier::format_daily_summary(
+                            &date_str,
+                            if is_testnet { "Futures Testnet" } else { "Futures Production" },
+                            &symbol_upper,
+                            daily_trades_count,
+                            daily_wins,
+                            daily_losses,
+                            daily_gross_pnl,
+                            daily_fees,
+                            daily_net_pnl,
+                            current_equity,
+                            current_equity,
+                            dd,
+                            &active_pos_desc,
+                            total_ticks,
+                            total_bars,
+                        );
+                        let _ = t.send_alert(&msg).await;
+                        tracing::info!(target: "telegram", "Dispatched 20:00 Madrid daily performance summary via Telegram");
+                    }
+                }
             }
 
             // Ingest private exchange events (Order fills, cancellations, account updates)
@@ -297,40 +361,117 @@ async fn main() -> Result<()> {
                         );
 
                         if update.status == "FILLED" {
-                            position_open = update.cumulative_filled_quantity > Decimal::ZERO;
-                            if let Some(t) = &telegram {
-                                let alert_msg = format!(
-                                    "🚨 *LIVE EXECUTION: {}*\nStatus: `{}`\nSide: `{:?}`\nPrice: `${}`\nQty: `{}`",
-                                    update.symbol, update.status, update.side, update.last_filled_price, update.cumulative_filled_quantity
-                                );
-                                let _ = t.send_alert(&alert_msg).await;
-                            }
+                            let is_closing = active_position_tracker.is_some();
+                            if !is_closing {
+                                // Position opened
+                                active_position_tracker = Some((
+                                    update.side,
+                                    update.last_filled_price,
+                                    update.cumulative_filled_quantity,
+                                    update.transaction_time_ms,
+                                ));
+                                position_open = true;
 
-                            if let Some(bq) = &bq_sink {
-                                let side_str = match update.side {
-                                    Side::Buy => "Buy",
-                                    Side::Sell => "Sell",
+                                if let Some(t) = &telegram {
+                                    let side_str = match update.side {
+                                        Side::Buy => "Long",
+                                        Side::Sell => "Short",
+                                    };
+                                    let (sl, tp) = match &active_order_intent {
+                                        Some(intent) => (intent.stop_loss, intent.take_profit),
+                                        None => (Decimal::ZERO, Decimal::ZERO),
+                                    };
+                                    let msg = TelegramNotifier::format_position_opened(
+                                        &symbol_upper,
+                                        side_str,
+                                        update.last_filled_price,
+                                        update.cumulative_filled_quantity,
+                                        sl,
+                                        tp,
+                                        current_equity,
+                                    );
+                                    let _ = t.send_alert(&msg).await;
+                                }
+                            } else {
+                                // Position closed
+                                let (entry_side, entry_price, entry_qty, entry_ts) = active_position_tracker.take().unwrap_or((
+                                    update.side,
+                                    update.last_filled_price,
+                                    update.cumulative_filled_quantity,
+                                    update.transaction_time_ms,
+                                ));
+                                let duration_secs = ((update.transaction_time_ms.saturating_sub(entry_ts)) / 1000) as i64;
+                                let gross_pnl = match entry_side {
+                                    Side::Buy => (update.last_filled_price - entry_price) * entry_qty,
+                                    Side::Sell => (entry_price - update.last_filled_price) * entry_qty,
                                 };
-                                let ts_i64 = update.transaction_time_ms as i64;
-                                let trade_identifier = update.trade_id.unwrap_or(0);
-                                let row = TradeRow {
-                                    trade_id: format!("{}_{}_{}", update.symbol, update.order_id, trade_identifier),
-                                    session_id: session_id.clone(),
-                                    strategy_id: strategy.name().to_string(),
-                                    symbol: update.symbol.clone(),
-                                    side: side_str.to_string(),
-                                    entry_timestamp: format_unix_ms_rfc3339(ts_i64),
-                                    exit_timestamp: format_unix_ms_rfc3339(ts_i64),
-                                    entry_price: update.last_filled_price.round_dp(4),
-                                    exit_price: update.last_filled_price.round_dp(4),
-                                    quantity: update.cumulative_filled_quantity.round_dp(4),
-                                    gross_pnl: dec!(0).round_dp(4),
-                                    fees_paid: dec!(0).round_dp(4),
-                                    net_pnl: dec!(0).round_dp(4),
-                                    exit_reason: update.status.clone(),
-                                    holding_duration_seconds: 0,
+                                let fees_paid = (entry_price * entry_qty + update.last_filled_price * entry_qty) * dec!(0.0005);
+                                let net_pnl = gross_pnl - fees_paid;
+                                let return_pct = if entry_price > Decimal::ZERO && entry_qty > Decimal::ZERO {
+                                    net_pnl / (entry_price * entry_qty)
+                                } else {
+                                    Decimal::ZERO
                                 };
-                                let _ = bq.insert_trades(&[row]).await;
+
+                                daily_trades_count += 1;
+                                if net_pnl > Decimal::ZERO {
+                                    daily_wins += 1;
+                                } else if net_pnl < Decimal::ZERO {
+                                    daily_losses += 1;
+                                }
+                                daily_gross_pnl += gross_pnl;
+                                daily_fees += fees_paid;
+                                daily_net_pnl += net_pnl;
+                                position_open = false;
+                                active_order_intent = None;
+
+                                if let Some(t) = &telegram {
+                                    let side_str = match entry_side {
+                                        Side::Buy => "Long",
+                                        Side::Sell => "Short",
+                                    };
+                                    let msg = TelegramNotifier::format_trade_summary(
+                                        &symbol_upper,
+                                        side_str,
+                                        &update.status,
+                                        entry_price,
+                                        update.last_filled_price,
+                                        entry_qty,
+                                        duration_secs,
+                                        gross_pnl,
+                                        fees_paid,
+                                        net_pnl,
+                                        return_pct,
+                                        current_equity,
+                                    );
+                                    let _ = t.send_alert(&msg).await;
+                                }
+
+                                if let Some(bq) = &bq_sink {
+                                    let side_str = match entry_side {
+                                        Side::Buy => "Buy",
+                                        Side::Sell => "Sell",
+                                    };
+                                    let trade_identifier = update.trade_id.unwrap_or(0);
+                                    let row = TradeRow {
+                                        trade_id: format!("{}_{}_{}", update.symbol, update.order_id, trade_identifier),
+                                        session_id: session_id.clone(),
+                                        strategy_id: strategy.name().to_string(),
+                                        symbol: update.symbol.clone(),
+                                        side: side_str.to_string(),
+                                        entry_timestamp: format_unix_ms_rfc3339(entry_ts as i64),
+                                        exit_timestamp: format_unix_ms_rfc3339(update.transaction_time_ms as i64),
+                                        entry_price: entry_price.round_dp(4),
+                                        exit_price: update.last_filled_price.round_dp(4),
+                                        quantity: entry_qty.round_dp(4),
+                                        gross_pnl: gross_pnl.round_dp(4),
+                                        fees_paid: fees_paid.round_dp(4),
+                                        net_pnl: net_pnl.round_dp(4),
+                                        exit_reason: update.status.clone(),
+                                        holding_duration_seconds: duration_secs,
+                                    };
+                                    let _ = bq.insert_trades(&[row]).await;
+                                }
                             }
                         }
                     }
@@ -356,6 +497,26 @@ async fn main() -> Result<()> {
                 match trade_res {
                     Ok(Some(trade)) => {
                         total_ticks += 1;
+
+                        if args.show_ticks {
+                            println!(
+                                "[LIVE TICK #{:>6}] ts: {} | price: {:>10} | qty: {:>8} | side: {:<4}",
+                                total_ticks,
+                                trade.timestamp,
+                                trade.price,
+                                trade.quantity,
+                                format!("{:?}", trade.side)
+                            );
+                        } else {
+                            tracing::trace!(
+                                target: "live_trading",
+                                tick = total_ticks,
+                                price = %trade.price,
+                                qty = %trade.quantity,
+                                side = ?trade.side,
+                                "Live tick processed"
+                            );
+                        }
 
                         // Periodic MTM logging and BigQuery telemetry
                         if last_mtm_print.elapsed() >= mtm_interval {
@@ -392,14 +553,19 @@ async fn main() -> Result<()> {
                         // Feed trade to DollarBarAggregator
                         if let Some(bar) = aggregator.process_trade(&trade) {
                             total_bars += 1;
+                            tracing::info!(
+                                target: "live_trading",
+                                bar_id = total_bars,
+                                open = %bar.open,
+                                high = %bar.high,
+                                low = %bar.low,
+                                close = %bar.close,
+                                volume = %bar.volume,
+                                dollar_volume = %bar.dollar_volume,
+                                "Dollar Bar finalized"
+                            );
                             println!(
-                                "\n------------------------------------------------------------\n\
-                                 >>> DOLLAR BAR #{:04} FINALIZED <<<\n\
-                                 Time:         {} -> {} ({} ms)\n\
-                                 OHLC:         O: {} | H: {} | L: {} | C: {}\n\
-                                 Volume:       {} base | ${} dollar volume\n\
-                                 Trade Count:  {}\n\
-                                 ------------------------------------------------------------",
+                                "[LIVE BAR #{:04}] Window: {} -> {} ({} ms) | O: {} | H: {} | L: {} | C: {} | Vol: ${:.0}",
                                 total_bars,
                                 bar.start_time,
                                 bar.end_time,
@@ -408,29 +574,9 @@ async fn main() -> Result<()> {
                                 bar.high,
                                 bar.low,
                                 bar.close,
-                                bar.volume,
-                                bar.dollar_volume,
-                                bar.trade_count
+                                bar.dollar_volume
                             );
-
-                            if let Some(bq) = &bq_sink {
-                                let bar_row = DollarBarRow {
-                                    bar_id: format!("bar_{:06}", total_bars),
-                                    session_id: session_id.clone(),
-                                    symbol: symbol_upper.clone(),
-                                    start_timestamp: format_unix_ms_rfc3339(bar.start_time),
-                                    close_timestamp: format_unix_ms_rfc3339(bar.end_time),
-                                    open: bar.open.round_dp(4),
-                                    high: bar.high.round_dp(4),
-                                    low: bar.low.round_dp(4),
-                                    close: bar.close.round_dp(4),
-                                    volume: bar.volume.round_dp(4),
-                                    dollar_volume: bar.dollar_volume.round_dp(4),
-                                    trade_count: bar.trade_count,
-                                    duration_ms: (bar.end_time - bar.start_time).max(0),
-                                };
-                                let _ = bq.insert_dollar_bars(&[bar_row]).await;
-                            }
+                            // NOTE: Real-time Dollar Bar BigQuery streaming is omitted to preserve network bandwidth.
 
                             // Strategy signal evaluation
                             if let Some(intent) = strategy.on_bar(&bar) {
@@ -468,7 +614,7 @@ async fn main() -> Result<()> {
                                                 report.price,
                                                 report.original_qty
                                             );
-                                            _active_order_intent = Some(intent);
+                                            active_order_intent = Some(intent);
                                             position_open = true;
                                         }
                                         Err(e) => {

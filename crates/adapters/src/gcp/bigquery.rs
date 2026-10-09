@@ -259,31 +259,17 @@ impl BigQuerySink {
                     .send()
                     .await?;
                 if retry_resp.status().is_success() {
-                    if table_id == "equity_snapshots" {
-                        println!(
-                            "# [GCP :: BigQuery] Telemetry snapshot streamed -> {}:{}.{} ({} row)",
-                            project_id,
-                            self.dataset_id,
-                            table_id,
-                            rows.len()
-                        );
-                    } else {
-                        println!(
-                            "\n############################################################\n\
-                             # [GCP :: BigQuery] STREAMING INSERT SUCCESSFUL            #\n\
-                             # Service: Google Cloud BigQuery                          #\n\
-                             # Table:   {}:{}.{}\n\
-                             # Rows:    {} row(s) streamed (token renewed)            #\n\
-                             ############################################################\n",
-                            project_id,
-                            self.dataset_id,
-                            table_id,
-                            rows.len()
-                        );
-                    }
+                    println!(
+                        "# [GCP :: BigQuery] Streamed {} row(s) -> {}:{}.{} (token renewed)",
+                        rows.len(),
+                        project_id,
+                        self.dataset_id,
+                        table_id
+                    );
                     info!(
                         target: "bigquery",
                         table = %table_id,
+                        count = rows.len(),
                         "BigQuery insert succeeded after token renewal"
                     );
                     return Ok(());
@@ -295,12 +281,7 @@ impl BigQuerySink {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             println!(
-                "\n############################################################\n\
-                 # [GCP :: BigQuery ERROR] Streaming Insert Failed          #\n\
-                 # Table:   {}:{}.{}\n\
-                 # Status:  {}\n\
-                 # Details: {}\n\
-                 ############################################################\n",
+                "# [GCP :: BigQuery ERROR] Streaming insert failed -> {}:{}.{} | Status: {} | Details: {}",
                 project_id, self.dataset_id, table_id, status, body
             );
             warn!(
@@ -315,11 +296,7 @@ impl BigQuerySink {
                 if let Some(arr) = errors.as_array() {
                     if !arr.is_empty() {
                         println!(
-                            "\n############################################################\n\
-                             # [GCP :: BigQuery WARNING] Row Validation Errors          #\n\
-                             # Table:   {}:{}.{}\n\
-                             # Errors:  {}\n\
-                             ############################################################\n",
+                            "# [GCP :: BigQuery WARNING] Row validation errors -> {}:{}.{} | Errors: {}",
                             project_id, self.dataset_id, table_id, errors
                         );
                         warn!(
@@ -333,28 +310,19 @@ impl BigQuerySink {
                 }
             }
 
-            if table_id == "equity_snapshots" {
-                println!(
-                    "# [GCP :: BigQuery] Telemetry snapshot streamed -> {}:{}.{} ({} row)",
-                    project_id,
-                    self.dataset_id,
-                    table_id,
-                    rows.len()
-                );
-            } else {
-                println!(
-                    "\n############################################################\n\
-                     # [GCP :: BigQuery] STREAMING INSERT SUCCESSFUL            #\n\
-                     # Service: Google Cloud BigQuery                          #\n\
-                     # Table:   {}:{}.{}\n\
-                     # Rows:    {} row(s) streamed successfully                 #\n\
-                     ############################################################\n",
-                    project_id,
-                    self.dataset_id,
-                    table_id,
-                    rows.len()
-                );
-            }
+            println!(
+                "# [GCP :: BigQuery] Streamed {} row(s) -> {}:{}.{}",
+                rows.len(),
+                project_id,
+                self.dataset_id,
+                table_id
+            );
+            info!(
+                target: "bigquery",
+                table = %table_id,
+                count = rows.len(),
+                "BigQuery streaming insert succeeded"
+            );
         }
 
         Ok(())
