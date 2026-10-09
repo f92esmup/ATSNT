@@ -9,7 +9,7 @@
 CREATE SCHEMA IF NOT EXISTS `atsnt_bi`
 OPTIONS (
     description = "ATSNT Quantitative Algorithmic Trading Analytics & BI Warehouse",
-    location = "EU"
+    location = "europe-southwest1"
 );
 
 -- -----------------------------------------------------------------------------

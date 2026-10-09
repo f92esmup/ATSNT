@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SQL_SCHEMA_FILE="${SCRIPT_DIR}/bigquery_schema.sql"
 
 PROJECT_ID="${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || echo "")}"
-REGION="${GCP_REGION:-EU}"
+REGION="${GCP_REGION:-europe-southwest1}"
 DATASET_ID="${GCP_DATASET_ID:-atsnt_bi}"
 BUCKET_NAME="${GCS_BUCKET_NAME:-atsnt-lake-${PROJECT_ID}}"
 
