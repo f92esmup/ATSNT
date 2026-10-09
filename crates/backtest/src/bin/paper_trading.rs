@@ -196,6 +196,21 @@ async fn main() -> Result<()> {
     let session_id = format!("paper_{}_{}", args.symbol.to_lowercase(), session_start_ts);
     let mut trade_counter: u64 = 0;
 
+    if let Some(bq) = &bq_sink {
+        let initial_snapshot = EquitySnapshotRow {
+            timestamp: format_unix_ms_rfc3339((session_start_ts * 1000) as i64),
+            session_id: session_id.clone(),
+            symbol: args.symbol.to_uppercase(),
+            cash_equity: session.cash_equity().round_dp(4),
+            unrealized_pnl: Decimal::ZERO,
+            total_equity: session.cash_equity().round_dp(4),
+            drawdown_pct: Decimal::ZERO,
+            active_position_side: None,
+            active_position_qty: None,
+        };
+        let _ = bq.insert_equity_snapshots(&[initial_snapshot]).await;
+    }
+
     let mut total_ticks: u64 = 0;
     let mut total_bars: u64 = 0;
     let mut last_mark_price = Decimal::ZERO;
@@ -325,8 +340,27 @@ async fn main() -> Result<()> {
                                         bar.close,
                                         bar.dollar_volume
                                     );
-                                    // NOTE: Real-time Dollar Bar BigQuery streaming is omitted to preserve network bandwidth.
-                                    // Bars are deterministically reproducible offline from raw trade archives.
+                                    // Stream bar mark-to-market snapshot to BigQuery
+                                    if let Some(bq) = &bq_sink {
+                                        let current_eq = session.total_equity(bar.close);
+                                        let unr = session.active_position().map_or(Decimal::ZERO, |p| p.unrealized_pnl(bar.close));
+                                        let dd = session.engine().current_drawdown_pct();
+                                        let row = EquitySnapshotRow {
+                                            timestamp: format_unix_ms_rfc3339(bar.end_time),
+                                            session_id: session_id.clone(),
+                                            symbol: args.symbol.to_uppercase(),
+                                            cash_equity: session.cash_equity().round_dp(4),
+                                            unrealized_pnl: unr.round_dp(4),
+                                            total_equity: current_eq.round_dp(4),
+                                            drawdown_pct: dd.round_dp(4),
+                                            active_position_side: session.active_position().map(|p| match p.side {
+                                                PositionSide::Long => "Long".to_string(),
+                                                PositionSide::Short => "Short".to_string(),
+                                            }),
+                                            active_position_qty: session.active_position().map(|p| p.quantity.round_dp(4)),
+                                        };
+                                        let _ = bq.insert_equity_snapshots(&[row]).await;
+                                    }
                                 }
                                 PaperTradingEvent::SignalGenerated(intent) => {
                                     println!(
@@ -575,6 +609,25 @@ async fn main() -> Result<()> {
                 let _ = bq.insert_trades(&[row]).await;
             }
         }
+    }
+
+    if let Some(bq) = &bq_sink {
+        let final_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let final_snapshot = EquitySnapshotRow {
+            timestamp: format_unix_ms_rfc3339(final_ts),
+            session_id: session_id.clone(),
+            symbol: args.symbol.to_uppercase(),
+            cash_equity: args.capital + metrics.net_profit,
+            unrealized_pnl: Decimal::ZERO,
+            total_equity: args.capital + metrics.net_profit,
+            drawdown_pct: metrics.max_drawdown_pct,
+            active_position_side: None,
+            active_position_qty: None,
+        };
+        let _ = bq.insert_equity_snapshots(&[final_snapshot]).await;
     }
 
     // 5. Display Quantitative Performance Report

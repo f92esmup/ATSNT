@@ -151,7 +151,7 @@ impl BigQuerySink {
     /// Returns `true` if BigQuery streaming is enabled and configured.
     #[inline]
     pub fn is_enabled(&self) -> bool {
-        self.project_id.is_some() && self.auth_token.is_some()
+        self.project_id.is_some() || self.auth_token.is_some()
     }
 
     /// Streaming insert of generic rows into a BigQuery table with idempotency deduplication keys.

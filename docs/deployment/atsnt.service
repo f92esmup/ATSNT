@@ -6,16 +6,17 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=f92esmup
-WorkingDirectory=/home/f92esmup/Projects/ATSNT
+WorkingDirectory=/home/f92esmup/atsnt
 
 # Observability Configuration
 # Limit logs to INFO level so hot-path tick telemetry (TRACE) does not incur disk/CPU overhead
 Environment="RUST_LOG=info,adapters=info"
+Environment="GCP_PROJECT_ID=mi-facturador-bot-01"
+Environment="GCP_DATASET_ID=atsnt_bi"
 
 # Binary Execution
-# By default runs in paper trading mode with Telegram alerts and BigQuery streaming enabled.
-# Add --show-ticks only during interactive terminal sessions when debugging.
-ExecStart=/home/f92esmup/Projects/ATSNT/target/release/paper_trading --symbol btcusdt --telegram-alerts --gcp-bigquery
+# Runs standalone compiled binary in paper trading mode with Telegram alerts and BigQuery streaming
+ExecStart=/home/f92esmup/atsnt/paper_trading --symbol btcusdt --telegram-alerts --gcp-bigquery
 
 # Resilience & Auto-Restart Policies
 Restart=always
