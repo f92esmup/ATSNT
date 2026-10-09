@@ -30,3 +30,22 @@ pub use gcp::{
     MonteCarloRow, TelegramNotifier, TradeRow,
 };
 pub use traits::{AlertNotifier, AsyncMarketDataStream, MarketDataStream};
+
+/// Convenience helper to load `.env` key-value pairs into `std::env` if `.env` exists.
+pub fn load_dotenv() {
+    if let Ok(content) = std::fs::read_to_string(".env") {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                let key = k.trim();
+                let val = v.trim().trim_matches('"').trim_matches('\'');
+                if std::env::var(key).is_err() {
+                    std::env::set_var(key, val);
+                }
+            }
+        }
+    }
+}

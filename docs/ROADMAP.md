@@ -61,6 +61,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] HMAC-SHA256 signature generator for Binance API keys with official test vector validation.
 - [x] Pre-trade risk manager (Account margin checks, balance verification, circuit breakers).
 - [x] Order reconciliation listener for exchange user data stream.
+- [x] End-to-end `live_trading` runner against Binance Futures Testnet & Production with automated BigQuery telemetry.
 
 ---
 

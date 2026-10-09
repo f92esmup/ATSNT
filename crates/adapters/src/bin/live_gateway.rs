@@ -56,6 +56,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    adapters::load_dotenv();
+
     let cli = Cli::parse();
     let is_spot = !cli.futures;
 
