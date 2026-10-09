@@ -184,9 +184,31 @@ gs://atsnt-lake-${PROJECT_ID}/
 
 ---
 
-## 6. Authentication Architecture (Cascade Resolver)
+## 6. Authentication & Secrets Architecture (GCP Secret Manager + Cascade Resolver)
 
-To prevent credential leaks, expired token errors, or downtime, the Rust adapter uses a 3-tier cascade resolution strategy:
+To eliminate plaintext secrets and `.env` files from production disks, the ATSNT trading engine integrates directly with **Google Cloud Secret Manager** (`secretmanager.googleapis.com`):
+
+### 6.1 Enterprise Secret Resolution
+Exchange credentials (`BINANCE_API_KEY`, `BINANCE_SECRET_KEY`) are dynamically resolved at runtime via [`GcpSecretManager`]:
+
+1. **Tier 1 (Production)**: **Google Cloud Secret Manager REST API** (`/v1/projects/{project}/secrets/{id}/versions/latest:access`). Decodes base64 secret payload directly into memory with zero disk persistence.
+2. **Tier 2 (Fallback)**: Local environment variables / `.env` file (strictly for local offline development).
+3. **Tier 3 (Manual CLI)**: Explicit `--api-key` and `--secret-key` flags.
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                 GcpSecretManager Resolution                 │
+├─────────────────────────────────────────────────────────────┤
+│ 1. GCP Secret Manager: BINANCE_API_KEY / BINANCE_SECRET_KEY │
+│    (Enterprise production, zero credentials on disk)        │
+│                                                             │
+│ 2. Environment / .env Fallback                              │
+│    (Local developer convenience)                            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 6.2 Token & Project ID Cascade Resolver (`GcpAuthResolver`)
+To authenticate with Secret Manager, BigQuery, and GCS without hardcoded credentials, the Rust adapter uses a 3-tier cascade resolution strategy:
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐

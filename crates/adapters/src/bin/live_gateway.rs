@@ -3,10 +3,12 @@
 //! Provides command-line utilities to test account balances, verify HMAC signatures,
 //! and stream normalized private account events on Binance Testnet or Production.
 
-use std::env;
 use std::sync::Arc;
 
-use adapters::{BinanceAuth, BinanceGateway, BinanceGatewayConfig, BinancePrivateUserDataStream};
+use adapters::{
+    BinanceAuth, BinanceGateway, BinanceGatewayConfig, BinancePrivateUserDataStream,
+    GcpSecretManager,
+};
 use clap::Parser;
 use tracing::{error, info};
 
@@ -61,18 +63,26 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let is_spot = !cli.futures;
 
-    let api_key = cli
-        .api_key
-        .or_else(|| env::var("BINANCE_API_KEY").ok())
-        .unwrap_or_default();
+    let secret_manager = GcpSecretManager::from_env();
 
-    let secret_key = cli
-        .secret_key
-        .or_else(|| env::var("BINANCE_SECRET_KEY").ok())
-        .unwrap_or_default();
+    let api_key = match cli.api_key {
+        Some(k) if !k.trim().is_empty() => k,
+        _ => secret_manager
+            .resolve_secret("BINANCE_API_KEY")
+            .await
+            .unwrap_or_default(),
+    };
+
+    let secret_key = match cli.secret_key {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => secret_manager
+            .resolve_secret("BINANCE_SECRET_KEY")
+            .await
+            .unwrap_or_default(),
+    };
 
     if api_key.is_empty() || secret_key.is_empty() {
-        error!("API key or Secret key not provided. Set BINANCE_API_KEY and BINANCE_SECRET_KEY or pass --api-key and --secret-key");
+        error!("API key or Secret key not provided. Store BINANCE_API_KEY and BINANCE_SECRET_KEY in GCP Secret Manager, .env, or pass --api-key and --secret-key");
         std::process::exit(1);
     }
 

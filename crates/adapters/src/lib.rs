@@ -26,8 +26,8 @@ pub use binance_user_stream::{BinanceUserDataStream, ExecutionUpdate};
 pub use binance_ws::{BinanceAggTradePayload, BinanceWebSocketStream, BinanceWsConfig};
 pub use error::AdapterError;
 pub use gcp::{
-    format_unix_ms_rfc3339, BigQuerySink, EquitySnapshotRow, GcsParquetSink, HpoEvaluationRow,
-    MonteCarloRow, TelegramNotifier, TradeRow,
+    format_unix_ms_rfc3339, BigQuerySink, EquitySnapshotRow, GcpSecretManager, GcsParquetSink,
+    HpoEvaluationRow, MonteCarloRow, TelegramNotifier, TradeRow,
 };
 pub use traits::{AlertNotifier, AsyncMarketDataStream, MarketDataStream};
 

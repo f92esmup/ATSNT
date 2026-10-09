@@ -5,7 +5,6 @@
 //! validates pre-trade risk policy constraints, dispatches authenticated live orders via [`BinanceGateway`],
 //! and listens for execution updates and order fills over the private [`BinancePrivateUserDataStream`].
 
-use std::env;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,7 +13,8 @@ use std::time::{Duration, Instant};
 use adapters::{
     format_unix_ms_rfc3339, AlertNotifier, AsyncMarketDataStream, BigQuerySink, BinanceGateway,
     BinanceGatewayConfig, BinancePrivateEvent, BinancePrivateUserDataStream,
-    BinanceWebSocketStream, BinanceWsConfig, EquitySnapshotRow, TelegramNotifier, TradeRow,
+    BinanceWebSocketStream, BinanceWsConfig, EquitySnapshotRow, GcpSecretManager, TelegramNotifier,
+    TradeRow,
 };
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -99,20 +99,29 @@ async fn main() -> Result<()> {
     let is_testnet = if args.production { false } else { args.testnet };
     let symbol_upper = args.symbol.to_ascii_uppercase();
 
-    let api_key = args
-        .api_key
-        .or_else(|| env::var("BINANCE_API_KEY").ok())
-        .unwrap_or_default();
+    let secret_manager = GcpSecretManager::from_env();
 
-    let secret_key = args
-        .secret_key
-        .or_else(|| env::var("BINANCE_SECRET_KEY").ok())
-        .unwrap_or_default();
+    let api_key = match args.api_key {
+        Some(k) if !k.trim().is_empty() => k,
+        _ => secret_manager
+            .resolve_secret("BINANCE_API_KEY")
+            .await
+            .unwrap_or_default(),
+    };
+
+    let secret_key = match args.secret_key {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => secret_manager
+            .resolve_secret("BINANCE_SECRET_KEY")
+            .await
+            .unwrap_or_default(),
+    };
 
     if api_key.is_empty() || secret_key.is_empty() {
         eprintln!(
             "\n[ERROR] Binance API credentials not found.\n\
-             Please set BINANCE_API_KEY and BINANCE_SECRET_KEY in your .env or pass --api-key and --secret-key.\n"
+             Please store BINANCE_API_KEY and BINANCE_SECRET_KEY in GCP Secret Manager,\n\
+             in your local .env file, or pass --api-key and --secret-key.\n"
         );
         std::process::exit(1);
     }

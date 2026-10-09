@@ -8,11 +8,13 @@
 pub mod auth;
 pub mod bigquery;
 pub mod gcs;
+pub mod secret_manager;
 pub mod telegram;
 
 pub use auth::GcpAuthResolver;
 pub use bigquery::{BigQuerySink, EquitySnapshotRow, HpoEvaluationRow, MonteCarloRow, TradeRow};
 pub use gcs::GcsParquetSink;
+pub use secret_manager::GcpSecretManager;
 pub use telegram::TelegramNotifier;
 
 /// Formats a Unix timestamp in milliseconds as an RFC3339 UTC string.
