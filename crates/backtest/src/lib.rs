@@ -1,3 +1,4 @@
+pub mod artifact;
 pub mod config;
 pub mod engine;
 pub mod error;
@@ -7,6 +8,10 @@ pub mod optimization;
 pub mod paper;
 pub mod walk_forward;
 
+pub use artifact::{
+    load_strategy_config, HpoScorecard, LoadedStrategyConfig, SamplingConfig,
+    StrategyDeploymentArtifact,
+};
 pub use config::BacktestConfig;
 pub use engine::BacktestEngine;
 pub use error::BacktestError;

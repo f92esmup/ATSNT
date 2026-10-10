@@ -144,6 +144,21 @@ impl Default for PaperTradingConfig {
     }
 }
 
+impl PaperTradingConfig {
+    /// Creates a [`PaperTradingConfig`] adopting parameters and friction models
+    /// from an authoritative [`StrategyDeploymentArtifact`].
+    pub fn from_artifact(
+        artifact: &crate::artifact::StrategyDeploymentArtifact<DollarBarsCusumConfig>,
+    ) -> Self {
+        Self {
+            dollar_bar_threshold: artifact.dollar_bar_threshold().unwrap_or(dec!(50_000)),
+            backtest: artifact.execution_context,
+            strategy: artifact.strategy_config.clone(),
+            channel_capacity: 10_000,
+        }
+    }
+}
+
 /// Live event-driven paper trading session coordinator.
 ///
 /// Bridges live incoming market trades with the deterministic [`BacktestEngine`]

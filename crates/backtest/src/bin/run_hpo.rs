@@ -8,7 +8,10 @@ use adapters::{
     HpoEvaluationRow, MarketDataStream,
 };
 use anyhow::{Context, Result};
-use backtest::{BacktestConfig, WalkForwardConfig, WalkForwardOptimizer, WalkForwardSplitter};
+use backtest::{
+    BacktestConfig, HpoScorecard, SamplingConfig, StrategyDeploymentArtifact, WalkForwardConfig,
+    WalkForwardOptimizer, WalkForwardSplitter,
+};
 use clap::Parser;
 use domain::DollarBarAggregator;
 use rust_decimal::Decimal;
@@ -21,6 +24,10 @@ use serde_json::json;
     about = "ATSNT - Parallel Walk-Forward Hyperparameter Optimizer (Rayon + Anti-Overfitting)"
 )]
 struct Args {
+    /// Target trading symbol in uppercase (e.g. 'BTCUSDT')
+    #[arg(short, long, default_value = "BTCUSDT")]
+    symbol: String,
+
     /// Path to historical market data file (.parquet or .csv)
     #[arg(
         short,
@@ -82,6 +89,8 @@ async fn main() -> Result<()> {
     println!("============================================================");
     println!(" ATSNT - Walk-Forward Hyperparameter Optimization (Rayon)  ");
     println!("============================================================");
+    let symbol_upper = args.symbol.to_ascii_uppercase();
+    println!("Symbol:      {}", symbol_upper);
     println!("Data:        {}", args.data.display());
     println!("Dollar Bar:  ${}", args.dollar_bar);
     println!(
@@ -258,16 +267,46 @@ async fn main() -> Result<()> {
         );
         println!("  • Deflated Sharpe Ratio p:   {:.4}", winner.dsr_p_value);
 
-        // Serialize Winner to output_config
+        // Serialize Winner to output_config as authoritative StrategyDeploymentArtifact
+        let scorecard = HpoScorecard {
+            mean_is_sortino: winner.mean_is_sortino,
+            mean_oos_sortino: winner.mean_oos_sortino,
+            mean_oos_profit_factor: winner.mean_oos_profit_factor,
+            stability_score: winner.stability_score,
+            fitness: winner.fitness,
+            dsr_p_value: winner.dsr_p_value,
+            is_statistically_significant: winner.is_statistically_significant,
+            trials_evaluated: evaluations.len(),
+        };
+
+        let deployment_artifact = StrategyDeploymentArtifact {
+            schema_version: "1.0".to_string(),
+            strategy_id: args.strategy.clone(),
+            symbol: symbol_upper.clone(),
+            market_type: strategies::MarketType::UsdMPerpetual,
+            sampling: SamplingConfig::DollarBar {
+                threshold: args.dollar_bar,
+            },
+            strategy_config: winner.config.clone(),
+            execution_context: engine_config,
+            hpo_scorecard: Some(scorecard),
+        };
+
         if let Some(parent) = args.output_config.parent() {
             fs::create_dir_all(parent)?;
         }
-        let winner_json = serde_json::to_string_pretty(&winner.config)?;
-        fs::write(&args.output_config, winner_json)?;
+        let artifact_json = serde_json::to_string_pretty(&deployment_artifact)?;
+        fs::write(&args.output_config, artifact_json)?;
         println!(
-            "\n[SAVED] Configuration saved to: {}",
+            "\n[SAVED] Strategy Deployment Artifact saved to: {}",
             args.output_config.display()
         );
+        println!(
+            "        • Strategy:     {}",
+            deployment_artifact.strategy_id
+        );
+        println!("        • Symbol:       {}", deployment_artifact.symbol);
+        println!("        • Sampling:     DollarBar(${})", args.dollar_bar);
 
         // Save detailed audit report for future web dashboard
         let reports_dir = Path::new("storage/reports");

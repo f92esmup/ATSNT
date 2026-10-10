@@ -5,7 +5,6 @@
 //! validates pre-trade risk policy constraints, dispatches authenticated live orders via [`BinanceGateway`],
 //! and listens for execution updates and order fills over the private [`BinancePrivateUserDataStream`].
 
-use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -35,9 +34,9 @@ struct Args {
     #[arg(short, long, default_value = "btcusdt")]
     symbol: String,
 
-    /// Dollar bar accumulation threshold in USDT
-    #[arg(long, default_value = "50000")]
-    dollar_bar: Decimal,
+    /// Dollar bar accumulation threshold in USDT (auto-adopted from --config artifact if omitted)
+    #[arg(long)]
+    dollar_bar: Option<Decimal>,
 
     /// Optional path to JSON strategy configuration (e.g. configs/hpo_results.json)
     #[arg(short, long)]
@@ -131,6 +130,97 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
+    // 1. Load Strategy Configuration & Authoritative Deployment Artifact
+    let (strat_config, loaded_config) = if let Some(config_path) = &args.config {
+        println!(
+            "[*] Loading strategy configuration from: {}",
+            config_path.display()
+        );
+        let loaded = backtest::load_strategy_config::<DollarBarsCusumConfig>(config_path)?;
+        match &loaded {
+            backtest::LoadedStrategyConfig::Artifact(artifact) => {
+                println!(
+                    "[*] Authoritative Deployment Artifact loaded (schema v{})",
+                    artifact.schema_version
+                );
+                if let Some(scorecard) = &artifact.hpo_scorecard {
+                    println!(
+                        "    • HPO Scorecard: IS Sortino={:.2}, OOS Sortino={:.2}, Stability={:.2}, DSR p={:.4} ({})",
+                        scorecard.mean_is_sortino,
+                        scorecard.mean_oos_sortino,
+                        scorecard.stability_score,
+                        scorecard.dsr_p_value,
+                        if scorecard.is_statistically_significant { "PASS" } else { "FAIL" }
+                    );
+                }
+            }
+            backtest::LoadedStrategyConfig::Bare(_) => {
+                println!(
+                    "[*] Legacy bare hyperparameter configuration loaded (no deployment manifest)"
+                );
+            }
+        }
+        (loaded.strategy_config().clone(), Some(loaded))
+    } else {
+        println!("[*] Using default CUSUM + Z-Score strategy hyperparameters");
+        (DollarBarsCusumConfig::default(), None)
+    };
+
+    // Contract validation
+    if let Some(loaded) = &loaded_config {
+        if let Some(strat_id) = loaded.strategy_id() {
+            if strat_id != "dollar_bars_cusum" && strat_id != "cusum" {
+                anyhow::bail!(
+                    "Deployment artifact strategy '{}' is not compatible with live_trading runner (expected 'dollar_bars_cusum')",
+                    strat_id
+                );
+            }
+        }
+        if let Some(artifact_sym) = loaded.symbol() {
+            if !artifact_sym.eq_ignore_ascii_case(&args.symbol) {
+                println!(
+                    "[WARNING] Artifact symbol ({}) does not match session symbol ({})!",
+                    artifact_sym, symbol_upper
+                );
+            }
+        }
+        if let Some(market) = loaded.market_type() {
+            if market != MarketType::UsdMPerpetual {
+                anyhow::bail!(
+                    "Deployment artifact specifies {:?}, but live_trading currently operates on UsdMPerpetual",
+                    market
+                );
+            }
+        }
+    }
+
+    // Resolve Dollar Bar threshold: CLI override > Artifact manifest > Fallback default ($50,000)
+    let effective_dollar_bar = match (
+        args.dollar_bar,
+        loaded_config
+            .as_ref()
+            .and_then(|c| c.dollar_bar_threshold()),
+    ) {
+        (Some(cli_val), Some(artifact_val)) => {
+            if cli_val != artifact_val {
+                println!(
+                    "[WARNING] CLI override --dollar-bar (${}) overrides artifact threshold (${})!",
+                    cli_val, artifact_val
+                );
+            }
+            cli_val
+        }
+        (Some(cli_val), None) => cli_val,
+        (None, Some(artifact_val)) => {
+            println!(
+                "[*] Authoritative Contract: Adopted Dollar Bar threshold from artifact: ${}",
+                artifact_val
+            );
+            artifact_val
+        }
+        (None, None) => dec!(50_000),
+    };
+
     println!("============================================================");
     println!("     ATSNT - Live Algorithmic Execution Engine             ");
     println!("============================================================");
@@ -143,7 +233,7 @@ async fn main() -> Result<()> {
             "Binance USD-M Futures PRODUCTION (https://fapi.binance.com) [REAL CAPITAL]"
         }
     );
-    println!(" Dollar Bar Threshold: ${}", args.dollar_bar);
+    println!(" Dollar Bar Threshold: ${}", effective_dollar_bar);
     println!(" Risk per Trade:       {:.2}%", args.risk_pct * dec!(100));
 
     let bq_sink = if args.gcp_bigquery {
@@ -174,21 +264,6 @@ async fn main() -> Result<()> {
         Some(t)
     } else {
         None
-    };
-
-    // 1. Load Strategy Configuration
-    let strat_config: DollarBarsCusumConfig = if let Some(config_path) = &args.config {
-        println!(
-            "[*] Loading strategy parameters from: {}",
-            config_path.display()
-        );
-        let file = File::open(config_path)
-            .with_context(|| format!("Failed to open config file: {}", config_path.display()))?;
-        serde_json::from_reader(file)
-            .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?
-    } else {
-        println!("[*] Using default CUSUM + Z-Score strategy hyperparameters");
-        DollarBarsCusumConfig::default()
     };
 
     let mut strategy = DollarBarsCusumStrategy::new(strat_config.clone())?;
@@ -251,7 +326,7 @@ async fn main() -> Result<()> {
         .as_secs();
     let session_id = format!("live_{}_{}", args.symbol.to_lowercase(), session_start_ts);
 
-    let mut aggregator = DollarBarAggregator::new(args.dollar_bar)?;
+    let mut aggregator = DollarBarAggregator::new(effective_dollar_bar)?;
     let mut peak_equity = initial_balance;
     let mut current_equity = initial_balance;
     let mut total_ticks: u64 = 0;

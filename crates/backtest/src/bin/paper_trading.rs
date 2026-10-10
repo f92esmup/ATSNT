@@ -4,7 +4,7 @@
 //! information-driven Dollar Bars, executes strategy signals against simulated liquidity
 //! and realistic friction via the [`PaperTradingSession`], and displays live execution telemetry.
 
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -33,9 +33,9 @@ struct Args {
     #[arg(short, long, default_value = "btcusdt")]
     symbol: String,
 
-    /// Dollar bar accumulation threshold in USDT
-    #[arg(long, default_value = "50000")]
-    dollar_bar: Decimal,
+    /// Dollar bar accumulation threshold in USDT (auto-adopted from --config artifact if omitted)
+    #[arg(long)]
+    dollar_bar: Option<Decimal>,
 
     /// Optional path to JSON strategy configuration (e.g. configs/hpo_results.json)
     #[arg(short, long)]
@@ -81,6 +81,90 @@ async fn main() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let args = Args::parse();
 
+    // 1. Load Strategy Configuration & Authoritative Deployment Artifact
+    let (strat_config, loaded_config) = if let Some(config_path) = &args.config {
+        println!(
+            "[*] Loading strategy configuration from: {}",
+            config_path.display()
+        );
+        let loaded = backtest::load_strategy_config::<DollarBarsCusumConfig>(config_path)?;
+        match &loaded {
+            backtest::LoadedStrategyConfig::Artifact(artifact) => {
+                println!(
+                    "[*] Authoritative Deployment Artifact loaded (schema v{})",
+                    artifact.schema_version
+                );
+                if let Some(scorecard) = &artifact.hpo_scorecard {
+                    println!(
+                        "    • HPO Scorecard: IS Sortino={:.2}, OOS Sortino={:.2}, Stability={:.2}, DSR p={:.4} ({})",
+                        scorecard.mean_is_sortino,
+                        scorecard.mean_oos_sortino,
+                        scorecard.stability_score,
+                        scorecard.dsr_p_value,
+                        if scorecard.is_statistically_significant { "PASS" } else { "FAIL" }
+                    );
+                }
+            }
+            backtest::LoadedStrategyConfig::Bare(_) => {
+                println!(
+                    "[*] Legacy bare hyperparameter configuration loaded (no deployment manifest)"
+                );
+            }
+        }
+        (loaded.strategy_config().clone(), Some(loaded))
+    } else {
+        println!("[*] Using default CUSUM + Z-Score strategy hyperparameters");
+        (DollarBarsCusumConfig::default(), None)
+    };
+
+    // Contract validation
+    if let Some(loaded) = &loaded_config {
+        if let Some(strat_id) = loaded.strategy_id() {
+            if strat_id != "dollar_bars_cusum" && strat_id != "cusum" {
+                anyhow::bail!(
+                    "Deployment artifact strategy '{}' is not compatible with paper_trading runner (expected 'dollar_bars_cusum')",
+                    strat_id
+                );
+            }
+        }
+        if let Some(artifact_sym) = loaded.symbol() {
+            if !artifact_sym.eq_ignore_ascii_case(&args.symbol) {
+                println!(
+                    "[WARNING] Artifact symbol ({}) does not match session symbol ({})!",
+                    artifact_sym,
+                    args.symbol.to_ascii_uppercase()
+                );
+            }
+        }
+    }
+
+    // Resolve Dollar Bar threshold: CLI override > Artifact manifest > Fallback default ($50,000)
+    let effective_dollar_bar = match (
+        args.dollar_bar,
+        loaded_config
+            .as_ref()
+            .and_then(|c| c.dollar_bar_threshold()),
+    ) {
+        (Some(cli_val), Some(artifact_val)) => {
+            if cli_val != artifact_val {
+                println!(
+                    "[WARNING] CLI override --dollar-bar (${}) overrides artifact threshold (${})!",
+                    cli_val, artifact_val
+                );
+            }
+            cli_val
+        }
+        (Some(cli_val), None) => cli_val,
+        (None, Some(artifact_val)) => {
+            println!(
+                "[*] Authoritative Contract: Adopted Dollar Bar threshold from artifact: ${}",
+                artifact_val
+            );
+            artifact_val
+        }
+        (None, None) => dec!(50_000),
+    };
+
     println!("============================================================");
     println!("     ATSNT - Real-Time Paper Trading Engine (Milestone 4)   ");
     println!("============================================================");
@@ -93,7 +177,7 @@ async fn main() -> Result<()> {
             "Binance Futures USDT-M (wss://fstream.binancefuture.com)"
         }
     );
-    println!(" Dollar Bar Threshold: ${}", args.dollar_bar);
+    println!(" Dollar Bar Threshold: ${}", effective_dollar_bar);
     println!(" Initial Capital:      ${}", args.capital);
     println!(" Risk per Trade:       {:.2}%", args.risk_pct * dec!(100));
 
@@ -128,21 +212,6 @@ async fn main() -> Result<()> {
         None
     };
 
-    // 1. Load Strategy Configuration
-    let strat_config: DollarBarsCusumConfig = if let Some(config_path) = &args.config {
-        println!(
-            "[*] Loading strategy parameters from: {}",
-            config_path.display()
-        );
-        let file = File::open(config_path)
-            .with_context(|| format!("Failed to open config file: {}", config_path.display()))?;
-        serde_json::from_reader(file)
-            .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?
-    } else {
-        println!("[*] Using default CUSUM + Z-Score strategy hyperparameters");
-        DollarBarsCusumConfig::default()
-    };
-
     let selected_strategy = DollarBarsCusumStrategy::new(strat_config.clone())?;
     let market_type = if args.spot {
         MarketType::Spot
@@ -161,14 +230,34 @@ async fn main() -> Result<()> {
     );
 
     // 2. Initialize Paper Trading Session
-    let backtest_config = BacktestConfig {
-        initial_capital: args.capital,
-        risk_per_trade_pct: args.risk_pct,
-        ..BacktestConfig::default()
-    };
+    let backtest_config =
+        if let Some(artifact_ctx) = loaded_config.as_ref().and_then(|c| c.execution_context()) {
+            BacktestConfig {
+                initial_capital: if args.capital != dec!(10_000) {
+                    args.capital
+                } else {
+                    artifact_ctx.initial_capital
+                },
+                risk_per_trade_pct: if args.risk_pct != dec!(0.01) {
+                    args.risk_pct
+                } else {
+                    artifact_ctx.risk_per_trade_pct
+                },
+                maker_fee_pct: artifact_ctx.maker_fee_pct,
+                taker_fee_pct: artifact_ctx.taker_fee_pct,
+                slippage_pct: artifact_ctx.slippage_pct,
+                max_daily_drawdown_pct: artifact_ctx.max_daily_drawdown_pct,
+            }
+        } else {
+            BacktestConfig {
+                initial_capital: args.capital,
+                risk_per_trade_pct: args.risk_pct,
+                ..BacktestConfig::default()
+            }
+        };
 
     let paper_config = PaperTradingConfig {
-        dollar_bar_threshold: args.dollar_bar,
+        dollar_bar_threshold: effective_dollar_bar,
         backtest: backtest_config,
         strategy: strat_config.clone(),
         channel_capacity: 10_000,
@@ -639,7 +728,7 @@ async fn main() -> Result<()> {
         " Market Stream:             {}",
         if args.spot { "Spot" } else { "USDT-M Futures" }
     );
-    println!(" Dollar Bar Threshold:      ${}", args.dollar_bar);
+    println!(" Dollar Bar Threshold:      ${}", effective_dollar_bar);
     println!(" Initial Capital:           ${:.2}", args.capital);
     println!(" Raw Ticks Processed:       {}", total_ticks);
     println!(" Dollar Bars Formed:        {}", total_bars);

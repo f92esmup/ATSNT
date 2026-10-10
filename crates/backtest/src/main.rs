@@ -25,9 +25,9 @@ struct Args {
     #[arg(short, long, default_value = "data/sample_trades.csv")]
     data: PathBuf,
 
-    /// Dollar bar threshold (e.g. 200000 for $200k, 1000000 for $1M)
-    #[arg(long, default_value = "200000")]
-    dollar_bar: Decimal,
+    /// Dollar bar threshold (e.g. 200000 for $200k, 1000000 for $1M; auto-adopted from --config artifact if omitted)
+    #[arg(long)]
+    dollar_bar: Option<Decimal>,
 
     /// Optional path to JSON strategy configuration (e.g. configs/hpo_results.json)
     #[arg(short, long)]
@@ -80,48 +80,108 @@ async fn main() -> Result<()> {
         Box::new(BinanceCsvReader::new(BufReader::new(file)))
     };
 
-    // 1. Initialize Dollar Bar Aggregator
-    let mut aggregator = DollarBarAggregator::new(args.dollar_bar)
+    // 1. Load Strategy Configuration & Authoritative Deployment Artifact
+    let (strat_config, loaded_config) = if let Some(config_path) = &args.config {
+        println!(
+            "[*] Loading strategy configuration from: {}",
+            config_path.display()
+        );
+        let loaded = backtest::load_strategy_config::<DollarBarsCusumConfig>(config_path)?;
+        match &loaded {
+            backtest::LoadedStrategyConfig::Artifact(artifact) => {
+                println!(
+                    "[*] Authoritative Deployment Artifact loaded (schema v{})",
+                    artifact.schema_version
+                );
+                if let Some(scorecard) = &artifact.hpo_scorecard {
+                    println!(
+                        "    • HPO Scorecard: IS Sortino={:.2}, OOS Sortino={:.2}, Stability={:.2}, DSR p={:.4} ({})",
+                        scorecard.mean_is_sortino,
+                        scorecard.mean_oos_sortino,
+                        scorecard.stability_score,
+                        scorecard.dsr_p_value,
+                        if scorecard.is_statistically_significant { "PASS" } else { "FAIL" }
+                    );
+                }
+            }
+            backtest::LoadedStrategyConfig::Bare(_) => {
+                println!(
+                    "[*] Legacy bare hyperparameter configuration loaded (no deployment manifest)"
+                );
+            }
+        }
+        (loaded.strategy_config().clone(), Some(loaded))
+    } else {
+        println!("[*] Using default CUSUM + Z-Score strategy hyperparameters");
+        (
+            DollarBarsCusumConfig {
+                rolling_window_len: 20,
+                cusum_vol_multiplier: dec!(1.5),
+                z_entry_threshold: dec!(1.8),
+                z_stop_threshold: dec!(3.0),
+                time_barrier_bars: 15,
+            },
+            None,
+        )
+    };
+
+    // Resolve Dollar Bar threshold: CLI override > Artifact manifest > Fallback default ($200,000)
+    let effective_dollar_bar = match (
+        args.dollar_bar,
+        loaded_config
+            .as_ref()
+            .and_then(|c| c.dollar_bar_threshold()),
+    ) {
+        (Some(cli_val), Some(artifact_val)) => {
+            if cli_val != artifact_val {
+                println!(
+                    "[WARNING] CLI override --dollar-bar (${}) overrides artifact threshold (${})!",
+                    cli_val, artifact_val
+                );
+            }
+            cli_val
+        }
+        (Some(cli_val), None) => cli_val,
+        (None, Some(artifact_val)) => {
+            println!(
+                "[*] Authoritative Contract: Adopted Dollar Bar threshold from artifact: ${}",
+                artifact_val
+            );
+            artifact_val
+        }
+        (None, None) => dec!(200_000),
+    };
+
+    // 2. Initialize Dollar Bar Aggregator
+    let mut aggregator = DollarBarAggregator::new(effective_dollar_bar)
         .map_err(|e| anyhow::anyhow!("Failed to initialize aggregator: {e}"))?;
 
     println!(
         "[*] Configured DollarBarAggregator with threshold: ${}",
-        args.dollar_bar
+        effective_dollar_bar
     );
 
-    // 2. Initialize Strategy (Dollar Bars + CUSUM + Z-Score)
-    let strat_config: DollarBarsCusumConfig = if let Some(config_path) = args.config {
-        println!(
-            "[*] Loading strategy parameters from: {}",
-            config_path.display()
-        );
-        let file = File::open(&config_path)
-            .with_context(|| format!("Failed to open config file {}", config_path.display()))?;
-        serde_json::from_reader(file)?
-    } else {
-        DollarBarsCusumConfig {
-            rolling_window_len: 20,
-            cusum_vol_multiplier: dec!(1.5),
-            z_entry_threshold: dec!(1.8),
-            z_stop_threshold: dec!(3.0),
-            time_barrier_bars: 15,
-        }
-    };
-
+    // 3. Initialize Strategy (Dollar Bars + CUSUM + Z-Score)
     let mut strategy = DollarBarsCusumStrategy::new(strat_config)
         .map_err(|e| anyhow::anyhow!("Failed to initialize strategy: {e}"))?;
 
     println!("[*] Strategy loaded: {}", strategy.name());
 
-    // 3. Initialize Backtest Engine with 1:1 realistic friction
-    let engine_config = BacktestConfig {
-        initial_capital: dec!(10_000),
-        maker_fee_pct: dec!(0.0002),    // 0.02%
-        taker_fee_pct: dec!(0.0005),    // 0.05%
-        slippage_pct: dec!(0.0005),     // 0.05%
-        risk_per_trade_pct: dec!(0.01), // 1.0% risk per trade
-        max_daily_drawdown_pct: dec!(0.05),
-    };
+    // 4. Initialize Backtest Engine with 1:1 realistic friction
+    let engine_config =
+        if let Some(artifact_ctx) = loaded_config.as_ref().and_then(|c| c.execution_context()) {
+            println!("[*] Adopting 1:1 realistic friction schedule from deployment artifact");
+            *artifact_ctx
+        } else {
+            BacktestConfig {
+                initial_capital: dec!(10_000),
+                maker_fee_pct: dec!(0.0002),    // 0.02%
+                taker_fee_pct: dec!(0.0005),    // 0.05%
+                slippage_pct: dec!(0.0005),     // 0.05%
+                risk_per_trade_pct: dec!(0.01), // 1.0% risk per trade
+                max_daily_drawdown_pct: dec!(0.05),
+            }
+        };
     let mut engine = BacktestEngine::new(engine_config);
 
     println!("[*] Initial Capital: ${}", engine.cash_equity());
@@ -200,7 +260,7 @@ async fn main() -> Result<()> {
     let bt_json = json!({
         "timestamp": timestamp,
         "data_source": args.data.display().to_string(),
-        "dollar_bar_threshold": args.dollar_bar,
+        "dollar_bar_threshold": effective_dollar_bar,
         "metrics": metrics,
         "closed_trades": closed_trades,
     });
