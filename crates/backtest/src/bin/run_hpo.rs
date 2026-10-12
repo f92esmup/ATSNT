@@ -319,10 +319,13 @@ async fn main() -> Result<()> {
         let report = json!({
             "timestamp": timestamp,
             "strategy": args.strategy,
+            "symbol": deployment_artifact.symbol,
+            "dollar_bar_threshold": args.dollar_bar,
             "data_source": args.data.display().to_string(),
             "total_bars": bars.len(),
             "folds_count": folds.len(),
             "trials_evaluated": evaluations.len(),
+            "deployment_artifact": &deployment_artifact,
             "winner": winner,
             "top_candidates": evaluations.iter().take(10).collect::<Vec<_>>()
         });
@@ -366,6 +369,22 @@ async fn main() -> Result<()> {
                 .upload_file(
                     &report_path,
                     &format!("hpo/hpo_run_{}.json", timestamp),
+                    "application/json",
+                )
+                .await;
+
+            let artifact_dest_name = args
+                .output_config
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("strategy_artifact.json");
+            println!(
+                "[*] Uploading Strategy Deployment Artifact to GCS (artifacts/{artifact_dest_name})..."
+            );
+            let _ = gcs
+                .upload_file(
+                    &args.output_config,
+                    &format!("artifacts/{}", artifact_dest_name),
                     "application/json",
                 )
                 .await;
