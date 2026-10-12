@@ -221,6 +221,12 @@ async fn main() -> Result<()> {
         (None, None) => dec!(50_000),
     };
 
+    let estimated_taker_fee_pct = loaded_config
+        .as_ref()
+        .and_then(|c| c.execution_context())
+        .map(|ctx| ctx.taker_fee_pct)
+        .unwrap_or(dec!(0.0005));
+
     println!("============================================================");
     println!("     ATSNT - Live Algorithmic Execution Engine             ");
     println!("============================================================");
@@ -235,6 +241,10 @@ async fn main() -> Result<()> {
     );
     println!(" Dollar Bar Threshold: ${}", effective_dollar_bar);
     println!(" Risk per Trade:       {:.2}%", args.risk_pct * dec!(100));
+    println!(
+        " Est. Taker Fee:       {:.4}%",
+        estimated_taker_fee_pct * dec!(100)
+    );
 
     let bq_sink = if args.gcp_bigquery {
         let sink = BigQuerySink::from_env();
@@ -480,7 +490,7 @@ async fn main() -> Result<()> {
                                     Side::Buy => (update.last_filled_price - entry_price) * entry_qty,
                                     Side::Sell => (entry_price - update.last_filled_price) * entry_qty,
                                 };
-                                let fees_paid = (entry_price * entry_qty + update.last_filled_price * entry_qty) * dec!(0.0005);
+                                let fees_paid = (entry_price * entry_qty + update.last_filled_price * entry_qty) * estimated_taker_fee_pct;
                                 let net_pnl = gross_pnl - fees_paid;
                                 let return_pct = if entry_price > Decimal::ZERO && entry_qty > Decimal::ZERO {
                                     net_pnl / (entry_price * entry_qty)
