@@ -166,7 +166,7 @@ If none of the above are configured or network access fails, the engine operates
 
 ## 7. Looker Studio BI Dashboard Specification
 
-Looker Studio reads only the views defined in `bigquery_schema.sql`: `v_runs` (latest run row + `full` metrics + flattened spec fields), `v_run_metrics`, `v_trades`, `v_series`, `v_equity` (event-based equity with running peak and drawdown) and `v_latest_equity` (paper/live monitor). The report layout is specified in [11-looker-studio-bi-spec.md](11-looker-studio-bi-spec.md).
+Looker Studio reads only the views defined in `bigquery_schema.sql`: `v_runs` (latest run row + `full` metrics + flattened spec fields), `v_run_metrics`, `v_trades`, `v_series`, `v_equity` (event-based equity with running peak and drawdown), `v_latest_equity` (paper/live monitor), and the flattened `v_hpo_trials`, `v_hpo_folds` and `v_monte_carlo`. The report layout is specified in [11-looker-studio-bi-spec.md](11-looker-studio-bi-spec.md).
 
 ---
 

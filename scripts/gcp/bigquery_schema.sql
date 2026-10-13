@@ -249,3 +249,70 @@ FROM (
 ) AS e
 JOIN `atsnt_bi.v_runs` AS r USING (run_id)
 WHERE e.row_num = 1;
+
+-- One row per HPO trial: its parameters (JSON string, strategy agnostic) and
+-- the ranking scores stored in its `full` extras row.
+CREATE OR REPLACE VIEW `atsnt_bi.v_hpo_trials` AS
+SELECT
+    r.run_id,
+    r.parent_run_id AS hpo_run_id,
+    r.strategy_id,
+    r.symbol,
+    r.started_at,
+    TO_JSON_STRING(r.params) AS params,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.rank') AS INT64) AS rank,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.mean_is_sortino') AS NUMERIC) AS mean_is_sortino,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.mean_oos_sortino') AS NUMERIC) AS mean_oos_sortino,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.mean_oos_profit_factor') AS NUMERIC) AS mean_oos_profit_factor,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.total_oos_trades') AS INT64) AS total_oos_trades,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.stability_score') AS NUMERIC) AS stability_score,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.fitness') AS NUMERIC) AS fitness,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.dsr_p_value') AS NUMERIC) AS dsr_p_value,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.is_statistically_significant') AS BOOL)
+        AS is_statistically_significant
+FROM `atsnt_bi.v_runs` AS r
+JOIN `atsnt_bi.v_run_metrics` AS m
+    ON m.run_id = r.run_id AND m.scope = 'full'
+WHERE r.run_type = 'hpo_trial';
+
+-- Per-fold in-sample / out-of-sample metrics of every HPO trial.
+CREATE OR REPLACE VIEW `atsnt_bi.v_hpo_folds` AS
+SELECT
+    m.run_id,
+    r.parent_run_id AS hpo_run_id,
+    SPLIT(m.scope, '_fold_')[SAFE_OFFSET(0)] AS sample,      -- is | oos
+    SAFE_CAST(SPLIT(m.scope, '_fold_')[SAFE_OFFSET(1)] AS INT64) AS fold_idx,
+    m.* EXCEPT(run_id, run_type, scope, recorded_at, extras)
+FROM `atsnt_bi.v_run_metrics` AS m
+JOIN `atsnt_bi.v_runs` AS r USING (run_id)
+WHERE m.scope LIKE '%\\_fold\\_%';
+
+-- One row per Monte Carlo run with its stress percentiles flattened.
+CREATE OR REPLACE VIEW `atsnt_bi.v_monte_carlo` AS
+SELECT
+    r.run_id,
+    r.parent_run_id AS backtest_run_id,
+    r.strategy_id,
+    r.symbol,
+    r.started_at,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.iterations') AS INT64) AS iterations,
+    JSON_VALUE(m.extras, '$.resample_method') AS resample_method,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.block_size') AS INT64) AS block_size,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.ruin_threshold_pct') AS NUMERIC) AS ruin_threshold_pct,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.historical_max_drawdown_pct') AS NUMERIC)
+        AS historical_max_drawdown_pct,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.p05_max_drawdown_pct') AS NUMERIC) AS p05_max_drawdown_pct,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.p50_max_drawdown_pct') AS NUMERIC) AS p50_max_drawdown_pct,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.p95_max_drawdown_pct') AS NUMERIC) AS p95_max_drawdown_pct,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.p99_max_drawdown_pct') AS NUMERIC) AS p99_max_drawdown_pct,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.worst_max_drawdown_pct') AS NUMERIC)
+        AS worst_max_drawdown_pct,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.probability_of_ruin_pct') AS NUMERIC)
+        AS probability_of_ruin_pct,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.median_underwater_trades') AS INT64)
+        AS median_underwater_trades,
+    SAFE_CAST(JSON_VALUE(m.extras, '$.p95_underwater_trades') AS INT64) AS p95_underwater_trades
+FROM `atsnt_bi.v_runs` AS r
+JOIN `atsnt_bi.v_run_metrics` AS m
+    ON m.run_id = r.run_id AND m.scope = 'full'
+WHERE r.run_type = 'monte_carlo';
