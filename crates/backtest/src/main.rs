@@ -13,7 +13,8 @@ use domain::DollarBarAggregator;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategies::{
-    DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType, OptimizableStrategy, Strategy,
+    DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType, OptimizableStrategy,
+    OrderFlowImbalanceConfig, OrderFlowImbalanceStrategy, Strategy,
 };
 
 #[derive(Parser, Debug)]
@@ -33,6 +34,15 @@ struct Args {
     /// Optional path to JSON strategy configuration (e.g. configs/hpo_results.json)
     #[arg(short, long)]
     config: Option<PathBuf>,
+
+    /// Strategy to run: "dollar_bars_cusum" (or "cusum") vs "order_flow_imbalance" (or "ofi").
+    /// Inferred automatically from --config artifact if omitted.
+    #[arg(long)]
+    strategy: Option<String>,
+
+    /// Initial cash capital allocation in USD (default: $10,000, or adopted from --config artifact)
+    #[arg(long)]
+    capital: Option<Decimal>,
 
     /// Enable post-backtest Discrete Event Monte Carlo Stress-Testing
     #[arg(long, default_value_t = false)]
@@ -75,57 +85,192 @@ async fn main() -> Result<()> {
     };
 
     // 1. Load Strategy Configuration & Authoritative Deployment Artifact
-    let (strat_config, loaded_config) = if let Some(config_path) = &args.config {
+    let (
+        mut strategy,
+        strat_config_val,
+        strat_id,
+        art_threshold,
+        art_symbol,
+        art_market,
+        art_context,
+    ) = if let Some(config_path) = &args.config {
         println!(
             "[*] Loading strategy configuration from: {}",
             config_path.display()
         );
-        let loaded = backtest::load_strategy_config::<DollarBarsCusumConfig>(config_path)?;
-        match &loaded {
-            backtest::LoadedStrategyConfig::Artifact(artifact) => {
-                println!(
-                    "[*] Authoritative Deployment Artifact loaded (schema v{})",
-                    artifact.schema_version
-                );
-                if let Some(scorecard) = &artifact.hpo_scorecard {
-                    println!(
-                        "    • HPO Scorecard: IS Sortino={:.2}, OOS Sortino={:.2}, Stability={:.2}, DSR p={:.4} ({})",
-                        scorecard.mean_is_sortino,
-                        scorecard.mean_oos_sortino,
-                        scorecard.stability_score,
-                        scorecard.dsr_p_value,
-                        if scorecard.is_statistically_significant { "PASS" } else { "FAIL" }
-                    );
+        let raw_content = std::fs::read_to_string(config_path)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+        let val: serde_json::Value = serde_json::from_str(&raw_content)
+            .with_context(|| "Failed to parse configuration JSON")?;
+
+        let strat_id = val
+            .get("strategy_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| args.strategy.clone())
+            .unwrap_or_else(|| "dollar_bars_cusum".to_string());
+
+        match strat_id.as_str() {
+            "order_flow_imbalance" | "ofi" => {
+                let loaded =
+                    backtest::load_strategy_config::<OrderFlowImbalanceConfig>(config_path)?;
+                match &loaded {
+                    backtest::LoadedStrategyConfig::Artifact(artifact) => {
+                        println!(
+                            "[*] Authoritative Deployment Artifact loaded (schema v{})",
+                            artifact.schema_version
+                        );
+                        if let Some(scorecard) = &artifact.hpo_scorecard {
+                            println!(
+                                "    • HPO Scorecard: IS Sortino={:.2}, OOS Sortino={:.2}, Stability={:.2}, DSR p={:.4} ({})",
+                                scorecard.mean_is_sortino,
+                                scorecard.mean_oos_sortino,
+                                scorecard.stability_score,
+                                scorecard.dsr_p_value,
+                                if scorecard.is_statistically_significant {
+                                    "PASS"
+                                } else {
+                                    "FAIL"
+                                }
+                            );
+                        }
+                    }
+                    backtest::LoadedStrategyConfig::Bare(_) => {
+                        println!(
+                            "[*] Legacy bare hyperparameter configuration loaded (no deployment manifest)"
+                        );
+                    }
                 }
+                let strat = Box::new(
+                    OrderFlowImbalanceStrategy::new(loaded.strategy_config().clone())
+                        .map_err(|e| anyhow::anyhow!("Failed to initialize strategy: {e}"))?,
+                ) as Box<dyn Strategy>;
+                let cfg_val = serde_json::to_value(loaded.strategy_config())?;
+                let threshold = loaded.dollar_bar_threshold();
+                let sym = loaded.symbol().map(str::to_string);
+                let mkt = loaded.market_type();
+                let ctx = loaded.execution_context().copied();
+                (
+                    strat,
+                    cfg_val,
+                    OrderFlowImbalanceStrategy::id().to_string(),
+                    threshold,
+                    sym,
+                    mkt,
+                    ctx,
+                )
             }
-            backtest::LoadedStrategyConfig::Bare(_) => {
-                println!(
-                    "[*] Legacy bare hyperparameter configuration loaded (no deployment manifest)"
+            "dollar_bars_cusum" | "cusum" => {
+                let loaded = backtest::load_strategy_config::<DollarBarsCusumConfig>(config_path)?;
+                match &loaded {
+                    backtest::LoadedStrategyConfig::Artifact(artifact) => {
+                        println!(
+                            "[*] Authoritative Deployment Artifact loaded (schema v{})",
+                            artifact.schema_version
+                        );
+                        if let Some(scorecard) = &artifact.hpo_scorecard {
+                            println!(
+                                "    • HPO Scorecard: IS Sortino={:.2}, OOS Sortino={:.2}, Stability={:.2}, DSR p={:.4} ({})",
+                                scorecard.mean_is_sortino,
+                                scorecard.mean_oos_sortino,
+                                scorecard.stability_score,
+                                scorecard.dsr_p_value,
+                                if scorecard.is_statistically_significant {
+                                    "PASS"
+                                } else {
+                                    "FAIL"
+                                }
+                            );
+                        }
+                    }
+                    backtest::LoadedStrategyConfig::Bare(_) => {
+                        println!(
+                            "[*] Legacy bare hyperparameter configuration loaded (no deployment manifest)"
+                        );
+                    }
+                }
+                let strat = Box::new(
+                    DollarBarsCusumStrategy::new(loaded.strategy_config().clone())
+                        .map_err(|e| anyhow::anyhow!("Failed to initialize strategy: {e}"))?,
+                ) as Box<dyn Strategy>;
+                let cfg_val = serde_json::to_value(loaded.strategy_config())?;
+                let threshold = loaded.dollar_bar_threshold();
+                let sym = loaded.symbol().map(str::to_string);
+                let mkt = loaded.market_type();
+                let ctx = loaded.execution_context().copied();
+                (
+                    strat,
+                    cfg_val,
+                    DollarBarsCusumStrategy::id().to_string(),
+                    threshold,
+                    sym,
+                    mkt,
+                    ctx,
+                )
+            }
+            unknown => {
+                anyhow::bail!(
+                    "Unknown strategy '{}'. Available strategies: 'dollar_bars_cusum', 'order_flow_imbalance'",
+                    unknown
                 );
             }
         }
-        (loaded.strategy_config().clone(), Some(loaded))
     } else {
-        println!("[*] Using default CUSUM + Z-Score strategy hyperparameters");
-        (
-            DollarBarsCusumConfig {
-                rolling_window_len: 20,
-                cusum_vol_multiplier: dec!(1.5),
-                z_entry_threshold: dec!(1.8),
-                z_stop_threshold: dec!(3.0),
-                time_barrier_bars: 15,
-            },
-            None,
-        )
+        let strat_id = args.strategy.as_deref().unwrap_or("dollar_bars_cusum");
+        match strat_id {
+            "order_flow_imbalance" | "ofi" => {
+                println!("[*] Using default Order Flow Imbalance strategy hyperparameters");
+                let cfg = OrderFlowImbalanceConfig::default();
+                let strat = Box::new(
+                    OrderFlowImbalanceStrategy::new(cfg.clone())
+                        .map_err(|e| anyhow::anyhow!("Failed to initialize strategy: {e}"))?,
+                ) as Box<dyn Strategy>;
+                let cfg_val = serde_json::to_value(&cfg)?;
+                (
+                    strat,
+                    cfg_val,
+                    OrderFlowImbalanceStrategy::id().to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            "dollar_bars_cusum" | "cusum" => {
+                println!("[*] Using default CUSUM + Z-Score strategy hyperparameters");
+                let cfg = DollarBarsCusumConfig {
+                    rolling_window_len: 20,
+                    cusum_vol_multiplier: dec!(1.5),
+                    z_entry_threshold: dec!(1.8),
+                    z_stop_threshold: dec!(3.0),
+                    time_barrier_bars: 15,
+                };
+                let strat = Box::new(
+                    DollarBarsCusumStrategy::new(cfg.clone())
+                        .map_err(|e| anyhow::anyhow!("Failed to initialize strategy: {e}"))?,
+                ) as Box<dyn Strategy>;
+                let cfg_val = serde_json::to_value(&cfg)?;
+                (
+                    strat,
+                    cfg_val,
+                    DollarBarsCusumStrategy::id().to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            unknown => {
+                anyhow::bail!(
+                    "Unknown strategy '{}'. Available strategies: 'dollar_bars_cusum', 'order_flow_imbalance'",
+                    unknown
+                );
+            }
+        }
     };
 
     // Resolve Dollar Bar threshold: CLI override > Artifact manifest > Fallback default ($200,000)
-    let effective_dollar_bar = match (
-        args.dollar_bar,
-        loaded_config
-            .as_ref()
-            .and_then(|c| c.dollar_bar_threshold()),
-    ) {
+    let effective_dollar_bar = match (args.dollar_bar, art_threshold) {
         (Some(cli_val), Some(artifact_val)) => {
             if cli_val != artifact_val {
                 println!(
@@ -155,27 +300,30 @@ async fn main() -> Result<()> {
         effective_dollar_bar
     );
 
-    // 3. Initialize Strategy (Dollar Bars + CUSUM + Z-Score)
-    let mut strategy = DollarBarsCusumStrategy::new(strat_config.clone())
-        .map_err(|e| anyhow::anyhow!("Failed to initialize strategy: {e}"))?;
-
     println!("[*] Strategy loaded: {}", strategy.name());
 
-    // 4. Initialize Backtest Engine with 1:1 realistic friction
-    let engine_config =
-        if let Some(artifact_ctx) = loaded_config.as_ref().and_then(|c| c.execution_context()) {
-            println!("[*] Adopting 1:1 realistic friction schedule from deployment artifact");
-            *artifact_ctx
-        } else {
-            BacktestConfig {
-                initial_capital: dec!(10_000),
-                maker_fee_pct: dec!(0.0002),    // 0.02%
-                taker_fee_pct: dec!(0.0005),    // 0.05%
-                slippage_pct: dec!(0.0005),     // 0.05%
-                risk_per_trade_pct: dec!(0.01), // 1.0% risk per trade
-                max_daily_drawdown_pct: dec!(0.05),
-            }
-        };
+    // 3. Initialize Backtest Engine with 1:1 realistic friction
+    let mut engine_config = if let Some(artifact_ctx) = art_context {
+        println!("[*] Adopting 1:1 realistic friction schedule from deployment artifact");
+        artifact_ctx
+    } else {
+        BacktestConfig {
+            initial_capital: dec!(10_000),
+            maker_fee_pct: dec!(0.0002),    // 0.02%
+            taker_fee_pct: dec!(0.0005),    // 0.05%
+            slippage_pct: dec!(0.0005),     // 0.05%
+            risk_per_trade_pct: dec!(0.01), // 1.0% risk per trade
+            max_daily_drawdown_pct: dec!(0.05),
+        }
+    };
+
+    if let Some(cap) = args.capital {
+        if cap <= Decimal::ZERO {
+            anyhow::bail!("--capital must be strictly positive, got {}", cap);
+        }
+        println!("[*] Capital Allocation: Override set to ${}", cap);
+        engine_config.initial_capital = cap;
+    }
     let mut engine = BacktestEngine::new(engine_config);
 
     println!("[*] Initial Capital: ${}", engine.cash_equity());
@@ -249,31 +397,22 @@ async fn main() -> Result<()> {
     println!(" Sortino Ratio:             {:.2}", metrics.sortino_ratio);
     println!("============================================================");
 
-    let symbol = loaded_config
-        .as_ref()
-        .and_then(|c| c.symbol().map(str::to_string))
-        .unwrap_or_else(|| {
-            args.data
-                .file_name()
-                .and_then(|f| f.to_str())
-                .and_then(|s| s.split('-').next())
-                .unwrap_or("BTCUSDT")
-                .to_uppercase()
-        });
+    let symbol = art_symbol.unwrap_or_else(|| {
+        args.data
+            .file_name()
+            .and_then(|f| f.to_str())
+            .and_then(|s| s.split('-').next())
+            .unwrap_or("BTCUSDT")
+            .to_uppercase()
+    });
     let run_spec = RunSpec {
-        strategy_id: loaded_config
-            .as_ref()
-            .and_then(|c| c.strategy_id().map(str::to_string))
-            .unwrap_or_else(|| DollarBarsCusumStrategy::id().to_string()),
+        strategy_id: strat_id,
         symbol,
-        market_type: loaded_config
-            .as_ref()
-            .and_then(|c| c.market_type())
-            .unwrap_or(MarketType::UsdMPerpetual),
+        market_type: art_market.unwrap_or(MarketType::UsdMPerpetual),
         sampling: SamplingConfig::DollarBar {
             threshold: effective_dollar_bar,
         },
-        strategy_config: strat_config,
+        strategy_config: strat_config_val,
         execution_context: engine_config,
     };
     let run_ctx = RunContext::new(RunType::Backtest, &run_spec, started_at_ms);

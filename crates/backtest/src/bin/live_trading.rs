@@ -60,6 +60,11 @@ struct Args {
     #[arg(long, default_value = "0.01")]
     risk_pct: Decimal,
 
+    /// Explicit capital allocation in USDT for this live session (partitioned virtual wallet).
+    /// If omitted, defaults to the full available USDT balance on Binance.
+    #[arg(long)]
+    capital: Option<Decimal>,
+
     /// Record the session run (lifecycle, closed trades with equity events, final metrics) to Google Cloud BigQuery
     #[arg(long, default_value_t = false)]
     gcp_bigquery: bool,
@@ -314,9 +319,37 @@ async fn main() -> Result<()> {
         .with_context(|| "Failed to query account balance from Binance")?;
 
     println!(
-        "[OK] Gateway Authenticated! Available USDT Balance: ${:.2}\n",
+        "[OK] Gateway Authenticated! Available USDT Balance on Binance: ${:.2}\n",
         initial_balance
     );
+
+    let effective_capital = match args.capital {
+        Some(allocated) if allocated > Decimal::ZERO => {
+            if allocated > initial_balance {
+                println!(
+                    "[WARNING] Requested allocated capital (${:.2}) exceeds available Binance balance (${:.2})! Clamping to available balance.",
+                    allocated, initial_balance
+                );
+                initial_balance
+            } else {
+                println!(
+                    "[*] Capital Allocation: Partitioned ${:.2} USDT for this strategy (Exchange Total: ${:.2} USDT)",
+                    allocated, initial_balance
+                );
+                allocated
+            }
+        }
+        Some(invalid) => {
+            anyhow::bail!("--capital must be strictly positive, got {}", invalid);
+        }
+        None => {
+            println!(
+                "[*] Capital Allocation: Full account balance adopted (${:.2} USDT)",
+                initial_balance
+            );
+            initial_balance
+        }
+    };
 
     // 4. Initialize Private User Data Stream
     println!("[*] Initializing Binance Private User Data Stream for live order updates...");
@@ -353,7 +386,7 @@ async fn main() -> Result<()> {
         },
         strategy_config: strat_config.clone(),
         execution_context: BacktestConfig {
-            initial_capital: initial_balance,
+            initial_capital: effective_capital,
             taker_fee_pct: estimated_taker_fee_pct,
             risk_per_trade_pct: args.risk_pct,
             ..artifact_context
@@ -364,16 +397,19 @@ async fn main() -> Result<()> {
         source: Some(ws_source),
         ..DataWindow::default()
     };
-    let mut excursion_tracker = LiveExcursionTracker::new(initial_balance);
+    let mut excursion_tracker = LiveExcursionTracker::new(effective_capital);
     let mut closed_trades: Vec<ClosedTrade> = Vec::new();
     if let Some(bq) = &bq_sink {
-        println!("[*] Recording live run {} to BigQuery", run_ctx.run_id);
+        println!(
+            "[*] Recording live run {} to BigQuery (Allocated Capital: ${:.2})",
+            run_ctx.run_id, effective_capital
+        );
         record_lifecycle(bq, &run_ctx, &run_spec, RunStatus::Running, &data_window).await;
     }
 
     let mut aggregator = DollarBarAggregator::new(effective_dollar_bar)?;
-    let mut peak_equity = initial_balance;
-    let mut current_equity = initial_balance;
+    let mut peak_equity = effective_capital;
+    let mut current_equity = effective_capital;
     let mut total_ticks: u64 = 0;
     let mut total_bars: u64 = 0;
     let mut last_mtm_print = Instant::now();
@@ -777,8 +813,12 @@ async fn main() -> Result<()> {
             .map(|t| t.excursion.max_drawdown_pct)
             .max()
             .unwrap_or_default();
-        let metrics =
-            BacktestMetrics::calculate(initial_balance, &closed_trades, max_dd_amount, max_dd_pct);
+        let metrics = BacktestMetrics::calculate(
+            effective_capital,
+            &closed_trades,
+            max_dd_amount,
+            max_dd_pct,
+        );
         record_lifecycle(bq, &run_ctx, &run_spec, RunStatus::Stopped, &data_window).await;
         if let Err(e) = bq
             .record_metrics(&[run_ctx.metrics_row("full", &metrics, None)])

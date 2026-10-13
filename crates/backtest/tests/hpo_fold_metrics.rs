@@ -19,6 +19,10 @@ fn synthetic_bars(count: usize) -> Vec<DollarBar> {
                 close: price,
                 volume: dec!(10),
                 dollar_volume: dec!(400000),
+                buy_volume: dec!(5),
+                sell_volume: dec!(5),
+                buy_dollar_volume: dec!(200000),
+                sell_dollar_volume: dec!(200000),
                 trade_count: 50,
             }
         })

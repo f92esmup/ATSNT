@@ -199,39 +199,72 @@ async fn main() -> Result<()> {
         engine_config.slippage_pct
     );
 
-    let (evaluations, winner, strategy_id, search_space) = match args.strategy.as_str() {
+    match args.strategy.as_str() {
         "dollar_bars_cusum" | "cusum" => {
-            let param_space = if let Some(path) = &args.param_space {
-                let content = fs::read_to_string(path).with_context(|| {
-                    format!("Failed to read parameter space file: {}", path.display())
-                })?;
-                serde_json::from_str::<strategies::DollarBarsCusumSpace>(&content)
-                    .with_context(|| "Failed to parse parameter space JSON")?
-            } else {
-                strategies::DollarBarsCusumSpace::default()
-            };
-
-            let space_json = serde_json::to_value(&param_space)?;
-            let optimizer = WalkForwardOptimizer::<strategies::DollarBarsCusumStrategy>::new(
+            run_and_report_hpo::<strategies::DollarBarsCusumStrategy>(
+                &args,
+                &bars,
+                &folds,
                 engine_config,
-                param_space,
-            );
-            let evals = optimizer.run_optimization(&bars, &folds, args.candidates)?;
-            let win = evals.first().cloned();
-            (
-                evals,
-                win,
-                strategies::DollarBarsCusumStrategy::id(),
-                space_json,
+                started_at_ms,
+                raw_trades,
+                opt_start,
+                &symbol_upper,
             )
+            .await?;
+        }
+        "order_flow_imbalance" | "ofi" => {
+            run_and_report_hpo::<strategies::OrderFlowImbalanceStrategy>(
+                &args,
+                &bars,
+                &folds,
+                engine_config,
+                started_at_ms,
+                raw_trades,
+                opt_start,
+                &symbol_upper,
+            )
+            .await?;
         }
         unknown => {
             anyhow::bail!(
-                "Unknown strategy '{}'. Available strategies: 'dollar_bars_cusum'",
+                "Unknown strategy '{}'. Available strategies: 'dollar_bars_cusum', 'order_flow_imbalance'",
                 unknown
             );
         }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_and_report_hpo<S>(
+    args: &Args,
+    bars: &[domain::DollarBar],
+    folds: &[backtest::WalkForwardFold],
+    engine_config: BacktestConfig,
+    started_at_ms: i64,
+    raw_trades: usize,
+    opt_start: Instant,
+    symbol_upper: &str,
+) -> Result<()>
+where
+    S: OptimizableStrategy,
+    S::Space: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let param_space = if let Some(path) = &args.param_space {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read parameter space file: {}", path.display()))?;
+        serde_json::from_str::<S::Space>(&content)
+            .with_context(|| "Failed to parse parameter space JSON")?
+    } else {
+        S::default_space()
     };
+
+    let space_json = serde_json::to_value(&param_space)?;
+    let optimizer = WalkForwardOptimizer::<S>::new(engine_config, param_space);
+    let evaluations = optimizer.run_optimization(bars, folds, args.candidates)?;
+    let winner = evaluations.first().cloned();
 
     let opt_duration = opt_start.elapsed().as_secs_f64();
     println!(
@@ -272,13 +305,13 @@ async fn main() -> Result<()> {
     println!("============================================================");
 
     let sweep_spec = RunSpec {
-        strategy_id: strategy_id.to_string(),
-        symbol: symbol_upper.clone(),
+        strategy_id: S::id().to_string(),
+        symbol: symbol_upper.to_string(),
         market_type: strategies::MarketType::UsdMPerpetual,
         sampling: SamplingConfig::DollarBar {
             threshold: args.dollar_bar,
         },
-        strategy_config: search_space,
+        strategy_config: space_json,
         execution_context: engine_config,
     };
 
@@ -320,7 +353,7 @@ async fn main() -> Result<()> {
 
     if let Some(winner) = &winner {
         println!("\n[WINNER] Selected Robust Parameter Configuration:");
-        println!("  • Strategy:                  {}", args.strategy);
+        println!("  • Strategy:                  {}", S::id());
         println!("  • Configuration:             {}", winner.config);
         println!(
             "  • Mean In-Sample Sortino:    {:.2}",

@@ -312,6 +312,10 @@ mod tests {
                 close: current_price,
                 volume: dec!(10.0),
                 dollar_volume: dec!(400000.0),
+                buy_volume: dec!(5.0),
+                sell_volume: dec!(5.0),
+                buy_dollar_volume: dec!(200000.0),
+                sell_dollar_volume: dec!(200000.0),
                 trade_count: 50,
             });
         }

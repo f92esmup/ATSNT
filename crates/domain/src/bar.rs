@@ -22,4 +22,12 @@ pub struct DollarBar {
     pub dollar_volume: Decimal,
     /// Total number of individual trade executions within this bar.
     pub trade_count: u64,
+    /// Total aggressive taker buy volume transacted in this bar (base asset).
+    pub buy_volume: Decimal,
+    /// Total aggressive taker sell volume transacted in this bar (base asset).
+    pub sell_volume: Decimal,
+    /// Total aggressive taker buy volume in quote currency (e.g. USDT).
+    pub buy_dollar_volume: Decimal,
+    /// Total aggressive taker sell volume in quote currency (e.g. USDT).
+    pub sell_dollar_volume: Decimal,
 }

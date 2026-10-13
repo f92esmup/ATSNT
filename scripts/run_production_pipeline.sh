@@ -56,7 +56,7 @@ Options:
   -i, --mc-iterations <N>    Monte Carlo bootstrap paths (default: ${MC_ITERATIONS})
   -o, --output-dir <DIR>     Root destination for Parquet dataset (default: data/historical_<YEAR>)
       --config <PATH>        Output/input path for winning HPO configuration JSON
-      --strategy <NAME>      Target strategy identifier (default: ${STRATEGY})
+      --strategy <NAME>      Target strategy identifier: 'dollar_bars_cusum' or 'order_flow_imbalance' (default: ${STRATEGY})
       --param-space <PATH>   Optional JSON path overriding default search space
       --gcp-bigquery         Record HPO, backtest and Monte Carlo runs to BigQuery
       --skip-fetch           Skip Phase 1 (use already downloaded data in output-dir)
@@ -330,6 +330,7 @@ BACKTEST_ARGS=(
     "--data" "${DATA_PATH}"
     "--dollar-bar" "${DOLLAR_BAR}"
     "--config" "${CONFIG_PATH}"
+    "--strategy" "${STRATEGY}"
     "--monte-carlo"
     "--mc-iterations" "${MC_ITERATIONS}"
 )

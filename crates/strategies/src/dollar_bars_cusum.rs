@@ -290,6 +290,10 @@ mod tests {
             volume: dec!(1.0),
             dollar_volume: price,
             trade_count: 10,
+            buy_volume: dec!(0.5),
+            sell_volume: dec!(0.5),
+            buy_dollar_volume: price * dec!(0.5),
+            sell_dollar_volume: price * dec!(0.5),
         }
     }
 

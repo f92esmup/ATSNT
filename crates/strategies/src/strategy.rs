@@ -77,3 +77,25 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
     /// Default search space defining hyperparameter candidate domains and ranges.
     fn default_space() -> Self::Space;
 }
+
+impl<S: ?Sized + Strategy> Strategy for Box<S> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn compatible_market_types(&self) -> &'static [MarketType] {
+        (**self).compatible_market_types()
+    }
+
+    fn supports_market_type(&self, market_type: MarketType) -> bool {
+        (**self).supports_market_type(market_type)
+    }
+
+    fn on_bar(&mut self, bar: &DollarBar) -> Option<OrderIntent> {
+        (**self).on_bar(bar)
+    }
+
+    fn reset(&mut self) {
+        (**self).reset()
+    }
+}

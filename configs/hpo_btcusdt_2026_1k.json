@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "strategy_id": "dollar_bars_cusum",
+  "symbol": "BTCUSDT",
+  "market_type": "usd_m_perpetual",
+  "sampling": {
+    "type": "dollar_bar",
+    "threshold": "1000000"
+  },
+  "strategy_config": {
+    "rolling_window_len": 25,
+    "cusum_vol_multiplier": "1.0",
+    "z_entry_threshold": "1.2",
+    "z_stop_threshold": "3.5",
+    "time_barrier_bars": 10
+  },
+  "execution_context": {
+    "initial_capital": "1000",
+    "maker_fee_pct": "0.0002",
+    "taker_fee_pct": "0.0005",
+    "slippage_pct": "0.0005",
+    "risk_per_trade_pct": "0.01",
+    "max_daily_drawdown_pct": "0.05"
+  },
+  "hpo_scorecard": {
+    "mean_is_sortino": "80",
+    "mean_oos_sortino": "20",
+    "mean_oos_profit_factor": "20",
+    "stability_score": "1",
+    "fitness": "80",
+    "dsr_p_value": "0.0000",
+    "is_statistically_significant": true,
+    "trials_evaluated": 720
+  }
+}

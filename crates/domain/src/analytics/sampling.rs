@@ -15,10 +15,30 @@ struct InProgressBar {
     volume: Decimal,
     dollar_volume: Decimal,
     trade_count: u64,
+    buy_volume: Decimal,
+    sell_volume: Decimal,
+    buy_dollar_volume: Decimal,
+    sell_dollar_volume: Decimal,
 }
 
 impl InProgressBar {
     fn new(first_trade: &Trade, initial_dollar_volume: Decimal) -> Self {
+        let (buy_volume, sell_volume, buy_dollar_volume, sell_dollar_volume) =
+            match first_trade.side {
+                crate::trade::Side::Buy => (
+                    first_trade.quantity,
+                    Decimal::ZERO,
+                    initial_dollar_volume,
+                    Decimal::ZERO,
+                ),
+                crate::trade::Side::Sell => (
+                    Decimal::ZERO,
+                    first_trade.quantity,
+                    Decimal::ZERO,
+                    initial_dollar_volume,
+                ),
+            };
+
         Self {
             start_time: first_trade.timestamp,
             open: first_trade.price,
@@ -28,6 +48,10 @@ impl InProgressBar {
             volume: first_trade.quantity,
             dollar_volume: initial_dollar_volume,
             trade_count: 1,
+            buy_volume,
+            sell_volume,
+            buy_dollar_volume,
+            sell_dollar_volume,
         }
     }
 
@@ -42,6 +66,17 @@ impl InProgressBar {
         self.volume += trade.quantity;
         self.dollar_volume += dollar_val;
         self.trade_count += 1;
+
+        match trade.side {
+            crate::trade::Side::Buy => {
+                self.buy_volume += trade.quantity;
+                self.buy_dollar_volume += dollar_val;
+            }
+            crate::trade::Side::Sell => {
+                self.sell_volume += trade.quantity;
+                self.sell_dollar_volume += dollar_val;
+            }
+        }
     }
 
     fn into_dollar_bar(self, end_time: i64) -> DollarBar {
@@ -55,6 +90,10 @@ impl InProgressBar {
             volume: self.volume,
             dollar_volume: self.dollar_volume,
             trade_count: self.trade_count,
+            buy_volume: self.buy_volume,
+            sell_volume: self.sell_volume,
+            buy_dollar_volume: self.buy_dollar_volume,
+            sell_dollar_volume: self.sell_dollar_volume,
         }
     }
 }
@@ -192,6 +231,10 @@ mod tests {
         assert_eq!(bar.volume, dec!(3.0));
         assert_eq!(bar.dollar_volume, dec!(121_000));
         assert_eq!(bar.trade_count, 3);
+        assert_eq!(bar.buy_volume, dec!(2.0));
+        assert_eq!(bar.sell_volume, dec!(1.0));
+        assert_eq!(bar.buy_dollar_volume, dec!(82_000));
+        assert_eq!(bar.sell_dollar_volume, dec!(39_000));
 
         // Rollover check: 121,000 - 100,000 = 21,000
         assert_eq!(agg.current_accumulated_dollar_volume(), dec!(21_000));
@@ -205,6 +248,9 @@ mod tests {
         let t1 = Trade::new(1000, dec!(55_000), dec!(2.0), Side::Buy).unwrap();
         let bar1 = agg.process_trade(&t1);
         assert!(bar1.is_some());
+        let bar1 = bar1.unwrap();
+        assert_eq!(bar1.buy_volume, dec!(2.0));
+        assert_eq!(bar1.sell_volume, dec!(0.0));
         assert_eq!(agg.current_accumulated_dollar_volume(), dec!(10_000));
 
         // Trade 2: $90,000 -> Combined with rollover ($10k + $90k = $100k) -> Emits bar immediately!
@@ -214,6 +260,29 @@ mod tests {
         let bar2 = bar2.unwrap();
 
         assert_eq!(bar2.dollar_volume, dec!(100_000));
+        assert_eq!(bar2.buy_volume, dec!(0.0));
+        assert_eq!(bar2.sell_volume, dec!(2.0));
         assert_eq!(agg.current_accumulated_dollar_volume(), dec!(0));
+    }
+
+    #[test]
+    fn order_flow_imbalance_accumulation() {
+        let mut agg = DollarBarAggregator::new(dec!(50_000)).unwrap();
+        let t1 = Trade::new(1000, dec!(10_000), dec!(3.0), Side::Buy).unwrap(); // $30,000 Buy
+        let t2 = Trade::new(2000, dec!(10_000), dec!(2.0), Side::Sell).unwrap(); // $20,000 Sell
+        assert!(agg.process_trade(&t1).is_none());
+        let bar = agg.process_trade(&t2).expect("Bar should emit at $50k");
+
+        assert_eq!(bar.volume, dec!(5.0));
+        assert_eq!(bar.dollar_volume, dec!(50_000));
+        assert_eq!(bar.buy_volume, dec!(3.0));
+        assert_eq!(bar.sell_volume, dec!(2.0));
+        assert_eq!(bar.buy_dollar_volume, dec!(30_000));
+        assert_eq!(bar.sell_dollar_volume, dec!(20_000));
+        assert_eq!(bar.buy_volume + bar.sell_volume, bar.volume);
+        assert_eq!(
+            bar.buy_dollar_volume + bar.sell_dollar_volume,
+            bar.dollar_volume
+        );
     }
 }

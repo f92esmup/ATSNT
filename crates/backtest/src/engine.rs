@@ -420,6 +420,10 @@ mod tests {
             close,
             volume: dec!(1.0),
             dollar_volume: close,
+            buy_volume: dec!(0.5),
+            sell_volume: dec!(0.5),
+            buy_dollar_volume: close / dec!(2),
+            sell_dollar_volume: close / dec!(2),
             trade_count: 5,
         }
     }
