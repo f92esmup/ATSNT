@@ -1,0 +1,253 @@
+//! Translation of domain results into the run analytics row contract
+//! ([`adapters::analytics`]).
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use adapters::{format_unix_ms_rfc3339, RunMetricsRow, RunRow, RunTradeRow, SeriesPointRow};
+use domain::PositionSide;
+use serde::Serialize;
+
+use crate::metrics::{BacktestMetrics, ClosedTrade};
+use crate::run::{RunId, RunSpec, RunType};
+
+/// Git commit the binary was built from, when available at build time.
+pub const GIT_SHA: Option<&str> = option_env!("ATSNT_GIT_SHA");
+
+/// Lifecycle state persisted on each appended run row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+    /// Run started and is still executing.
+    Running,
+    /// Run finished normally.
+    Completed,
+    /// Run aborted on an error.
+    Failed,
+    /// Run was stopped by the operator (paper/live shutdown).
+    Stopped,
+}
+
+impl RunStatus {
+    /// Stable label used in persisted rows.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+/// Market data a run consumed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DataWindow {
+    /// Data file, directory, or stream identifier.
+    pub source: Option<String>,
+    /// First event time consumed (Unix ms).
+    pub start_ms: Option<i64>,
+    /// Last event time consumed (Unix ms).
+    pub end_ms: Option<i64>,
+}
+
+/// Identity shared by every row a run emits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunContext {
+    pub run_id: RunId,
+    pub parent_run_id: Option<RunId>,
+    pub run_type: RunType,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub started_at_ms: i64,
+}
+
+/// Current wall-clock time in Unix milliseconds.
+pub fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
+impl RunContext {
+    /// Starts a new top-level run for `spec`.
+    pub fn new<C>(run_type: RunType, spec: &RunSpec<C>, started_at_ms: i64) -> Self {
+        Self {
+            run_id: RunId::generate(),
+            parent_run_id: None,
+            run_type,
+            strategy_id: spec.strategy_id.clone(),
+            symbol: spec.symbol.clone(),
+            started_at_ms,
+        }
+    }
+
+    /// Starts a run nested under this one (HPO trial, Monte Carlo of a backtest).
+    pub fn child(&self, run_type: RunType, started_at_ms: i64) -> Self {
+        Self {
+            run_id: RunId::generate(),
+            parent_run_id: Some(self.run_id.clone()),
+            run_type,
+            strategy_id: self.strategy_id.clone(),
+            symbol: self.symbol.clone(),
+            started_at_ms,
+        }
+    }
+
+    /// Lifecycle row capturing the complete spec the run executed.
+    pub fn run_row<C: Serialize>(
+        &self,
+        spec: &RunSpec<C>,
+        status: RunStatus,
+        finished_at_ms: Option<i64>,
+        data: &DataWindow,
+    ) -> Result<RunRow, serde_json::Error> {
+        let market_type = match serde_json::to_value(spec.market_type)? {
+            serde_json::Value::String(s) => s,
+            other => other.to_string(),
+        };
+        Ok(RunRow {
+            run_id: self.run_id.to_string(),
+            parent_run_id: self.parent_run_id.as_ref().map(ToString::to_string),
+            run_type: self.run_type.as_str().to_string(),
+            status: status.as_str().to_string(),
+            recorded_at: format_unix_ms_rfc3339(now_unix_ms()),
+            started_at: format_unix_ms_rfc3339(self.started_at_ms),
+            finished_at: finished_at_ms.map(format_unix_ms_rfc3339),
+            strategy_id: spec.strategy_id.clone(),
+            symbol: spec.symbol.clone(),
+            market_type,
+            sampling: serde_json::to_string(&spec.sampling)?,
+            params: serde_json::to_string(&spec.strategy_config)?,
+            execution_context: serde_json::to_string(&spec.execution_context)?,
+            data_source: data.source.clone(),
+            data_start: data.start_ms.map(format_unix_ms_rfc3339),
+            data_end: data.end_ms.map(format_unix_ms_rfc3339),
+            git_sha: GIT_SHA.map(str::to_string),
+        })
+    }
+
+    /// Performance row for `scope` built from computed metrics.
+    pub fn metrics_row(
+        &self,
+        scope: &str,
+        m: &BacktestMetrics,
+        extras: Option<serde_json::Value>,
+    ) -> RunMetricsRow {
+        RunMetricsRow {
+            run_id: self.run_id.to_string(),
+            run_type: self.run_type.as_str().to_string(),
+            scope: scope.to_string(),
+            recorded_at: format_unix_ms_rfc3339(now_unix_ms()),
+            total_trades: Some(m.total_trades as i64),
+            winning_trades: Some(m.winning_trades as i64),
+            losing_trades: Some(m.losing_trades as i64),
+            win_rate: Some(m.win_rate),
+            gross_profit: Some(m.gross_profit),
+            gross_loss: Some(m.gross_loss),
+            net_profit: Some(m.net_profit),
+            total_fees: Some(m.total_fees),
+            total_slippage: Some(m.total_slippage),
+            profit_factor: Some(m.profit_factor),
+            payoff_ratio: Some(m.payoff_ratio),
+            mathematical_expectancy: Some(m.mathematical_expectancy),
+            max_drawdown_amount: Some(m.max_drawdown_amount),
+            max_drawdown_pct: Some(m.max_drawdown_pct),
+            sortino_ratio: Some(m.sortino_ratio),
+            fee_drag_pct: Some(m.fee_drag_pct),
+            avg_holding_seconds: Some(m.avg_holding_seconds),
+            avg_mae_pct: Some(m.avg_mae_pct),
+            avg_mfe_pct: Some(m.avg_mfe_pct),
+            exit_reason_counts: serde_json::to_string(&m.exit_reason_counts).ok(),
+            extras: extras.map(|v| v.to_string()),
+        }
+    }
+
+    /// Performance row carrying only run-type specific values.
+    pub fn extras_row(&self, scope: &str, extras: serde_json::Value) -> RunMetricsRow {
+        RunMetricsRow::extras_only(
+            self.run_id.to_string(),
+            self.run_type.as_str(),
+            scope,
+            format_unix_ms_rfc3339(now_unix_ms()),
+            extras.to_string(),
+        )
+    }
+
+    /// Stable trade identifier for the 1-based trade number within this run.
+    pub fn trade_id(&self, number: usize) -> String {
+        format!("{}_t{:05}", self.run_id, number)
+    }
+
+    /// Trade rows numbered from `first_number` (1-based).
+    pub fn trade_rows(&self, trades: &[ClosedTrade], first_number: usize) -> Vec<RunTradeRow> {
+        trades
+            .iter()
+            .enumerate()
+            .map(|(i, t)| RunTradeRow {
+                trade_id: self.trade_id(first_number + i),
+                run_id: self.run_id.to_string(),
+                run_type: self.run_type.as_str().to_string(),
+                strategy_id: self.strategy_id.clone(),
+                symbol: self.symbol.clone(),
+                side: match t.side {
+                    PositionSide::Long => "Long",
+                    PositionSide::Short => "Short",
+                }
+                .to_string(),
+                entry_timestamp: format_unix_ms_rfc3339(t.entry_time),
+                exit_timestamp: format_unix_ms_rfc3339(t.exit_time),
+                entry_price: t.entry_price,
+                exit_price: t.exit_price,
+                quantity: t.quantity,
+                gross_pnl: t.pnl_gross,
+                fees_paid: t.fees_paid,
+                slippage_paid: t.slippage_paid,
+                net_pnl: t.pnl_net,
+                return_pct: t.return_pct,
+                exit_reason: t.exit_reason.clone(),
+                holding_duration_seconds: t.holding_duration_seconds,
+                entry_equity: t.excursion.entry_equity,
+                trough_equity: t.excursion.trough_equity,
+                trough_timestamp: format_unix_ms_rfc3339(t.excursion.trough_time),
+                peak_equity: t.excursion.peak_equity,
+                peak_timestamp: format_unix_ms_rfc3339(t.excursion.peak_time),
+                exit_equity: t.excursion.exit_equity,
+                max_drawdown_amount: t.excursion.max_drawdown_amount,
+                max_drawdown_pct: t.excursion.max_drawdown_pct,
+            })
+            .collect()
+    }
+
+    /// Event-based equity curve: entry, trough, peak, and exit per trade,
+    /// in chronological order within each trade.
+    pub fn equity_points(
+        &self,
+        trades: &[ClosedTrade],
+        first_number: usize,
+    ) -> Vec<SeriesPointRow> {
+        let mut points = Vec::with_capacity(trades.len() * 4);
+        for (i, t) in trades.iter().enumerate() {
+            let trade_id = self.trade_id(first_number + i);
+            let ex = &t.excursion;
+            let mut events = [
+                ("entry", t.entry_time, ex.entry_equity, 0),
+                ("trough", ex.trough_time, ex.trough_equity, 1),
+                ("peak", ex.peak_time, ex.peak_equity, 1),
+                ("exit", t.exit_time, ex.exit_equity, 2),
+            ];
+            events.sort_by_key(|(_, time, _, rank)| (*rank, *time));
+            for (event, time, value, _) in events {
+                points.push(SeriesPointRow {
+                    run_id: self.run_id.to_string(),
+                    run_type: self.run_type.as_str().to_string(),
+                    series: "equity".to_string(),
+                    event: event.to_string(),
+                    ts: Some(format_unix_ms_rfc3339(time)),
+                    x: None,
+                    value,
+                    trade_id: Some(trade_id.clone()),
+                });
+            }
+        }
+        points
+    }
+}

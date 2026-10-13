@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod binance_auth;
 pub mod binance_csv;
 pub mod binance_fetcher;
@@ -10,6 +11,10 @@ pub mod error;
 pub mod gcp;
 pub mod traits;
 
+pub use analytics::{
+    InMemoryRunRecorder, RecordedRuns, RunMetricsRow, RunRecorder, RunRow, RunTradeRow,
+    SeriesPointRow,
+};
 pub use binance_auth::BinanceAuth;
 pub use binance_csv::BinanceCsvReader;
 pub use binance_fetcher::{BinanceDataFetcher, FetchParams, FetchSummary};

@@ -10,6 +10,7 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use super::auth::GcpAuthResolver;
+use crate::analytics::{RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow};
 use crate::error::AdapterError;
 
 /// Individual closed trade audit record for BigQuery `trades` table.
@@ -106,6 +107,38 @@ impl BigQueryRecord for HpoEvaluationRow {
 impl BigQueryRecord for MonteCarloRow {
     fn insert_id(&self) -> Option<String> {
         Some(format!("{}_{}", self.run_id, self.strategy_id))
+    }
+}
+
+impl BigQueryRecord for RunRow {
+    fn insert_id(&self) -> Option<String> {
+        Some(format!("{}_{}", self.run_id, self.status))
+    }
+}
+
+impl BigQueryRecord for RunMetricsRow {
+    fn insert_id(&self) -> Option<String> {
+        Some(format!("{}_{}", self.run_id, self.scope))
+    }
+}
+
+impl BigQueryRecord for RunTradeRow {
+    fn insert_id(&self) -> Option<String> {
+        Some(self.trade_id.clone())
+    }
+}
+
+impl BigQueryRecord for SeriesPointRow {
+    fn insert_id(&self) -> Option<String> {
+        Some(format!(
+            "{}_{}_{}_{}_{}_{}",
+            self.run_id,
+            self.series,
+            self.event,
+            self.ts.as_deref().unwrap_or(""),
+            self.x.map(|x| x.to_string()).unwrap_or_default(),
+            self.trade_id.as_deref().unwrap_or("")
+        ))
     }
 }
 
@@ -335,10 +368,63 @@ impl BigQuerySink {
     }
 }
 
+impl RunRecorder for BigQuerySink {
+    async fn record_run(&self, row: &RunRow) -> Result<(), AdapterError> {
+        self.insert_rows("runs", std::slice::from_ref(row)).await
+    }
+
+    async fn record_metrics(&self, rows: &[RunMetricsRow]) -> Result<(), AdapterError> {
+        self.insert_rows("run_metrics", rows).await
+    }
+
+    async fn record_trades(&self, rows: &[RunTradeRow]) -> Result<(), AdapterError> {
+        self.insert_rows("trades", rows).await
+    }
+
+    async fn record_series(&self, rows: &[SeriesPointRow]) -> Result<(), AdapterError> {
+        self.insert_rows("run_series", rows).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    fn equity_point(event: &str, trade_id: &str) -> SeriesPointRow {
+        SeriesPointRow {
+            run_id: "r1".into(),
+            run_type: "backtest".into(),
+            series: "equity".into(),
+            event: event.into(),
+            ts: Some("2026-10-08T12:00:00Z".into()),
+            x: None,
+            value: dec!(10000),
+            trade_id: Some(trade_id.into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_sink_records_runs_without_error() {
+        let sink = BigQuerySink::new(None, "atsnt_bi".into(), None);
+        let metrics = RunMetricsRow::extras_only("r1", "monte_carlo", "full", "t", "{}");
+        assert!(sink.record_metrics(&[metrics]).await.is_ok());
+        assert!(sink
+            .record_series(&[equity_point("entry", "t1")])
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn series_insert_ids_distinguish_events_and_trades() {
+        let ids = [
+            equity_point("entry", "t1").insert_id(),
+            equity_point("exit", "t1").insert_id(),
+            equity_point("entry", "t2").insert_id(),
+        ];
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[0], ids[2]);
+    }
 
     #[tokio::test]
     async fn disabled_bigquery_sink_succeeds_without_panic() {

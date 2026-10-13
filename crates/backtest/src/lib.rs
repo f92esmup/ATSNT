@@ -6,6 +6,7 @@ pub mod metrics;
 pub mod monte_carlo;
 pub mod optimization;
 pub mod paper;
+pub mod recording;
 pub mod run;
 pub mod walk_forward;
 
@@ -29,5 +30,6 @@ pub use paper::{
     PaperSessionOwner, PaperSessionRuntime, PaperTradingConfig, PaperTradingEvent,
     PaperTradingSession, TelemetryConfig, TelemetryEnvelope,
 };
+pub use recording::{now_unix_ms, DataWindow, RunContext, RunStatus, GIT_SHA};
 pub use run::{RunId, RunSpec, RunType};
 pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};
