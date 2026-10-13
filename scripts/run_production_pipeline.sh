@@ -229,13 +229,13 @@ if [ "${DETACH}" = "true" ]; then
     echo "Log Output:   ${LOG_FILE}"
     echo "------------------------------------------------------------"
 
-    INHIBIT_CMD=""
+    CMD=(bash "${BASH_SOURCE[0]}")
     if [ "${NO_INHIBIT}" = "false" ] && command -v systemd-inhibit >/dev/null 2>&1; then
-        INHIBIT_CMD="systemd-inhibit --what=idle:sleep:handle-lid-switch --who=ATSNT --why=Pipeline"
+        CMD=(systemd-inhibit --what=idle:sleep:handle-lid-switch --who=ATSNT --why=Pipeline bash "${BASH_SOURCE[0]}")
     fi
 
     # Forward arguments excluding --detach
-    nohup ${INHIBIT_CMD} "$0" \
+    nohup "${CMD[@]}" \
         --symbol "${SYMBOL}" \
         --year "${YEAR}" \
         ${MONTH:+--month "${MONTH}"} \
