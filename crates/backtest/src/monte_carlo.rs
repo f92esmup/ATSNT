@@ -353,6 +353,7 @@ impl MonteCarloSimulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::TradeExcursion;
 
     fn create_dummy_trades() -> Vec<ClosedTrade> {
         vec![
@@ -370,6 +371,7 @@ mod tests {
                 return_pct: dec!(0.0147),
                 exit_reason: "TakeProfit".to_string(),
                 holding_duration_seconds: 1,
+                excursion: TradeExcursion::default(),
             },
             ClosedTrade {
                 entry_time: 1500,
@@ -385,6 +387,7 @@ mod tests {
                 return_pct: dec!(-0.0103),
                 exit_reason: "StopLoss".to_string(),
                 holding_duration_seconds: 1,
+                excursion: TradeExcursion::default(),
             },
             ClosedTrade {
                 entry_time: 2500,
@@ -400,6 +403,7 @@ mod tests {
                 return_pct: dec!(0.0216),
                 exit_reason: "TakeProfit".to_string(),
                 holding_duration_seconds: 1,
+                excursion: TradeExcursion::default(),
             },
             ClosedTrade {
                 entry_time: 3500,
@@ -415,6 +419,7 @@ mod tests {
                 return_pct: dec!(-0.0083),
                 exit_reason: "TimeBarrier".to_string(),
                 holding_duration_seconds: 1,
+                excursion: TradeExcursion::default(),
             },
             ClosedTrade {
                 entry_time: 4500,
@@ -430,6 +435,7 @@ mod tests {
                 return_pct: dec!(0.0295),
                 exit_reason: "TakeProfit".to_string(),
                 holding_duration_seconds: 1,
+                excursion: TradeExcursion::default(),
             },
         ]
     }

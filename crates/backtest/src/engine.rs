@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use strategies::Strategy;
 
 use crate::config::BacktestConfig;
-use crate::metrics::{BacktestMetrics, ClosedTrade};
+use crate::metrics::{BacktestMetrics, ClosedTrade, TradeExcursion};
 
 /// Deterministic, discrete-event backtesting simulator.
 ///
@@ -24,6 +24,7 @@ pub struct BacktestEngine {
     entry_fee: Decimal,
     entry_slippage: Decimal,
     last_bar_end_time: Option<i64>,
+    open_excursion: Option<TradeExcursion>,
 }
 
 impl BacktestEngine {
@@ -44,6 +45,7 @@ impl BacktestEngine {
             entry_fee: Decimal::ZERO,
             entry_slippage: Decimal::ZERO,
             last_bar_end_time: None,
+            open_excursion: None,
         }
     }
 
@@ -132,6 +134,7 @@ impl BacktestEngine {
     pub fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &DollarBar) {
         self.last_bar_end_time = Some(bar.end_time);
         let had_position = self.active_position.is_some();
+        let trades_before = self.closed_trades.len();
 
         // 1. If an active position exists, evaluate Triple Barrier Exits
         if had_position {
@@ -157,10 +160,27 @@ impl BacktestEngine {
             self.max_drawdown_amount = dd_amount;
         }
 
-        if self.peak_equity > Decimal::ZERO {
-            let dd_pct = dd_amount / self.peak_equity;
-            if dd_pct > self.max_drawdown_pct {
-                self.max_drawdown_pct = dd_pct;
+        let dd_pct = if self.peak_equity > Decimal::ZERO {
+            dd_amount / self.peak_equity
+        } else {
+            Decimal::ZERO
+        };
+        if dd_pct > self.max_drawdown_pct {
+            self.max_drawdown_pct = dd_pct;
+        }
+
+        // 4. Track the open trade's equity path, or attribute this bar's post-exit
+        //    drawdown sample to the trade that just closed.
+        if self.active_position.is_some() {
+            self.open_excursion
+                .get_or_insert_with(|| TradeExcursion::start(bar.end_time, total_val))
+                .observe_equity(bar.end_time, total_val);
+            if let Some(excursion) = self.open_excursion.as_mut() {
+                excursion.observe_drawdown(dd_amount, dd_pct);
+            }
+        } else if self.closed_trades.len() > trades_before {
+            if let Some(trade) = self.closed_trades.last_mut() {
+                trade.excursion.observe_drawdown(dd_amount, dd_pct);
             }
         }
     }
@@ -326,6 +346,13 @@ impl BacktestEngine {
 
         let holding_duration_seconds = ((exit_time - entry_time) / 1000).max(0);
 
+        let mut excursion = self
+            .open_excursion
+            .take()
+            .unwrap_or_else(|| TradeExcursion::start(entry_time, self.equity));
+        excursion.observe_equity(exit_time, self.equity);
+        excursion.exit_equity = self.equity;
+
         self.closed_trades.push(ClosedTrade {
             entry_time,
             exit_time,
@@ -340,6 +367,7 @@ impl BacktestEngine {
             return_pct,
             exit_reason: exit_reason.to_string(),
             holding_duration_seconds,
+            excursion,
         });
     }
 

@@ -16,7 +16,7 @@ pub use artifact::{
 pub use config::BacktestConfig;
 pub use engine::BacktestEngine;
 pub use error::BacktestError;
-pub use metrics::{BacktestMetrics, ClosedTrade};
+pub use metrics::{BacktestMetrics, ClosedTrade, TradeExcursion};
 pub use monte_carlo::{
     FanChartTrajectory, MonteCarloConfig, MonteCarloMetrics, MonteCarloReport, MonteCarloSimulator,
     ResampleMethod,
