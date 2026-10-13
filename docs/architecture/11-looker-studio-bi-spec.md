@@ -1,6 +1,11 @@
 # ATSNT Quantitative Trading Engine - Google Looker Studio BI Specification
 
-Este documento define cómo construir el informe analítico de **ATSNT** en **Google Looker Studio** sobre el modelo de datos centrado en runs (`scripts/gcp/bigquery_schema.sql`). El informe se organiza **por preguntas, no por tablas**: todas las páginas comparten la clave `run_id`, de modo que un mismo control filtra el informe completo y cualquier estrategia nueva aparece sin tocar el dashboard.
+Este documento define la especificación técnica completa y paso a paso para construir desde cero el cuadro de mando analítico de **ATSNT** en **Google Looker Studio**, consumiendo directamente las vistas analíticas de **Google BigQuery** (`scripts/gcp/bigquery_schema.sql`).
+
+El informe se organiza en **3 páginas temáticas** optimizadas para eliminar duplicidades, unificar el flujo cuantitativo y evitar cualquier desarrollo o modificación de tablas en BigQuery:
+1. **Página 1: Explorador & Comparador de Runs** — *"¿Qué he ejecutado y cuál es el mejor candidato?"*
+2. **Página 2: Radiografía del Run (Backtest / Paper / Live)** — *"¿Cómo funciona este run en detalle y cómo gestiona el riesgo?"*
+3. **Página 3: Robustez Cuantitativa (WFO & Monte Carlo)** — *"¿El resultado es una ventaja estadística real o es sobreajuste / azar?"*
 
 ---
 
@@ -9,130 +14,321 @@ Este documento define cómo construir el informe analítico de **ATSNT** en **Go
 - **Proyecto GCP**: `${GCP_PROJECT_ID}`
 - **Región**: `europe-southwest1` (Madrid)
 - **Dataset**: `atsnt_bi`
-- **Conector**: BigQuery nativo (Direct Query). Los datos se actualizan con el botón **Actualizar datos** del informe; no hace falta streaming continuo.
+- **Conector**: BigQuery nativo (Direct Query).
 
-Looker Studio lee **solo vistas**, nunca las tablas físicas:
+Looker Studio se conecta exclusivamente a **vistas deduplicadas (`v_*`)**, nunca a tablas físicas directas:
 
-| Fuente Looker | Vista BigQuery | Grano | Uso |
+| Fuente en Looker | Vista BigQuery | Grano / Nivel de detalle | Uso principal en el informe |
 | :--- | :--- | :--- | :--- |
-| `Runs` | `v_runs` | 1 fila por run (último estado + métricas `full` + spec aplanada) | Explorador, scorecards, comparador |
-| `Trades` | `v_trades` | 1 fila por trade cerrado (con MAE/MFE) | Anatomía de salidas, bitácora |
-| `Equity` | `v_equity` | Puntos de equity por evento (entry/trough/peak/exit) con drawdown | Curva de equity y underwater |
-| `Latest Equity` | `v_latest_equity` | Último punto de equity por run | Monitor paper/live |
-| `HPO Trials` | `v_hpo_trials` | 1 fila por trial de HPO (params + scores) | Superficie de parámetros, sobreajuste |
-| `HPO Folds` | `v_hpo_folds` | 1 fila por trial, fold y muestra (`is`/`oos`) | Degradación IS → OOS |
-| `Monte Carlo` | `v_monte_carlo` | 1 fila por run de Monte Carlo (percentiles aplanados) | Riesgo de ruina |
-| `Series` | `v_series` | Puntos de serie genéricos (`mc_equity`) | Fan chart de Monte Carlo |
+| `Runs` | `v_runs` | 1 fila por run (último lifecycle + métricas `full` + spec aplanada) | Página 1 (Catálogo y comparador) y Página 2 (Scorecards del run) |
+| `Trades` | `v_trades` | 1 fila por trade cerrado (con MAE, MFE y drawdown propio) | Página 2 (Anatomía de salidas, MAE/MFE y bitácora de órdenes) |
+| `Equity` | `v_equity` | Puntos de equity por evento (`entry`, `trough`, `peak`, `exit`) | Página 2 (Curva de equity y gráfico underwater) |
+| `Latest Equity` | `v_latest_equity`| Último punto de equity registrado por run activo | Página 1 (Monitor de sesiones activas) |
+| `HPO Trials` | `v_hpo_trials` | 1 fila por trial de optimización (hiperparámetros JSON + ranking) | Página 3 (Superficie de parámetros, ranking y dispersión IS/OOS) |
+| `HPO Folds` | `v_hpo_folds` | 1 fila por trial, fold (`0..N`) y muestra (`is` / `oos`) | Página 3 (Barras de degradación temporal por fold) |
+| `Monte Carlo` | `v_monte_carlo`| 1 fila por simulación CBB (percentiles P50, P95, P99 y ruina) | Página 3 (Scorecards de estrés y riesgo de ruina) |
+| `Series` | `v_series` | Puntos de serie temporal u ordinal (`series`, `event`, `x`, `value`)| Página 3 (Fan chart de trayectorias de Monte Carlo) |
 
-> El max drawdown exacto de un run es `v_runs.max_drawdown_pct` (calculado por el motor barra a barra). `v_equity.drawdown_pct` se deriva de los puntos por evento y sirve para dibujar la curva.
-
----
-
-## 2. Controles Globales (a nivel de informe)
-
-Crea estos controles en **Ver → Elementos a nivel de informe** para que se apliquen a todas las páginas. Looker Studio filtra entre fuentes distintas cuando el campo tiene el mismo nombre y tipo. Todas las vistas exponen `run_id` (el filtro que une el informe); `strategy_id` y `symbol` solo filtran las fuentes que los incluyen (`Runs`, `Trades`, `Latest Equity`, `HPO Trials`, `Monte Carlo`).
-
-1. **Tipo de run**: lista desplegable → `run_type` (`backtest`, `hpo`, `hpo_trial`, `monte_carlo`, `paper`, `live`).
-2. **Estrategia**: lista desplegable → `strategy_id`.
-3. **Símbolo**: lista desplegable → `symbol`.
-4. **Run**: lista desplegable con búsqueda → `run_id` (fuente `Runs`; dimensión de etiqueta recomendada: campo calculado `CONCAT(run_type, " · ", strategy_id, " · ", FORMAT_DATETIME("%Y-%m-%d %H:%M", started_at))`).
-5. **Periodo**: control de intervalo de fechas → `started_at`.
+> [!NOTE]
+> Todas las fuentes comparten la clave primaria `run_id` (o `parent_run_id` en el caso de HPO y Monte Carlo). Esto garantiza que los filtros globales afecten a todas las fuentes de manera coherente sin necesidad de uniones complejas en Looker Studio.
 
 ---
 
-## 3. Página 1: Explorador de Runs — "¿Qué he ejecutado?"
+## 2. Configuración Global del Informe y Cuota Free Tier
 
-*Fuente*: `Runs`.
+### 2.1 Preservación de Coste Cero (Always Free Tier 1 TB/mes)
+Para asegurar que el dashboard cumpla la premisa de **0,00 € / mes** de la arquitectura ATSNT sin agotar la cuota de consultas analíticas de BigQuery:
+1. En cada fuente de datos: **Recurso** → **Gestionar las fuentes de datos añadidas** → **Editar** en cada vista.
+2. Pulsa en **Frescura de datos** (*Data freshness*) arriba a la derecha.
+3. Configúralo en **1 hora** o **4 horas** (en lugar de los 15 minutos por defecto).
+4. El informe cuenta con el botón manual **Actualizar datos** para cuando se desee forzar la lectura tras finalizar un backtest.
 
-### 3.1 Tabla principal
-- Dimensiones: `started_at`, `run_type`, `status`, `strategy_id`, `symbol`, `run_id`, `parent_run_id`, `data_source`, `git_sha`.
-- Métricas: `total_trades`, `net_profit`, `profit_factor`, `sortino_ratio`, `max_drawdown_pct`, `fee_drag_pct`, `win_rate`, `duration_seconds`.
-- Orden: `started_at` descendente.
-- **Interacciones → Filtrado cruzado** activado: al hacer clic en una fila se filtra el resto de la página por ese run.
-- Formato condicional: `net_profit < 0` rojo suave; `status = failed` en negrita.
-
-### 3.2 Scorecards de contexto
-| Tarjeta | Campo | Agregación |
-| :--- | :--- | :--- |
-| Runs | `run_id` | `COUNT_DISTINCT` |
-| Backtests | `run_id` con filtro `run_type = backtest` | `COUNT_DISTINCT` |
-| Sesiones paper/live activas | `run_id` con filtro `status = running` | `COUNT_DISTINCT` |
+### 2.2 Dimensiones del Lienzo (*Canvas*)
+- **Páginas 1 y 2**: Anchura `1360 px`, Altura `1080 px` (o formato estándar panorámico 16:9).
+- **Página 3**: Anchura `1360 px`, Altura `1600 px` (para permitir scroll vertical cómodo entre el bloque de Walk-Forward y el bloque de Monte Carlo).
 
 ---
 
-## 4. Página 2: Radiografía de un Run — "¿Cómo es esta estrategia?"
+## 3. Campos Calculados en Looker Studio
 
-*Uso*: selecciona un único `run_id` (backtest, paper o live) en el control global.
+Para no modificar ninguna vista ni tabla en BigQuery, se crean los siguientes campos calculados directamente en las fuentes de datos de Looker Studio:
 
-### 4.1 Scorecards (fuente `Runs`)
-| Bloque | Tarjetas |
-| :--- | :--- |
-| Edge | `mathematical_expectancy`, `profit_factor`, `win_rate`, `payoff_ratio` |
-| Calidad del retorno | `sortino_ratio`, `max_drawdown_pct`, `max_drawdown_amount`, `net_profit` |
-| Fricción | `total_fees`, `total_slippage`, `fee_drag_pct` |
-| Ciclo de vida | `avg_holding_seconds` (÷ 60 → minutos), `avg_mae_pct`, `avg_mfe_pct`, `total_trades` |
-| Spec usada | `dollar_bar_threshold`, `taker_fee_pct`, `maker_fee_pct`, `slippage_pct`, `initial_capital` |
+### 3.1 En la fuente `Runs` (`v_runs`):
+1. **`run_label`** (Etiqueta legible para selectores y gráficos de barras):
+   - Tipo: Texto
+   - Fórmula:
+     ```text
+     CONCAT(run_type, " · ", strategy_id, " · ", FORMAT_DATETIME("%Y-%m-%d %H:%M", started_at))
+     ```
+2. **`holding_minutes`** (Duración media en minutos):
+   - Tipo: Numérico → Número
+   - Fórmula:
+     ```text
+     avg_holding_seconds / 60
+     ```
 
-### 4.2 Gráficos
-1. **Curva de equity** (fuente `Equity`, serie temporal): dimensión `ts`; métricas `equity` y `running_peak`.
-2. **Underwater** (fuente `Equity`, área): dimensión `ts`; métrica `drawdown_pct` (invertida en el eje).
-3. **Anatomía de salidas** (fuente `Trades`, donut): dimensión `exit_reason`; métrica `trade_id` (`COUNT`).
-4. **MAE vs resultado** (fuente `Trades`, dispersión): X = campo calculado `(entry_equity - trough_equity) / entry_equity`; Y = `net_pnl`; color = `exit_reason`. Muestra si los stops están demasiado cerca o si los ganadores sufren antes de ganar.
-5. **MFE vs resultado** (fuente `Trades`, dispersión): X = `(peak_equity - entry_equity) / entry_equity`; Y = `net_pnl`. Muestra beneficio dejado sobre la mesa.
-6. **Bitácora** (fuente `Trades`, tabla): `exit_timestamp`, `side`, `exit_reason`, `entry_price`, `exit_price`, `quantity`, `gross_pnl`, `fees_paid`, `net_pnl`, `holding_duration_seconds`; orden `exit_timestamp` descendente.
+### 3.2 En la fuente `Trades` (`v_trades`):
+1. **`mae_pct`** (Máxima Excursión Adversa como fracción):
+   - Tipo: Numérico → Porcentaje
+   - Fórmula:
+     ```text
+     (entry_equity - trough_equity) / entry_equity
+     ```
+2. **`mfe_pct`** (Máxima Excursión Favorable como fracción):
+   - Tipo: Numérico → Porcentaje
+   - Fórmula:
+     ```text
+     (peak_equity - entry_equity) / entry_equity
+     ```
 
 ---
 
-## 5. Página 3: Comparador — "¿Cuál es mejor y por qué?"
+## 4. Controles Globales (A Nivel de Informe)
 
-### 5.1 Runs lado a lado (fuente `Runs`)
-- Tabla con `run_id`, `strategy_id`, `run_type` y las métricas de la sección 4.1; selecciona varios runs en el control global para compararlos.
-- Gráfico de barras agrupadas: dimensión `run_id`; métricas `sortino_ratio`, `profit_factor`, `max_drawdown_pct`.
+Crea estos 4 controles en la cabecera superior. Selecciónalos juntos, haz clic derecho y elige **Pasar al nivel de informe** para que aparezcan sincronizados en todas las páginas:
 
-### 5.2 Superficie de parámetros HPO (fuente `HPO Trials`)
-Los parámetros se guardan como JSON (`params`), así que se extraen con campos calculados de texto, válidos para cualquier estrategia:
+1. **Tipo de Run**:
+   - Tipo de control: **Lista desplegable** (*Drop-down list*). Nunca usar *Casilla*.
+   - Fuente: `v_runs` | Campo de control: `run_type` (`backtest`, `hpo`, `paper`, `live`, etc.).
+2. **Estrategia**:
+   - Tipo de control: **Lista desplegable**.
+   - Fuente: `v_runs` | Campo de control: `strategy_id`.
+3. **Símbolo**:
+   - Tipo de control: **Lista desplegable**.
+   - Fuente: `v_runs` | Campo de control: `symbol`.
+4. **Intervalo Temporal**:
+   - Tipo de control: **Control de intervalo de fechas**.
+   - Campo de fecha: `started_at`.
+
+---
+
+## 5. Página 1: Explorador & Comparador de Runs
+
+> **Pregunta que responde:** *"¿Qué he ejecutado en el sistema y qué estrategias o variantes destacan para analizar en detalle?"*
 
 ```text
-param_z_entry   = CAST(REGEXP_EXTRACT(params, '"z_entry_threshold":"?(-?[0-9.]+)') AS NUMBER)
-param_window    = CAST(REGEXP_EXTRACT(params, '"rolling_window_len":"?(-?[0-9.]+)') AS NUMBER)
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ [CABECERA GLOBAL]: Filtros a nivel de informe (Tipo Run | Estrategia | Símbolo | Fecha)│
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ [FILA 1: KPIs GLOBALES]                                                                │
+│ ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐ ┌─────────────────────┐ │
+│ │ Total Runs       │ │ Backtests Éxito  │ │ En Ejecución     │ │ Máx Sortino         │ │
+│ └──────────────────┘ └──────────────────┘ └──────────────────┘ └─────────────────────┘ │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ [FILA 2: CATÁLOGO DE RUNS] (Tabla interactiva con Filtrado Cruzado)                    │
+│ started_at | run_type | status | strategy | symbol | Sortino | PF | Net PnL | MaxDD%   │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ [FILA 3: COMPARADOR LADO A LADO] (Activado al pulsar filas del catálogo)               │
+│ ┌────────────────────────────────────────┐ ┌─────────────────────────────────────────┐ │
+│ │ Gráfico Barras: Sortino, PF y MaxDD %  │ │ Tabla Specs: Capital, Umbral, Comisiones│ │
+│ └────────────────────────────────────────┘ └─────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-1. **Dispersión parámetro vs OOS**: X = `param_z_entry`; Y = `mean_oos_sortino`; tamaño = `total_oos_trades`; color = `is_statistically_significant`.
-2. **Mapa de calor**: filas `param_window`, columnas `param_z_entry`, métrica `fitness` (`AVG`). Las mesetas estables son preferibles a los picos aislados.
-3. **Ranking**: tabla con `rank`, `params`, `fitness`, `stability_score`, `mean_is_sortino`, `mean_oos_sortino`, `dsr_p_value`; orden `rank` ascendente. Control de filtro por `hpo_run_id`.
+### 5.1 Fila 1: Scorecards Ejecutivos (Fuente `v_runs`)
+- **Tarjeta 1 (Total Runs)**: Métrica `run_id` | Agregación: `Recuento único` (`COUNT_DISTINCT`).
+- **Tarjeta 2 (Backtests Éxito)**: Métrica `run_id` (`COUNT_DISTINCT`) con filtro de tarjeta: `run_type = 'backtest'` Y `net_profit > 0`.
+- **Tarjeta 3 (En Ejecución)**: Métrica `run_id` (`COUNT_DISTINCT`) con filtro de tarjeta: `status = 'running'`.
+- **Tarjeta 4 (Máx Sortino)**: Métrica `sortino_ratio` | Agregación: `MAX`.
+
+### 5.2 Fila 2: Tabla Principal del Catálogo de Runs (Fuente `v_runs`)
+- **Dimensiones**: `started_at` (formato Fecha Hora), `run_type`, `status`, `strategy_id`, `symbol`, `run_id`.
+- **Métricas**:
+  - `sortino_ratio` (`AVG` | 2 decimales)
+  - `profit_factor` (`AVG` | 2 decimales)
+  - `net_profit` (`SUM` | Moneda)
+  - `max_drawdown_pct` (`MAX` | Porcentaje)
+  - `win_rate` (`AVG` | Porcentaje)
+  - `total_trades` (`SUM` | Número entero)
+  - `fee_drag_pct` (`AVG` | Porcentaje)
+- **Ordenación**: `started_at` descendente.
+- **Paginación**: 20 filas por página.
+- **Interacción**: Marcar casilla **Filtrado cruzado** (*Cross-filtering*).
+- **Formato condicional**: `net_profit < 0` fondo rojo suave; `net_profit > 0` fondo verde suave; `status = failed` texto rojo negrita.
+
+### 5.3 Fila 3: Bloque Comparador Inferior (Fuente `v_runs`)
+1. **Gráfico de Barras Agrupadas (Izquierda, 50% ancho)**:
+   - Dimensión: `run_label` (o `run_id`).
+   - Métricas: `sortino_ratio` (`AVG`), `profit_factor` (`AVG`), `max_drawdown_pct` (`MAX`).
+   - Estilo: Mostrar etiquetas de datos activado.
+2. **Tabla de Especificaciones de Ejecución (Derecha, 50% ancho)**:
+   - Dimensión: `run_label`.
+   - Métricas: `initial_capital` (`MAX` | Moneda), `dollar_bar_threshold` (`MAX` | Número), `taker_fee_pct` (`MAX` | Porcentaje), `slippage_pct` (`MAX` | Porcentaje), `duration_seconds` (`MAX` | Segundos).
 
 ---
 
-## 6. Página 4: Robustez — "¿Es real o es suerte?"
+## 6. Página 2: Radiografía del Run (Backtest / Paper / Live)
 
-### 6.1 Sobreajuste IS vs OOS
-1. **Dispersión IS vs OOS** (fuente `HPO Trials`): X = `mean_is_sortino`; Y = `mean_oos_sortino`; línea de referencia `y = x`. Los puntos muy por debajo de la diagonal están sobreajustados.
-2. **Degradación por fold** (fuente `HPO Folds`): dimensión `fold_idx`; desglose `sample`; métricas `sortino_ratio` y `profit_factor` (`AVG`); filtro por `run_id` del trial.
-3. **Scorecard DSR**: `dsr_p_value` del trial ganador (`rank = 1`) con formato condicional `< 0.05` verde.
+> **Pregunta que responde:** *"¿Por qué gana o pierde dinero este run concreto y cómo gestiona el riesgo y las comisiones barra a barra?"*
 
-### 6.2 Monte Carlo (fuentes `Monte Carlo` y `Series`)
-1. **Scorecards**: `probability_of_ruin_pct`, `historical_max_drawdown_pct`, `p50_max_drawdown_pct`, `p95_max_drawdown_pct`, `p99_max_drawdown_pct`, `p95_underwater_trades`, `iterations`, `resample_method`.
-2. **Fan chart** (fuente `Series`, gráfico de líneas): filtro `series = mc_equity`; dimensión `x` (número de trade); desglose `event` (`Realized`, `Worst_Stress_1`, `Best_Ceiling_1`, `Quantile_0.05` … `Quantile_0.95`); métrica `value`.
-3. Para ir del backtest a su Monte Carlo usa `backtest_run_id` = `run_id` del backtest seleccionado.
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ [CONTROL OBLIGATORIO]: Selector de run_id / run_label con Selección Única Activada    │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ [FILA 1: MATRIZ DE SCORECARDS]                                                         │
+│  BLOQUE A: Edge & Retorno   │  BLOQUE B: Riesgo & Drawdown │  BLOQUE C: Fricción & Tpo │
+│  Net PnL | PF | WinRate     │  Sortino | MaxDD% | MaxDD $  │  Fees | Drag % | Duración │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ [FILA 2: CURVA DE EQUITY & UNDERWATER] (Alineados en el eje temporal 'ts')             │
+│ ┌────────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ Serie Temporal: Equity (azul continua) vs Running Peak (gris punteada)             │ │
+│ ├────────────────────────────────────────────────────────────────────────────────────┤ │
+│ │ Gráfico Área: Drawdown % (área roja, eje invertido con 0% arriba)                  │ │
+│ └────────────────────────────────────────────────────────────────────────────────────┘ │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ [FILA 3: TRADE INTELLIGENCE]                                                           │
+│ ┌─────────────────────────┐ ┌───────────────────────────┐ ┌──────────────────────────┐│
+│ │ Donut: Salidas          │ │ Dispersión MAE vs PnL     │ │ Dispersión MFE vs PnL    ││
+│ │ (TP vs SL vs Barreras)  │ │ (¿Stops asfixiados?)      │ │ (¿Beneficio regalado?)   ││
+│ └─────────────────────────┘ └───────────────────────────┘ └──────────────────────────┘│
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ [FILA 4: BITÁCORA DE TRADES] (Tabla detallada paginada a 50 filas)                     │
+│ exit_ts | side | exit_reason | entry_px | exit_px | fees | net_pnl | return% | max_dd% │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 6.1 Control Específico de Página
+- **Tipo de control**: **Lista desplegable** (*Drop-down list*).
+- **Fuente**: `v_runs` | **Campo de control**: `run_label` (o `run_id`).
+- **Estilo**: Marcar obligatoriamente **Habilitar selección única** (evita agregaciones accidentales de runs múltiples).
+
+### 6.2 Fila 1: Matriz de Scorecards (Fuente `v_runs`)
+- **Bloque A (Edge & Rendimiento)**:
+  - `net_profit` (`SUM` | Moneda)
+  - `profit_factor` (`AVG` | 2 decimales)
+  - `win_rate` (`AVG` | Porcentaje)
+  - `payoff_ratio` (`AVG` | 2 decimales)
+  - `mathematical_expectancy` (`AVG` | Moneda)
+- **Bloque B (Riesgo & Capital)**:
+  - `sortino_ratio` (`AVG` | 2 decimales)
+  - `max_drawdown_pct` (`MAX` | Porcentaje)
+  - `max_drawdown_amount` (`MAX` | Moneda)
+  - `total_trades` (`SUM` | Entero)
+- **Bloque C (Fricción & Realidad)**:
+  - `total_fees` (`SUM` | Moneda)
+  - `total_slippage` (`SUM` | Moneda)
+  - `fee_drag_pct` (`AVG` | Porcentaje)
+  - `holding_minutes` (`AVG` | 1 decimal)
+
+### 6.3 Fila 2: Curva de Equity & Underwater (Fuente `v_equity`)
+1. **Curva de Equity (Serie temporal superior)**:
+   - Dimensión temporal: `ts`.
+   - Métricas: `equity` (`AVG` | Línea sólida azul/verde) y `running_peak` (`MAX` | Línea punteada gris).
+2. **Underwater / Drawdown (Gráfico de área inferior)**:
+   - Dimensión temporal: `ts`.
+   - Métrica: `drawdown_pct` (`MAX` | Porcentaje).
+   - Estilo: Gráfico de área color rojo suave / semi-transparente.
+   - En **Eje Y izquierdo**: Marcar **Invertir dirección del eje** (el 0 % queda arriba y las caídas descienden).
+
+### 6.4 Fila 3: Trade Intelligence (Fuente `v_trades`)
+1. **Donut: Anatomía de Salidas (30% ancho)**:
+   - Dimensión: `exit_reason` (`TakeProfit`, `StopLoss`, `TimeBarrier`, etc.).
+   - Métrica: `trade_id` (`Recuento único` / `COUNT_DISTINCT`).
+2. **Dispersión MAE vs Resultado (35% ancho)**:
+   - Dimensión: `trade_id`.
+   - Eje X: `mae_pct` (campo calculado de máxima excursión adversa).
+   - Eje Y: `net_pnl`.
+   - Color / Desglose: `exit_reason`.
+3. **Dispersión MFE vs Resultado (35% ancho)**:
+   - Dimensión: `trade_id`.
+   - Eje X: `mfe_pct` (campo calculado de máxima excursión favorable).
+   - Eje Y: `net_pnl`.
+
+### 6.5 Fila 4: Bitácora de Trades (Fuente `v_trades`)
+- **Dimensiones**: `exit_timestamp`, `side`, `exit_reason`.
+- **Métricas**: `entry_price` (`AVG`), `exit_price` (`AVG`), `quantity` (`SUM`), `gross_pnl` (`SUM`), `fees_paid` (`SUM`), `net_pnl` (`SUM`), `return_pct` (`AVG` | Porcentaje), `max_drawdown_pct` (`MAX` | Porcentaje).
+- **Ordenación**: `exit_timestamp` descendente.
+- **Paginación**: 50 filas por página (vital para evitar lentitud en navegador con miles de trades).
+- **Formato condicional**: `net_pnl > 0` verde suave; `net_pnl < 0` rojo suave.
 
 ---
 
-## 7. Página 5: Monitor Paper / Live — "¿Cómo va ahora?"
+## 7. Página 3: Robustez Cuantitativa (WFO & Monte Carlo)
 
-*Uso*: control `run_type` en `paper` o `live`.
+> **Pregunta que responde:** *"¿Esta estrategia tiene una ventaja estadística real fuera de muestra o fue producto de la suerte y el sobreajuste?"*
 
-1. **Estado actual** (fuente `Latest Equity`): tabla con `run_id`, `status`, `strategy_id`, `symbol`, `ts`, `equity`, `drawdown_pct`.
-2. **Curva de la sesión** (fuente `Equity`): serie temporal `ts` / `equity` del run seleccionado.
-3. **Últimos trades** (fuente `Trades`): tabla ordenada por `exit_timestamp` descendente, limitada a 20 filas.
-4. **Scorecards** (fuente `Runs`): `net_profit`, `total_trades`, `win_rate`, `max_drawdown_pct` (se rellenan al cerrar la sesión, cuando se escribe la fila final del run).
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ [SECCIÓN A: WALK-FORWARD OPTIMIZATION] (Fuente: v_hpo_trials y v_hpo_folds)            │
+│  [Selector HPO Run ID]                                                                 │
+│  Scorecards: Rank #1 Fitness | Mean OOS Sortino | Stability Score | DSR p-value (<0.05)│
+│ ┌───────────────────────────────────────┐ ┌──────────────────────────────────────────┐ │
+│ │ Dispersión IS vs OOS                  │ │ Barras Degradación por Fold:             │ │
+│ │ (X=IS Sortino, Y=OOS Sortino)         │ │ (Dim=fold_idx, Desglose=sample is vs oos)│ │
+│ └───────────────────────────────────────┘ └──────────────────────────────────────────┘ │
+│ ┌────────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ Tabla Ranking de Trials: rank | params | fitness | stability | is/oos Sortino | DSR│ │
+│ └────────────────────────────────────────────────────────────────────────────────────┘ │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ [SECCIÓN B: MONTE CARLO STRESS TESTING] (Fuente: v_monte_carlo y v_series)             │
+│  Scorecards: Prob. Ruina % | MaxDD Histórico | P95 Max Drawdown | P95 Rachas Bajo Agua │
+│ ┌────────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ Fan Chart de Trayectorias CBB (Fuente: v_series, Filtro: series = 'mc_equity')     │ │
+│ │ Dimensión: x (ordinal trade) | Desglose: event (Quantiles & Realized) | Métrica: val│ │
+│ └────────────────────────────────────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
 
-> La equity solo se registra cuando hay flujo de dinero (entrada, valle, pico y salida de cada trade). Entre trades la cuenta es plana, así que no hay snapshots por tiempo.
+### 7.1 SECCIÓN A: Walk-Forward Optimization (HPO)
+
+1. **Control de Optimización**:
+   - Tipo de control: **Lista desplegable** (*Drop-down list* con selección única).
+   - Fuente: `v_hpo_trials` | Campo de control: `hpo_run_id`.
+2. **Scorecards del Trial Ganador (#1)** (Fuente `v_hpo_trials`):
+   - `fitness`: `MAX` | 2 decimales.
+   - `mean_oos_sortino`: `MAX` | 2 decimales (Sortino medio fuera de muestra).
+   - `stability_score`: `MAX` | 2 decimales (Penalización de picos inestables).
+   - `dsr_p_value`: `MIN` | 4 decimales. Formato condicional: `< 0.05` en verde (Deflated Sharpe Ratio estadísticamente significativo).
+3. **Dispersión IS vs OOS (Detector de Sobreajuste)**:
+   - Gráfico: **Gráfico de dispersión** (*Scatter plot*).
+   - Fuente: `v_hpo_trials` | Dimensión: `run_id`.
+   - Eje X: `mean_is_sortino`.
+   - Eje Y: `mean_oos_sortino`.
+   - Tamaño de burbuja: `total_oos_trades`.
+   - *Lectura*: Puntos muy alejados por debajo de la diagonal teórica $y=x$ denotan sobreajuste severo.
+4. **Degradación por Fold**:
+   - Gráfico: **Gráfico de barras de columnas agrupadas**.
+   - Fuente: `v_hpo_folds`.
+   - Dimensión: `fold_idx` (Fold 0, Fold 1, Fold 2...).
+   - Dimensión de desglose: `sample` (`is` vs `oos`).
+   - Métrica: `sortino_ratio` (`AVG`).
+5. **Tabla Ranking de Trials de HPO**:
+   - Fuente: `v_hpo_trials`.
+   - Dimensiones: `rank`, `params`.
+   - Métricas: `fitness` (`AVG`), `stability_score` (`AVG`), `mean_is_sortino` (`AVG`), `mean_oos_sortino` (`AVG`), `dsr_p_value` (`AVG`).
+   - Ordenación: `rank` ascendente (#1 arriba).
 
 ---
 
-## 8. Reglas Generales de Formateo
+### 7.2 SECCIÓN B: Monte Carlo Stress Testing (CBB)
 
-1. **Agregaciones**: importes y conteos (`net_pnl`, `fees_paid`, `total_trades`) con `SUM`; ratios y porcentajes (`sortino_ratio`, `win_rate`, `max_drawdown_pct`, `fee_drag_pct`) con `AVG` o `MAX`, nunca `SUM`.
-2. **Un run por gráfico de radiografía**: las páginas 2 y 5 asumen un único `run_id` seleccionado; sin selección, los scorecards agregan todos los runs filtrados.
-3. **Porcentajes**: los campos `*_pct` están en fracción (0.05 = 5 %); configúralos como tipo **Porcentaje**.
-4. **Estrategias nuevas**: no requieren cambios; solo añade campos calculados `REGEXP_EXTRACT` para sus parámetros en la página 3.
+1. **Scorecards de Riesgo de Ruina y Estrés** (Fuente `v_monte_carlo`):
+   - `probability_of_ruin_pct`: `MAX` | Porcentaje (Objetivo: 0.00 %).
+   - `historical_max_drawdown_pct`: `MAX` | Porcentaje (El drawdown real sufrido en el backtest).
+   - `p95_max_drawdown_pct`: `MAX` | Porcentaje (El 95% de los caminos simulados no superan esta pérdida).
+   - `p95_underwater_trades`: `MAX` | Número entero (Racha consecutiva de trades en pérdidas bajo el percentil 95).
+2. **Fan Chart de Trayectorias de Monte Carlo**:
+   - Gráfico: **Gráfico de serie temporal** o **Gráfico de líneas**.
+   - Fuente: `v_series`.
+   - **Dimensión**: `x` (índice ordinal de la operación simulada: trade 1, trade 2, trade 100...).
+   - **Dimensión de desglose**: `event` (genera las curvas: `Realized`, `Worst_Stress_1`, `Best_Ceiling_1`, `Quantile_0.05`, `Quantile_0.50`, `Quantile_0.95`).
+   - **Métrica**: `value` (`AVG` | Moneda / Capital simulado).
+   - **Filtro del gráfico (OBLIGATORIO)**:
+     - Crear filtro a nivel de este gráfico: **Incluir** → `series` → **Igual a (=)** → `mc_equity`.
+   - **Estilo**: Línea `Realized` destacada en azul/blanco; cuantiles `Quantile_*` en tonos degradados naranjas o grises.
+
+---
+
+## 8. Reglas Maestras de Agregación y Formateo
+
+1. **Agregaciones matemáticas**:
+   - Magnitudes acumulativas y conteos (`net_profit`, `total_trades`, `total_fees`, `gross_pnl`): **`SUM`**.
+   - Ratios y rendimientos ponderados (`sortino_ratio`, `profit_factor`, `win_rate`, `fee_drag_pct`): **`AVG`**.
+   - Valores extremos de riesgo (`max_drawdown_pct`, `max_drawdown_amount`, percentiles de Monte Carlo): **`MAX`**.
+   - Parámetros fijos de configuración (`initial_capital`, `dollar_bar_threshold`, comisiones): **`AVG`** o **`MAX`**.
+2. **Tipo de datos en Looker Studio**:
+   - Todos los campos con sufijo `*_pct` deben configurarse en su métrica como **Numérico → Porcentaje** (BigQuery los entrega en base 1, ej: `0.154` = `15.4%`).
+   - Los importes monetarios deben configurarse como **Numérico → Moneda (USD / EUR)**.
+3. **Paginación y Rendimiento del Navegador**:
+   - La tabla del catálogo de runs debe paginarse a **20 filas**.
+   - La bitácora de trades debe paginarse a **50 filas**. Nunca renderizar listas infinitas de trades directas de BigQuery para evitar bloqueos del navegador.
