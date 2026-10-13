@@ -80,7 +80,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] BigQuery tables `runs`, `run_metrics`, `trades`, `run_series` with latest-row views; legacy `equity_snapshots`, `hpo_evaluations`, `monte_carlo_runs` dropped.
 - [x] Event-based equity (entry/trough/peak/exit per trade with MAE/MFE) replacing time-sampled snapshots; per-trade drawdown reproduces the engine max drawdown exactly.
 - [x] Local JSON reports and GCS Parquet exports removed; GCS keeps only deployment artifacts.
-- [ ] Looker Studio report built from [`docs/architecture/11-looker-studio-bi-spec.md`](architecture/11-looker-studio-bi-spec.md).
+- [x] Looker Studio report built from [`docs/architecture/11-looker-studio-bi-spec.md`](architecture/11-looker-studio-bi-spec.md).
 - [ ] Technical debt: model perpetual futures funding payments as cash-flow events.
 
 ---
