@@ -148,3 +148,99 @@ fn equity_points_are_four_events_per_trade_in_time_order() {
     sorted.sort();
     assert_eq!(times, sorted);
 }
+
+mod persistence {
+    use super::*;
+    use adapters::InMemoryRunRecorder;
+    use backtest::{
+        record_backtest, record_monte_carlo, MonteCarloConfig, MonteCarloSimulator, ResampleMethod,
+    };
+
+    fn trades(n: usize) -> Vec<ClosedTrade> {
+        (0..n)
+            .map(|i| {
+                let mut t = closed_trade();
+                if i % 3 == 0 {
+                    t.pnl_net = dec!(-5);
+                    t.return_pct = dec!(-0.025);
+                }
+                t
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn backtest_records_run_metrics_trades_and_equity_events() {
+        let recorder = InMemoryRunRecorder::new();
+        let ctx = RunContext::new(RunType::Backtest, &spec(), 0);
+        let closed = trades(3);
+        let metrics = BacktestMetrics::calculate(dec!(10_000), &closed, dec!(10), dec!(0.001));
+
+        record_backtest(
+            &recorder,
+            &ctx,
+            &spec(),
+            &DataWindow::default(),
+            &metrics,
+            &closed,
+        )
+        .await
+        .unwrap();
+
+        let rec = recorder.snapshot();
+        assert_eq!(rec.runs.len(), 1);
+        assert_eq!(rec.runs[0].status, "completed");
+        assert_eq!(rec.runs[0].run_type, "backtest");
+        assert_eq!(rec.metrics.len(), 1);
+        assert_eq!(rec.metrics[0].scope, "full");
+        assert_eq!(rec.trades.len(), 3);
+        assert_eq!(rec.series.len(), 12);
+    }
+
+    #[tokio::test]
+    async fn monte_carlo_is_a_child_run_with_extras_and_bounded_fan_chart() {
+        let recorder = InMemoryRunRecorder::new();
+        let parent = RunContext::new(RunType::Backtest, &spec(), 0);
+        let mc_ctx = parent.child(RunType::MonteCarlo, 0);
+        let closed = trades(12);
+        let config = MonteCarloConfig {
+            iterations: 200,
+            method: ResampleMethod::IidWithReplacement,
+            ruin_threshold_pct: dec!(0.30),
+            seed: Some(7),
+        };
+        let report = MonteCarloSimulator::new(config)
+            .run(dec!(10_000), &closed)
+            .unwrap();
+
+        record_monte_carlo(&recorder, &mc_ctx, &spec(), &DataWindow::default(), &report)
+            .await
+            .unwrap();
+
+        let rec = recorder.snapshot();
+        assert_eq!(rec.runs[0].run_type, "monte_carlo");
+        assert_eq!(
+            rec.runs[0].parent_run_id.as_deref(),
+            Some(parent.run_id.as_str())
+        );
+        assert!(rec.trades.is_empty(), "Monte Carlo stores no trades");
+
+        let extras: serde_json::Value =
+            serde_json::from_str(rec.metrics[0].extras.as_deref().unwrap()).unwrap();
+        assert_eq!(extras["iterations"], 200);
+        assert_eq!(extras["resample_method"], "IidWithReplacement");
+        assert!(extras.get("probability_of_ruin_pct").is_some());
+        assert!(extras.get("p95_max_drawdown_pct").is_some());
+        assert!(rec.metrics[0].total_trades.is_none());
+
+        let mut curves: Vec<&str> = rec.series.iter().map(|p| p.event.as_str()).collect();
+        curves.dedup();
+        assert!(curves.contains(&"Realized"));
+        assert!(curves.len() <= 8, "only representative curves are stored");
+        assert!(rec
+            .series
+            .iter()
+            .all(|p| p.series == "mc_equity" && p.x.is_some()));
+        assert_eq!(rec.series.len(), curves.len() * (closed.len() + 1));
+    }
+}

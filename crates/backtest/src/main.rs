@@ -1,19 +1,20 @@
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use adapters::{
-    format_unix_ms_rfc3339, BigQuerySink, BinanceCsvReader, BinanceParquetReader, GcsParquetSink,
-    MarketDataStream, MonteCarloRow, TradeRow,
-};
+use adapters::{BigQuerySink, BinanceCsvReader, BinanceParquetReader, MarketDataStream};
 use anyhow::{Context, Result};
-use backtest::{BacktestConfig, BacktestEngine, MonteCarloConfig, MonteCarloSimulator};
+use backtest::{
+    now_unix_ms, record_backtest, record_monte_carlo, BacktestConfig, BacktestEngine, DataWindow,
+    MonteCarloConfig, MonteCarloSimulator, RunContext, RunSpec, RunType, SamplingConfig,
+};
 use clap::Parser;
-use domain::{DollarBarAggregator, PositionSide};
+use domain::DollarBarAggregator;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde_json::json;
-use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, Strategy};
+use strategies::{
+    DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType, OptimizableStrategy, Strategy,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -41,22 +42,15 @@ struct Args {
     #[arg(long, default_value_t = 10000)]
     mc_iterations: usize,
 
-    /// Optional output file path for the Monte Carlo telemetry report
-    #[arg(short, long)]
-    report: Option<PathBuf>,
-
-    /// Stream completed trades and Monte Carlo metrics to Google Cloud BigQuery
+    /// Record the run (spec, metrics, trades, equity events and Monte Carlo child run) to BigQuery
     #[arg(long, default_value_t = false)]
     gcp_bigquery: bool,
-
-    /// Export Monte Carlo trajectories as columnar Parquet to GCS/staging
-    #[arg(long, default_value_t = false)]
-    gcs_parquet: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let started_at_ms = now_unix_ms();
 
     println!("============================================================");
     println!("     ATSNT - Quantitative Backtesting Engine (100% Rust)    ");
@@ -162,7 +156,7 @@ async fn main() -> Result<()> {
     );
 
     // 3. Initialize Strategy (Dollar Bars + CUSUM + Z-Score)
-    let mut strategy = DollarBarsCusumStrategy::new(strat_config)
+    let mut strategy = DollarBarsCusumStrategy::new(strat_config.clone())
         .map_err(|e| anyhow::anyhow!("Failed to initialize strategy: {e}"))?;
 
     println!("[*] Strategy loaded: {}", strategy.name());
@@ -190,10 +184,16 @@ async fn main() -> Result<()> {
     let mut total_trades_processed = 0usize;
     let mut total_bars_emitted = 0usize;
     let mut last_price = Decimal::ZERO;
+    let mut data_window = DataWindow {
+        source: Some(args.data.display().to_string()),
+        ..DataWindow::default()
+    };
 
     while let Some(trade) = stream.next_trade()? {
         total_trades_processed += 1;
         last_price = trade.price;
+        data_window.start_ms.get_or_insert(trade.timestamp);
+        data_window.end_ms = Some(trade.timestamp);
 
         if let Some(bar) = aggregator.process_trade(&trade) {
             total_bars_emitted += 1;
@@ -249,83 +249,54 @@ async fn main() -> Result<()> {
     println!(" Sortino Ratio:             {:.2}", metrics.sortino_ratio);
     println!("============================================================");
 
-    // Save backtest telemetry
-    let reports_dir = Path::new("storage/reports");
-    fs::create_dir_all(reports_dir)?;
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    let backtest_report_path = reports_dir.join(format!("backtest_{timestamp}.json"));
+    let symbol = loaded_config
+        .as_ref()
+        .and_then(|c| c.symbol().map(str::to_string))
+        .unwrap_or_else(|| {
+            args.data
+                .file_name()
+                .and_then(|f| f.to_str())
+                .and_then(|s| s.split('-').next())
+                .unwrap_or("BTCUSDT")
+                .to_uppercase()
+        });
+    let run_spec = RunSpec {
+        strategy_id: loaded_config
+            .as_ref()
+            .and_then(|c| c.strategy_id().map(str::to_string))
+            .unwrap_or_else(|| DollarBarsCusumStrategy::id().to_string()),
+        symbol,
+        market_type: loaded_config
+            .as_ref()
+            .and_then(|c| c.market_type())
+            .unwrap_or(MarketType::UsdMPerpetual),
+        sampling: SamplingConfig::DollarBar {
+            threshold: effective_dollar_bar,
+        },
+        strategy_config: strat_config,
+        execution_context: engine_config,
+    };
+    let run_ctx = RunContext::new(RunType::Backtest, &run_spec, started_at_ms);
+    let recorder = args.gcp_bigquery.then(BigQuerySink::from_env);
 
-    let bt_json = json!({
-        "timestamp": timestamp,
-        "data_source": args.data.display().to_string(),
-        "dollar_bar_threshold": effective_dollar_bar,
-        "metrics": metrics,
-        "closed_trades": closed_trades,
-    });
-    fs::write(
-        &backtest_report_path,
-        serde_json::to_string_pretty(&bt_json)?,
-    )?;
-    println!(
-        "[*] Backtest report saved to: {}",
-        backtest_report_path.display()
-    );
-
-    if args.gcp_bigquery && !closed_trades.is_empty() {
-        let bq = BigQuerySink::from_env();
-        let symbol_name = args
-            .data
-            .file_name()
-            .and_then(|f| f.to_str())
-            .and_then(|s| s.split('-').next())
-            .unwrap_or("BTCUSDT")
-            .to_uppercase();
-        let session_id = format!("bt_{}_{}", symbol_name.to_lowercase(), timestamp);
-        let rows: Vec<TradeRow> = closed_trades
-            .iter()
-            .enumerate()
-            .map(|(idx, ct)| {
-                let side_str = match ct.side {
-                    PositionSide::Long => "Long",
-                    PositionSide::Short => "Short",
-                };
-                TradeRow {
-                    trade_id: format!("{}_t{:05}", session_id, idx + 1),
-                    session_id: session_id.clone(),
-                    strategy_id: strategy.name().to_string(),
-                    symbol: symbol_name.clone(),
-                    side: side_str.to_string(),
-                    entry_timestamp: format_unix_ms_rfc3339(ct.entry_time),
-                    exit_timestamp: format_unix_ms_rfc3339(ct.exit_time),
-                    entry_price: ct.entry_price.round_dp(4),
-                    exit_price: ct.exit_price.round_dp(4),
-                    quantity: ct.quantity.round_dp(4),
-                    gross_pnl: ct.pnl_gross.round_dp(4),
-                    fees_paid: ct.fees_paid.round_dp(4),
-                    net_pnl: ct.pnl_net.round_dp(4),
-                    exit_reason: ct.exit_reason.clone(),
-                    holding_duration_seconds: ct.holding_duration_seconds,
-                }
-            })
-            .collect();
+    if let Some(bq) = &recorder {
         println!(
-            "[*] Streaming {} closed trades to BigQuery (atsnt_bi.trades)...",
-            rows.len()
+            "[*] Recording backtest run {} to BigQuery ({} trades)...",
+            run_ctx.run_id,
+            closed_trades.len()
         );
-        let _ = bq.insert_trades(&rows).await;
-    }
-
-    if args.gcs_parquet {
-        let gcs_sink = GcsParquetSink::from_env("storage/parquet");
-        let _ = gcs_sink
-            .upload_file(
-                &backtest_report_path,
-                &format!("backtests/backtest_{}.json", timestamp),
-                "application/json",
-            )
-            .await;
+        if let Err(e) = record_backtest(
+            bq,
+            &run_ctx,
+            &run_spec,
+            &data_window,
+            &metrics,
+            &closed_trades,
+        )
+        .await
+        {
+            println!("[WARN] Failed to record backtest run: {e}");
+        }
     }
 
     // 4. Monte Carlo Stress-Testing
@@ -402,56 +373,17 @@ async fn main() -> Result<()> {
             );
             println!("============================================================");
 
-            let mc_path = args
-                .report
-                .unwrap_or_else(|| reports_dir.join(format!("{}.json", mc_report.report_id)));
-            if let Some(parent) = mc_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(&mc_path, serde_json::to_string_pretty(&mc_report)?)?;
-            println!(
-                "[*] Monte Carlo fan-chart telemetry saved to: {}",
-                mc_path.display()
-            );
-
-            if args.gcp_bigquery {
-                let bq = BigQuerySink::from_env();
-                let mc_row = MonteCarloRow {
-                    run_id: mc_report.report_id.clone(),
-                    timestamp: format_unix_ms_rfc3339((timestamp * 1000) as i64),
-                    strategy_id: strategy.name().to_string(),
-                    iterations: mc_report.metrics.total_simulations as u64,
-                    resample_method: "CircularBlockBootstrap".to_string(),
-                    historical_max_drawdown: mc_report
-                        .metrics
-                        .historical_max_drawdown_pct
-                        .round_dp(4),
-                    p50_max_drawdown: mc_report.metrics.p50_max_drawdown_pct.round_dp(4),
-                    p95_max_drawdown: mc_report.metrics.p95_max_drawdown_pct.round_dp(4),
-                    p99_max_drawdown: mc_report.metrics.p99_max_drawdown_pct.round_dp(4),
-                    probability_of_ruin_pct: mc_report.metrics.probability_of_ruin_pct.round_dp(4),
-                };
+            if let Some(bq) = &recorder {
+                let mc_ctx = run_ctx.child(RunType::MonteCarlo, now_unix_ms());
                 println!(
-                    "[*] Streaming Monte Carlo summary to BigQuery (atsnt_bi.monte_carlo_runs)..."
+                    "[*] Recording Monte Carlo run {} (child of {}) to BigQuery...",
+                    mc_ctx.run_id, run_ctx.run_id
                 );
-                let _ = bq.insert_monte_carlo_runs(&[mc_row]).await;
-            }
-
-            if args.gcs_parquet {
-                let gcs_sink = GcsParquetSink::from_env("storage/parquet");
-                let trajectories: Vec<(&str, &[Decimal])> = mc_report
-                    .fan_chart
-                    .iter()
-                    .map(|t| (t.label.as_str(), t.equity_curve.as_slice()))
-                    .collect();
-                println!("[*] Exporting Monte Carlo trajectories to Parquet / GCS...");
-                let parquet_path = gcs_sink
-                    .export_monte_carlo_trajectories(&mc_report.report_id, &trajectories)
-                    .await?;
-                println!(
-                    "[SAVED] Monte Carlo trajectories exported to: {}",
-                    parquet_path.display()
-                );
+                if let Err(e) =
+                    record_monte_carlo(bq, &mc_ctx, &run_spec, &data_window, &mc_report).await
+                {
+                    println!("[WARN] Failed to record Monte Carlo run: {e}");
+                }
             }
         }
     }

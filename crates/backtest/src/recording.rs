@@ -3,11 +3,15 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use adapters::{format_unix_ms_rfc3339, RunMetricsRow, RunRow, RunTradeRow, SeriesPointRow};
+use adapters::{
+    format_unix_ms_rfc3339, AdapterError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow,
+    SeriesPointRow,
+};
 use domain::PositionSide;
 use serde::Serialize;
 
 use crate::metrics::{BacktestMetrics, ClosedTrade};
+use crate::monte_carlo::{MonteCarloReport, ResampleMethod};
 use crate::run::{RunId, RunSpec, RunType};
 
 /// Git commit the binary was built from, when available at build time.
@@ -250,4 +254,109 @@ impl RunContext {
         }
         points
     }
+}
+
+/// Fan-chart curves persisted per Monte Carlo run: the realized path, the
+/// extreme paths, and quantile paths (ranked by final equity, best first).
+const MC_PERSISTED_CURVES: [&str; 8] = [
+    "Realized",
+    "Worst_Stress_1",
+    "Best_Ceiling_1",
+    "Quantile_0.05",
+    "Quantile_0.25",
+    "Quantile_0.50",
+    "Quantile_0.75",
+    "Quantile_0.95",
+];
+
+fn serialization_error(e: serde_json::Error) -> AdapterError {
+    AdapterError::General(format!("run row serialization failed: {e}"))
+}
+
+/// Persists a completed backtest: run, `full` metrics, trades, and equity events.
+pub async fn record_backtest<R: RunRecorder, C: Serialize>(
+    recorder: &R,
+    ctx: &RunContext,
+    spec: &RunSpec<C>,
+    data: &DataWindow,
+    metrics: &BacktestMetrics,
+    trades: &[ClosedTrade],
+) -> Result<(), AdapterError> {
+    let run = ctx
+        .run_row(spec, RunStatus::Completed, Some(now_unix_ms()), data)
+        .map_err(serialization_error)?;
+    recorder.record_run(&run).await?;
+    recorder
+        .record_metrics(&[ctx.metrics_row("full", metrics, None)])
+        .await?;
+    if !trades.is_empty() {
+        recorder.record_trades(&ctx.trade_rows(trades, 1)).await?;
+        recorder
+            .record_series(&ctx.equity_points(trades, 1))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Persists a Monte Carlo stress test as its own run: percentiles and
+/// simulation settings in metrics `extras`, representative curves in
+/// `run_series` (series `mc_equity`, `x` = trade index). No trades.
+pub async fn record_monte_carlo<R: RunRecorder, C: Serialize>(
+    recorder: &R,
+    ctx: &RunContext,
+    spec: &RunSpec<C>,
+    data: &DataWindow,
+    report: &MonteCarloReport,
+) -> Result<(), AdapterError> {
+    let run = ctx
+        .run_row(spec, RunStatus::Completed, Some(now_unix_ms()), data)
+        .map_err(serialization_error)?;
+    recorder.record_run(&run).await?;
+
+    let (method, block_size) = match report.config.method {
+        ResampleMethod::IidWithReplacement => ("IidWithReplacement", None),
+        ResampleMethod::CircularBlockBootstrap { block_size } => {
+            ("CircularBlockBootstrap", Some(block_size))
+        }
+    };
+    let mut extras = serde_json::to_value(&report.metrics).map_err(serialization_error)?;
+    if let Some(obj) = extras.as_object_mut() {
+        obj.insert("iterations".into(), report.config.iterations.into());
+        obj.insert("resample_method".into(), method.into());
+        obj.insert("block_size".into(), block_size.into());
+        obj.insert(
+            "ruin_threshold_pct".into(),
+            serde_json::to_value(report.config.ruin_threshold_pct).map_err(serialization_error)?,
+        );
+        obj.insert("seed".into(), report.config.seed.into());
+    }
+    recorder
+        .record_metrics(&[ctx.extras_row("full", extras)])
+        .await?;
+
+    let points: Vec<SeriesPointRow> = report
+        .fan_chart
+        .iter()
+        .filter(|curve| MC_PERSISTED_CURVES.contains(&curve.label.as_str()))
+        .flat_map(|curve| {
+            curve
+                .equity_curve
+                .iter()
+                .enumerate()
+                .map(move |(i, value)| SeriesPointRow {
+                    run_id: ctx.run_id.to_string(),
+                    run_type: ctx.run_type.as_str().to_string(),
+                    series: "mc_equity".to_string(),
+                    event: curve.label.clone(),
+                    ts: None,
+                    x: Some(i as i64),
+                    value: *value,
+                    trade_id: None,
+                })
+        })
+        .collect();
+    if !points.is_empty() {
+        recorder.record_series(&points).await?;
+    }
+    Ok(())
 }
