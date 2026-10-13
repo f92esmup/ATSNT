@@ -152,8 +152,8 @@ impl PaperTradingConfig {
     ) -> Self {
         Self {
             dollar_bar_threshold: artifact.dollar_bar_threshold().unwrap_or(dec!(50_000)),
-            backtest: artifact.execution_context,
-            strategy: artifact.strategy_config.clone(),
+            backtest: artifact.spec.execution_context,
+            strategy: artifact.spec.strategy_config.clone(),
             channel_capacity: 10_000,
         }
     }

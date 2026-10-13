@@ -7,6 +7,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use strategies::MarketType;
 
 use crate::config::BacktestConfig;
+use crate::run::RunSpec;
 
 /// Data sampling specification required by the strategy (AFML Ch. 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,18 +55,10 @@ pub struct HpoScorecard {
 pub struct StrategyDeploymentArtifact<C> {
     /// Schema format version for backwards/forwards compatibility (e.g. "1.0").
     pub schema_version: String,
-    /// Canonical strategy identifier (e.g. "dollar_bars_cusum").
-    pub strategy_id: String,
-    /// Target trading symbol in uppercase (e.g. "BTCUSDT").
-    pub symbol: String,
-    /// Market venue model (e.g. UsdMPerpetual, Spot).
-    pub market_type: MarketType,
-    /// Data sampling configuration defining the discrete information clock.
-    pub sampling: SamplingConfig,
-    /// Strategy hyperparameters.
-    pub strategy_config: C,
-    /// Account risk settings and friction schedule simulated during optimization.
-    pub execution_context: BacktestConfig,
+    /// Strategy, market, sampling, and friction specification, serialized
+    /// flat for compatibility with existing artifact files.
+    #[serde(flatten)]
+    pub spec: RunSpec<C>,
     /// Statistical audit metrics from the HPO run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hpo_scorecard: Option<HpoScorecard>,
@@ -74,7 +67,7 @@ pub struct StrategyDeploymentArtifact<C> {
 impl<C> StrategyDeploymentArtifact<C> {
     /// Convenience helper returning the dollar bar threshold if configured.
     pub fn dollar_bar_threshold(&self) -> Option<Decimal> {
-        self.sampling.dollar_bar_threshold()
+        self.spec.sampling.dollar_bar_threshold()
     }
 }
 
@@ -92,7 +85,7 @@ impl<C> LoadedStrategyConfig<C> {
     /// Returns a reference to the strategy hyperparameters.
     pub fn strategy_config(&self) -> &C {
         match self {
-            Self::Artifact(a) => &a.strategy_config,
+            Self::Artifact(a) => &a.spec.strategy_config,
             Self::Bare(c) => c,
         }
     }
@@ -100,7 +93,7 @@ impl<C> LoadedStrategyConfig<C> {
     /// Consumes the wrapper and returns the strategy hyperparameters.
     pub fn into_strategy_config(self) -> C {
         match self {
-            Self::Artifact(a) => a.strategy_config,
+            Self::Artifact(a) => a.spec.strategy_config,
             Self::Bare(c) => c,
         }
     }
@@ -116,7 +109,7 @@ impl<C> LoadedStrategyConfig<C> {
     /// Returns the canonical strategy ID if specified in the artifact.
     pub fn strategy_id(&self) -> Option<&str> {
         match self {
-            Self::Artifact(a) => Some(&a.strategy_id),
+            Self::Artifact(a) => Some(&a.spec.strategy_id),
             Self::Bare(_) => None,
         }
     }
@@ -124,7 +117,7 @@ impl<C> LoadedStrategyConfig<C> {
     /// Returns the target symbol if specified in the artifact.
     pub fn symbol(&self) -> Option<&str> {
         match self {
-            Self::Artifact(a) => Some(&a.symbol),
+            Self::Artifact(a) => Some(&a.spec.symbol),
             Self::Bare(_) => None,
         }
     }
@@ -132,7 +125,7 @@ impl<C> LoadedStrategyConfig<C> {
     /// Returns the market type if specified in the artifact.
     pub fn market_type(&self) -> Option<MarketType> {
         match self {
-            Self::Artifact(a) => Some(a.market_type),
+            Self::Artifact(a) => Some(a.spec.market_type),
             Self::Bare(_) => None,
         }
     }
@@ -140,7 +133,7 @@ impl<C> LoadedStrategyConfig<C> {
     /// Returns the execution context if specified in the artifact.
     pub fn execution_context(&self) -> Option<&BacktestConfig> {
         match self {
-            Self::Artifact(a) => Some(&a.execution_context),
+            Self::Artifact(a) => Some(&a.spec.execution_context),
             Self::Bare(_) => None,
         }
     }
@@ -193,14 +186,16 @@ mod tests {
 
         let artifact = StrategyDeploymentArtifact {
             schema_version: "1.0".to_string(),
-            strategy_id: "dollar_bars_cusum".to_string(),
-            symbol: "BTCUSDT".to_string(),
-            market_type: MarketType::UsdMPerpetual,
-            sampling: SamplingConfig::DollarBar {
-                threshold: dec!(10_000_000),
+            spec: RunSpec {
+                strategy_id: "dollar_bars_cusum".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                market_type: MarketType::UsdMPerpetual,
+                sampling: SamplingConfig::DollarBar {
+                    threshold: dec!(10_000_000),
+                },
+                strategy_config: config.clone(),
+                execution_context: BacktestConfig::default(),
             },
-            strategy_config: config.clone(),
-            execution_context: BacktestConfig::default(),
             hpo_scorecard: Some(HpoScorecard {
                 mean_is_sortino: dec!(2.45),
                 mean_oos_sortino: dec!(2.10),
@@ -217,10 +212,10 @@ mod tests {
         let parsed: StrategyDeploymentArtifact<DollarBarsCusumConfig> =
             serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.strategy_id, "dollar_bars_cusum");
+        assert_eq!(parsed.spec.strategy_id, "dollar_bars_cusum");
         assert_eq!(parsed.dollar_bar_threshold(), Some(dec!(10_000_000)));
-        assert_eq!(parsed.strategy_config, config);
-        assert_eq!(parsed.market_type, MarketType::UsdMPerpetual);
+        assert_eq!(parsed.spec.strategy_config, config);
+        assert_eq!(parsed.spec.market_type, MarketType::UsdMPerpetual);
     }
 
     #[test]
@@ -239,14 +234,16 @@ mod tests {
 
         let artifact = StrategyDeploymentArtifact {
             schema_version: "1.0".to_string(),
-            strategy_id: "dollar_bars_cusum".to_string(),
-            symbol: "BTCUSDT".to_string(),
-            market_type: MarketType::UsdMPerpetual,
-            sampling: SamplingConfig::DollarBar {
-                threshold: dec!(1_000_000),
+            spec: RunSpec {
+                strategy_id: "dollar_bars_cusum".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                market_type: MarketType::UsdMPerpetual,
+                sampling: SamplingConfig::DollarBar {
+                    threshold: dec!(1_000_000),
+                },
+                strategy_config: config.clone(),
+                execution_context: BacktestConfig::default(),
             },
-            strategy_config: config.clone(),
-            execution_context: BacktestConfig::default(),
             hpo_scorecard: None,
         };
 

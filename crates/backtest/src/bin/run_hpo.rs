@@ -9,8 +9,8 @@ use adapters::{
 };
 use anyhow::{Context, Result};
 use backtest::{
-    BacktestConfig, HpoScorecard, SamplingConfig, StrategyDeploymentArtifact, WalkForwardConfig,
-    WalkForwardOptimizer, WalkForwardSplitter,
+    BacktestConfig, HpoScorecard, RunSpec, SamplingConfig, StrategyDeploymentArtifact,
+    WalkForwardConfig, WalkForwardOptimizer, WalkForwardSplitter,
 };
 use clap::Parser;
 use domain::DollarBarAggregator;
@@ -281,14 +281,16 @@ async fn main() -> Result<()> {
 
         let deployment_artifact = StrategyDeploymentArtifact {
             schema_version: "1.0".to_string(),
-            strategy_id: args.strategy.clone(),
-            symbol: symbol_upper.clone(),
-            market_type: strategies::MarketType::UsdMPerpetual,
-            sampling: SamplingConfig::DollarBar {
-                threshold: args.dollar_bar,
+            spec: RunSpec {
+                strategy_id: args.strategy.clone(),
+                symbol: symbol_upper.clone(),
+                market_type: strategies::MarketType::UsdMPerpetual,
+                sampling: SamplingConfig::DollarBar {
+                    threshold: args.dollar_bar,
+                },
+                strategy_config: winner.config.clone(),
+                execution_context: engine_config,
             },
-            strategy_config: winner.config.clone(),
-            execution_context: engine_config,
             hpo_scorecard: Some(scorecard),
         };
 
@@ -303,9 +305,12 @@ async fn main() -> Result<()> {
         );
         println!(
             "        • Strategy:     {}",
-            deployment_artifact.strategy_id
+            deployment_artifact.spec.strategy_id
         );
-        println!("        • Symbol:       {}", deployment_artifact.symbol);
+        println!(
+            "        • Symbol:       {}",
+            deployment_artifact.spec.symbol
+        );
         println!("        • Sampling:     DollarBar(${})", args.dollar_bar);
 
         // Save detailed audit report for future web dashboard
@@ -319,7 +324,7 @@ async fn main() -> Result<()> {
         let report = json!({
             "timestamp": timestamp,
             "strategy": args.strategy,
-            "symbol": deployment_artifact.symbol,
+            "symbol": deployment_artifact.spec.symbol,
             "dollar_bar_threshold": args.dollar_bar,
             "data_source": args.data.display().to_string(),
             "total_bars": bars.len(),
