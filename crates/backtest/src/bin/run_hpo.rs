@@ -1,22 +1,22 @@
 use std::fs::{self, File};
 use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use adapters::{
-    format_unix_ms_rfc3339, BigQuerySink, BinanceCsvReader, BinanceParquetReader, GcsParquetSink,
-    HpoEvaluationRow, MarketDataStream,
+    BigQuerySink, BinanceCsvReader, BinanceParquetReader, GcsParquetSink, MarketDataStream,
 };
 use anyhow::{Context, Result};
 use backtest::{
-    BacktestConfig, HpoScorecard, RunSpec, SamplingConfig, StrategyDeploymentArtifact,
-    WalkForwardConfig, WalkForwardOptimizer, WalkForwardSplitter,
+    now_unix_ms, record_hpo, BacktestConfig, DataWindow, HpoScorecard, RunContext, RunSpec,
+    RunType, SamplingConfig, StrategyDeploymentArtifact, WalkForwardConfig, WalkForwardOptimizer,
+    WalkForwardSplitter,
 };
 use clap::Parser;
 use domain::DollarBarAggregator;
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use serde_json::json;
+use strategies::OptimizableStrategy;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -73,11 +73,17 @@ struct Args {
     #[arg(long)]
     param_space: Option<PathBuf>,
 
-    /// Stream evaluated candidate parameters to Google Cloud BigQuery
+    /// Optional path to a JSON execution context (initial capital, maker/taker fees,
+    /// slippage, risk) used for every simulated trial; defaults to the engine defaults
+    #[arg(long)]
+    execution_context: Option<PathBuf>,
+
+    /// Record the sweep (hpo parent run plus one hpo_trial run per candidate with
+    /// per-fold metrics) to Google Cloud BigQuery
     #[arg(long, default_value_t = false)]
     gcp_bigquery: bool,
 
-    /// Export HPO evaluation report to Google Cloud Storage
+    /// Upload the winning Strategy Deployment Artifact to Google Cloud Storage
     #[arg(long, default_value_t = false)]
     gcs_upload: bool,
 }
@@ -85,6 +91,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let started_at_ms = now_unix_ms();
 
     println!("============================================================");
     println!(" ATSNT - Walk-Forward Hyperparameter Optimization (Rayon)  ");
@@ -174,16 +181,25 @@ async fn main() -> Result<()> {
     );
     let opt_start = Instant::now();
 
-    let engine_config = BacktestConfig {
-        initial_capital: dec!(10_000),
-        maker_fee_pct: dec!(0.0002),
-        taker_fee_pct: dec!(0.0005),
-        slippage_pct: dec!(0.0005),
-        risk_per_trade_pct: dec!(0.01),
-        max_daily_drawdown_pct: dec!(0.05),
+    let engine_config = match &args.execution_context {
+        Some(path) => {
+            let content = fs::read_to_string(path).with_context(|| {
+                format!("Failed to read execution context file: {}", path.display())
+            })?;
+            serde_json::from_str::<BacktestConfig>(&content)
+                .with_context(|| "Failed to parse execution context JSON")?
+        }
+        None => BacktestConfig::default(),
     };
+    println!(
+        "      Execution context: capital ${}, maker {} / taker {} fees, slippage {}",
+        engine_config.initial_capital,
+        engine_config.maker_fee_pct,
+        engine_config.taker_fee_pct,
+        engine_config.slippage_pct
+    );
 
-    let (evaluations, winner) = match args.strategy.as_str() {
+    let (evaluations, winner, strategy_id, search_space) = match args.strategy.as_str() {
         "dollar_bars_cusum" | "cusum" => {
             let param_space = if let Some(path) = &args.param_space {
                 let content = fs::read_to_string(path).with_context(|| {
@@ -195,13 +211,19 @@ async fn main() -> Result<()> {
                 strategies::DollarBarsCusumSpace::default()
             };
 
+            let space_json = serde_json::to_value(&param_space)?;
             let optimizer = WalkForwardOptimizer::<strategies::DollarBarsCusumStrategy>::new(
                 engine_config,
                 param_space,
             );
             let evals = optimizer.run_optimization(&bars, &folds, args.candidates)?;
             let win = evals.first().cloned();
-            (evals, win)
+            (
+                evals,
+                win,
+                strategies::DollarBarsCusumStrategy::id(),
+                space_json,
+            )
         }
         unknown => {
             anyhow::bail!(
@@ -249,6 +271,53 @@ async fn main() -> Result<()> {
     }
     println!("============================================================");
 
+    let sweep_spec = RunSpec {
+        strategy_id: strategy_id.to_string(),
+        symbol: symbol_upper.clone(),
+        market_type: strategies::MarketType::UsdMPerpetual,
+        sampling: SamplingConfig::DollarBar {
+            threshold: args.dollar_bar,
+        },
+        strategy_config: search_space,
+        execution_context: engine_config,
+    };
+
+    if args.gcp_bigquery && !evaluations.is_empty() {
+        let bq = BigQuerySink::from_env();
+        let sweep_ctx = RunContext::new(RunType::Hpo, &sweep_spec, started_at_ms);
+        let data_window = DataWindow {
+            source: Some(args.data.display().to_string()),
+            start_ms: bars.first().map(|b| b.start_time),
+            end_ms: bars.last().map(|b| b.end_time),
+        };
+        let settings = json!({
+            "folds": folds.len(),
+            "train_ratio": args.train_ratio,
+            "embargo_bars": args.embargo_bars,
+            "candidates_requested": args.candidates,
+            "total_bars": bars.len(),
+            "raw_trades": raw_trades,
+            "optimization_seconds": opt_duration,
+        });
+        println!(
+            "[*] Recording HPO run {} with {} trial runs to BigQuery...",
+            sweep_ctx.run_id,
+            evaluations.len()
+        );
+        if let Err(e) = record_hpo(
+            &bq,
+            &sweep_ctx,
+            &sweep_spec,
+            &data_window,
+            &evaluations,
+            settings,
+        )
+        .await
+        {
+            println!("[WARN] Failed to record HPO run: {e}");
+        }
+    }
+
     if let Some(winner) = &winner {
         println!("\n[WINNER] Selected Robust Parameter Configuration:");
         println!("  • Strategy:                  {}", args.strategy);
@@ -281,16 +350,7 @@ async fn main() -> Result<()> {
 
         let deployment_artifact = StrategyDeploymentArtifact {
             schema_version: "1.0".to_string(),
-            spec: RunSpec {
-                strategy_id: args.strategy.clone(),
-                symbol: symbol_upper.clone(),
-                market_type: strategies::MarketType::UsdMPerpetual,
-                sampling: SamplingConfig::DollarBar {
-                    threshold: args.dollar_bar,
-                },
-                strategy_config: winner.config.clone(),
-                execution_context: engine_config,
-            },
+            spec: sweep_spec.with_config(winner.config.clone()),
             hpo_scorecard: Some(scorecard),
         };
 
@@ -313,71 +373,8 @@ async fn main() -> Result<()> {
         );
         println!("        • Sampling:     DollarBar(${})", args.dollar_bar);
 
-        // Save detailed audit report for future web dashboard
-        let reports_dir = Path::new("storage/reports");
-        fs::create_dir_all(reports_dir)?;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
-        let report_path = reports_dir.join(format!("hpo_run_{timestamp}.json"));
-
-        let report = json!({
-            "timestamp": timestamp,
-            "strategy": args.strategy,
-            "symbol": deployment_artifact.spec.symbol,
-            "dollar_bar_threshold": args.dollar_bar,
-            "data_source": args.data.display().to_string(),
-            "total_bars": bars.len(),
-            "folds_count": folds.len(),
-            "trials_evaluated": evaluations.len(),
-            "deployment_artifact": &deployment_artifact,
-            "winner": winner,
-            "top_candidates": evaluations.iter().take(10).collect::<Vec<_>>()
-        });
-
-        fs::write(&report_path, serde_json::to_string_pretty(&report)?)?;
-        println!(
-            "[SAVED] Detailed audit telemetry saved to: {}",
-            report_path.display()
-        );
-
-        if args.gcp_bigquery {
-            let bq = BigQuerySink::from_env();
-            let timestamp_str = format_unix_ms_rfc3339((timestamp * 1000) as i64);
-            let rows: Vec<HpoEvaluationRow> = evaluations
-                .iter()
-                .enumerate()
-                .map(|(idx, eval)| HpoEvaluationRow {
-                    run_id: format!("hpo_{}_{}", timestamp, idx),
-                    timestamp: timestamp_str.clone(),
-                    strategy_id: args.strategy.clone(),
-                    parameter_space: serde_json::to_string(&eval.config).unwrap_or_default(),
-                    is_sharpe: eval.mean_is_sortino.round_dp(4),
-                    oos_sharpe: eval.mean_oos_sortino.round_dp(4),
-                    deflated_sharpe_ratio: eval.fitness.round_dp(4),
-                    parameter_stability_score: eval.stability_score.round_dp(4),
-                    total_trades: 0,
-                    win_rate: dec!(0),
-                    max_drawdown_pct: dec!(0),
-                })
-                .collect();
-            println!(
-                "[*] Streaming {} evaluations to BigQuery (atsnt_bi.hpo_evaluations)...",
-                rows.len()
-            );
-            let _ = bq.insert_hpo_evaluations(&rows).await;
-        }
-
         if args.gcs_upload {
             let gcs = GcsParquetSink::from_env("storage/reports");
-            let _ = gcs
-                .upload_file(
-                    &report_path,
-                    &format!("hpo/hpo_run_{}.json", timestamp),
-                    "application/json",
-                )
-                .await;
-
             let artifact_dest_name = args
                 .output_config
                 .file_name()

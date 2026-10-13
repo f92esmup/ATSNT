@@ -24,14 +24,15 @@ pub use monte_carlo::{
 };
 pub use optimization::{
     calculate_dsr, calculate_parameter_stability, run_backtest_slice, CandidateEvaluation,
-    ParameterSpace, WalkForwardOptimizer,
+    FoldMetrics, ParameterSpace, WalkForwardOptimizer,
 };
 pub use paper::{
     PaperSessionOwner, PaperSessionRuntime, PaperTradingConfig, PaperTradingEvent,
     PaperTradingSession, TelemetryConfig, TelemetryEnvelope,
 };
 pub use recording::{
-    now_unix_ms, record_backtest, record_monte_carlo, DataWindow, RunContext, RunStatus, GIT_SHA,
+    now_unix_ms, record_backtest, record_hpo, record_monte_carlo, DataWindow, RunContext,
+    RunStatus, GIT_SHA,
 };
 pub use run::{RunId, RunSpec, RunType};
 pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};

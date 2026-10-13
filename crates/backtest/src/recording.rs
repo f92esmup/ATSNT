@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use crate::metrics::{BacktestMetrics, ClosedTrade};
 use crate::monte_carlo::{MonteCarloReport, ResampleMethod};
+use crate::optimization::CandidateEvaluation;
 use crate::run::{RunId, RunSpec, RunType};
 
 /// Git commit the binary was built from, when available at build time.
@@ -285,7 +286,7 @@ pub async fn record_backtest<R: RunRecorder, C: Serialize>(
     let run = ctx
         .run_row(spec, RunStatus::Completed, Some(now_unix_ms()), data)
         .map_err(serialization_error)?;
-    recorder.record_run(&run).await?;
+    recorder.record_runs(&[run]).await?;
     recorder
         .record_metrics(&[ctx.metrics_row("full", metrics, None)])
         .await?;
@@ -311,7 +312,7 @@ pub async fn record_monte_carlo<R: RunRecorder, C: Serialize>(
     let run = ctx
         .run_row(spec, RunStatus::Completed, Some(now_unix_ms()), data)
         .map_err(serialization_error)?;
-    recorder.record_run(&run).await?;
+    recorder.record_runs(&[run]).await?;
 
     let (method, block_size) = match report.config.method {
         ResampleMethod::IidWithReplacement => ("IidWithReplacement", None),
@@ -359,4 +360,78 @@ pub async fn record_monte_carlo<R: RunRecorder, C: Serialize>(
         recorder.record_series(&points).await?;
     }
     Ok(())
+}
+
+/// Persists a Walk-Forward HPO sweep: one `hpo` parent run (its `params` are
+/// the search space) and one `hpo_trial` child run per evaluated candidate.
+///
+/// Each trial gets a `full` extras row with its ranking scores and full
+/// metrics for every fold (`is_fold_<n>`, `oos_fold_<n>`). No trades or
+/// series are stored. `settings` (folds, ratios, timings) is merged into the
+/// parent's extras. Returns the winning (rank 1) trial's run id.
+pub async fn record_hpo<R: RunRecorder, S: Serialize, C: Serialize + Clone>(
+    recorder: &R,
+    parent: &RunContext,
+    parent_spec: &RunSpec<S>,
+    data: &DataWindow,
+    evaluations: &[CandidateEvaluation<C>],
+    settings: serde_json::Value,
+) -> Result<Option<RunId>, AdapterError> {
+    let finished = now_unix_ms();
+    let mut runs = vec![parent
+        .run_row(parent_spec, RunStatus::Completed, Some(finished), data)
+        .map_err(serialization_error)?];
+    let mut metrics = Vec::new();
+    let mut winner = None;
+
+    for (rank, eval) in evaluations.iter().enumerate() {
+        let trial = parent.child(RunType::HpoTrial, parent.started_at_ms);
+        let trial_spec = parent_spec.with_config(eval.config.clone());
+        runs.push(
+            trial
+                .run_row(&trial_spec, RunStatus::Completed, Some(finished), data)
+                .map_err(serialization_error)?,
+        );
+        let summary = serde_json::json!({
+            "rank": rank + 1,
+            "mean_is_sortino": eval.mean_is_sortino,
+            "mean_oos_sortino": eval.mean_oos_sortino,
+            "mean_oos_profit_factor": eval.mean_oos_profit_factor,
+            "total_oos_trades": eval.total_oos_trades,
+            "stability_score": eval.stability_score,
+            "fitness": eval.fitness,
+            "dsr_p_value": eval.dsr_p_value,
+            "is_statistically_significant": eval.is_statistically_significant,
+        });
+        metrics.push(trial.extras_row("full", summary));
+        for fold in &eval.fold_metrics {
+            metrics.push(trial.metrics_row(
+                &format!("is_fold_{}", fold.fold_idx),
+                &fold.in_sample,
+                None,
+            ));
+            metrics.push(trial.metrics_row(
+                &format!("oos_fold_{}", fold.fold_idx),
+                &fold.out_of_sample,
+                None,
+            ));
+        }
+        if rank == 0 {
+            winner = Some(trial.run_id.clone());
+        }
+    }
+
+    let mut parent_extras = settings;
+    if let Some(obj) = parent_extras.as_object_mut() {
+        obj.insert("trials_evaluated".into(), evaluations.len().into());
+        obj.insert(
+            "winner_run_id".into(),
+            winner.as_ref().map(ToString::to_string).into(),
+        );
+    }
+    metrics.insert(0, parent.extras_row("full", parent_extras));
+
+    recorder.record_runs(&runs).await?;
+    recorder.record_metrics(&metrics).await?;
+    Ok(winner)
 }

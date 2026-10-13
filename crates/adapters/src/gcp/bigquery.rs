@@ -142,6 +142,9 @@ impl BigQueryRecord for SeriesPointRow {
     }
 }
 
+/// Rows per `insertAll` request, following BigQuery's recommended batch size.
+const MAX_ROWS_PER_REQUEST: usize = 500;
+
 /// BigQuery streaming data sink.
 ///
 /// Dispatches rows directly to the BigQuery `tabledata.insertAll` REST API.
@@ -225,6 +228,23 @@ impl BigQuerySink {
             project_id, self.dataset_id, table_id
         );
 
+        for chunk in rows.chunks(MAX_ROWS_PER_REQUEST) {
+            self.insert_chunk(&url, &token, &project_id, table_id, chunk)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Sends one `insertAll` request (at most [`MAX_ROWS_PER_REQUEST`] rows).
+    async fn insert_chunk<T: BigQueryRecord>(
+        &self,
+        url: &str,
+        token: &str,
+        project_id: &str,
+        table_id: &str,
+        rows: &[T],
+    ) -> Result<(), AdapterError> {
         let row_envelopes: Vec<_> = rows
             .iter()
             .map(|r| {
@@ -247,8 +267,8 @@ impl BigQuerySink {
 
         let response = self
             .client
-            .post(&url)
-            .bearer_auth(&token)
+            .post(url)
+            .bearer_auth(token)
             .json(&payload)
             .send()
             .await?;
@@ -262,7 +282,7 @@ impl BigQuerySink {
             if let Some(fresh_token) = GcpAuthResolver::resolve_token(&self.client).await {
                 let retry_resp = self
                     .client
-                    .post(&url)
+                    .post(url)
                     .bearer_auth(fresh_token)
                     .json(&payload)
                     .send()
@@ -369,8 +389,8 @@ impl BigQuerySink {
 }
 
 impl RunRecorder for BigQuerySink {
-    async fn record_run(&self, row: &RunRow) -> Result<(), AdapterError> {
-        self.insert_rows("runs", std::slice::from_ref(row)).await
+    async fn record_runs(&self, rows: &[RunRow]) -> Result<(), AdapterError> {
+        self.insert_rows("runs", rows).await
     }
 
     async fn record_metrics(&self, rows: &[RunMetricsRow]) -> Result<(), AdapterError> {

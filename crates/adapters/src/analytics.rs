@@ -172,9 +172,9 @@ pub struct SeriesPointRow {
 
 /// Outbound port persisting run analytics.
 pub trait RunRecorder: Send + Sync {
-    /// Appends a lifecycle row for a run.
+    /// Appends lifecycle rows (one per run and status change).
     #[allow(async_fn_in_trait)]
-    async fn record_run(&self, row: &RunRow) -> Result<(), AdapterError>;
+    async fn record_runs(&self, rows: &[RunRow]) -> Result<(), AdapterError>;
 
     /// Appends performance rows.
     #[allow(async_fn_in_trait)]
@@ -226,8 +226,8 @@ impl InMemoryRunRecorder {
 }
 
 impl RunRecorder for InMemoryRunRecorder {
-    async fn record_run(&self, row: &RunRow) -> Result<(), AdapterError> {
-        self.with(|r| r.runs.push(row.clone()))
+    async fn record_runs(&self, rows: &[RunRow]) -> Result<(), AdapterError> {
+        self.with(|r| r.runs.extend_from_slice(rows))
     }
 
     async fn record_metrics(&self, rows: &[RunMetricsRow]) -> Result<(), AdapterError> {

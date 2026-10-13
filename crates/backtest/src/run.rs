@@ -34,6 +34,21 @@ pub struct RunSpec<C> {
     pub execution_context: BacktestConfig,
 }
 
+impl<C> RunSpec<C> {
+    /// Same market, sampling, and friction with different strategy parameters
+    /// (e.g. an HPO trial derived from its sweep's spec).
+    pub fn with_config<D>(&self, strategy_config: D) -> RunSpec<D> {
+        RunSpec {
+            strategy_id: self.strategy_id.clone(),
+            symbol: self.symbol.clone(),
+            market_type: self.market_type,
+            sampling: self.sampling,
+            strategy_config,
+            execution_context: self.execution_context,
+        }
+    }
+}
+
 impl<C: Serialize> RunSpec<C> {
     /// Strategy hyperparameters as a JSON value for schema-free persistence.
     pub fn params_json(&self) -> Result<serde_json::Value, serde_json::Error> {

@@ -54,6 +54,20 @@ pub struct CandidateEvaluation<C> {
     pub dsr_p_value: Decimal,
     /// Whether this candidate passes statistical significance (p < 0.05).
     pub is_statistically_significant: bool,
+    /// Full in-sample and out-of-sample metrics for every Walk-Forward fold.
+    #[serde(default)]
+    pub fold_metrics: Vec<FoldMetrics>,
+}
+
+/// In-sample and out-of-sample performance of one candidate on one fold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FoldMetrics {
+    /// Index of the Walk-Forward fold.
+    pub fold_idx: usize,
+    /// Metrics on the fold's training slice.
+    pub in_sample: BacktestMetrics,
+    /// Metrics on the fold's test slice.
+    pub out_of_sample: BacktestMetrics,
 }
 
 /// Evaluates parameter stability by perturbing parameters by $\pm \delta$ on In-Sample bars.
@@ -199,6 +213,7 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
                 let mut oos_sortinos = Vec::with_capacity(folds.len());
                 let mut oos_profit_factors = Vec::with_capacity(folds.len());
                 let mut total_oos_trades = 0usize;
+                let mut fold_metrics = Vec::with_capacity(folds.len());
 
                 for fold in folds.iter() {
                     let train_slice = fold.train_slice(bars);
@@ -213,6 +228,11 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
                     oos_sortinos.push(oos_metrics.sortino_ratio);
                     oos_profit_factors.push(oos_metrics.profit_factor);
                     total_oos_trades += oos_metrics.total_trades;
+                    fold_metrics.push(FoldMetrics {
+                        fold_idx: fold.fold_idx,
+                        in_sample: is_metrics,
+                        out_of_sample: oos_metrics,
+                    });
                 }
 
                 let num_folds_dec = Decimal::from(folds.len());
@@ -251,6 +271,7 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
                     fitness,
                     dsr_p_value: dsr_p,
                     is_statistically_significant: is_significant,
+                    fold_metrics,
                 })
             })
             .collect();

@@ -243,4 +243,126 @@ mod persistence {
             .all(|p| p.series == "mc_equity" && p.x.is_some()));
         assert_eq!(rec.series.len(), curves.len() * (closed.len() + 1));
     }
+
+    #[tokio::test]
+    async fn hpo_records_parent_and_one_trial_run_per_candidate_with_fold_metrics() {
+        use backtest::{record_hpo, CandidateEvaluation, FoldMetrics};
+        use strategies::DollarBarsCusumSpace;
+
+        let recorder = InMemoryRunRecorder::new();
+        let parent_spec = RunSpec {
+            strategy_config: DollarBarsCusumSpace::default(),
+            ..spec_without_config()
+        };
+        let parent = RunContext::new(RunType::Hpo, &parent_spec, 0);
+        let fold = |idx| FoldMetrics {
+            fold_idx: idx,
+            in_sample: BacktestMetrics::calculate(dec!(10_000), &trades(4), dec!(5), dec!(0.0005)),
+            out_of_sample: BacktestMetrics::calculate(
+                dec!(10_000),
+                &trades(2),
+                dec!(3),
+                dec!(0.0003),
+            ),
+        };
+        let candidate = |window| CandidateEvaluation {
+            config: DollarBarsCusumConfig {
+                rolling_window_len: window,
+                ..DollarBarsCusumConfig::default()
+            },
+            mean_is_sortino: dec!(1.5),
+            mean_oos_sortino: dec!(0.8),
+            mean_oos_profit_factor: dec!(1.3),
+            total_oos_trades: 4,
+            stability_score: dec!(0.9),
+            fitness: dec!(1.35),
+            dsr_p_value: dec!(0.04),
+            is_statistically_significant: true,
+            fold_metrics: vec![fold(0), fold(1)],
+        };
+        let evaluations = vec![candidate(25), candidate(30)];
+
+        let winner = record_hpo(
+            &recorder,
+            &parent,
+            &parent_spec,
+            &DataWindow::default(),
+            &evaluations,
+            serde_json::json!({"folds": 2}),
+        )
+        .await
+        .unwrap();
+
+        let rec = recorder.snapshot();
+        assert_eq!(rec.runs.len(), 3);
+        assert_eq!(rec.runs[0].run_type, "hpo");
+        let trials: Vec<_> = rec
+            .runs
+            .iter()
+            .filter(|r| r.run_type == "hpo_trial")
+            .collect();
+        assert_eq!(trials.len(), 2);
+        assert!(trials
+            .iter()
+            .all(|t| t.parent_run_id.as_deref() == Some(parent.run_id.as_str())));
+        let params: serde_json::Value = serde_json::from_str(&trials[1].params).unwrap();
+        assert_eq!(params["rolling_window_len"], 30);
+        assert_eq!(
+            winner.as_ref().map(|w| w.as_str()),
+            Some(trials[0].run_id.as_str())
+        );
+
+        let trial_scopes: Vec<&str> = rec
+            .metrics
+            .iter()
+            .filter(|m| m.run_id == trials[0].run_id)
+            .map(|m| m.scope.as_str())
+            .collect();
+        assert_eq!(
+            trial_scopes,
+            ["full", "is_fold_0", "oos_fold_0", "is_fold_1", "oos_fold_1"]
+        );
+        let oos = rec
+            .metrics
+            .iter()
+            .find(|m| m.run_id == trials[0].run_id && m.scope == "oos_fold_1")
+            .unwrap();
+        assert_eq!(oos.total_trades, Some(2));
+        assert_eq!(oos.max_drawdown_pct, Some(dec!(0.0003)));
+        let summary: serde_json::Value = serde_json::from_str(
+            rec.metrics
+                .iter()
+                .find(|m| m.run_id == trials[0].run_id && m.scope == "full")
+                .and_then(|m| m.extras.as_deref())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(summary["rank"], 1);
+        assert_eq!(summary["mean_oos_sortino"], "0.8");
+        let parent_extras: serde_json::Value = serde_json::from_str(
+            rec.metrics
+                .iter()
+                .find(|m| m.run_id == parent.run_id.as_str())
+                .and_then(|m| m.extras.as_deref())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parent_extras["folds"], 2);
+        assert_eq!(parent_extras["trials_evaluated"], 2);
+        assert_eq!(parent_extras["winner_run_id"], winner.unwrap().as_str());
+        assert!(rec.trades.is_empty() && rec.series.is_empty());
+    }
+
+    fn spec_without_config() -> RunSpec<DollarBarsCusumSpace> {
+        let base = spec();
+        RunSpec {
+            strategy_id: base.strategy_id,
+            symbol: base.symbol,
+            market_type: base.market_type,
+            sampling: base.sampling,
+            strategy_config: DollarBarsCusumSpace::default(),
+            execution_context: base.execution_context,
+        }
+    }
+    use strategies::DollarBarsCusumSpace;
 }
