@@ -13,6 +13,7 @@ fn configured_session_preserves_raw_events_and_market_metadata() {
             z_entry_threshold: dec!(1.5),
             z_stop_threshold: dec!(3),
             time_barrier_bars: 10,
+            min_take_profit_pct: dec!(0.0025),
         },
         ..Default::default()
     };

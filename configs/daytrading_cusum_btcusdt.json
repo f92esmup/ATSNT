@@ -12,7 +12,8 @@
     "cusum_vol_multiplier": "0.8",
     "z_entry_threshold": "1.0",
     "z_stop_threshold": "2.5",
-    "time_barrier_bars": 8
+    "time_barrier_bars": 8,
+    "min_take_profit_pct": "0.0035"
   },
   "execution_context": {
     "initial_capital": "1000",

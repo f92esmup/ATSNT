@@ -24,6 +24,14 @@ pub struct OrderFlowImbalanceConfig {
     pub stop_loss_vol_mult: Decimal,
     /// Maximum bar holding duration for horizontal barrier exit.
     pub time_barrier_bars: usize,
+    /// Minimum required Take Profit distance as a percentage of entry price (e.g. 0.0025 = 0.25%).
+    /// Filters out trades where target is too compressed to clear exchange friction.
+    #[serde(default = "default_min_take_profit_pct")]
+    pub min_take_profit_pct: Decimal,
+}
+
+pub fn default_min_take_profit_pct() -> Decimal {
+    dec!(0.0025)
 }
 
 impl Default for OrderFlowImbalanceConfig {
@@ -35,6 +43,7 @@ impl Default for OrderFlowImbalanceConfig {
             take_profit_vol_mult: dec!(2.0),
             stop_loss_vol_mult: dec!(1.5),
             time_barrier_bars: 12,
+            min_take_profit_pct: default_min_take_profit_pct(),
         }
     }
 }
@@ -43,13 +52,14 @@ impl std::fmt::Display for OrderFlowImbalanceConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "W:{}|Zofi:{}|Abs:{}|TP:{}|SL:{}|Tb:{}",
+            "W:{}|Zofi:{}|Abs:{}|TP:{}|SL:{}|Tb:{}|MinTp:{}",
             self.rolling_window_len,
             self.z_ofi_threshold,
             self.absorption_ratio_threshold,
             self.take_profit_vol_mult,
             self.stop_loss_vol_mult,
-            self.time_barrier_bars
+            self.time_barrier_bars,
+            self.min_take_profit_pct
         )
     }
 }
@@ -97,6 +107,7 @@ impl HyperparameterSpace for OrderFlowImbalanceSpace {
                                     take_profit_vol_mult: tp,
                                     stop_loss_vol_mult: sl,
                                     time_barrier_bars: tb,
+                                    min_take_profit_pct: default_min_take_profit_pct(),
                                 });
                             }
                         }
@@ -252,6 +263,12 @@ impl Strategy for OrderFlowImbalanceStrategy {
         // Volatility buffer for barriers
         let tp_distance = mean_range * self.config.take_profit_vol_mult;
         let sl_distance = (mean_range * self.config.stop_loss_vol_mult).max(dec!(0.01));
+
+        // Friction guard: skip signal if target run distance cannot clear round-trip friction
+        let min_tp_distance = bar.close * self.config.min_take_profit_pct;
+        if tp_distance < min_tp_distance {
+            return None;
+        }
 
         // 5. Evaluate order flow imbalance triggers
         if z_res.z_score >= self.config.z_ofi_threshold {
@@ -492,5 +509,46 @@ mod tests {
         assert_eq!(intent.side, Side::Sell);
         assert!(intent.take_profit < intent.price);
         assert!(intent.stop_loss > intent.price);
+    }
+
+    #[test]
+    fn friction_filter_blocks_compressed_volatility_signals() {
+        let config = OrderFlowImbalanceConfig {
+            rolling_window_len: 5,
+            z_ofi_threshold: dec!(1.5),
+            absorption_ratio_threshold: dec!(0.35),
+            min_take_profit_pct: dec!(0.05), // 5% minimum target required
+            take_profit_vol_mult: dec!(1.0),
+            ..Default::default()
+        };
+        let mut strategy = OrderFlowImbalanceStrategy::new(config).unwrap();
+
+        // Feed neutral bars with tiny range ($10 on a $50k asset = 0.02%)
+        for i in 1..=5 {
+            let bar = create_test_bar(
+                i * 1000,
+                dec!(50000),
+                dec!(50010),
+                dec!(50000),
+                dec!(50005),
+                dec!(5.0),
+                dec!(5.0),
+            );
+            strategy.on_bar(&bar);
+        }
+
+        // 6th bar: Strong breakout signal, but target is only ~$10 (<< 5% = $2500)
+        let breakout_bar = create_test_bar(
+            6000,
+            dec!(50000),
+            dec!(50010),
+            dec!(50000),
+            dec!(50010),
+            dec!(9.0),
+            dec!(1.0),
+        );
+
+        let intent = strategy.on_bar(&breakout_bar);
+        assert!(intent.is_none(), "Should be blocked by friction filter");
     }
 }

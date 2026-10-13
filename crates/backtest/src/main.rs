@@ -252,6 +252,7 @@ async fn main() -> Result<()> {
                     z_entry_threshold: dec!(1.8),
                     z_stop_threshold: dec!(3.0),
                     time_barrier_bars: 15,
+                    min_take_profit_pct: dec!(0.0025),
                 };
                 let strat = Box::new(
                     DollarBarsCusumStrategy::new(cfg.clone())

@@ -182,6 +182,7 @@ mod tests {
             z_entry_threshold: dec!(1.8),
             z_stop_threshold: dec!(3.5),
             time_barrier_bars: 15,
+            min_take_profit_pct: dec!(0.0025),
         };
 
         let artifact = StrategyDeploymentArtifact {
@@ -230,6 +231,7 @@ mod tests {
             z_entry_threshold: dec!(1.8),
             z_stop_threshold: dec!(3.5),
             time_barrier_bars: 15,
+            min_take_profit_pct: dec!(0.0025),
         };
 
         let artifact = StrategyDeploymentArtifact {

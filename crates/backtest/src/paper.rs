@@ -596,6 +596,7 @@ mod tests {
                 z_entry_threshold: dec!(1.5),
                 z_stop_threshold: dec!(3.0),
                 time_barrier_bars: 10,
+                min_take_profit_pct: dec!(0.0025),
             },
             channel_capacity: 100,
         };
@@ -693,6 +694,7 @@ mod tests {
                 z_entry_threshold: dec!(1.5),
                 z_stop_threshold: dec!(2.0),
                 time_barrier_bars: 10,
+                min_take_profit_pct: dec!(0.0025),
             },
             channel_capacity: 100,
         };
@@ -744,6 +746,7 @@ mod tests {
                 z_entry_threshold: dec!(1.5),
                 z_stop_threshold: dec!(5.0), // very wide SL
                 time_barrier_bars: 2,        // short time barrier
+                min_take_profit_pct: dec!(0.0025),
             },
             channel_capacity: 100,
         };
@@ -793,6 +796,7 @@ mod tests {
                 z_entry_threshold: dec!(1.5),
                 z_stop_threshold: dec!(5.0),
                 time_barrier_bars: 10,
+                min_take_profit_pct: dec!(0.0025),
             },
             channel_capacity: 100,
         };

@@ -18,6 +18,14 @@ pub struct DollarBarsCusumConfig {
     pub z_stop_threshold: Decimal,
     /// Maximum bar holding duration for horizontal barrier exit.
     pub time_barrier_bars: usize,
+    /// Minimum required Take Profit distance as a percentage of entry price (e.g. 0.0025 = 0.25%).
+    /// Filters out trades where target is too compressed to clear exchange friction.
+    #[serde(default = "default_min_take_profit_pct")]
+    pub min_take_profit_pct: Decimal,
+}
+
+pub fn default_min_take_profit_pct() -> Decimal {
+    dec!(0.0025)
 }
 
 impl Default for DollarBarsCusumConfig {
@@ -28,6 +36,7 @@ impl Default for DollarBarsCusumConfig {
             z_entry_threshold: dec!(2.0),
             z_stop_threshold: dec!(3.5),
             time_barrier_bars: 15,
+            min_take_profit_pct: default_min_take_profit_pct(),
         }
     }
 }
@@ -36,12 +45,13 @@ impl std::fmt::Display for DollarBarsCusumConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "W:{}|V:{}|Ze:{}|Zs:{}|Tb:{}",
+            "W:{}|V:{}|Ze:{}|Zs:{}|Tb:{}|MinTp:{}",
             self.rolling_window_len,
             self.cusum_vol_multiplier,
             self.z_entry_threshold,
             self.z_stop_threshold,
-            self.time_barrier_bars
+            self.time_barrier_bars,
+            self.min_take_profit_pct
         )
     }
 }
@@ -85,6 +95,7 @@ impl HyperparameterSpace for DollarBarsCusumSpace {
                                 z_entry_threshold: z_entry,
                                 z_stop_threshold: z_stop,
                                 time_barrier_bars: tb,
+                                min_take_profit_pct: default_min_take_profit_pct(),
                             });
                         }
                     }
@@ -218,6 +229,12 @@ impl Strategy for DollarBarsCusumStrategy {
             // Negative shift + Oversold Z-Score -> GO LONG (Expect bounce to mean)
             CusumEvent::NegativeShift { .. } if z_res.z_score <= -self.config.z_entry_threshold => {
                 let take_profit = z_res.mean;
+                let tp_dist = (take_profit - bar.close).abs();
+                let min_tp_dist = bar.close * self.config.min_take_profit_pct;
+                if tp_dist < min_tp_dist {
+                    return None; // Target run distance too small to overcome exchange friction
+                }
+
                 let stop_dist = self.config.z_stop_threshold * z_res.std_dev;
                 let stop_loss = if z_res.mean > stop_dist {
                     z_res.mean - stop_dist
@@ -239,6 +256,12 @@ impl Strategy for DollarBarsCusumStrategy {
             // Positive shift + Overbought Z-Score -> GO SHORT (Expect pullback to mean)
             CusumEvent::PositiveShift { .. } if z_res.z_score >= self.config.z_entry_threshold => {
                 let take_profit = z_res.mean;
+                let tp_dist = (take_profit - bar.close).abs();
+                let min_tp_dist = bar.close * self.config.min_take_profit_pct;
+                if tp_dist < min_tp_dist {
+                    return None; // Target run distance too small to overcome exchange friction
+                }
+
                 let stop_dist = self.config.z_stop_threshold * z_res.std_dev;
                 let stop_loss = z_res.mean + stop_dist;
 
@@ -331,6 +354,7 @@ mod tests {
             z_entry_threshold: dec!(1.5),
             z_stop_threshold: dec!(3.0),
             time_barrier_bars: 10,
+            min_take_profit_pct: dec!(0.0025),
         };
         let mut strategy = DollarBarsCusumStrategy::new(config).unwrap();
 
@@ -364,6 +388,7 @@ mod tests {
             z_entry_threshold: dec!(1.5),
             z_stop_threshold: dec!(3.0),
             time_barrier_bars: 10,
+            min_take_profit_pct: dec!(0.0025),
         };
         let mut strategy = DollarBarsCusumStrategy::new(config).unwrap();
 
@@ -383,5 +408,31 @@ mod tests {
         assert!(intent.take_profit < dec!(112)); // TP is mean (below 112)
         assert!(intent.stop_loss > dec!(112)); // SL is above 112
         assert_eq!(intent.max_bars_hold, 10);
+    }
+
+    #[test]
+    fn friction_filter_blocks_compressed_reversion_signals() {
+        let config = DollarBarsCusumConfig {
+            rolling_window_len: 4,
+            cusum_vol_multiplier: dec!(1.0),
+            z_entry_threshold: dec!(1.5),
+            z_stop_threshold: dec!(3.0),
+            time_barrier_bars: 10,
+            min_take_profit_pct: dec!(0.20), // Require 20% minimum price move to mean
+        };
+        let mut strategy = DollarBarsCusumStrategy::new(config).unwrap();
+
+        // Baseline: mean is around 100
+        strategy.on_bar(&create_test_bar(1000, dec!(100)));
+        strategy.on_bar(&create_test_bar(2000, dec!(101)));
+        strategy.on_bar(&create_test_bar(3000, dec!(99)));
+        strategy.on_bar(&create_test_bar(4000, dec!(100)));
+
+        // Drop to 90 -> Mean is ~97.5, distance is ~7.5 (< 20% of 90 = 18.0)
+        let signal = strategy.on_bar(&create_test_bar(5000, dec!(90)));
+        assert!(
+            signal.is_none(),
+            "Should be filtered out by min_take_profit_pct"
+        );
     }
 }

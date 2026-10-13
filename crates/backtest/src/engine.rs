@@ -25,6 +25,9 @@ pub struct BacktestEngine {
     entry_slippage: Decimal,
     last_bar_end_time: Option<i64>,
     open_excursion: Option<TradeExcursion>,
+    current_day_utc: Option<i64>,
+    daily_peak_equity: Decimal,
+    daily_circuit_breaker_tripped: bool,
 }
 
 impl BacktestEngine {
@@ -46,6 +49,9 @@ impl BacktestEngine {
             entry_slippage: Decimal::ZERO,
             last_bar_end_time: None,
             open_excursion: None,
+            current_day_utc: None,
+            daily_peak_equity: initial,
+            daily_circuit_breaker_tripped: false,
         }
     }
 
@@ -72,12 +78,24 @@ impl BacktestEngine {
         }
     }
 
-    fn current_drawdown_pct_at(
+    /// Current session drawdown percentage from all-time peak marked equity.
+    pub fn current_drawdown_pct_at(
         &self,
         current_price: Decimal,
     ) -> Result<Decimal, domain::RiskError> {
         RiskPolicy::calculate_session_drawdown_pct(
             self.peak_equity,
+            self.total_equity(current_price),
+        )
+    }
+
+    /// Current daily session drawdown percentage from daily peak marked equity.
+    pub fn current_daily_drawdown_pct_at(
+        &self,
+        current_price: Decimal,
+    ) -> Result<Decimal, domain::RiskError> {
+        RiskPolicy::calculate_session_drawdown_pct(
+            self.daily_peak_equity,
             self.total_equity(current_price),
         )
     }
@@ -133,6 +151,16 @@ impl BacktestEngine {
     /// Ingests a closed DollarBar, updates position barriers, and steps the strategy.
     pub fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &DollarBar) {
         self.last_bar_end_time = Some(bar.end_time);
+        let day_key = bar.end_time / 86_400_000;
+        let mark_before = self.total_equity(bar.open);
+
+        // Daily session rollover: reset watermark and circuit breaker at 00:00:00 UTC day boundary
+        if self.current_day_utc != Some(day_key) {
+            self.current_day_utc = Some(day_key);
+            self.daily_peak_equity = mark_before;
+            self.daily_circuit_breaker_tripped = false;
+        }
+
         let had_position = self.active_position.is_some();
         let trades_before = self.closed_trades.len();
 
@@ -154,6 +182,9 @@ impl BacktestEngine {
         if total_val > self.peak_equity {
             self.peak_equity = total_val;
         }
+        if total_val > self.daily_peak_equity {
+            self.daily_peak_equity = total_val;
+        }
 
         let dd_amount = self.peak_equity - total_val;
         if dd_amount > self.max_drawdown_amount {
@@ -167,6 +198,15 @@ impl BacktestEngine {
         };
         if dd_pct > self.max_drawdown_pct {
             self.max_drawdown_pct = dd_pct;
+        }
+
+        let day_dd_pct = if self.daily_peak_equity > Decimal::ZERO {
+            (self.daily_peak_equity - total_val).max(Decimal::ZERO) / self.daily_peak_equity
+        } else {
+            Decimal::ZERO
+        };
+        if day_dd_pct >= self.config.max_daily_drawdown_pct {
+            self.daily_circuit_breaker_tripped = true;
         }
 
         // 4. Track the open trade's equity path, or attribute this bar's post-exit
@@ -249,6 +289,11 @@ impl BacktestEngine {
         mark_price: Decimal,
         entry_time: i64,
     ) {
+        // If daily circuit breaker is tripped, halt trading for the remainder of today
+        if self.daily_circuit_breaker_tripped {
+            return;
+        }
+
         let (fill_price, slippage_per_unit) = match intent.side {
             Side::Buy => {
                 let slip = intent.price * self.config.slippage_pct;
@@ -260,7 +305,7 @@ impl BacktestEngine {
             }
         };
 
-        let Ok(current_session_drawdown_pct) = self.current_drawdown_pct_at(mark_price) else {
+        let Ok(current_daily_drawdown_pct) = self.current_daily_drawdown_pct_at(mark_price) else {
             return;
         };
         let defaults = RiskPolicy::default();
@@ -278,7 +323,7 @@ impl BacktestEngine {
             mark_to_market_equity,
             self.config.risk_per_trade_pct,
             Decimal::ZERO,
-            current_session_drawdown_pct,
+            current_daily_drawdown_pct,
         ) else {
             return;
         };
@@ -287,7 +332,8 @@ impl BacktestEngine {
         let entry_notional = fill_price * quantity;
         let entry_fee = entry_notional * self.config.taker_fee_pct;
         let entry_slippage = slippage_per_unit * quantity;
-        self.equity -= entry_fee + entry_slippage;
+        // Slippage is already embedded in fill_price; do not deduct from cash equity here
+        self.equity -= entry_fee;
 
         let pos_side = match intent.side {
             Side::Buy => PositionSide::Long,
@@ -333,10 +379,13 @@ impl BacktestEngine {
         let exit_slippage = slippage_per_unit * pos.quantity;
         let total_fees = entry_fee + exit_fee;
         let total_slippage = entry_slippage + exit_slippage;
-        let pnl_net = pnl_gross - total_fees - total_slippage;
 
-        // self.equity already had entry_fee and entry_slippage deducted upon entry
-        self.equity += pnl_gross - exit_fee - exit_slippage;
+        // In real execution, fill_price and exit_price already embed slippage into pnl_gross.
+        // We report total_slippage as an informative metric, but do not double-deduct it.
+        let pnl_net = pnl_gross - total_fees;
+
+        // self.equity already had entry_fee deducted upon entry. Adjust with pnl_gross and exit_fee.
+        self.equity += pnl_gross - exit_fee;
 
         let return_pct = if pos.entry_price > Decimal::ZERO && pos.quantity > Decimal::ZERO {
             pnl_net / (pos.entry_price * pos.quantity)
@@ -461,6 +510,7 @@ mod tests {
             z_entry_threshold: dec!(1.5),
             z_stop_threshold: dec!(3.0),
             time_barrier_bars: 10,
+            min_take_profit_pct: dec!(0.0025),
         };
         let mut strategy = DollarBarsCusumStrategy::new(strat_cfg).unwrap();
 
@@ -515,6 +565,7 @@ mod tests {
             z_entry_threshold: dec!(1.5),
             z_stop_threshold: dec!(2.0),
             time_barrier_bars: 10,
+            min_take_profit_pct: dec!(0.0025),
         };
         let mut strategy = DollarBarsCusumStrategy::new(strat_cfg).unwrap();
 
@@ -568,6 +619,7 @@ mod tests {
             z_entry_threshold: dec!(1.5),
             z_stop_threshold: dec!(5.0), // wide stop
             time_barrier_bars: 2,        // short time barrier
+            min_take_profit_pct: dec!(0.0025),
         };
         let mut strategy = DollarBarsCusumStrategy::new(strat_cfg).unwrap();
 
@@ -612,5 +664,178 @@ mod tests {
 
         let metrics = engine.finish(None);
         assert_eq!(metrics.total_trades, 1);
+    }
+
+    #[test]
+    fn slippage_accounting_does_not_double_count_in_cash_equity_and_pnl_net() {
+        let btc_cfg = BacktestConfig {
+            initial_capital: dec!(1000),
+            maker_fee_pct: dec!(0.0002),
+            taker_fee_pct: dec!(0.0005),
+            slippage_pct: dec!(0.01), // 1% slippage for prominent measurement
+            risk_per_trade_pct: dec!(0.01),
+            max_daily_drawdown_pct: dec!(0.20),
+        };
+        let mut engine = BacktestEngine::new(btc_cfg);
+
+        let strat_cfg = DollarBarsCusumConfig {
+            rolling_window_len: 4,
+            cusum_vol_multiplier: dec!(1.0),
+            z_entry_threshold: dec!(1.5),
+            z_stop_threshold: dec!(3.0),
+            time_barrier_bars: 10,
+            min_take_profit_pct: dec!(0.0025),
+        };
+        let mut strategy = DollarBarsCusumStrategy::new(strat_cfg).unwrap();
+
+        // Baseline bars to warm up rolling stats
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(2000, dec!(101), dec!(101), dec!(101), dec!(101)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(3000, dec!(99), dec!(99), dec!(99), dec!(99)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(4000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+
+        // Plunge to 90 -> triggers Long entry
+        // fill_price = 90 + (90 * 0.01) = 90.90
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(5000, dec!(90), dec!(91), dec!(89), dec!(90)),
+        );
+        assert!(engine.active_position.is_some());
+
+        // Rebound back above mean (100) -> Take profit hit at 100!
+        // exit_price = 100.00 (maker exit at TP, zero exit slippage)
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(6000, dec!(95), dec!(102), dec!(94), dec!(100)),
+        );
+        assert!(engine.active_position.is_none());
+
+        let (metrics, trades) = engine.finish_with_trades(None);
+        assert_eq!(trades.len(), 1);
+        let trade = &trades[0];
+
+        // pnl_gross = (exit_price - fill_price) * quantity
+        // fill_price already embeds entry slippage!
+        assert_eq!(trade.pnl_net, trade.pnl_gross - trade.fees_paid);
+        assert!(trade.slippage_paid > Decimal::ZERO);
+
+        // Cash equity must exactly equal initial_capital + pnl_net
+        assert_eq!(metrics.net_profit, trade.pnl_net);
+        assert_eq!(dec!(1000) + trade.pnl_net, dec!(1000) + metrics.net_profit);
+    }
+
+    #[test]
+    fn daily_circuit_breaker_resets_at_utc_day_boundary() {
+        let btc_cfg = BacktestConfig {
+            initial_capital: dec!(1000),
+            maker_fee_pct: dec!(0.0002),
+            taker_fee_pct: dec!(0.0005),
+            slippage_pct: dec!(0.0005),
+            risk_per_trade_pct: dec!(0.05), // large position to trigger breaker
+            max_daily_drawdown_pct: dec!(0.05), // 5% daily breaker
+        };
+        let mut engine = BacktestEngine::new(btc_cfg);
+
+        let strat_cfg = DollarBarsCusumConfig {
+            rolling_window_len: 4,
+            cusum_vol_multiplier: dec!(1.0),
+            z_entry_threshold: dec!(1.5),
+            z_stop_threshold: dec!(2.0),
+            time_barrier_bars: 10,
+            min_take_profit_pct: dec!(0.0025),
+        };
+        let mut strategy = DollarBarsCusumStrategy::new(strat_cfg).unwrap();
+
+        let day_1_ms: i64 = 1_000_000;
+        let day_2_ms: i64 = day_1_ms + 86_400_000; // Next UTC day (+24h)
+
+        // Day 1 Baseline
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_1_ms, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_1_ms + 1000, dec!(101), dec!(101), dec!(101), dec!(101)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_1_ms + 2000, dec!(99), dec!(99), dec!(99), dec!(99)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_1_ms + 3000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+
+        // Day 1: Plunge to 90 -> triggers Long entry
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_1_ms + 4000, dec!(90), dec!(91), dec!(89), dec!(90)),
+        );
+        assert!(engine.active_position.is_some());
+
+        // Day 1: Crash to 70 -> hits Stop Loss and loses >5% of account!
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_1_ms + 5000, dec!(80), dec!(81), dec!(69), dec!(70)),
+        );
+        assert!(engine.active_position.is_none());
+        assert!(engine.daily_circuit_breaker_tripped);
+
+        // Day 1: Another plunge to 60 -> signal generated by strategy but REJECTED by daily circuit breaker
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_1_ms + 6000, dec!(60), dec!(61), dec!(59), dec!(60)),
+        );
+        assert!(
+            engine.active_position.is_none(),
+            "Should be blocked on Day 1"
+        );
+
+        // Day 2 (midnight UTC rollover): new day starts!
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_2_ms, dec!(60), dec!(60), dec!(60), dec!(60)),
+        );
+        assert!(
+            !engine.daily_circuit_breaker_tripped,
+            "Breaker must reset on Day 2"
+        );
+
+        // Day 2: Baseline
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_2_ms + 1000, dec!(61), dec!(61), dec!(61), dec!(61)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_2_ms + 2000, dec!(59), dec!(59), dec!(59), dec!(59)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_2_ms + 3000, dec!(60), dec!(60), dec!(60), dec!(60)),
+        );
+
+        // Day 2: Plunge to 50 -> triggers entry on Day 2 successfully!
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_2_ms + 4000, dec!(50), dec!(51), dec!(49), dec!(50)),
+        );
+        assert!(
+            engine.active_position.is_some(),
+            "Trading should resume on Day 2!"
+        );
     }
 }
