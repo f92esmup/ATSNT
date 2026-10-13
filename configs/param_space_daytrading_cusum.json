@@ -1,0 +1,7 @@
+{
+  "rolling_window_lens": [8, 12, 16, 20],
+  "cusum_vol_multipliers": ["0.6", "0.8", "1.0", "1.2"],
+  "z_entry_thresholds": ["0.8", "1.0", "1.2", "1.5"],
+  "z_stop_thresholds": ["2.0", "2.5", "3.0"],
+  "time_barrier_bars": [6, 8, 12]
+}

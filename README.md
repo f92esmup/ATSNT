@@ -20,7 +20,7 @@ A high-performance, modular algorithmic trading engine built 100% in Rust from f
 ATSNT/
 ├── crates/
 │   ├── domain/       # Pure business logic (DollarBar, Aggregator, CusumFilter, Z-Score, Order FSM, Position)
-│   ├── strategies/   # Strategy traits & implementations (DollarBarsCusumStrategy with Triple Barrier exits)
+│   ├── strategies/   # Strategy traits & implementations (DollarBarsCusumStrategy, OrderFlowImbalanceStrategy)
 │   ├── adapters/     # Ports & infrastructure adapters (Binance CSV, Parquet columnar, Binance ETL fetcher, Binance WebSocket Stream, GCP BigQuery/GCS/Telegram)
 │   └── backtest/     # 1:1 Event Simulator, Walk-Forward Splitter, Rayon HPO Engine, Monte Carlo, Real-Time Paper Trading
 ├── data/             # Historical market data (CSV samples & compressed Parquet archives)
@@ -54,11 +54,11 @@ The repository provides 6 specialized CLI binaries built with `clap` (run any wi
 
 | Binary / Tool | Crate | Purpose | Quick Command | Detailed Guide |
 | :--- | :--- | :--- | :--- | :--- |
-| `fetch_data` | `adapters` | Official Binance ETL: downloads historical `aggTrades` & converts to Parquet | `cargo run -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2024 --month 1` | [Step 1](#step-1-download--convert-real-market-data-binance-etl) |
-| `backtest` | `backtest` | Deterministic 1:1 event simulator and Monte Carlo stress testing (BigQuery & GCS Parquet export) | `cargo run -p backtest -- --data data/sample_trades.csv --dollar-bar 50000 --gcp-bigquery` | [Step 2](#step-2-run-deterministic-11-backtest) & [Step 3](#step-3-run-monte-carlo-stress-simulation) |
-| `run_hpo` | `backtest` | Multi-core CPU parallel hyperparameter optimization (Rayon + WFO, BigQuery export) | `cargo run -p backtest --bin run_hpo -- --data <PATH> --folds 3 --gcp-bigquery` | [Step 4](#step-4-run-parallel-walk-forward-hyperparameter-optimization-hpo) |
+| `fetch_data` | `adapters` | Official Binance ETL: downloads historical `aggTrades` & converts to Parquet | `cargo run -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2026 --month 1` | [Step 1](#step-1-download--convert-real-market-data-binance-etl) |
+| `backtest` | `backtest` | Deterministic 1:1 event simulator and Monte Carlo stress testing (BigQuery & GCS export) | `cargo run -p backtest -- --data data/sample_trades.csv --strategy dollar_bars_cusum --capital 200 --gcp-bigquery` | [Step 2](#step-2-run-deterministic-11-backtest) & [Step 3](#step-3-run-monte-carlo-stress-simulation) |
+| `run_hpo` | `backtest` | Multi-core CPU parallel hyperparameter optimization (Rayon + WFO, BigQuery export) | `cargo run -p backtest --bin run_hpo -- --data <PATH> --strategy dollar_bars_cusum --capital 200 --folds 3 --gcp-bigquery` | [Step 4](#step-4-run-parallel-walk-forward-hyperparameter-optimization-hpo) |
 | `stream_trades`| `adapters` | Live Binance WebSocket feed accumulating and printing Dollar Bars | `cargo run -p adapters --bin stream_trades -- --symbol btcusdt --threshold 50000` | [Step 5](#step-5-live-market-data-ingestion--dollar-bar-streaming) |
-| `paper_trading`| `backtest` | Real-time simulated execution with continuous mark-to-market PnL, BigQuery & Telegram alerts | `cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --gcp-bigquery --telegram-alerts` | [Step 6](#step-6-run-real-time-paper-trading-engine) |
+| `paper_trading`| `backtest` | Real-time simulated execution with continuous mark-to-market PnL, BigQuery & Telegram alerts | `cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --capital 1000 --gcp-bigquery --telegram-alerts` | [Step 6](#step-6-run-real-time-paper-trading-engine) |
 | `live_gateway` | `adapters` | Authenticated live order gateway with HMAC signing and circuit breakers | `cargo run -p adapters --bin live_gateway -- --testnet --check-balance` | [Step 8](#step-8-live-execution-gateway-binance-testnet--production) |
 
 
@@ -283,8 +283,10 @@ cargo run -p adapters --bin live_gateway -- \
   --check-balance
 ```
 
-#### Pre-Trade Risk Policy & Safety Guarantees
-- **Circuit Breaker**: Trading automatically hard-halts if daily account drawdown breaches `max_daily_drawdown_pct` (default: 5%).
+#### Pre-Trade Risk Policy & Quantitative Safety Guarantees
+- **Exact Slippage Accounting**: In 1:1 realistic simulation, slippage is implicitly absorbed into the fill and exit prices (`pnl_gross`). Cash equity satisfies the exact mathematical identity $\text{Cash} = \text{Initial Capital} + \sum \text{Net PnL}$ without double deductions.
+- **Circuit Breaker with Daily UTC Reset**: Trading automatically halts if daily account drawdown breaches `max_daily_drawdown_pct` (default: 5% in live, configurable). The watermark and freeze reset automatically at `00:00:00 UTC`, supporting uninterrupted multi-month backtesting.
+- **Microstructure Friction Filter**: Strategies enforce `min_take_profit_pct` (default: 25-35 bps), rejecting trades where price displacement cannot clear round-trip exchange fees and latency slippage.
 - **Order Size Ceiling**: Single order notional value cannot exceed `max_order_notional` (default: $10,000 USDT).
 - **Position Cap**: Aggregate position exposure cannot exceed `max_position_notional` (default: $50,000 USDT).
 - **Zero-Float Math**: 100% fixed-point decimal arithmetic via `rust_decimal::Decimal`.
@@ -300,6 +302,7 @@ cargo run -p adapters --bin live_gateway -- \
 - [`AGENTS.md`](AGENTS.md): Architectural standards, engineering guidelines, and agent rules.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): Milestone progress and upcoming deliverables.
 - [`docs/strategy/01-dollar-bars-cusum.md`](docs/strategy/01-dollar-bars-cusum.md): Mathematics of Dollar Bars, symmetric CUSUM filter, rolling Z-Scores, and Triple Barrier exits.
+- [`docs/strategy/02-order-flow-imbalance.md`](docs/strategy/02-order-flow-imbalance.md): Order Flow Imbalance, toxic momentum breakouts, liquidity absorption reversals, and friction filters.
 - [`docs/architecture/02-domain-models-and-lifecycle.md`](docs/architecture/02-domain-models-and-lifecycle.md): Domain models and 3-stage execution lifecycle (`OrderIntent` -> `Order` FSM -> `Position`).
 - [`docs/architecture/03-adapters-and-market-data.md`](docs/architecture/03-adapters-and-market-data.md): Ports and Adapters, Binance `aggTrades` mapping, and WebSocket streaming.
 - [`docs/architecture/04-hpo-and-walk-forward.md`](docs/architecture/04-hpo-and-walk-forward.md): Walk-Forward Optimization, parameter stability scoring, DSR, and Rayon parallelism.

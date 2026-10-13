@@ -20,6 +20,7 @@ cd "${PROJECT_ROOT}"
 SYMBOL="BTCUSDT"
 STRATEGY="dollar_bars_cusum"
 PARAM_SPACE=""
+CAPITAL=""
 YEAR="$(date +%Y)"
 MONTH=""
 DOLLAR_BAR="1000000"
@@ -46,6 +47,7 @@ Usage:
 
 Options:
   -s, --symbol <SYM>         Trading pair symbol (default: ${SYMBOL})
+  -k, --capital <AMOUNT>     Starting capital in quote currency (e.g. 200, 1000)
   -y, --year <YYYY>          Year to process (default: current year ${YEAR})
   -m, --month <MM>           Optional single month to fetch (1-12)
   -b, --dollar-bar <AMOUNT>  Dollar bar threshold in USD (default: ${DOLLAR_BAR})
@@ -83,6 +85,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -s|--symbol)
             SYMBOL="${2^^}"
+            shift 2
+            ;;
+        -k|--capital)
+            CAPITAL="$2"
             shift 2
             ;;
         -y|--year)
@@ -204,6 +210,7 @@ if [ "${NO_INHIBIT}" = "false" ] && [ "${DETACH}" = "false" ] && [ -z "${SYSTEMD
         --config "${CONFIG_PATH}" \
         --strategy "${STRATEGY}" \
         ${PARAM_SPACE:+--param-space "${PARAM_SPACE}"} \
+        ${CAPITAL:+--capital "${CAPITAL}"} \
         $( [ "${GCP_BIGQUERY}" = "true" ] && echo "--gcp-bigquery" ) \
         $( [ "${SKIP_FETCH}" = "true" ] && echo "--skip-fetch" ) \
         $( [ "${SKIP_HPO}" = "true" ] && echo "--skip-hpo" ) \
@@ -217,6 +224,7 @@ if [ "${DETACH}" = "true" ]; then
     echo "============================================================"
     echo "Symbol:       ${SYMBOL}"
     echo "Strategy:     ${STRATEGY}"
+    [ -n "${CAPITAL}" ] && echo "Capital:      \$${CAPITAL}"
     echo "Year:         ${YEAR}"
     echo "Log Output:   ${LOG_FILE}"
     echo "------------------------------------------------------------"
@@ -241,6 +249,7 @@ if [ "${DETACH}" = "true" ]; then
         --config "${CONFIG_PATH}" \
         --strategy "${STRATEGY}" \
         ${PARAM_SPACE:+--param-space "${PARAM_SPACE}"} \
+        ${CAPITAL:+--capital "${CAPITAL}"} \
         $( [ "${GCP_BIGQUERY}" = "true" ] && echo "--gcp-bigquery" ) \
         $( [ "${SKIP_FETCH}" = "true" ] && echo "--skip-fetch" ) \
         $( [ "${SKIP_HPO}" = "true" ] && echo "--skip-hpo" ) \
@@ -264,6 +273,7 @@ echo "Symbol:          ${SYMBOL}"
 echo "Year:            ${YEAR}"
 [ -n "${MONTH}" ] && echo "Month:           ${MONTH}"
 echo "Dollar Bar:      \$${DOLLAR_BAR}"
+[ -n "${CAPITAL}" ] && echo "Capital:         \$${CAPITAL}"
 echo "Data Directory:  ${OUTPUT_DIR}/${SYMBOL}"
 echo "HPO Config:      ${CONFIG_PATH}"
 echo "Monte Carlo:     ${MC_ITERATIONS} iterations"
@@ -318,6 +328,9 @@ else
     if [ -n "${PARAM_SPACE}" ]; then
         HPO_ARGS+=("--param-space" "${PARAM_SPACE}")
     fi
+    if [ -n "${CAPITAL}" ]; then
+        HPO_ARGS+=("--capital" "${CAPITAL}")
+    fi
     if [ "${GCP_BIGQUERY}" = "true" ]; then
         HPO_ARGS+=("--gcp-bigquery")
     fi
@@ -334,6 +347,9 @@ BACKTEST_ARGS=(
     "--monte-carlo"
     "--mc-iterations" "${MC_ITERATIONS}"
 )
+if [ -n "${CAPITAL}" ]; then
+    BACKTEST_ARGS+=("--capital" "${CAPITAL}")
+fi
 if [ "${GCP_BIGQUERY}" = "true" ]; then
     BACKTEST_ARGS+=("--gcp-bigquery")
 fi

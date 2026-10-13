@@ -85,7 +85,12 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 
 ---
 
-### Milestone 7: Strategy Catalog & Machine Learning Expansion
-- [ ] Microstructure feature pipelines (Order Flow Imbalance, Volume-Synchronized Probability of Toxicity - VPIN).
+### Milestone 7: Strategy Catalog & Microstructure Expansion
+- [x] Microstructure feature pipeline: `OrderFlowImbalanceStrategy` (OFI metric, rolling Z-score standardization, price efficiency absorption ratio, dynamic Triple Barrier exits, and friction filters).
+- [x] Quantitative engine hardening:
+  - Exact slippage accounting: removed double-deductions in net PnL and cash equity; exact cash identity $\text{Cash} = \text{Initial Capital} + \sum \text{Net PnL}$ verified.
+  - 00:00:00 UTC daily circuit breaker rollover: watermark and halt reset every midnight UTC for continuous multi-month backtesting.
+  - Microstructure friction guard (`min_take_profit_pct`): prevents executing sub-friction trades in compressed volatility regimes.
+- [ ] Volume-Synchronized Probability of Toxicity (VPIN) pipeline.
 - [ ] Pure Rust ML integration (`ort` for ONNX models / native Rust inference).
 - [ ] Multi-asset portfolio balancing and risk parity allocation.

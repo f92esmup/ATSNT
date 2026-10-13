@@ -78,6 +78,10 @@ struct Args {
     #[arg(long)]
     execution_context: Option<PathBuf>,
 
+    /// Initial starting capital in quote currency (overrides execution context, e.g. 200 for 200 USDT)
+    #[arg(long)]
+    capital: Option<Decimal>,
+
     /// Record the sweep (hpo parent run plus one hpo_trial run per candidate with
     /// per-fold metrics) to Google Cloud BigQuery
     #[arg(long, default_value_t = false)]
@@ -181,7 +185,7 @@ async fn main() -> Result<()> {
     );
     let opt_start = Instant::now();
 
-    let engine_config = match &args.execution_context {
+    let mut engine_config = match &args.execution_context {
         Some(path) => {
             let content = fs::read_to_string(path).with_context(|| {
                 format!("Failed to read execution context file: {}", path.display())
@@ -191,6 +195,9 @@ async fn main() -> Result<()> {
         }
         None => BacktestConfig::default(),
     };
+    if let Some(cap) = args.capital {
+        engine_config.initial_capital = cap;
+    }
     println!(
         "      Execution context: capital ${}, maker {} / taker {} fees, slippage {}",
         engine_config.initial_capital,
