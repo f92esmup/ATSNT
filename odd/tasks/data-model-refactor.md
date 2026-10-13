@@ -28,7 +28,7 @@ Branch: `feat/data-model-refactor` | Delivery: ask-on-risk (forecast > 400 lines
 | T9 | S4, S5 | inline | done | fe3b3fb |
 | T10 | S1 | inline | done | 9f6c8d3 |
 | T11 | S7 | inline | done | 28ab110 |
-| T12 | S6 | inline | pending | needs user authorization for remote destructive BigQuery operation |
+| T12 | S6 | inline | done | executed 2026-10-13 on mi-facturador-bot-01.atsnt_bi (user-authorized) |
 
 - T1: extract `RunSpec`, `RunType`, `RunId` (UUID v7); artifact = spec + scorecard with backward-compatible JSON.
 - T2: MAE/MFE equity points on `ClosedTrade`, tracked by the engine; reconstruction test vs engine max DD.
@@ -60,3 +60,5 @@ Routes are inline: no parallel units with disjoint surfaces and no context backs
 - L7: T10 found that tests using a "disabled" BigQuerySink fell back to the local gcloud CLI and streamed into the real dataset (legacy `disabled_bigquery_sink_succeeds_without_panic` inserted `trade_1` into `atsnt_bi.trades`; the new T4 test hit 404 on non-existent tables). Fixed with `BigQuerySink::offline` / `GcsArtifactSink::offline`; `cargo test --workspace -- --nocapture` now shows only "Insert skipped" lines.
 - L8: T11 added `v_hpo_trials`, `v_hpo_folds`, `v_monte_carlo` views; doc 11 kept in Spanish to match its existing language.
 - L9: verification state — `cargo test --workspace` 168 passed, clippy and fmt clean; backtest and HPO binaries smoke-run offline on real 2024-01 / 2026-10-01 data; paper/live not run live (require WebSocket/Binance access). SQL never executed against BigQuery. Native assess: risk high, review_due (4351 changed lines on the branch); independent verifier and native review not run yet. Next: T12 after authorization, then verification/review, then delivery strategy (branch exceeds 400 lines).
+- L10 (2026-10-13): "entonces no vamos a revisar esos cambios. lo damos como bueno. y si, te autorizo para esa tarea". Native review START had failed with `lens_context_budget_exceeded` (4354 lines); user declined splitting and accepted the branch without review or independent verifier.
+- L11: T12 executed. Before drop: trades 18 rows, equity_snapshots 540,044 rows, hpo_evaluations 0, monte_carlo_runs 0, views v_trades and v_live_paper_monitor. After: tables runs, run_metrics, trades, run_series and 9 views created; every view queries successfully (0 rows). No end-to-end insert through `--gcp-bigquery` has been run yet (JSON columns via insertAll unverified).
