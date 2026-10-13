@@ -49,7 +49,7 @@ gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command="sudo systemctl
 echo "[*] Step 4: Backing up previous binary and preparing remote directories..."
 CONFIG_BASENAME=$(basename "${CONFIG_FILE}")
 gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command="
-    mkdir -p ${REMOTE_DIR}/configs ${REMOTE_DIR}/storage/reports
+    mkdir -p ${REMOTE_DIR}/configs
     if [ -f ${REMOTE_DIR}/paper_trading ]; then
         cp ${REMOTE_DIR}/paper_trading ${REMOTE_DIR}/paper_trading.bak
         echo '[*] Backup preserved: ${REMOTE_DIR}/paper_trading.bak'

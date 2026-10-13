@@ -5,7 +5,7 @@
 # Chains together:
 #   1. Binance Historical ETL (fetch_data) -> Compressed Apache Parquet
 #   2. Parallel Walk-Forward HPO (run_hpo) -> configs/hpo_<symbol>_<year>.json
-#   3. Deterministic Backtest + Monte Carlo (backtest) -> storage/reports/
+#   3. Deterministic Backtest + Monte Carlo (backtest) -> BigQuery runs (with --gcp-bigquery)
 #
 # Automatically inhibits OS sleep, idle, and laptop lid-switch while running.
 # =============================================================================
@@ -30,7 +30,6 @@ CANDIDATES="60"
 MC_ITERATIONS="10000"
 OUTPUT_DIR=""
 CONFIG_PATH=""
-REPORT_PATH=""
 LOG_FILE=""
 GCP_BIGQUERY=false
 SKIP_FETCH=false
@@ -59,8 +58,7 @@ Options:
       --config <PATH>        Output/input path for winning HPO configuration JSON
       --strategy <NAME>      Target strategy identifier (default: ${STRATEGY})
       --param-space <PATH>   Optional JSON path overriding default search space
-      --report <PATH>        Output path for Monte Carlo telemetry report JSON
-      --gcp-bigquery         Stream telemetry and closed trades to BigQuery
+      --gcp-bigquery         Record HPO, backtest and Monte Carlo runs to BigQuery
       --skip-fetch           Skip Phase 1 (use already downloaded data in output-dir)
       --skip-hpo             Skip Phase 2 (use existing --config JSON directly in Backtest)
       --no-inhibit           Do not invoke systemd-inhibit (allow OS to sleep)
@@ -135,10 +133,6 @@ while [[ $# -gt 0 ]]; do
             PARAM_SPACE="$2"
             shift 2
             ;;
-        --report)
-            REPORT_PATH="$2"
-            shift 2
-            ;;
         --gcp-bigquery)
             GCP_BIGQUERY=true
             shift
@@ -184,10 +178,6 @@ if [ -z "${CONFIG_PATH}" ]; then
     CONFIG_PATH="configs/hpo_${SYMBOL,,}_${YEAR}.json"
 fi
 
-if [ -z "${REPORT_PATH}" ]; then
-    REPORT_PATH="storage/reports/monte_carlo_${SYMBOL,,}_${YEAR}.json"
-fi
-
 if [ -z "${LOG_FILE}" ]; then
     LOG_FILE="pipeline_${SYMBOL,,}_${YEAR}.log"
 fi
@@ -214,7 +204,6 @@ if [ "${NO_INHIBIT}" = "false" ] && [ "${DETACH}" = "false" ] && [ -z "${SYSTEMD
         --config "${CONFIG_PATH}" \
         --strategy "${STRATEGY}" \
         ${PARAM_SPACE:+--param-space "${PARAM_SPACE}"} \
-        --report "${REPORT_PATH}" \
         $( [ "${GCP_BIGQUERY}" = "true" ] && echo "--gcp-bigquery" ) \
         $( [ "${SKIP_FETCH}" = "true" ] && echo "--skip-fetch" ) \
         $( [ "${SKIP_HPO}" = "true" ] && echo "--skip-hpo" ) \
@@ -252,7 +241,6 @@ if [ "${DETACH}" = "true" ]; then
         --config "${CONFIG_PATH}" \
         --strategy "${STRATEGY}" \
         ${PARAM_SPACE:+--param-space "${PARAM_SPACE}"} \
-        --report "${REPORT_PATH}" \
         $( [ "${GCP_BIGQUERY}" = "true" ] && echo "--gcp-bigquery" ) \
         $( [ "${SKIP_FETCH}" = "true" ] && echo "--skip-fetch" ) \
         $( [ "${SKIP_HPO}" = "true" ] && echo "--skip-hpo" ) \
@@ -278,7 +266,7 @@ echo "Year:            ${YEAR}"
 echo "Dollar Bar:      \$${DOLLAR_BAR}"
 echo "Data Directory:  ${OUTPUT_DIR}/${SYMBOL}"
 echo "HPO Config:      ${CONFIG_PATH}"
-echo "Monte Carlo:     ${MC_ITERATIONS} iterations -> ${REPORT_PATH}"
+echo "Monte Carlo:     ${MC_ITERATIONS} iterations"
 echo "BigQuery Export: ${GCP_BIGQUERY}"
 echo "------------------------------------------------------------"
 
@@ -344,7 +332,6 @@ BACKTEST_ARGS=(
     "--config" "${CONFIG_PATH}"
     "--monte-carlo"
     "--mc-iterations" "${MC_ITERATIONS}"
-    "--report" "${REPORT_PATH}"
 )
 if [ "${GCP_BIGQUERY}" = "true" ]; then
     BACKTEST_ARGS+=("--gcp-bigquery")
@@ -359,7 +346,9 @@ echo "============================================================"
 echo " [SUCCESS] Entire Production Pipeline Completed!"
 echo " Total Elapsed Time:   ${TOTAL_DURATION}s"
 echo " Winning Parameters:   ${CONFIG_PATH}"
-echo " Monte Carlo Audit:    ${REPORT_PATH}"
+if [ "${GCP_BIGQUERY}" = "true" ]; then
+    echo " Run Analytics:        BigQuery atsnt_bi (v_runs, v_trades, v_equity)"
+fi
 echo " Next Production Step: Run real-time paper trading:"
 echo "   cargo run --release -p backtest --bin paper_trading -- \\"
 echo "     --symbol ${SYMBOL,,} --config ${CONFIG_PATH}"

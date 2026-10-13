@@ -111,58 +111,13 @@ Equity ($)
 
 ---
 
-## 5. Structured Telemetry Schemas
+## 5. Persisted Telemetry (Run Model)
 
-All simulation, HPO, and backtest results are serialized to `storage/reports/` as machine-readable JSON artifacts, and can be streamed directly to Google Cloud BigQuery and Google Cloud Storage (GCS Parquet) via `crates/adapters::gcp` for visualization in Looker Studio.
+Results are not written to local JSON files. With `--gcp-bigquery`, a Monte Carlo stress test is recorded as a `monte_carlo` run whose `parent_run_id` is the backtest run it resampled (see [10-gcp-cloud-architecture.md §4](10-gcp-cloud-architecture.md#4-bigquery-data-warehouse-schemas-atsnt_bi)):
 
-### 5.1 Monte Carlo Report (`storage/reports/monte_carlo_<id>.json`)
-```json
-{
-  "report_id": "mc_20261004_133000_btc",
-  "strategy_id": "dollar_bars_cusum",
-  "iterations": 10000,
-  "resample_method": "CircularBlockBootstrap",
-  "block_size": 5,
-  "initial_capital": "10000.00",
-  "ruin_threshold_pct": "30.00",
-  "metrics_summary": {
-    "historical_max_drawdown_pct": "6.85",
-    "p50_max_drawdown_pct": "8.12",
-    "p95_max_drawdown_pct": "14.40",
-    "p99_max_drawdown_pct": "21.05",
-    "worst_max_drawdown_pct": "26.30",
-    "probability_of_ruin_pct": "0.12",
-    "p50_underwater_trades": 18,
-    "p95_underwater_trades": 45
-  },
-  "distribution_histogram": {
-    "drawdown_bins": ["0-5%", "5-10%", "10-15%", "15-20%", "20-25%", ">25%"],
-    "frequency": [1200, 5800, 2400, 520, 75, 5]
-  },
-  "fan_chart_trajectories": [
-    {
-      "label": "Realized",
-      "equity_curve": ["10000.00", "10045.20", "10120.00", "10550.00"]
-    },
-    {
-      "label": "P01_Worst",
-      "equity_curve": ["10000.00", "9850.00", "9620.00", "9200.00"]
-    },
-    {
-      "label": "P99_Best",
-      "equity_curve": ["10000.00", "10180.00", "10450.00", "11200.00"]
-    }
-  ]
-}
-```
-
-### 5.2 Backtest Run Report (`storage/reports/backtest_<id>.json`)
-Contains:
-1. `metadata`: Timestamp, git commit SHA, data source, date range.
-2. `config`: Parameter coordinates $\theta$.
-3. `summary_metrics`: Total PnL, Sortino, Sharpe, Profit Factor, Fee Drag, Expectancy.
-4. `trade_manifest`: Array of completed trades (`TradeRecord`: timestamps, entry/exit prices, fees, slippage, realized PnL).
-5. `downsampled_equity`: Downsampled timeseries (e.g. at every trade exit or 1-hour bar) to render smooth, lightweight charts in web frontends.
+- `run_metrics` (`scope = full`): `extras` JSON with every percentile (`p01`..`p99`, worst), `probability_of_ruin_pct`, underwater statistics, and the simulation settings actually used (`iterations`, `resample_method`, `block_size`, `ruin_threshold_pct`, `seed`).
+- `run_series` (`series = mc_equity`, `x` = trade index): 8 representative curves from the fan chart — `Realized`, `Worst_Stress_1`, `Best_Ceiling_1`, and `Quantile_0.05/0.25/0.50/0.75/0.95` (ranked by final equity, best first).
+- No trades are stored for Monte Carlo runs.
 
 ---
 
@@ -171,4 +126,4 @@ Contains:
 To respect our architectural principles:
 - **`crates/domain`**: Implements pure mathematical functions (`bootstrap_resample`, `compute_drawdown_distribution`, `calculate_ruin_probability`). Zero I/O, zero network, 100% deterministic via seeded RNG.
 - **`crates/backtest`**: Coordinates execution of the strategy over the event stream, invokes domain Monte Carlo routines, and compiles the `BacktestReport`.
-- **`crates/adapters`**: Implements file system storage (`FileSystemReportStore`) as well as Cloud-First export sinks (`BigQuerySink`, `GcsParquetSink`) in `crates/adapters::gcp` to stream metrics, trades, and compressed Parquet simulation trajectories directly to BigQuery and GCS for BI visualization in Looker Studio, and `TelegramNotifier` for real-time mobile push alerting.
+- **`crates/adapters`**: Implements the `RunRecorder` port (`BigQuerySink`, plus `InMemoryRunRecorder` for tests) that persists runs, metrics, trades, and event series to BigQuery for Looker Studio, `GcsArtifactSink` for deployment artifact uploads, and `TelegramNotifier` for real-time mobile push alerting. `crates/backtest::recording` translates domain results into those rows.

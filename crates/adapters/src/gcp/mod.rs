@@ -1,8 +1,8 @@
 //! Google Cloud Platform (GCP) and Outbound Alerting Adapters for ATSNT.
 //!
 //! Provides cloud-first streaming telemetry, serverless data warehousing, and mobile push notifications:
-//! - [`bigquery`]: Direct streaming inserts to BigQuery tables (`trades`, `equity_snapshots`, `hpo_evaluations`, `monte_carlo_runs`) for zero-code Looker Studio dashboards.
-//! - [`gcs`]: Columnar Apache Parquet persistence for simulation trajectories and historical data.
+//! - [`bigquery`]: [`crate::RunRecorder`] implementation streaming run analytics (`runs`, `run_metrics`, `trades`, `run_series`) for Looker Studio.
+//! - [`gcs`]: Uploads of strategy deployment artifacts to Cloud Storage.
 //! - [`telegram`]: Mobile push alerting via official Telegram Bot API webhooks.
 
 pub mod auth;
@@ -12,10 +12,8 @@ pub mod secret_manager;
 pub mod telegram;
 
 pub use auth::GcpAuthResolver;
-pub use bigquery::{
-    BigQueryRecord, BigQuerySink, EquitySnapshotRow, HpoEvaluationRow, MonteCarloRow, TradeRow,
-};
-pub use gcs::GcsParquetSink;
+pub use bigquery::{BigQueryRecord, BigQuerySink};
+pub use gcs::GcsArtifactSink;
 pub use secret_manager::GcpSecretManager;
 pub use telegram::{datetime_in_madrid, now_in_madrid, TelegramNotifier};
 

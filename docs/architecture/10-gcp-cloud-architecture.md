@@ -43,10 +43,10 @@ The ATSNT quantitative trading engine is designed as an **outbound-only, air-gap
 │     - /market_data/<symbol>/...                        │       └──────────────────┬───────────────────┘
 │                                                        │                          │
 │  B. Google BigQuery (Dataset: atsnt_bi)                │◄─────────────────────────┘
-│     - trades (Execution audit & realized PnL)          │  Streaming Asynchronous Inserts
-│     - equity_snapshots (Account MTM & live drawdown)   │  (tabledata.insertAll REST API)
-│     - hpo_evaluations (Parameter stability surface)    │
-│     - monte_carlo_runs (Stress tests & ruin prob)      │
+│     - runs (spec, lineage, lifecycle)                  │  Streaming Asynchronous Inserts
+│     - run_metrics (x-ray per run and scope)            │  (tabledata.insertAll REST API)
+│     - trades (closed trades with MAE/MFE)              │
+│     - run_series (event-based equity, MC curves)       │
 └───────────────────────────────┬────────────────────────┘
                                 │
                                 │ Native BigQuery Connector (Zero ETL)
@@ -84,119 +84,36 @@ The architecture is deliberately dimensioned to run at **0,00 € / mes** indefi
 
 ## 4. BigQuery Data Warehouse Schemas (`atsnt_bi`)
 
-The data warehouse contains four core tables partitioned by date to minimize query byte scans:
+The canonical DDL is [`scripts/gcp/bigquery_schema.sql`](../../scripts/gcp/bigquery_schema.sql). Datasets created with the previous model must first run [`scripts/gcp/bigquery_drop_legacy.sql`](../../scripts/gcp/bigquery_drop_legacy.sql) (destructive).
 
-### 4.1 Table: `atsnt_bi.trades`
-Records closed trades from both historical backtests and live/paper trading sessions:
-```sql
-CREATE TABLE IF NOT EXISTS `atsnt_bi.trades` (
-    trade_id STRING NOT NULL,
-    session_id STRING NOT NULL,
-    strategy_id STRING NOT NULL,
-    symbol STRING NOT NULL,
-    side STRING NOT NULL,               -- 'Long' | 'Short' | 'ClosedPosition'
-    entry_timestamp TIMESTAMP NOT NULL,
-    exit_timestamp TIMESTAMP NOT NULL,
-    entry_price NUMERIC NOT NULL,
-    exit_price NUMERIC NOT NULL,
-    quantity NUMERIC NOT NULL,
-    gross_pnl NUMERIC NOT NULL,
-    fees_paid NUMERIC NOT NULL,
-    net_pnl NUMERIC NOT NULL,
-    exit_reason STRING NOT NULL,        -- 'TakeProfit' | 'StopLoss' | 'TimeBarrier'
-    holding_duration_seconds INT64
-)
-PARTITION BY DATE(exit_timestamp)
-CLUSTER BY symbol, strategy_id;
-```
+Every execution mode records the same run-centric contract through the `RunRecorder` port (`crates/adapters/src/analytics.rs`), keyed by `run_id` (UUID v7):
 
-### 4.2 Table: `atsnt_bi.equity_snapshots`
-Records periodic mark-to-market valuations and live drawdown from running engines:
-```sql
-CREATE TABLE IF NOT EXISTS `atsnt_bi.equity_snapshots` (
-    timestamp TIMESTAMP NOT NULL,
-    session_id STRING NOT NULL,
-    symbol STRING NOT NULL,
-    cash_equity NUMERIC NOT NULL,
-    unrealized_pnl NUMERIC NOT NULL,
-    total_equity NUMERIC NOT NULL,
-    drawdown_pct NUMERIC NOT NULL,
-    active_position_side STRING,         -- 'Long' | 'Short' | NULL
-    active_position_qty NUMERIC
-)
-PARTITION BY DATE(timestamp)
-CLUSTER BY session_id;
-```
+| Table | Grain | Written by |
+|-------|-------|------------|
+| `runs` | One row per run and status change (`running` → `completed` / `stopped` / `failed`); full spec: strategy params, sampling, execution context (fees, slippage, capital), data window, git sha, `parent_run_id` | all run types |
+| `run_metrics` | One row per run and scope (`full`, `is_fold_<n>`, `oos_fold_<n>`); trade metrics plus `extras` JSON (DSR, stability, ruin probability, MC percentiles) | all run types |
+| `trades` | One row per closed trade with MAE/MFE equity points and the deepest drawdown while open | `backtest`, `paper`, `live` |
+| `run_series` | Event points, never time-sampled: `equity` (entry/trough/peak/exit per trade) and `mc_equity` (8 representative Monte Carlo curves) | `backtest`, `monte_carlo`, `paper`, `live` |
 
-### 4.3 Table: `atsnt_bi.hpo_evaluations`
-Stores Walk-Forward Optimization parameter combinations and overfitting diagnostics:
-```sql
-CREATE TABLE IF NOT EXISTS `atsnt_bi.hpo_evaluations` (
-    run_id STRING NOT NULL,
-    timestamp TIMESTAMP NOT NULL,
-    strategy_id STRING NOT NULL,
-    parameter_space STRING NOT NULL,     -- JSON: {"dollar_threshold": 1000000, "z_entry": 1.8...}
-    is_sharpe NUMERIC NOT NULL,
-    oos_sharpe NUMERIC NOT NULL,
-    deflated_sharpe_ratio NUMERIC NOT NULL,
-    parameter_stability_score NUMERIC NOT NULL,
-    total_trades INT64 NOT NULL,
-    win_rate NUMERIC NOT NULL,
-    max_drawdown_pct NUMERIC NOT NULL
-)
-PARTITION BY DATE(timestamp)
-CLUSTER BY strategy_id;
-```
+Run types: `backtest`, `monte_carlo` (child of its backtest), `hpo`, `hpo_trial` (child of its sweep, metrics only), `paper`, `live`. Strategy parameters are stored as JSON, so adding a strategy needs no schema change.
 
-### 4.4 Table: `atsnt_bi.monte_carlo_runs`
-Stores aggregate stress-testing statistics from Circular Block Bootstrapping:
-```sql
-CREATE TABLE IF NOT EXISTS `atsnt_bi.monte_carlo_runs` (
-    run_id STRING NOT NULL,
-    timestamp TIMESTAMP NOT NULL,
-    strategy_id STRING NOT NULL,
-    iterations INT64 NOT NULL,
-    resample_method STRING NOT NULL,     -- 'CircularBlockBootstrap' | 'IID'
-    historical_max_drawdown NUMERIC NOT NULL,
-    p50_max_drawdown NUMERIC NOT NULL,
-    p95_max_drawdown NUMERIC NOT NULL,
-    p99_max_drawdown NUMERIC NOT NULL,
-    probability_of_ruin_pct NUMERIC NOT NULL
-)
-PARTITION BY DATE(timestamp)
-CLUSTER BY strategy_id;
-```
+### 4.1 Idempotency & Data Contract Principles
 
-### 4.5 Idempotency & Data Contract Principles
-To guarantee deterministic reproducibility, zero duplicate rows, and seamless BI filtering:
-1. **Streaming Deduplication (`insertId`)**: All BigQuery streaming inserts via `BigQuerySink::insert_rows` attach a unique `insertId` envelope for each row. BigQuery uses this key for automatic 1-minute deduplication on network retries.
-2. **Deterministic ID Taxonomy**:
-   - `session_id`:
-     - Backtest: `bt_<symbol>_<timestamp>`
-     - Paper Trading: `paper_<symbol>_<session_start_timestamp>`
-     - Live Gateway: `live_<symbol>_<session_start_timestamp>`
-   - `trade_id`:
-     - Backtest & Paper: `{session_id}_t{idx:05}` (e.g. `paper_btcusdt_1791544244_t00001`)
-     - Live Gateway: `{symbol}_{binance_order_id}_{trade_id}`
-3. **Analytical View Layer Idempotency**: All analytical reporting queries read through deduplicating views (`v_trades`, `v_live_paper_monitor`) using windowed `ROW_NUMBER() OVER (...) = 1` to guarantee absolute data consistency even across manual table reloads.
+1. **Append-only**: streaming inserts cannot be updated while in the streaming buffer, so lifecycle changes append rows and views keep the latest row per key.
+2. **Deduplicated reads**: `insertId` keys (`run_id+status`, `run_id+scope`, `trade_id`, series point key) plus `ROW_NUMBER()`/`DISTINCT` views make retries harmless.
+3. **Exact drawdown**: `MAX(trades.max_drawdown_pct)` per run equals the engine's mark-to-market max drawdown, without storing every bar.
+4. **Fixed-point values**: all monetary fields are `NUMERIC` serialized from `rust_decimal::Decimal`.
 
 ---
 
 ## 5. Google Cloud Storage (GCS) Hierarchy
 
-Heavy simulation curves and columnar market data are stored as Snappy-compressed Apache Parquet in the bucket `gs://atsnt-lake-${PROJECT_ID}`:
+GCS only stores the strategy deployment artifact uploaded by `run_hpo --gcs-upload`; analytics live in BigQuery.
 
 ```text
 gs://atsnt-lake-${PROJECT_ID}/
-├── simulations/
-│   └── monte_carlo_<run_id>.parquet       # Trajectories: run_id, label, step_index, equity
-├── hpo/
-│   └── hpo_results_<run_id>.json          # Full serialized winning parameter manifests
-├── backtests/
-│   └── backtest_<timestamp>.json          # Detailed backtest execution reports
-└── market_data/
-    └── <symbol>/
-        └── <symbol>-aggTrades-<YYYY-MM>.parquet
+└── artifacts/
+    └── <output-config file name>.json     # StrategyDeploymentArtifact (RunSpec + HPO scorecard)
 ```
 
 ---
@@ -249,53 +166,7 @@ If none of the above are configured or network access fails, the engine operates
 
 ## 7. Looker Studio BI Dashboard Specification
 
-Looker Studio connects directly to BigQuery using the standard Google connector.
-
-### Analytical SQL Views for Dashboards:
-
-1. **`v_trades`**:
-   Idempotent, deduplicated closed trade records with full price and duration metrics:
-   ```sql
-   CREATE OR REPLACE VIEW `atsnt_bi.v_trades` AS
-   SELECT * EXCEPT(row_num)
-   FROM (
-       SELECT
-           *,
-           ROW_NUMBER() OVER(PARTITION BY trade_id ORDER BY exit_timestamp DESC) AS row_num
-       FROM `atsnt_bi.trades`
-   )
-   WHERE row_num = 1;
-   ```
-
-2. **`v_live_paper_monitor`**:
-   Returns the latest mark-to-market state of each active paper/live trading session:
-   ```sql
-   CREATE OR REPLACE VIEW `atsnt_bi.v_live_paper_monitor` AS
-   SELECT * EXCEPT(row_num)
-   FROM (
-       SELECT
-           timestamp,
-           session_id,
-           symbol,
-           cash_equity,
-           unrealized_pnl,
-           total_equity,
-           drawdown_pct,
-           active_position_side,
-           active_position_qty,
-           ROW_NUMBER() OVER(PARTITION BY session_id ORDER BY timestamp DESC) AS row_num
-       FROM `atsnt_bi.equity_snapshots`
-   )
-   WHERE row_num = 1;
-   ```
-
-### 7.1 Multi-Dimensional Filtering in Looker Studio
-Every dashboard report in Looker Studio can incorporate interactive control dropdowns:
-- **Strategy Selector**: Dropdown on `strategy_id` (e.g. `DollarBarsCusum_v1`, `TrendFollowing_v1`).
-- **Session Filter**: Dropdown on `session_id` to compare individual live runs against historical backtests (`bt_...`, `paper_...`, `live_...`).
-- **Instrument Selector**: Dropdown on `symbol` (`BTCUSDT`, `ETHUSDT`).
-- **Date Range Picker**: Native calendar control bound to `exit_timestamp`.
-- **Optimization Surface Explorer**: Multi-metric scatter plot on `hpo_evaluations` filtered by `strategy_id` and sorted by `deflated_sharpe_ratio`.
+Looker Studio reads only the views defined in `bigquery_schema.sql`: `v_runs` (latest run row + `full` metrics + flattened spec fields), `v_run_metrics`, `v_trades`, `v_series`, `v_equity` (event-based equity with running peak and drawdown) and `v_latest_equity` (paper/live monitor). The report layout is specified in [11-looker-studio-bi-spec.md](11-looker-studio-bi-spec.md).
 
 ---
 
@@ -311,14 +182,13 @@ export GCP_REGION="europe-southwest1" # Madrid
 
 ### Step 2: Run Local Simulations with Cloud Export
 ```bash
-# 1. Backtest & Monte Carlo with BigQuery & GCS export:
+# 1. Backtest & Monte Carlo recorded as runs (Monte Carlo is a child run):
 cargo run -p backtest -- \
   --data data/historical/BTCUSDT/BTCUSDT-aggTrades-2024-01-01.parquet \
   --monte-carlo \
-  --gcp-bigquery \
-  --gcs-parquet
+  --gcp-bigquery
 
-# 2. Walk-Forward HPO with parameter surface streaming:
+# 2. Walk-Forward HPO recorded as an hpo run with one hpo_trial run per candidate:
 cargo run -p backtest --bin run_hpo -- \
   --data data/historical/BTCUSDT/BTCUSDT-aggTrades-2024-01-01.parquet \
   --gcp-bigquery
@@ -358,7 +228,7 @@ Multi-line ASCII boxes have been eliminated in favor of concise, single-line clo
 ```text
 # [GCP :: BigQuery] Streamed 1 row(s) -> mi-facturador-bot-01:atsnt_bi.trades
 # [GCP :: Secret Manager] Secret 'BOT_TOKEN' resolved from project 'mi-facturador-bot-01'
-# [GCP :: Cloud Storage] File uploaded -> gs://atsnt-lake/simulations/monte_carlo_1791544244.parquet
+# [GCP :: Cloud Storage] File uploaded -> gs://atsnt-lake/artifacts/hpo_btcusdt_2026.json
 ```
 
 ### 9.4 Real-Time & Executive Telegram Notifications

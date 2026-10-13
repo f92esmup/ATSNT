@@ -32,8 +32,7 @@ pub use binance_ws::{BinanceAggTradePayload, BinanceWebSocketStream, BinanceWsCo
 pub use error::AdapterError;
 pub use gcp::{
     datetime_in_madrid, format_unix_ms_rfc3339, now_in_madrid, BigQueryRecord, BigQuerySink,
-    EquitySnapshotRow, GcpSecretManager, GcsParquetSink, HpoEvaluationRow, MonteCarloRow,
-    TelegramNotifier, TradeRow,
+    GcpSecretManager, GcsArtifactSink, TelegramNotifier,
 };
 pub use traits::{AlertNotifier, AsyncMarketDataStream, MarketDataStream};
 

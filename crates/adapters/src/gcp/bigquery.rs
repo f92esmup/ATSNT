@@ -1,11 +1,10 @@
 //! Google Cloud BigQuery Streaming Ingestion Adapter for ATSNT.
 //!
-//! Provides direct, serverless streaming writes to BigQuery tables (`trades`, `equity_snapshots`,
-//! `hpo_evaluations`, `monte_carlo_runs`) so that Looker Studio can display real-time analytics
-//! and historical metrics with zero frontend code.
+//! Implements the [`RunRecorder`] port with streaming writes to the run-centric
+//! analytics tables (`runs`, `run_metrics`, `trades`, `run_series`) that Looker
+//! Studio reads through the `v_*` views (see `scripts/gcp/bigquery_schema.sql`).
 
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use tracing::{info, warn};
 
@@ -13,100 +12,11 @@ use super::auth::GcpAuthResolver;
 use crate::analytics::{RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow};
 use crate::error::AdapterError;
 
-/// Individual closed trade audit record for BigQuery `trades` table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TradeRow {
-    pub trade_id: String,
-    pub session_id: String,
-    pub strategy_id: String,
-    pub symbol: String,
-    pub side: String,
-    pub entry_timestamp: String,
-    pub exit_timestamp: String,
-    pub entry_price: Decimal,
-    pub exit_price: Decimal,
-    pub quantity: Decimal,
-    pub gross_pnl: Decimal,
-    pub fees_paid: Decimal,
-    pub net_pnl: Decimal,
-    pub exit_reason: String,
-    pub holding_duration_seconds: i64,
-}
-
-/// Periodic mark-to-market account valuation for BigQuery `equity_snapshots` table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EquitySnapshotRow {
-    pub timestamp: String,
-    pub session_id: String,
-    pub symbol: String,
-    pub cash_equity: Decimal,
-    pub unrealized_pnl: Decimal,
-    pub total_equity: Decimal,
-    pub drawdown_pct: Decimal,
-    pub active_position_side: Option<String>,
-    pub active_position_qty: Option<Decimal>,
-}
-
-/// Parameter optimization evaluation record for BigQuery `hpo_evaluations` table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HpoEvaluationRow {
-    pub run_id: String,
-    pub timestamp: String,
-    pub strategy_id: String,
-    pub parameter_space: String,
-    pub is_sharpe: Decimal,
-    pub oos_sharpe: Decimal,
-    pub deflated_sharpe_ratio: Decimal,
-    pub parameter_stability_score: Decimal,
-    pub total_trades: u64,
-    pub win_rate: Decimal,
-    pub max_drawdown_pct: Decimal,
-}
-
-/// Statistical risk summary for BigQuery `monte_carlo_runs` table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MonteCarloRow {
-    pub run_id: String,
-    pub timestamp: String,
-    pub strategy_id: String,
-    pub iterations: u64,
-    pub resample_method: String,
-    pub historical_max_drawdown: Decimal,
-    pub p50_max_drawdown: Decimal,
-    pub p95_max_drawdown: Decimal,
-    pub p99_max_drawdown: Decimal,
-    pub probability_of_ruin_pct: Decimal,
-}
-
 /// Trait representing rows destined for BigQuery streaming tables, providing deduplication keys.
 pub trait BigQueryRecord: Serialize {
     /// Unique identifier attached as `insertId` in `tabledata.insertAll` for ingestion idempotency.
     fn insert_id(&self) -> Option<String> {
         None
-    }
-}
-
-impl BigQueryRecord for TradeRow {
-    fn insert_id(&self) -> Option<String> {
-        Some(self.trade_id.clone())
-    }
-}
-
-impl BigQueryRecord for EquitySnapshotRow {
-    fn insert_id(&self) -> Option<String> {
-        Some(format!("{}_{}", self.session_id, self.timestamp))
-    }
-}
-
-impl BigQueryRecord for HpoEvaluationRow {
-    fn insert_id(&self) -> Option<String> {
-        Some(format!("{}_{}", self.run_id, self.timestamp))
-    }
-}
-
-impl BigQueryRecord for MonteCarloRow {
-    fn insert_id(&self) -> Option<String> {
-        Some(format!("{}_{}", self.run_id, self.strategy_id))
     }
 }
 
@@ -156,6 +66,9 @@ pub struct BigQuerySink {
     project_id: Option<String>,
     dataset_id: String,
     auth_token: Option<String>,
+    /// Whether missing credentials may be resolved from the environment
+    /// (metadata server, gcloud CLI). `false` keeps the sink fully offline.
+    ambient_auth: bool,
 }
 
 impl BigQuerySink {
@@ -169,6 +82,17 @@ impl BigQuerySink {
             project_id,
             dataset_id,
             auth_token,
+            ambient_auth: true,
+        }
+    }
+
+    /// Sink that never resolves ambient credentials and therefore never
+    /// reaches the network unless explicit credentials are provided. Used by
+    /// tests and offline runs.
+    pub fn offline(dataset_id: impl Into<String>) -> Self {
+        Self {
+            ambient_auth: false,
+            ..Self::new(None, dataset_id.into(), None)
         }
     }
 
@@ -202,11 +126,13 @@ impl BigQuerySink {
 
         let project_id = match &self.project_id {
             Some(p) => Some(p.clone()),
-            None => GcpAuthResolver::resolve_project_id(&self.client).await,
+            None if self.ambient_auth => GcpAuthResolver::resolve_project_id(&self.client).await,
+            None => None,
         };
         let token = match &self.auth_token {
             Some(t) => Some(t.clone()),
-            None => GcpAuthResolver::resolve_token(&self.client).await,
+            None if self.ambient_auth => GcpAuthResolver::resolve_token(&self.client).await,
+            None => None,
         };
 
         let (Some(project_id), Some(token)) = (project_id, token) else {
@@ -356,36 +282,6 @@ impl BigQuerySink {
 
         Ok(())
     }
-
-    /// Convenience wrapper for inserting trade audit records.
-    pub async fn insert_trades(&self, rows: &[TradeRow]) -> Result<(), AdapterError> {
-        self.insert_rows("trades", rows).await
-    }
-
-    /// Convenience wrapper for inserting equity snapshots.
-    pub async fn insert_equity_snapshots(
-        &self,
-        rows: &[EquitySnapshotRow],
-    ) -> Result<(), AdapterError> {
-        self.insert_rows("equity_snapshots", rows).await
-    }
-
-    /// Convenience wrapper for inserting HPO parameter evaluations.
-    pub async fn insert_hpo_evaluations(
-        &self,
-        rows: &[HpoEvaluationRow],
-    ) -> Result<(), AdapterError> {
-        self.insert_rows("hpo_evaluations", rows).await
-    }
-
-    /// Convenience wrapper for inserting Monte Carlo summary metrics.
-    /// Convenience wrapper for inserting Monte Carlo summary metrics.
-    pub async fn insert_monte_carlo_runs(
-        &self,
-        rows: &[MonteCarloRow],
-    ) -> Result<(), AdapterError> {
-        self.insert_rows("monte_carlo_runs", rows).await
-    }
 }
 
 impl RunRecorder for BigQuerySink {
@@ -425,8 +321,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_sink_records_runs_without_error() {
-        let sink = BigQuerySink::new(None, "atsnt_bi".into(), None);
+    async fn offline_sink_skips_inserts_without_resolving_credentials() {
+        let sink = BigQuerySink::offline("atsnt_bi");
+        assert!(!sink.is_enabled());
         let metrics = RunMetricsRow::extras_only("r1", "monte_carlo", "full", "t", "{}");
         assert!(sink.record_metrics(&[metrics]).await.is_ok());
         assert!(sink
@@ -444,51 +341,5 @@ mod tests {
         ];
         assert_ne!(ids[0], ids[1]);
         assert_ne!(ids[0], ids[2]);
-    }
-
-    #[tokio::test]
-    async fn disabled_bigquery_sink_succeeds_without_panic() {
-        let sink = BigQuerySink::new(None, "atsnt_bi".into(), None);
-        assert!(!sink.is_enabled());
-
-        let trade = TradeRow {
-            trade_id: "trade_1".into(),
-            session_id: "sess_1".into(),
-            strategy_id: "dollar_bars_cusum".into(),
-            symbol: "btcusdt".into(),
-            side: "Buy".into(),
-            entry_timestamp: "2026-10-08T12:00:00Z".into(),
-            exit_timestamp: "2026-10-08T12:15:00Z".into(),
-            entry_price: dec!(65000),
-            exit_price: dec!(66000),
-            quantity: dec!(0.5),
-            gross_pnl: dec!(500),
-            fees_paid: dec!(10),
-            net_pnl: dec!(490),
-            exit_reason: "TakeProfit".into(),
-            holding_duration_seconds: 900,
-        };
-
-        assert!(sink.insert_trades(&[trade]).await.is_ok());
-    }
-
-    #[test]
-    fn row_serialization_produces_valid_json() {
-        let snapshot = EquitySnapshotRow {
-            timestamp: "2026-10-08T12:00:00Z".into(),
-            session_id: "sess_1".into(),
-            symbol: "btcusdt".into(),
-            cash_equity: dec!(10000),
-            unrealized_pnl: dec!(150),
-            total_equity: dec!(10150),
-            drawdown_pct: dec!(0.02),
-            active_position_side: Some("Long".into()),
-            active_position_qty: Some(dec!(0.2)),
-        };
-
-        let json_val = serde_json::to_value(&snapshot).unwrap();
-        assert_eq!(json_val["symbol"], "btcusdt");
-        assert_eq!(json_val["cash_equity"], "10000");
-        assert_eq!(json_val["active_position_side"], "Long");
     }
 }

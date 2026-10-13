@@ -25,7 +25,6 @@ ATSNT/
 │   └── backtest/     # 1:1 Event Simulator, Walk-Forward Splitter, Rayon HPO Engine, Monte Carlo, Real-Time Paper Trading
 ├── data/             # Historical market data (CSV samples & compressed Parquet archives)
 ├── configs/          # Serialized strategy parameters and winning HPO artifacts
-├── storage/reports/  # Machine-readable JSON telemetry reports (Backtests, HPO sweeps, Monte Carlo fan charts)
 └── docs/             # Mathematical specifications and architecture guides
 ```
 
@@ -100,8 +99,7 @@ tail -f pipeline_btcusdt_2026.log
 | `-i, --mc-iterations <N>`| Monte Carlo bootstrap resample paths | `10000` |
 | `-o, --output-dir <DIR>` | Parquet destination root directory | `data/historical_<YEAR>` |
 | `--config <PATH>` | Output/input path for winning HPO JSON | `configs/hpo_<sym>_<year>.json` |
-| `--report <PATH>` | Output path for Monte Carlo JSON report | `storage/reports/monte_carlo_<sym>_<year>.json` |
-| `--gcp-bigquery` | Stream evaluation rows & trades to BigQuery | `false` |
+| `--gcp-bigquery` | Record HPO, backtest and Monte Carlo runs to BigQuery | `false` |
 | `--skip-fetch` | Skip ETL download (use existing cached Parquet) | `false` |
 | `--skip-hpo` | Skip HPO (replay backtest with existing config) | `false` |
 | `--no-inhibit` | Disable automatic `systemd-inhibit` wrapper | `false` |
@@ -151,7 +149,7 @@ cargo run -p backtest -- --data data/historical/BTCUSDT/BTCUSDT-aggTrades-2024-0
 - Performs **Circular Block Bootstrap (CBB)** resampling over realized trades.
 - Computes drawdown percentiles ($p_1, p_5, p_{25}, p_{50}, p_{75}, p_{95}, p_{99}$, worst case).
 - Calculates Probability of Ruin ($P_{\text{ruin}}$) for critical account drawdowns (e.g. 30%).
-- Exports a 50-curve **Fan Chart** to `storage/reports/` and supports exporting 10,000+ compressed trajectory paths to GCS Parquet (`--gcs-parquet`).
+- With `--gcp-bigquery`, records the backtest run (spec, metrics, trades, event-based equity) and the Monte Carlo child run (percentiles, ruin probability and 8 representative fan-chart curves) to BigQuery.
 
 ---
 
@@ -170,7 +168,7 @@ cargo run -p backtest --bin run_hpo -- \
 - **Embargo Buffering**: Quarantines bars between train and test windows to prevent indicator lookahead leakage.
 - **Plateau Stability Score**: Evaluates parameter neighborhoods ($\pm \delta$) and penalizes fragile overfitting spikes.
 - **Deflated Sharpe Ratio (DSR)**: Assesses statistical significance ($p < 0.05$) adjusted for trial count.
-- **Automated Serialization**: Saves the winning configuration to `configs/hpo_results.json` and full audit telemetry to `storage/reports/hpo_run_<timestamp>.json`.
+- **Automated Serialization**: Saves the winning Strategy Deployment Artifact to `configs/hpo_results.json` (`--gcs-upload` also uploads it to GCS). With `--gcp-bigquery`, records an `hpo` run plus one `hpo_trial` run per candidate with in-sample/out-of-sample metrics for every fold. `--execution-context <json>` sets the fee/slippage/capital schedule used by every trial.
 
 ---
 
@@ -205,8 +203,8 @@ cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --config co
 - Matches simulated orders with realistic maker/taker fees and slippage.
 - Computes real-time *mark-to-market* unrealized PnL and drawdown tracking.
 - Implements Triple Barrier exits (Stop Loss, Take Profit, Time Barrier).
-- Streams real-time trading events, closed trades, and periodic equity snapshots to BigQuery (`--gcp-bigquery`) and sends instant push alerts to Telegram (`--telegram-alerts`).
-- Graceful shutdown on `Ctrl+C`: liquidates open position at current mark price, compiles full quantitative performance attribution (Sharpe/Sortino, Win Rate, Profit Factor), and persists audit JSON to `storage/reports/paper_trading_<timestamp>.json`.
+- Records the session as a `paper` run in BigQuery (`--gcp-bigquery`): lifecycle rows, each closed trade with its entry/trough/peak/exit equity, and final metrics; sends instant push alerts to Telegram (`--telegram-alerts`).
+- Graceful shutdown on `Ctrl+C`: liquidates open position at current mark price, compiles full quantitative performance attribution (Sortino, Win Rate, Profit Factor), and records the final `stopped` run row with its metrics when `--gcp-bigquery` is enabled.
 
 ---
 
@@ -222,20 +220,19 @@ cargo run -p backtest --bin paper_trading -- \
   --gcp-bigquery \
   --telegram-alerts
 
-# 2. Run HPO and stream parameter evaluations to BigQuery
+# 2. Run HPO and record the sweep and its trials to BigQuery
 cargo run -p backtest --bin run_hpo -- \
   --data data/historical/BTCUSDT/BTCUSDT-aggTrades-2024-01-01.parquet \
   --candidates 60 \
   --gcp-bigquery
 
-# 3. Run backtest with Monte Carlo and export Parquet trajectories to GCS
+# 3. Run backtest with Monte Carlo and record both runs to BigQuery
 cargo run -p backtest -- \
   --monte-carlo \
   --mc-iterations 10000 \
-  --gcp-bigquery \
-  --gcs-parquet
+  --gcp-bigquery
 ```
-- **Looker Studio**: Connects natively to BigQuery dataset `atsnt_bi` (`trades`, `equity_snapshots`, `hpo_evaluations`, `monte_carlo_runs`) for zero-code, read-only BI dashboards.
+- **Looker Studio**: Reads the run-centric views in BigQuery dataset `atsnt_bi` (`v_runs`, `v_run_metrics`, `v_trades`, `v_equity`, `v_latest_equity`); see `docs/architecture/11-looker-studio-bi-spec.md`.
 - **Telegram Bot Webhook**: Dispatches instant push notifications (<200ms) for position entries, exits, stop loss triggers, and circuit breakers.
 - **Fail-Open / Offline Safe**: If GCP/Telegram environment variables (`GCP_PROJECT_ID`, `TELEGRAM_BOT_TOKEN`, etc.) are omitted, sinks safely log information and continue without interruption.
 

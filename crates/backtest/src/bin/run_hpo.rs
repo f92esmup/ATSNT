@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use adapters::{
-    BigQuerySink, BinanceCsvReader, BinanceParquetReader, GcsParquetSink, MarketDataStream,
+    BigQuerySink, BinanceCsvReader, BinanceParquetReader, GcsArtifactSink, MarketDataStream,
 };
 use anyhow::{Context, Result};
 use backtest::{
@@ -374,7 +374,7 @@ async fn main() -> Result<()> {
         println!("        • Sampling:     DollarBar(${})", args.dollar_bar);
 
         if args.gcs_upload {
-            let gcs = GcsParquetSink::from_env("storage/reports");
+            let gcs = GcsArtifactSink::from_env();
             let artifact_dest_name = args
                 .output_config
                 .file_name()
