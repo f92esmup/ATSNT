@@ -27,7 +27,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] Parameter Stability Plateau scoring (anti-overfitting).
 - [x] Deflated Sharpe Ratio (DSR) statistical significance testing.
 - [x] Discrete Event Monte Carlo Stress-Testing (Trade bootstrapping, Ruin probability, Drawdown percentiles).
-- [x] Automated JSON persistence for HPO results, Backtest manifests, and audit telemetry (`storage/reports/`).
+- [x] Automated JSON persistence for HPO results, Backtest manifests, and audit telemetry (`storage/reports/`; superseded by the run-centric BigQuery model).
 - [x] Automated end-to-end production staging pipeline (`scripts/run_production_pipeline.sh`) with native YTD ETL and `systemd-inhibit` sleep locking.
 
 ---
@@ -71,6 +71,17 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] **De-risking & Zero-Trust**: In-process web servers are retired to ensure the trading engine runs headless, air-gapped in private VPC networks without public open ports.
 - [x] **Reporting & Business Intelligence**: Post-trade auditing, Monte Carlo trajectories, and HPO parameter evaluations stream to BigQuery / GCS Parquet for visualization via Looker Studio (zero-code frontend maintenance).
 - [x] **Proactive Mobile Alerts**: Execution fills, risk threshold breaches, and circuit breakers trigger outbound webhooks (Telegram/Discord) directly to operators' devices.
+
+---
+
+### Run-Centric Analytics Data Model
+*(Feature log: [`odd/tasks/data-model-refactor.md`](../odd/tasks/data-model-refactor.md); schema: [`scripts/gcp/bigquery_schema.sql`](../scripts/gcp/bigquery_schema.sql))*
+- [x] Common `RunSpec` contract (strategy params as JSON, sampling, execution context) shared by backtest, HPO, Monte Carlo, paper and live runs, keyed by UUID v7 `run_id` with parent/child lineage.
+- [x] BigQuery tables `runs`, `run_metrics`, `trades`, `run_series` with latest-row views; legacy `equity_snapshots`, `hpo_evaluations`, `monte_carlo_runs` dropped.
+- [x] Event-based equity (entry/trough/peak/exit per trade with MAE/MFE) replacing time-sampled snapshots; per-trade drawdown reproduces the engine max drawdown exactly.
+- [x] Local JSON reports and GCS Parquet exports removed; GCS keeps only deployment artifacts.
+- [ ] Looker Studio report built from [`docs/architecture/11-looker-studio-bi-spec.md`](architecture/11-looker-studio-bi-spec.md).
+- [ ] Technical debt: model perpetual futures funding payments as cash-flow events.
 
 ---
 
