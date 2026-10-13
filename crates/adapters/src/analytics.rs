@@ -20,6 +20,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AdapterError;
 
+/// Serializers rounding decimals to BigQuery `NUMERIC` scale (9 fractional
+/// digits); BigQuery rejects rows carrying more digits.
+mod bq_numeric {
+    use rust_decimal::Decimal;
+    use serde::Serializer;
+
+    const SCALE: u32 = 9;
+
+    pub fn value<S: Serializer>(v: &Decimal, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.round_dp(SCALE).normalize().to_string())
+    }
+
+    pub fn option<S: Serializer>(v: &Option<Decimal>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(d) => value(d, s),
+            None => s.serialize_none(),
+        }
+    }
+}
+
 /// Lifecycle record of a run (`runs` table).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRow {
@@ -60,21 +80,37 @@ pub struct RunMetricsRow {
     pub total_trades: Option<i64>,
     pub winning_trades: Option<i64>,
     pub losing_trades: Option<i64>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub win_rate: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub gross_profit: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub gross_loss: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub net_profit: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub total_fees: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub total_slippage: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub profit_factor: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub payoff_ratio: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub mathematical_expectancy: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub max_drawdown_amount: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub max_drawdown_pct: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub sortino_ratio: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub fee_drag_pct: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub avg_holding_seconds: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub avg_mae_pct: Option<Decimal>,
+    #[serde(serialize_with = "bq_numeric::option")]
     pub avg_mfe_pct: Option<Decimal>,
     /// JSON object: exit reason -> trade count.
     pub exit_reason_counts: Option<String>,
@@ -133,23 +169,37 @@ pub struct RunTradeRow {
     pub side: String,
     pub entry_timestamp: String,
     pub exit_timestamp: String,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub entry_price: Decimal,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub exit_price: Decimal,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub quantity: Decimal,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub gross_pnl: Decimal,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub fees_paid: Decimal,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub slippage_paid: Decimal,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub net_pnl: Decimal,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub return_pct: Decimal,
     pub exit_reason: String,
     pub holding_duration_seconds: i64,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub entry_equity: Decimal,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub trough_equity: Decimal,
     pub trough_timestamp: String,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub peak_equity: Decimal,
     pub peak_timestamp: String,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub exit_equity: Decimal,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub max_drawdown_amount: Decimal,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub max_drawdown_pct: Decimal,
 }
 
@@ -166,6 +216,7 @@ pub struct SeriesPointRow {
     pub ts: Option<String>,
     /// Ordinal index for non-temporal series (e.g. trade number in a fan chart).
     pub x: Option<i64>,
+    #[serde(serialize_with = "bq_numeric::value")]
     pub value: Decimal,
     pub trade_id: Option<String>,
 }
@@ -274,6 +325,29 @@ mod tests {
         assert_eq!(recorded.metrics, vec![metrics]);
         assert_eq!(recorded.series, vec![point]);
         assert!(recorded.runs.is_empty() && recorded.trades.is_empty());
+    }
+
+    #[test]
+    fn numeric_fields_serialize_within_bigquery_scale() {
+        let mut row = RunMetricsRow::extras_only("r1", "backtest", "full", "t", "{}");
+        row.fee_drag_pct = Some(Decimal::from_str_exact("0.1147980030689286271025803653").unwrap());
+        let point = SeriesPointRow {
+            run_id: "r1".into(),
+            run_type: "backtest".into(),
+            series: "equity".into(),
+            event: "entry".into(),
+            ts: None,
+            x: None,
+            value: Decimal::from_str_exact("9989.130841157723777327276313").unwrap(),
+            trade_id: None,
+        };
+
+        let metrics = serde_json::to_value(&row).unwrap();
+        let series = serde_json::to_value(&point).unwrap();
+
+        assert_eq!(metrics["fee_drag_pct"], "0.114798003");
+        assert_eq!(series["value"], "9989.130841158");
+        assert!(metrics["win_rate"].is_null());
     }
 
     #[test]
