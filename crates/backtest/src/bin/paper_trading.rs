@@ -4,24 +4,26 @@
 //! information-driven Dollar Bars, executes strategy signals against simulated liquidity
 //! and realistic friction via the [`PaperTradingSession`], and displays live execution telemetry.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use adapters::{
-    format_unix_ms_rfc3339, now_in_madrid, AlertNotifier, AsyncMarketDataStream, BigQuerySink,
-    BinanceWebSocketStream, BinanceWsConfig, EquitySnapshotRow, GcpSecretManager, TelegramNotifier,
-    TradeRow,
+    now_in_madrid, AlertNotifier, AsyncMarketDataStream, BigQuerySink, BinanceWebSocketStream,
+    BinanceWsConfig, GcpSecretManager, RunRecorder, TelegramNotifier,
 };
 use anyhow::{Context, Result};
-use backtest::{BacktestConfig, PaperTradingConfig, PaperTradingEvent, PaperTradingSession};
+use backtest::{
+    now_unix_ms, BacktestConfig, ClosedTrade, DataWindow, PaperTradingConfig, PaperTradingEvent,
+    PaperTradingSession, RunContext, RunSpec, RunStatus, RunType, SamplingConfig,
+};
 use chrono::Timelike;
 use clap::Parser;
 use domain::PositionSide;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde_json::json;
-use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType, Strategy};
+use strategies::{
+    DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType, OptimizableStrategy, Strategy,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -53,17 +55,7 @@ struct Args {
     #[arg(long, default_value = "0.01")]
     risk_pct: Decimal,
 
-    /// Save audit performance report JSON upon session termination
-    #[arg(
-        long,
-        default_value_t = true,
-        num_args = 0..=1,
-        default_missing_value = "true",
-        action = clap::ArgAction::Set
-    )]
-    save_report: bool,
-
-    /// Stream real-time equity snapshots and trades to Google Cloud BigQuery
+    /// Record the session run (lifecycle, closed trades with equity events, final metrics) to Google Cloud BigQuery
     #[arg(long, default_value_t = false)]
     gcp_bigquery: bool,
 
@@ -80,6 +72,7 @@ struct Args {
 async fn main() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let args = Args::parse();
+    let started_at_ms = now_unix_ms();
 
     // 1. Load Strategy Configuration & Authoritative Deployment Artifact
     let (strat_config, loaded_config) = if let Some(config_path) = &args.config {
@@ -186,7 +179,7 @@ async fn main() -> Result<()> {
         println!(
             " BigQuery Telemetry:   {}",
             if sink.is_enabled() {
-                "ACTIVE (Streaming to atsnt_bi)"
+                "ACTIVE (Recording run to atsnt_bi)"
             } else {
                 "ENABLED (Pending GCP_PROJECT_ID / GCP_AUTH_TOKEN)"
             }
@@ -273,31 +266,34 @@ async fn main() -> Result<()> {
         BinanceWsConfig::futures(&args.symbol)
     };
 
-    println!("[*] Connecting to WebSocket: {}", ws_config.stream_url());
+    let ws_source = ws_config.stream_url();
+    println!("[*] Connecting to WebSocket: {}", ws_source);
     let mut stream = BinanceWebSocketStream::connect(ws_config)
         .with_context(|| "Failed to connect to Binance WebSocket stream")?;
 
     println!("[*] Engine initialized. Awaiting market trades (Press Ctrl+C to terminate)...\n");
 
-    let session_start_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    let session_id = format!("paper_{}_{}", args.symbol.to_lowercase(), session_start_ts);
-    let mut trade_counter: u64 = 0;
+    let run_spec = RunSpec {
+        strategy_id: DollarBarsCusumStrategy::id().to_string(),
+        symbol: args.symbol.to_uppercase(),
+        market_type,
+        sampling: SamplingConfig::DollarBar {
+            threshold: effective_dollar_bar,
+        },
+        strategy_config: strat_config.clone(),
+        execution_context: backtest_config,
+    };
+    let run_ctx = RunContext::new(RunType::Paper, &run_spec, started_at_ms);
+    let mut data_window = DataWindow {
+        source: Some(ws_source),
+        ..DataWindow::default()
+    };
+    let mut trade_counter: usize = 0;
+    let mut end_status = RunStatus::Stopped;
 
     if let Some(bq) = &bq_sink {
-        let initial_snapshot = EquitySnapshotRow {
-            timestamp: format_unix_ms_rfc3339((session_start_ts * 1000) as i64),
-            session_id: session_id.clone(),
-            symbol: args.symbol.to_uppercase(),
-            cash_equity: session.cash_equity().round_dp(4),
-            unrealized_pnl: Decimal::ZERO,
-            total_equity: session.cash_equity().round_dp(4),
-            drawdown_pct: Decimal::ZERO,
-            active_position_side: None,
-            active_position_qty: None,
-        };
-        let _ = bq.insert_equity_snapshots(&[initial_snapshot]).await;
+        println!("[*] Recording paper run {} to BigQuery", run_ctx.run_id);
+        record_lifecycle(bq, &run_ctx, &run_spec, RunStatus::Running, &data_window).await;
     }
 
     let mut total_ticks: u64 = 0;
@@ -377,6 +373,8 @@ async fn main() -> Result<()> {
                     Ok(Some(trade)) => {
                         total_ticks += 1;
                         last_mark_price = trade.price;
+                        data_window.start_ms.get_or_insert(trade.timestamp);
+                        data_window.end_ms = Some(trade.timestamp);
 
                         if args.show_ticks {
                             println!(
@@ -429,27 +427,6 @@ async fn main() -> Result<()> {
                                         bar.close,
                                         bar.dollar_volume
                                     );
-                                    // Stream bar mark-to-market snapshot to BigQuery
-                                    if let Some(bq) = &bq_sink {
-                                        let current_eq = session.total_equity(bar.close);
-                                        let unr = session.active_position().map_or(Decimal::ZERO, |p| p.unrealized_pnl(bar.close));
-                                        let dd = session.engine().current_drawdown_pct();
-                                        let row = EquitySnapshotRow {
-                                            timestamp: format_unix_ms_rfc3339(bar.end_time),
-                                            session_id: session_id.clone(),
-                                            symbol: args.symbol.to_uppercase(),
-                                            cash_equity: session.cash_equity().round_dp(4),
-                                            unrealized_pnl: unr.round_dp(4),
-                                            total_equity: current_eq.round_dp(4),
-                                            drawdown_pct: dd.round_dp(4),
-                                            active_position_side: session.active_position().map(|p| match p.side {
-                                                PositionSide::Long => "Long".to_string(),
-                                                PositionSide::Short => "Short".to_string(),
-                                            }),
-                                            active_position_qty: session.active_position().map(|p| p.quantity.round_dp(4)),
-                                        };
-                                        let _ = bq.insert_equity_snapshots(&[row]).await;
-                                    }
                                 }
                                 PaperTradingEvent::SignalGenerated(intent) => {
                                     println!(
@@ -493,7 +470,7 @@ async fn main() -> Result<()> {
                                 }
                                 PaperTradingEvent::PositionClosed { exit_reason, exit_price, net_pnl, total_equity } => {
                                     let closed_trade_opt = session.engine().closed_trades().last().cloned();
-                                    let (side_str, entry_p, qty, entry_ts, gross_pnl, fees_paid, duration, ret_pct) = match &closed_trade_opt {
+                                    let (side_str, entry_p, qty, _entry_ts, gross_pnl, fees_paid, duration, ret_pct) = match &closed_trade_opt {
                                         Some(ct) => (
                                             match ct.side {
                                                 PositionSide::Long => "Long".to_string(),
@@ -566,26 +543,9 @@ async fn main() -> Result<()> {
                                         );
                                         let _ = t.send_alert(&msg).await;
                                     }
-                                    if let Some(bq) = &bq_sink {
+                                    if let (Some(bq), Some(ct)) = (&bq_sink, &closed_trade_opt) {
                                         trade_counter += 1;
-                                        let row = TradeRow {
-                                            trade_id: format!("{}_t{:05}", session_id, trade_counter),
-                                            session_id: session_id.clone(),
-                                            strategy_id: selected_strategy.name().to_string(),
-                                            symbol: args.symbol.to_uppercase(),
-                                            side: side_str,
-                                            entry_timestamp: format_unix_ms_rfc3339(entry_ts),
-                                            exit_timestamp: format_unix_ms_rfc3339(trade.timestamp),
-                                            entry_price: entry_p.round_dp(4),
-                                            exit_price: exit_price.round_dp(4),
-                                            quantity: qty.round_dp(4),
-                                            gross_pnl: gross_pnl.round_dp(4),
-                                            fees_paid: fees_paid.round_dp(4),
-                                            net_pnl: net_pnl.round_dp(4),
-                                            exit_reason: exit_reason.clone(),
-                                            holding_duration_seconds: duration,
-                                        };
-                                        let _ = bq.insert_trades(&[row]).await;
+                                        record_closed_trade(bq, &run_ctx, ct, trade_counter).await;
                                     }
                                 }
                                 PaperTradingEvent::MarkToMarket { current_price, unrealized_pnl, total_equity, drawdown_pct } => {
@@ -604,23 +564,6 @@ async fn main() -> Result<()> {
                                             total_equity,
                                             drawdown_pct * dec!(100)
                                         );
-                                        if let Some(bq) = &bq_sink {
-                                            let row = EquitySnapshotRow {
-                                                timestamp: format_unix_ms_rfc3339(trade.timestamp),
-                                                session_id: session_id.clone(),
-                                                symbol: args.symbol.to_uppercase(),
-                                                cash_equity: session.cash_equity().round_dp(4),
-                                                unrealized_pnl: unrealized_pnl.round_dp(4),
-                                                total_equity: total_equity.round_dp(4),
-                                                drawdown_pct: drawdown_pct.round_dp(4),
-                                                active_position_side: session.active_position().map(|p| match p.side {
-                                                    PositionSide::Long => "Long".to_string(),
-                                                    PositionSide::Short => "Short".to_string(),
-                                                }),
-                                                active_position_qty: session.active_position().map(|p| p.quantity.round_dp(4)),
-                                            };
-                                            let _ = bq.insert_equity_snapshots(&[row]).await;
-                                        }
                                     }
                                 }
                             }
@@ -632,6 +575,7 @@ async fn main() -> Result<()> {
                     }
                     Err(e) => {
                         eprintln!("\n[ERROR] Market data stream error: {e}");
+                        end_status = RunStatus::Failed;
                         break;
                     }
                 }
@@ -678,45 +622,19 @@ async fn main() -> Result<()> {
             }
             if let Some(bq) = &bq_sink {
                 trade_counter += 1;
-                let row = TradeRow {
-                    trade_id: format!("{}_t{:05}", session_id, trade_counter),
-                    session_id: session_id.clone(),
-                    strategy_id: selected_strategy.name().to_string(),
-                    symbol: args.symbol.to_uppercase(),
-                    side: side_str.to_string(),
-                    entry_timestamp: format_unix_ms_rfc3339(last_trade.entry_time),
-                    exit_timestamp: format_unix_ms_rfc3339(last_trade.exit_time),
-                    entry_price: last_trade.entry_price.round_dp(4),
-                    exit_price: last_trade.exit_price.round_dp(4),
-                    quantity: last_trade.quantity.round_dp(4),
-                    gross_pnl: last_trade.pnl_gross.round_dp(4),
-                    fees_paid: (last_trade.fees_paid + last_trade.slippage_paid).round_dp(4),
-                    net_pnl: last_trade.pnl_net.round_dp(4),
-                    exit_reason: last_trade.exit_reason.clone(),
-                    holding_duration_seconds: last_trade.holding_duration_seconds,
-                };
-                let _ = bq.insert_trades(&[row]).await;
+                record_closed_trade(bq, &run_ctx, last_trade, trade_counter).await;
             }
         }
     }
 
     if let Some(bq) = &bq_sink {
-        let final_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let final_snapshot = EquitySnapshotRow {
-            timestamp: format_unix_ms_rfc3339(final_ts),
-            session_id: session_id.clone(),
-            symbol: args.symbol.to_uppercase(),
-            cash_equity: args.capital + metrics.net_profit,
-            unrealized_pnl: Decimal::ZERO,
-            total_equity: args.capital + metrics.net_profit,
-            drawdown_pct: metrics.max_drawdown_pct,
-            active_position_side: None,
-            active_position_qty: None,
-        };
-        let _ = bq.insert_equity_snapshots(&[final_snapshot]).await;
+        record_lifecycle(bq, &run_ctx, &run_spec, end_status, &data_window).await;
+        if let Err(e) = bq
+            .record_metrics(&[run_ctx.metrics_row("full", &metrics, None)])
+            .await
+        {
+            println!("[WARN] Failed to record paper run metrics: {e}");
+        }
     }
 
     // 5. Display Quantitative Performance Report
@@ -766,38 +684,50 @@ async fn main() -> Result<()> {
     );
     println!("============================================================");
 
-    // 6. Save JSON Audit Telemetry Report
-    if args.save_report {
-        let reports_dir = Path::new("storage/reports");
-        fs::create_dir_all(reports_dir)?;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
-        let report_path = reports_dir.join(format!("paper_trading_{timestamp}.json"));
+    Ok(())
+}
 
-        let report = json!({
-            "timestamp": timestamp,
-            "symbol": args.symbol.to_uppercase(),
-            "stream_mode": if args.spot { "spot" } else { "futures" },
-            "dollar_bar_threshold": args.dollar_bar,
-            "initial_capital": args.capital,
-            "final_equity": args.capital + metrics.net_profit,
-            "raw_ticks_processed": total_ticks,
-            "dollar_bars_formed": total_bars,
-            "backtest_config": backtest_config,
-            "strategy_config": strat_config,
-            "metrics": metrics,
-            "closed_trades": closed_trades,
-        });
-
-        fs::write(&report_path, serde_json::to_string_pretty(&report)?)?;
+/// Appends a lifecycle row for the paper run; failures are logged, never fatal.
+async fn record_lifecycle<R: RunRecorder>(
+    recorder: &R,
+    ctx: &RunContext,
+    spec: &RunSpec<DollarBarsCusumConfig>,
+    status: RunStatus,
+    data: &DataWindow,
+) {
+    let finished_at = (status != RunStatus::Running).then(now_unix_ms);
+    let result = match ctx.run_row(spec, status, finished_at, data) {
+        Ok(row) => recorder.record_runs(&[row]).await,
+        Err(e) => Err(adapters::AdapterError::General(e.to_string())),
+    };
+    if let Err(e) = result {
         println!(
-            "[SAVED] Audit report successfully written to: {}",
-            report_path.display()
+            "[WARN] Failed to record paper run status {}: {e}",
+            status.as_str()
         );
     }
+}
 
-    Ok(())
+/// Records one closed trade and its four equity events; failures are logged, never fatal.
+async fn record_closed_trade<R: RunRecorder>(
+    recorder: &R,
+    ctx: &RunContext,
+    trade: &ClosedTrade,
+    number: usize,
+) {
+    let trades = std::slice::from_ref(trade);
+    if let Err(e) = recorder
+        .record_trades(&ctx.trade_rows(trades, number))
+        .await
+    {
+        println!("[WARN] Failed to record paper trade #{number}: {e}");
+    }
+    if let Err(e) = recorder
+        .record_series(&ctx.equity_points(trades, number))
+        .await
+    {
+        println!("[WARN] Failed to record equity events for trade #{number}: {e}");
+    }
 }
 
 fn validate_strategy_market(strategy: &impl Strategy, market_type: MarketType) -> Result<()> {
@@ -814,8 +744,79 @@ fn validate_strategy_market(strategy: &impl Strategy, market_type: MarketType) -
 
 #[cfg(test)]
 mod tests {
-    use super::validate_strategy_market;
+    use super::{record_closed_trade, record_lifecycle, validate_strategy_market};
+    use adapters::InMemoryRunRecorder;
+    use backtest::{
+        BacktestConfig, ClosedTrade, DataWindow, RunContext, RunSpec, RunStatus, RunType,
+        SamplingConfig, TradeExcursion,
+    };
+    use domain::PositionSide;
+    use rust_decimal_macros::dec;
     use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType};
+
+    fn spec() -> RunSpec<DollarBarsCusumConfig> {
+        RunSpec {
+            strategy_id: "dollar_bars_cusum".into(),
+            symbol: "BTCUSDT".into(),
+            market_type: MarketType::UsdMPerpetual,
+            sampling: SamplingConfig::DollarBar {
+                threshold: dec!(1_000_000),
+            },
+            strategy_config: DollarBarsCusumConfig::default(),
+            execution_context: BacktestConfig::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn paper_run_lifecycle_appends_running_then_final_status() {
+        let recorder = InMemoryRunRecorder::new();
+        let ctx = RunContext::new(RunType::Paper, &spec(), 0);
+        let data = DataWindow::default();
+
+        record_lifecycle(&recorder, &ctx, &spec(), RunStatus::Running, &data).await;
+        record_lifecycle(&recorder, &ctx, &spec(), RunStatus::Stopped, &data).await;
+
+        let runs = recorder.snapshot().runs;
+        assert_eq!(runs.len(), 2);
+        assert_eq!(
+            (runs[0].status.as_str(), runs[0].finished_at.is_none()),
+            ("running", true)
+        );
+        assert_eq!(
+            (runs[1].status.as_str(), runs[1].finished_at.is_some()),
+            ("stopped", true)
+        );
+        assert_eq!(runs[0].run_id, runs[1].run_id);
+    }
+
+    #[tokio::test]
+    async fn closed_trade_records_one_trade_and_four_equity_events() {
+        let recorder = InMemoryRunRecorder::new();
+        let ctx = RunContext::new(RunType::Paper, &spec(), 0);
+        let trade = ClosedTrade {
+            entry_time: 1_000,
+            exit_time: 5_000,
+            entry_price: dec!(100),
+            exit_price: dec!(101),
+            quantity: dec!(1),
+            side: PositionSide::Long,
+            pnl_gross: dec!(1),
+            fees_paid: dec!(0.1),
+            slippage_paid: dec!(0),
+            pnl_net: dec!(0.9),
+            return_pct: dec!(0.009),
+            exit_reason: "TakeProfit".into(),
+            holding_duration_seconds: 4,
+            excursion: TradeExcursion::start(1_000, dec!(10_000)),
+        };
+
+        record_closed_trade(&recorder, &ctx, &trade, 3).await;
+
+        let rec = recorder.snapshot();
+        assert_eq!(rec.trades.len(), 1);
+        assert!(rec.trades[0].trade_id.ends_with("_t00003"));
+        assert_eq!(rec.series.len(), 4);
+    }
 
     #[test]
     fn paper_runner_rejects_the_futures_only_strategy_for_spot() {
