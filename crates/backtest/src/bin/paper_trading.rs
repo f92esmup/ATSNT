@@ -695,12 +695,7 @@ async fn record_lifecycle<R: RunRecorder>(
     status: RunStatus,
     data: &DataWindow,
 ) {
-    let finished_at = (status != RunStatus::Running).then(now_unix_ms);
-    let result = match ctx.run_row(spec, status, finished_at, data) {
-        Ok(row) => recorder.record_runs(&[row]).await,
-        Err(e) => Err(adapters::AdapterError::General(e.to_string())),
-    };
-    if let Err(e) = result {
+    if let Err(e) = backtest::record_run_status(recorder, ctx, spec, status, data).await {
         println!(
             "[WARN] Failed to record paper run status {}: {e}",
             status.as_str()
@@ -715,18 +710,8 @@ async fn record_closed_trade<R: RunRecorder>(
     trade: &ClosedTrade,
     number: usize,
 ) {
-    let trades = std::slice::from_ref(trade);
-    if let Err(e) = recorder
-        .record_trades(&ctx.trade_rows(trades, number))
-        .await
-    {
+    if let Err(e) = backtest::record_closed_trade(recorder, ctx, trade, number).await {
         println!("[WARN] Failed to record paper trade #{number}: {e}");
-    }
-    if let Err(e) = recorder
-        .record_series(&ctx.equity_points(trades, number))
-        .await
-    {
-        println!("[WARN] Failed to record equity events for trade #{number}: {e}");
     }
 }
 

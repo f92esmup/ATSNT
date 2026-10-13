@@ -435,3 +435,36 @@ pub async fn record_hpo<R: RunRecorder, S: Serialize, C: Serialize + Clone>(
     recorder.record_metrics(&metrics).await?;
     Ok(winner)
 }
+
+/// Appends a lifecycle row for a long-running session (paper/live).
+/// `finished_at` is set for every status other than `Running`.
+pub async fn record_run_status<R: RunRecorder, C: Serialize>(
+    recorder: &R,
+    ctx: &RunContext,
+    spec: &RunSpec<C>,
+    status: RunStatus,
+    data: &DataWindow,
+) -> Result<(), AdapterError> {
+    let finished_at = (status != RunStatus::Running).then(now_unix_ms);
+    let row = ctx
+        .run_row(spec, status, finished_at, data)
+        .map_err(serialization_error)?;
+    recorder.record_runs(&[row]).await
+}
+
+/// Records one closed trade (1-based `number` within the run) and its four
+/// equity events.
+pub async fn record_closed_trade<R: RunRecorder>(
+    recorder: &R,
+    ctx: &RunContext,
+    trade: &ClosedTrade,
+    number: usize,
+) -> Result<(), AdapterError> {
+    let trades = std::slice::from_ref(trade);
+    recorder
+        .record_trades(&ctx.trade_rows(trades, number))
+        .await?;
+    recorder
+        .record_series(&ctx.equity_points(trades, number))
+        .await
+}

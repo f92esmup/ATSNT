@@ -31,8 +31,8 @@ pub use paper::{
     PaperTradingSession, TelemetryConfig, TelemetryEnvelope,
 };
 pub use recording::{
-    now_unix_ms, record_backtest, record_hpo, record_monte_carlo, DataWindow, RunContext,
-    RunStatus, GIT_SHA,
+    now_unix_ms, record_backtest, record_closed_trade, record_hpo, record_monte_carlo,
+    record_run_status, DataWindow, RunContext, RunStatus, GIT_SHA,
 };
 pub use run::{RunId, RunSpec, RunType};
 pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};

@@ -10,18 +10,24 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use adapters::{
-    format_unix_ms_rfc3339, now_in_madrid, AlertNotifier, AsyncMarketDataStream, BigQuerySink,
-    BinanceGateway, BinanceGatewayConfig, BinancePrivateEvent, BinancePrivateUserDataStream,
-    BinanceWebSocketStream, BinanceWsConfig, EquitySnapshotRow, GcpSecretManager, TelegramNotifier,
-    TradeRow,
+    now_in_madrid, AlertNotifier, AsyncMarketDataStream, BigQuerySink, BinanceGateway,
+    BinanceGatewayConfig, BinancePrivateEvent, BinancePrivateUserDataStream,
+    BinanceWebSocketStream, BinanceWsConfig, GcpSecretManager, RunRecorder, TelegramNotifier,
 };
 use anyhow::{Context, Result};
+use backtest::{
+    now_unix_ms, record_closed_trade, record_run_status, BacktestConfig, BacktestMetrics,
+    ClosedTrade, DataWindow, RunContext, RunSpec, RunStatus, RunType, SamplingConfig,
+    TradeExcursion,
+};
 use chrono::Timelike;
 use clap::Parser;
-use domain::{DollarBarAggregator, OrderIntent, RiskPolicy, Side};
+use domain::{DollarBarAggregator, OrderIntent, PositionSide, RiskPolicy, Side};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType, Strategy};
+use strategies::{
+    DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType, OptimizableStrategy, Strategy,
+};
 use tracing::{error, warn};
 
 #[derive(Parser, Debug)]
@@ -54,7 +60,7 @@ struct Args {
     #[arg(long, default_value = "0.01")]
     risk_pct: Decimal,
 
-    /// Stream real-time equity snapshots and trades to Google Cloud BigQuery
+    /// Record the session run (lifecycle, closed trades with equity events, final metrics) to Google Cloud BigQuery
     #[arg(long, default_value_t = false)]
     gcp_bigquery: bool,
 
@@ -100,6 +106,7 @@ async fn main() -> Result<()> {
     adapters::load_dotenv();
 
     let args = Args::parse();
+    let started_at_ms = now_unix_ms();
     let is_testnet = if args.production { false } else { args.testnet };
     let symbol_upper = args.symbol.to_ascii_uppercase();
 
@@ -251,7 +258,7 @@ async fn main() -> Result<()> {
         println!(
             " BigQuery Telemetry:   {}",
             if sink.is_enabled() {
-                "ACTIVE (Streaming to atsnt_bi)"
+                "ACTIVE (Recording run to atsnt_bi)"
             } else {
                 "ENABLED (Pending GCP_PROJECT_ID / GCP_AUTH_TOKEN)"
             }
@@ -328,13 +335,41 @@ async fn main() -> Result<()> {
         args.symbol.to_ascii_lowercase()
     );
     let ws_config = BinanceWsConfig::futures(&args.symbol);
+    let ws_source = ws_config.stream_url();
     let mut market_stream = BinanceWebSocketStream::connect(ws_config)
         .with_context(|| "Failed to connect to public Binance WebSocket feed")?;
 
-    let session_start_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    let session_id = format!("live_{}_{}", args.symbol.to_lowercase(), session_start_ts);
+    let artifact_context = loaded_config
+        .as_ref()
+        .and_then(|c| c.execution_context())
+        .copied()
+        .unwrap_or_default();
+    let run_spec = RunSpec {
+        strategy_id: DollarBarsCusumStrategy::id().to_string(),
+        symbol: symbol_upper.clone(),
+        market_type: MarketType::UsdMPerpetual,
+        sampling: SamplingConfig::DollarBar {
+            threshold: effective_dollar_bar,
+        },
+        strategy_config: strat_config.clone(),
+        execution_context: BacktestConfig {
+            initial_capital: initial_balance,
+            taker_fee_pct: estimated_taker_fee_pct,
+            risk_per_trade_pct: args.risk_pct,
+            ..artifact_context
+        },
+    };
+    let run_ctx = RunContext::new(RunType::Live, &run_spec, started_at_ms);
+    let mut data_window = DataWindow {
+        source: Some(ws_source),
+        ..DataWindow::default()
+    };
+    let mut excursion_tracker = LiveExcursionTracker::new(initial_balance);
+    let mut closed_trades: Vec<ClosedTrade> = Vec::new();
+    if let Some(bq) = &bq_sink {
+        println!("[*] Recording live run {} to BigQuery", run_ctx.run_id);
+        record_lifecycle(bq, &run_ctx, &run_spec, RunStatus::Running, &data_window).await;
+    }
 
     let mut aggregator = DollarBarAggregator::new(effective_dollar_bar)?;
     let mut peak_equity = initial_balance;
@@ -456,6 +491,7 @@ async fn main() -> Result<()> {
                                     update.transaction_time_ms,
                                 ));
                                 position_open = true;
+                                excursion_tracker.open(update.transaction_time_ms as i64, current_equity);
 
                                 if let Some(t) = &telegram {
                                     let side_str = match update.side {
@@ -532,30 +568,36 @@ async fn main() -> Result<()> {
                                     let _ = t.send_alert(&msg).await;
                                 }
 
-                                if let Some(bq) = &bq_sink {
-                                    let side_str = match entry_side {
-                                        Side::Buy => "Buy",
-                                        Side::Sell => "Sell",
-                                    };
-                                    let trade_identifier = update.trade_id.unwrap_or(0);
-                                    let row = TradeRow {
-                                        trade_id: format!("{}_{}_{}", update.symbol, update.order_id, trade_identifier),
-                                        session_id: session_id.clone(),
-                                        strategy_id: strategy.name().to_string(),
-                                        symbol: update.symbol.clone(),
-                                        side: side_str.to_string(),
-                                        entry_timestamp: format_unix_ms_rfc3339(entry_ts as i64),
-                                        exit_timestamp: format_unix_ms_rfc3339(update.transaction_time_ms as i64),
-                                        entry_price: entry_price.round_dp(4),
-                                        exit_price: update.last_filled_price.round_dp(4),
-                                        quantity: entry_qty.round_dp(4),
-                                        gross_pnl: gross_pnl.round_dp(4),
-                                        fees_paid: fees_paid.round_dp(4),
-                                        net_pnl: net_pnl.round_dp(4),
-                                        exit_reason: update.status.clone(),
-                                        holding_duration_seconds: duration_secs,
-                                    };
-                                    let _ = bq.insert_trades(&[row]).await;
+                                let exit_time = update.transaction_time_ms as i64;
+                                let entry_equity = excursion_tracker.entry_equity().unwrap_or(current_equity);
+                                let exit_equity = entry_equity + net_pnl;
+                                let excursion = excursion_tracker
+                                    .close(exit_time, exit_equity)
+                                    .unwrap_or_else(|| TradeExcursion::start(exit_time, exit_equity));
+                                let closed = ClosedTrade {
+                                    entry_time: entry_ts as i64,
+                                    exit_time,
+                                    entry_price,
+                                    exit_price: update.last_filled_price,
+                                    quantity: entry_qty,
+                                    side: match entry_side {
+                                        Side::Buy => PositionSide::Long,
+                                        Side::Sell => PositionSide::Short,
+                                    },
+                                    pnl_gross: gross_pnl,
+                                    fees_paid,
+                                    slippage_paid: Decimal::ZERO,
+                                    pnl_net: net_pnl,
+                                    return_pct,
+                                    exit_reason: update.status.clone(),
+                                    holding_duration_seconds: duration_secs,
+                                    excursion,
+                                };
+                                closed_trades.push(closed);
+                                if let (Some(bq), Some(closed)) = (&bq_sink, closed_trades.last()) {
+                                    if let Err(e) = record_closed_trade(bq, &run_ctx, closed, closed_trades.len()).await {
+                                        println!("[WARN] Failed to record live trade #{}: {e}", closed_trades.len());
+                                    }
                                 }
                             }
                         }
@@ -567,6 +609,7 @@ async fn main() -> Result<()> {
                                 if current_equity > peak_equity {
                                     peak_equity = current_equity;
                                 }
+                                excursion_tracker.observe_cash(current_equity);
                             }
                         }
                     }
@@ -582,6 +625,8 @@ async fn main() -> Result<()> {
                 match trade_res {
                     Ok(Some(trade)) => {
                         total_ticks += 1;
+                        data_window.start_ms.get_or_insert(trade.timestamp);
+                        data_window.end_ms = Some(trade.timestamp);
 
                         if args.show_ticks {
                             println!(
@@ -619,20 +664,6 @@ async fn main() -> Result<()> {
                                 dd_pct * dec!(100)
                             );
 
-                            if let Some(bq) = &bq_sink {
-                                let snapshot = EquitySnapshotRow {
-                                    timestamp: format_unix_ms_rfc3339(trade.timestamp),
-                                    session_id: session_id.clone(),
-                                    symbol: symbol_upper.clone(),
-                                    cash_equity: current_equity.round_dp(4),
-                                    unrealized_pnl: Decimal::ZERO.round_dp(4),
-                                    total_equity: current_equity.round_dp(4),
-                                    drawdown_pct: dd_pct.round_dp(4),
-                                    active_position_side: None,
-                                    active_position_qty: Some(Decimal::ZERO.round_dp(4)),
-                                };
-                                let _ = bq.insert_equity_snapshots(&[snapshot]).await;
-                            }
                         }
 
                         // Feed trade to DollarBarAggregator
@@ -661,7 +692,10 @@ async fn main() -> Result<()> {
                                 bar.close,
                                 bar.dollar_volume
                             );
-                            // NOTE: Real-time Dollar Bar BigQuery streaming is omitted to preserve network bandwidth.
+                            // Mark the open position at the bar close to track its MAE/MFE (no per-bar persistence).
+                            if let Some((side, entry_price, qty, _)) = active_position_tracker {
+                                excursion_tracker.mark(bar.end_time, current_equity, side, entry_price, qty, bar.close);
+                            }
 
                             // Strategy signal evaluation
                             if let Some(intent) = strategy.on_bar(&bar) {
@@ -732,5 +766,159 @@ async fn main() -> Result<()> {
     println!(" Final Account Equity: ${:.2}", current_equity);
     println!("============================================================\n");
 
+    if let Some(bq) = &bq_sink {
+        let max_dd_amount = closed_trades
+            .iter()
+            .map(|t| t.excursion.max_drawdown_amount)
+            .max()
+            .unwrap_or_default();
+        let max_dd_pct = closed_trades
+            .iter()
+            .map(|t| t.excursion.max_drawdown_pct)
+            .max()
+            .unwrap_or_default();
+        let metrics =
+            BacktestMetrics::calculate(initial_balance, &closed_trades, max_dd_amount, max_dd_pct);
+        record_lifecycle(bq, &run_ctx, &run_spec, RunStatus::Stopped, &data_window).await;
+        if let Err(e) = bq
+            .record_metrics(&[run_ctx.metrics_row("full", &metrics, None)])
+            .await
+        {
+            println!("[WARN] Failed to record live run metrics: {e}");
+        }
+    }
+
     Ok(())
+}
+
+/// Appends a lifecycle row for the live run; failures are logged, never fatal.
+async fn record_lifecycle<R: RunRecorder>(
+    recorder: &R,
+    ctx: &RunContext,
+    spec: &RunSpec<DollarBarsCusumConfig>,
+    status: RunStatus,
+    data: &DataWindow,
+) {
+    if let Err(e) = record_run_status(recorder, ctx, spec, status, data).await {
+        println!(
+            "[WARN] Failed to record live run status {}: {e}",
+            status.as_str()
+        );
+    }
+}
+
+/// Tracks the mark-to-market equity path of the open live position at bar
+/// closes, mirroring the backtest engine's per-trade excursion semantics.
+struct LiveExcursionTracker {
+    session_peak: Decimal,
+    open: Option<TradeExcursion>,
+}
+
+impl LiveExcursionTracker {
+    fn new(initial_equity: Decimal) -> Self {
+        Self {
+            session_peak: initial_equity,
+            open: None,
+        }
+    }
+
+    /// Folds a wallet balance update into the session peak.
+    fn observe_cash(&mut self, equity: Decimal) {
+        self.session_peak = self.session_peak.max(equity);
+    }
+
+    /// Starts tracking a newly filled position.
+    fn open(&mut self, time: i64, equity: Decimal) {
+        self.observe_cash(equity);
+        self.open = Some(TradeExcursion::start(time, equity));
+    }
+
+    /// Entry equity of the open position, if any.
+    fn entry_equity(&self) -> Option<Decimal> {
+        self.open.as_ref().map(|e| e.entry_equity)
+    }
+
+    /// Marks the open position at `mark_price`; ignored when flat.
+    fn mark(
+        &mut self,
+        time: i64,
+        cash: Decimal,
+        side: Side,
+        entry_price: Decimal,
+        quantity: Decimal,
+        mark_price: Decimal,
+    ) {
+        let unrealized = match side {
+            Side::Buy => (mark_price - entry_price) * quantity,
+            Side::Sell => (entry_price - mark_price) * quantity,
+        };
+        self.observe(time, cash + unrealized);
+    }
+
+    /// Closes the open position at `exit_equity`, returning its excursion.
+    fn close(&mut self, time: i64, exit_equity: Decimal) -> Option<TradeExcursion> {
+        self.open.as_ref()?;
+        self.observe(time, exit_equity);
+        let mut excursion = self.open.take()?;
+        excursion.exit_equity = exit_equity;
+        Some(excursion)
+    }
+
+    fn observe(&mut self, time: i64, equity: Decimal) {
+        let Some(excursion) = self.open.as_mut() else {
+            return;
+        };
+        excursion.observe_equity(time, equity);
+        self.session_peak = self.session_peak.max(equity);
+        let dd_amount = (self.session_peak - equity).max(Decimal::ZERO);
+        let dd_pct = if self.session_peak > Decimal::ZERO {
+            dd_amount / self.session_peak
+        } else {
+            Decimal::ZERO
+        };
+        excursion.observe_drawdown(dd_amount, dd_pct);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LiveExcursionTracker;
+    use domain::Side;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn tracker_records_mae_mfe_and_drawdown_from_bar_marks() {
+        let mut tracker = LiveExcursionTracker::new(dec!(1000));
+        tracker.open(1, dec!(1000));
+        // Long 2 units from 100: marks at 95 (-10) and 110 (+20).
+        tracker.mark(2, dec!(1000), Side::Buy, dec!(100), dec!(2), dec!(95));
+        tracker.mark(3, dec!(1000), Side::Buy, dec!(100), dec!(2), dec!(110));
+        let excursion = tracker.close(4, dec!(1015)).expect("open trade");
+
+        assert_eq!(excursion.entry_equity, dec!(1000));
+        assert_eq!(
+            (excursion.trough_equity, excursion.trough_time),
+            (dec!(990), 2)
+        );
+        assert_eq!(
+            (excursion.peak_equity, excursion.peak_time),
+            (dec!(1020), 3)
+        );
+        assert_eq!(excursion.exit_equity, dec!(1015));
+        // Deepest drawdown: peak 1020 -> exit 1015 = 5 is smaller than 1000 -> 990 = 10.
+        assert_eq!(excursion.max_drawdown_amount, dec!(10));
+        assert_eq!(excursion.max_drawdown_pct, dec!(0.01));
+    }
+
+    #[test]
+    fn tracker_marks_short_positions_inversely_and_ignores_flat_marks() {
+        let mut tracker = LiveExcursionTracker::new(dec!(1000));
+        tracker.mark(1, dec!(1000), Side::Sell, dec!(100), dec!(1), dec!(90));
+        assert!(tracker.close(2, dec!(1000)).is_none(), "no open trade");
+
+        tracker.open(3, dec!(1000));
+        tracker.mark(4, dec!(1000), Side::Sell, dec!(100), dec!(1), dec!(90));
+        let excursion = tracker.close(5, dec!(1010)).expect("open trade");
+        assert_eq!(excursion.peak_equity, dec!(1010));
+    }
 }
