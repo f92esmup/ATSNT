@@ -44,6 +44,14 @@ struct Args {
     #[arg(long)]
     capital: Option<Decimal>,
 
+    /// Optional override for max session drawdown percentage (e.g. 0.20 for 20%)
+    #[arg(long)]
+    max_drawdown: Option<Decimal>,
+
+    /// Optional override for risk percentage per trade (e.g. 0.01 for 1.0%)
+    #[arg(long)]
+    risk_per_trade: Option<Decimal>,
+
     /// Enable post-backtest Discrete Event Monte Carlo Stress-Testing
     #[arg(long, default_value_t = false)]
     monte_carlo: bool,
@@ -324,6 +332,28 @@ async fn main() -> Result<()> {
         println!("[*] Capital Allocation: Override set to ${}", cap);
         engine_config.initial_capital = cap;
     }
+
+    if let Some(dd) = args.max_drawdown {
+        if dd <= Decimal::ZERO || dd > Decimal::ONE {
+            anyhow::bail!("--max-drawdown must be between 0.0 and 1.0, got {}", dd);
+        }
+        println!(
+            "[*] Max Session Drawdown: Override set to {:.2}%",
+            dd * dec!(100)
+        );
+        engine_config.max_daily_drawdown_pct = dd;
+    }
+
+    if let Some(risk) = args.risk_per_trade {
+        if risk <= Decimal::ZERO || risk > Decimal::ONE {
+            anyhow::bail!("--risk-per-trade must be between 0.0 and 1.0, got {}", risk);
+        }
+        println!(
+            "[*] Risk per Trade: Override set to {:.2}%",
+            risk * dec!(100)
+        );
+        engine_config.risk_per_trade_pct = risk;
+    }
     let mut engine = BacktestEngine::new(engine_config);
 
     println!("[*] Initial Capital: ${}", engine.cash_equity());
@@ -345,9 +375,9 @@ async fn main() -> Result<()> {
 
         if let Some(bar) = aggregator.process_trade(&trade) {
             total_bars_emitted += 1;
-            if total_bars_emitted <= 20 || total_bars_emitted % 100 == 0 {
+            if total_bars_emitted <= 5 || total_bars_emitted % 250_000 == 0 {
                 println!(
-                    "  [DollarBar #{:04}] Close: ${:.2} | Vol: {:.2} BTC | Notional: ${:.2}",
+                    "  [DollarBar #{:07}] Close: ${:.2} | Vol: {:.2} BTC | Notional: ${:.2}",
                     total_bars_emitted, bar.close, bar.volume, bar.dollar_volume
                 );
             }
@@ -396,6 +426,28 @@ async fn main() -> Result<()> {
     );
     println!(" Sortino Ratio:             {:.2}", metrics.sortino_ratio);
     println!("============================================================");
+
+    if !closed_trades.is_empty() {
+        println!("\n------------------------------------------------------------");
+        println!("                   CLOSED TRADES DETAIL                     ");
+        println!("------------------------------------------------------------");
+        for (i, t) in closed_trades.iter().enumerate() {
+            println!(
+                " #{:<2} {:?} qty:{:.4} entry:${:.2} exit:${:.2} ({}) gross:${:.2} net:${:.2} fees:${:.2} hold:{}s",
+                i + 1,
+                t.side,
+                t.quantity,
+                t.entry_price,
+                t.exit_price,
+                t.exit_reason,
+                t.pnl_gross,
+                t.pnl_net,
+                t.fees_paid + t.slippage_paid,
+                t.holding_duration_seconds
+            );
+        }
+        println!("------------------------------------------------------------");
+    }
 
     let symbol = art_symbol.unwrap_or_else(|| {
         args.data
