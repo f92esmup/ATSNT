@@ -24,11 +24,11 @@ Branch: `feat/data-model-refactor` | Delivery: ask-on-risk (forecast > 400 lines
 | T5 | S3, S6 | inline | done | 332961a (SQL not validated against BigQuery; pending T12) |
 | T6 | S1, S5 | inline | done | 52a0ef5 |
 | T7 | S1, S5 | inline | done | 241b4dd |
-| T8 | S4, S5 | inline | pending | |
-| T9 | S4, S5 | inline | pending | |
-| T10 | S1 | inline | pending | |
-| T11 | S7 | inline | pending | |
-| T12 | S6 | inline | pending | |
+| T8 | S4, S5 | inline | done | 75a3fa7 |
+| T9 | S4, S5 | inline | done | fe3b3fb |
+| T10 | S1 | inline | done | 9f6c8d3 |
+| T11 | S7 | inline | done | 28ab110 |
+| T12 | S6 | inline | pending | needs user authorization for remote destructive BigQuery operation |
 
 - T1: extract `RunSpec`, `RunType`, `RunId` (UUID v7); artifact = spec + scorecard with backward-compatible JSON.
 - T2: MAE/MFE equity points on `ClosedTrade`, tracked by the engine; reconstruction test vs engine max DD.
@@ -57,3 +57,6 @@ Routes are inline: no parallel units with disjoint surfaces and no context backs
 - L4 (2026-10-13): correction to S4 — four points per trade (entry/trough/peak/exit) cannot always reproduce the engine max drawdown (an intra-trade high before the trough is lost). Each trade therefore also stores the deepest session drawdown observed while open (`max_drawdown_amount/pct`); the max across trades equals the engine metric exactly (test `per_trade_drawdowns_reproduce_engine_max_drawdown_exactly`). The four points remain the plotted curve.
 - L5: old row types (`EquitySnapshotRow`, `HpoEvaluationRow`, `MonteCarloRow`, old `TradeRow`) are deleted when their last caller migrates (T9/T10) instead of in T4, to keep every commit building.
 - L6: T7 replaced the hardcoded HPO fee schedule with `--execution-context <json>` (default `BacktestConfig::default()`), per S2; HPO trial metrics are per-fold scopes `is_fold_<n>` / `oos_fold_<n>` plus a `full` extras row with ranking scores. Monte Carlo stores 8 representative curves (series `mc_equity`).
+- L7: T10 found that tests using a "disabled" BigQuerySink fell back to the local gcloud CLI and streamed into the real dataset (legacy `disabled_bigquery_sink_succeeds_without_panic` inserted `trade_1` into `atsnt_bi.trades`; the new T4 test hit 404 on non-existent tables). Fixed with `BigQuerySink::offline` / `GcsArtifactSink::offline`; `cargo test --workspace -- --nocapture` now shows only "Insert skipped" lines.
+- L8: T11 added `v_hpo_trials`, `v_hpo_folds`, `v_monte_carlo` views; doc 11 kept in Spanish to match its existing language.
+- L9: verification state — `cargo test --workspace` 168 passed, clippy and fmt clean; backtest and HPO binaries smoke-run offline on real 2024-01 / 2026-10-01 data; paper/live not run live (require WebSocket/Binance access). SQL never executed against BigQuery. Native assess: risk high, review_due (4351 changed lines on the branch); independent verifier and native review not run yet. Next: T12 after authorization, then verification/review, then delivery strategy (branch exceeds 400 lines).
