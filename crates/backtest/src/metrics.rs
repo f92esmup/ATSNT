@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use domain::PositionSide;
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
@@ -103,6 +105,21 @@ pub struct BacktestMetrics {
     pub max_drawdown_amount: Decimal,
     pub max_drawdown_pct: Decimal,
     pub sortino_ratio: Decimal,
+    /// Share of gross profit (sum of positive pre-fee PnL) consumed by fees.
+    #[serde(default)]
+    pub fee_drag_pct: Decimal,
+    /// Number of closed trades per exit reason (e.g. "TakeProfit").
+    #[serde(default)]
+    pub exit_reason_counts: BTreeMap<String, usize>,
+    /// Mean holding time per trade in seconds.
+    #[serde(default)]
+    pub avg_holding_seconds: Decimal,
+    /// Mean maximum adverse excursion, as a fraction of entry equity.
+    #[serde(default)]
+    pub avg_mae_pct: Decimal,
+    /// Mean maximum favorable excursion, as a fraction of entry equity.
+    #[serde(default)]
+    pub avg_mfe_pct: Decimal,
 }
 
 impl BacktestMetrics {
@@ -127,8 +144,25 @@ impl BacktestMetrics {
         let mut total_slippage = Decimal::ZERO;
         let mut negative_returns_sq_sum = Decimal::ZERO;
         let mut downside_count = 0;
+        let mut positive_gross_pnl = Decimal::ZERO;
+        let mut exit_reason_counts = BTreeMap::new();
+        let mut holding_seconds_sum = Decimal::ZERO;
+        let mut mae_pct_sum = Decimal::ZERO;
+        let mut mfe_pct_sum = Decimal::ZERO;
 
         for t in trades {
+            if t.pnl_gross > Decimal::ZERO {
+                positive_gross_pnl += t.pnl_gross;
+            }
+            *exit_reason_counts.entry(t.exit_reason.clone()).or_insert(0) += 1;
+            holding_seconds_sum += Decimal::from(t.holding_duration_seconds);
+            let entry_equity = t.excursion.entry_equity;
+            if entry_equity > Decimal::ZERO {
+                mae_pct_sum +=
+                    (entry_equity - t.excursion.trough_equity).max(Decimal::ZERO) / entry_equity;
+                mfe_pct_sum +=
+                    (t.excursion.peak_equity - entry_equity).max(Decimal::ZERO) / entry_equity;
+            }
             net_profit += t.pnl_net;
             total_fees += t.fees_paid;
             total_slippage += t.slippage_paid;
@@ -200,6 +234,12 @@ impl BacktestMetrics {
             Decimal::ZERO
         };
 
+        let fee_drag_pct = if positive_gross_pnl > Decimal::ZERO {
+            total_fees / positive_gross_pnl
+        } else {
+            Decimal::ZERO
+        };
+
         Self {
             total_trades,
             winning_trades,
@@ -216,6 +256,11 @@ impl BacktestMetrics {
             max_drawdown_amount,
             max_drawdown_pct,
             sortino_ratio,
+            fee_drag_pct,
+            exit_reason_counts,
+            avg_holding_seconds: holding_seconds_sum / n,
+            avg_mae_pct: mae_pct_sum / n,
+            avg_mfe_pct: mfe_pct_sum / n,
         }
     }
 
@@ -236,6 +281,11 @@ impl BacktestMetrics {
             max_drawdown_amount: Decimal::ZERO,
             max_drawdown_pct: Decimal::ZERO,
             sortino_ratio: Decimal::ZERO,
+            fee_drag_pct: Decimal::ZERO,
+            exit_reason_counts: BTreeMap::new(),
+            avg_holding_seconds: Decimal::ZERO,
+            avg_mae_pct: Decimal::ZERO,
+            avg_mfe_pct: Decimal::ZERO,
         }
     }
 }
