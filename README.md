@@ -90,7 +90,7 @@ tail -f pipeline_btcusdt_2026.log
 | :--- | :--- | :--- |
 | `-s, --symbol <SYM>` | Trading pair symbol | `BTCUSDT` |
 | `-y, --year <YYYY>` | Historical or current year | Current year (`2026`) |
-| `-m, --month <MM>` | Optional specific single month | All months YTD |
+| `-m, --month <MM>` | Single completed month: HPO and backtest read only `<SYM>-aggTrades-<YEAR>-<MM>.parquet` (fails fast if missing) | All months YTD |
 | `-b, --dollar-bar <N>` | Dollar bar volume threshold (USD) | `1000000` ($1M) |
 | `-f, --folds <N>` | Walk-Forward rolling validation folds | `5` |
 | `-r, --train-ratio <F>` | In-sample train window ratio | `0.70` (70%) |
@@ -98,13 +98,20 @@ tail -f pipeline_btcusdt_2026.log
 | `-c, --candidates <N>` | Parameter combinations to evaluate | `60` |
 | `-i, --mc-iterations <N>`| Monte Carlo bootstrap resample paths | `10000` |
 | `-o, --output-dir <DIR>` | Parquet destination root directory | `data/historical_<YEAR>` |
-| `--config <PATH>` | Output/input path for winning HPO JSON | `configs/hpo_<sym>_<year>.json` |
+| `--config <PATH>` | Output/input path for winning HPO JSON | `configs/hpo_<sym>_<year>[_<MM>].json` |
 | `--gcp-bigquery` | Record HPO, backtest and Monte Carlo runs to BigQuery | `false` |
+| `--strict-sinks` | Fail the run if any BigQuery recording or GCS upload fails | `false` |
+| `--upload-winner` | Upload the winning artifact to GCS `artifacts/<config stem>-<suffix>.json` | `false` |
+| `--artifact-suffix <S>` | Unique suffix for the uploaded artifact | UTC timestamp |
+| `--bin-dir <DIR>` | Use prebuilt binaries from `DIR` instead of `cargo build` (containers) | `target/release` + build |
+| `--dry-run` | Print the resolved commands without executing anything | `false` |
 | `--skip-fetch` | Skip ETL download (use existing cached Parquet) | `false` |
 | `--skip-hpo` | Skip HPO (replay backtest with existing config) | `false` |
 | `--no-inhibit` | Disable automatic `systemd-inhibit` wrapper | `false` |
 | `-d, --detach` | Run in background via `nohup` | `false` |
-| `-l, --log <PATH>` | Custom logfile path when detached | `pipeline_<sym>_<year>.log` |
+| `-l, --log <PATH>` | Custom logfile path when detached | `pipeline_<sym>_<year>[_<MM>].log` |
+
+Argument resolution is covered by `bash scripts/tests/pipeline_args_test.sh` (dry-run based, no network or build).
 
 ---
 

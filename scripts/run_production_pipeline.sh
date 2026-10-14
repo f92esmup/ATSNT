@@ -4,7 +4,7 @@
 #
 # Chains together:
 #   1. Binance Historical ETL (fetch_data) -> Compressed Apache Parquet
-#   2. Parallel Walk-Forward HPO (run_hpo) -> configs/hpo_<symbol>_<year>.json
+#   2. Parallel Walk-Forward HPO (run_hpo) -> configs/hpo_<symbol>_<year>[_<MM>].json
 #   3. Deterministic Backtest + Monte Carlo (backtest) -> BigQuery runs (with --gcp-bigquery)
 #
 # Automatically inhibits OS sleep, idle, and laptop lid-switch while running.
@@ -37,6 +37,11 @@ SKIP_FETCH=false
 SKIP_HPO=false
 NO_INHIBIT=false
 DETACH=false
+DRY_RUN=false
+BIN_DIR=""
+STRICT_SINKS=false
+UPLOAD_WINNER=false
+ARTIFACT_SUFFIX=""
 
 show_help() {
     cat << EOF
@@ -49,7 +54,9 @@ Options:
   -s, --symbol <SYM>         Trading pair symbol (default: ${SYMBOL})
   -k, --capital <AMOUNT>     Starting capital in quote currency (e.g. 200, 1000)
   -y, --year <YYYY>          Year to process (default: current year ${YEAR})
-  -m, --month <MM>           Optional single month to fetch (1-12)
+  -m, --month <MM>           Optional single month (1-12): fetches it and runs HPO/backtest on that
+                             month's Parquet file only (the current month is only published as
+                             daily archives, so pick a completed month or omit --month)
   -b, --dollar-bar <AMOUNT>  Dollar bar threshold in USD (default: ${DOLLAR_BAR})
   -f, --folds <N>            Walk-Forward validation folds (default: ${FOLDS})
   -r, --train-ratio <FLOAT>  In-Sample train ratio (default: ${TRAIN_RATIO})
@@ -61,6 +68,11 @@ Options:
       --strategy <NAME>      Target strategy identifier: 'dollar_bars_cusum' or 'order_flow_imbalance' (default: ${STRATEGY})
       --param-space <PATH>   Optional JSON path overriding default search space
       --gcp-bigquery         Record HPO, backtest and Monte Carlo runs to BigQuery
+      --strict-sinks         Fail the run if any BigQuery recording or GCS upload fails
+      --upload-winner        Upload the winning artifact to GCS (artifacts/<config stem>-<suffix>.json)
+      --artifact-suffix <S>  Unique suffix for the uploaded artifact (default: UTC timestamp)
+      --bin-dir <DIR>        Use prebuilt fetch_data/run_hpo/backtest from DIR (skips cargo build)
+      --dry-run              Print the resolved commands without executing anything
       --skip-fetch           Skip Phase 1 (use already downloaded data in output-dir)
       --skip-hpo             Skip Phase 2 (use existing --config JSON directly in Backtest)
       --no-inhibit           Do not invoke systemd-inhibit (allow OS to sleep)
@@ -143,6 +155,26 @@ while [[ $# -gt 0 ]]; do
             GCP_BIGQUERY=true
             shift
             ;;
+        --strict-sinks)
+            STRICT_SINKS=true
+            shift
+            ;;
+        --upload-winner)
+            UPLOAD_WINNER=true
+            shift
+            ;;
+        --artifact-suffix)
+            ARTIFACT_SUFFIX="$2"
+            shift 2
+            ;;
+        --bin-dir)
+            BIN_DIR="$2"
+            shift 2
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
         --skip-fetch)
             SKIP_FETCH=true
             shift
@@ -175,50 +207,83 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Set dynamic default paths
+# Validate and normalize --month (accepts 1 or 01)
+MONTH_PADDED=""
+if [ -n "${MONTH}" ]; then
+    if ! [[ "${MONTH}" =~ ^[0-9]{1,2}$ ]] || [ $((10#${MONTH})) -lt 1 ] || [ $((10#${MONTH})) -gt 12 ]; then
+        echo "[ERROR] --month must be between 1 and 12 (got '${MONTH}')"
+        exit 1
+    fi
+    MONTH_PADDED="$(printf "%02d" "$((10#${MONTH}))")"
+fi
+
+# Set dynamic default paths (month-scoped when --month is given so runs never overwrite each other)
+PERIOD="${YEAR}${MONTH_PADDED:+_${MONTH_PADDED}}"
+
 if [ -z "${OUTPUT_DIR}" ]; then
     OUTPUT_DIR="data/historical_${YEAR}"
 fi
 
 if [ -z "${CONFIG_PATH}" ]; then
-    CONFIG_PATH="configs/hpo_${SYMBOL,,}_${YEAR}.json"
+    CONFIG_PATH="configs/hpo_${SYMBOL,,}_${PERIOD}.json"
 fi
 
 if [ -z "${LOG_FILE}" ]; then
-    LOG_FILE="pipeline_${SYMBOL,,}_${YEAR}.log"
+    LOG_FILE="pipeline_${SYMBOL,,}_${PERIOD}.log"
 fi
 
+# Data actually read by HPO and backtest: the exact monthly file with --month,
+# otherwise every Parquet file of the symbol directory.
+DATA_PATH="${OUTPUT_DIR}/${SYMBOL}"
+TARGET_DATA="${DATA_PATH}"
+if [ -n "${MONTH_PADDED}" ]; then
+    TARGET_DATA="${DATA_PATH}/${SYMBOL}-aggTrades-${YEAR}-${MONTH_PADDED}.parquet"
+fi
+
+if [ -n "${BIN_DIR}" ]; then
+    BIN_PATH="${BIN_DIR%/}"
+else
+    BIN_PATH="./target/release"
+fi
+
+# Arguments forwarded when re-executing under systemd-inhibit or nohup.
+FORWARD_ARGS=(
+    --symbol "${SYMBOL}"
+    --year "${YEAR}"
+    --dollar-bar "${DOLLAR_BAR}"
+    --folds "${FOLDS}"
+    --train-ratio "${TRAIN_RATIO}"
+    --embargo-bars "${EMBARGO_BARS}"
+    --candidates "${CANDIDATES}"
+    --mc-iterations "${MC_ITERATIONS}"
+    --output-dir "${OUTPUT_DIR}"
+    --config "${CONFIG_PATH}"
+    --strategy "${STRATEGY}"
+)
+[ -n "${MONTH}" ] && FORWARD_ARGS+=(--month "${MONTH}")
+[ -n "${PARAM_SPACE}" ] && FORWARD_ARGS+=(--param-space "${PARAM_SPACE}")
+[ -n "${CAPITAL}" ] && FORWARD_ARGS+=(--capital "${CAPITAL}")
+[ -n "${BIN_DIR}" ] && FORWARD_ARGS+=(--bin-dir "${BIN_DIR}")
+[ -n "${ARTIFACT_SUFFIX}" ] && FORWARD_ARGS+=(--artifact-suffix "${ARTIFACT_SUFFIX}")
+[ "${GCP_BIGQUERY}" = "true" ] && FORWARD_ARGS+=(--gcp-bigquery)
+[ "${STRICT_SINKS}" = "true" ] && FORWARD_ARGS+=(--strict-sinks)
+[ "${UPLOAD_WINNER}" = "true" ] && FORWARD_ARGS+=(--upload-winner)
+[ "${SKIP_FETCH}" = "true" ] && FORWARD_ARGS+=(--skip-fetch)
+[ "${SKIP_HPO}" = "true" ] && FORWARD_ARGS+=(--skip-hpo)
+
 # Self-wrap with systemd-inhibit if not detached and inhibitor is available
-if [ "${NO_INHIBIT}" = "false" ] && [ "${DETACH}" = "false" ] && [ -z "${SYSTEMD_INHIBITED:-}" ] && command -v systemd-inhibit >/dev/null 2>&1; then
+if [ "${DRY_RUN}" = "false" ] && [ "${NO_INHIBIT}" = "false" ] && [ "${DETACH}" = "false" ] && [ -z "${SYSTEMD_INHIBITED:-}" ] && command -v systemd-inhibit >/dev/null 2>&1; then
     export SYSTEMD_INHIBITED=1
     echo "[*] Activating systemd-inhibit (sleep/idle/lid-switch locked for duration of pipeline)..."
     exec systemd-inhibit \
         --what=idle:sleep:handle-lid-switch \
         --who="ATSNT Production Pipeline" \
         --why="ETL, HPO Walk-Forward, and Monte Carlo" \
-        "$0" \
-        --symbol "${SYMBOL}" \
-        --year "${YEAR}" \
-        ${MONTH:+--month "${MONTH}"} \
-        --dollar-bar "${DOLLAR_BAR}" \
-        --folds "${FOLDS}" \
-        --train-ratio "${TRAIN_RATIO}" \
-        --embargo-bars "${EMBARGO_BARS}" \
-        --candidates "${CANDIDATES}" \
-        --mc-iterations "${MC_ITERATIONS}" \
-        --output-dir "${OUTPUT_DIR}" \
-        --config "${CONFIG_PATH}" \
-        --strategy "${STRATEGY}" \
-        ${PARAM_SPACE:+--param-space "${PARAM_SPACE}"} \
-        ${CAPITAL:+--capital "${CAPITAL}"} \
-        $( [ "${GCP_BIGQUERY}" = "true" ] && echo "--gcp-bigquery" ) \
-        $( [ "${SKIP_FETCH}" = "true" ] && echo "--skip-fetch" ) \
-        $( [ "${SKIP_HPO}" = "true" ] && echo "--skip-hpo" ) \
-        --no-inhibit
+        "$0" "${FORWARD_ARGS[@]}" --no-inhibit
 fi
 
 # Handle background detach
-if [ "${DETACH}" = "true" ]; then
+if [ "${DRY_RUN}" = "false" ] && [ "${DETACH}" = "true" ]; then
     echo "============================================================"
     echo " ATSNT - Launching Pipeline in Background"
     echo "============================================================"
@@ -235,25 +300,7 @@ if [ "${DETACH}" = "true" ]; then
     fi
 
     # Forward arguments excluding --detach
-    nohup "${CMD[@]}" \
-        --symbol "${SYMBOL}" \
-        --year "${YEAR}" \
-        ${MONTH:+--month "${MONTH}"} \
-        --dollar-bar "${DOLLAR_BAR}" \
-        --folds "${FOLDS}" \
-        --train-ratio "${TRAIN_RATIO}" \
-        --embargo-bars "${EMBARGO_BARS}" \
-        --candidates "${CANDIDATES}" \
-        --mc-iterations "${MC_ITERATIONS}" \
-        --output-dir "${OUTPUT_DIR}" \
-        --config "${CONFIG_PATH}" \
-        --strategy "${STRATEGY}" \
-        ${PARAM_SPACE:+--param-space "${PARAM_SPACE}"} \
-        ${CAPITAL:+--capital "${CAPITAL}"} \
-        $( [ "${GCP_BIGQUERY}" = "true" ] && echo "--gcp-bigquery" ) \
-        $( [ "${SKIP_FETCH}" = "true" ] && echo "--skip-fetch" ) \
-        $( [ "${SKIP_HPO}" = "true" ] && echo "--skip-hpo" ) \
-        --no-inhibit > "${LOG_FILE}" 2>&1 &
+    nohup "${CMD[@]}" "${FORWARD_ARGS[@]}" --no-inhibit > "${LOG_FILE}" 2>&1 &
 
     BG_PID=$!
     echo "[OK] Process dispatched with PID: ${BG_PID}"
@@ -275,26 +322,66 @@ echo "Year:            ${YEAR}"
 echo "Dollar Bar:      \$${DOLLAR_BAR}"
 [ -n "${CAPITAL}" ] && echo "Capital:         \$${CAPITAL}"
 echo "Data Directory:  ${OUTPUT_DIR}/${SYMBOL}"
+[ -n "${MONTH_PADDED}" ] && echo "Data File:       ${TARGET_DATA}"
 echo "HPO Config:      ${CONFIG_PATH}"
+[ "${DRY_RUN}" = "true" ] && echo "Log File:        ${LOG_FILE}"
 echo "Monte Carlo:     ${MC_ITERATIONS} iterations"
 echo "BigQuery Export: ${GCP_BIGQUERY}"
 echo "------------------------------------------------------------"
-
-# Step 0: Ensure binaries are compiled in release mode
-echo "[0/3] Compiling optimized release binaries..."
-cargo build --release \
-    -p adapters --bin fetch_data \
-    -p backtest --bin run_hpo \
-    -p backtest --bin backtest
-echo "      [OK] Binaries built successfully."
 
 # Prints a greppable elapsed-time line for a pipeline stage started at epoch seconds $2.
 stage_timing() {
     echo "[TIMING] stage=$1 seconds=$(( $(date +%s) - $2 ))"
 }
 
+# Runs a pipeline stage command, or only prints it under --dry-run.
+run_stage() {
+    local name="$1"
+    shift
+    if [ "${DRY_RUN}" = "true" ]; then
+        echo "[DRY-RUN] $*"
+        return 0
+    fi
+    local stage_start
+    stage_start=$(date +%s)
+    "$@"
+    stage_timing "${name}" "${stage_start}"
+}
+
+# Fails fast when --month points at a monthly file that does not exist, instead of
+# silently reading other months.
+require_target_data() {
+    if [ -n "${MONTH_PADDED}" ] && [ ! -f "${TARGET_DATA}" ]; then
+        echo "[ERROR] Monthly data file ${TARGET_DATA} not found."
+        echo "        Monthly archives exist only for completed months (the current month is published as daily archives); use a completed month or omit --month."
+        exit 1
+    fi
+}
+
+# Step 0: Ensure binaries are compiled in release mode
+if [ -n "${BIN_DIR}" ]; then
+    echo "[0/3] [SKIPPED] Compilation (using prebuilt binaries in ${BIN_PATH})"
+    if [ "${DRY_RUN}" = "false" ]; then
+        for bin in fetch_data run_hpo backtest; do
+            if [ ! -x "${BIN_PATH}/${bin}" ]; then
+                echo "[ERROR] Prebuilt binary ${BIN_PATH}/${bin} not found or not executable."
+                exit 1
+            fi
+        done
+    fi
+elif [ "${DRY_RUN}" = "true" ]; then
+    echo "[0/3] Compiling optimized release binaries..."
+    echo "[DRY-RUN] cargo build --release -p adapters --bin fetch_data -p backtest --bin run_hpo -p backtest --bin backtest"
+else
+    echo "[0/3] Compiling optimized release binaries..."
+    cargo build --release \
+        -p adapters --bin fetch_data \
+        -p backtest --bin run_hpo \
+        -p backtest --bin backtest
+    echo "      [OK] Binaries built successfully."
+fi
+
 # Step 1: Binance ETL
-DATA_PATH="${OUTPUT_DIR}/${SYMBOL}"
 if [ "${SKIP_FETCH}" = "true" ]; then
     echo -e "\n[1/3] [SKIPPED] Historical ETL (Using existing data in ${DATA_PATH})"
 else
@@ -307,9 +394,13 @@ else
     if [ -n "${MONTH}" ]; then
         FETCH_ARGS+=("--month" "${MONTH}")
     fi
-    STAGE_START=$(date +%s)
-    ./target/release/fetch_data "${FETCH_ARGS[@]}"
-    stage_timing fetch "${STAGE_START}"
+    run_stage fetch "${BIN_PATH}/fetch_data" "${FETCH_ARGS[@]}"
+fi
+
+# With --month the HPO and backtest read exactly this file; it must exist now
+# (in dry-run it can only be checked when fetch was skipped).
+if [ "${DRY_RUN}" = "false" ] || [ "${SKIP_FETCH}" = "true" ]; then
+    require_target_data
 fi
 
 # Step 2: Parallel Walk-Forward HPO
@@ -324,7 +415,7 @@ else
     HPO_ARGS=(
         "--strategy" "${STRATEGY}"
         "--symbol" "${SYMBOL}"
-        "--data" "${DATA_PATH}"
+        "--data" "${TARGET_DATA}"
         "--dollar-bar" "${DOLLAR_BAR}"
         "--folds" "${FOLDS}"
         "--train-ratio" "${TRAIN_RATIO}"
@@ -341,15 +432,22 @@ else
     if [ "${GCP_BIGQUERY}" = "true" ]; then
         HPO_ARGS+=("--gcp-bigquery")
     fi
-    STAGE_START=$(date +%s)
-    ./target/release/run_hpo "${HPO_ARGS[@]}"
-    stage_timing hpo "${STAGE_START}"
+    if [ "${UPLOAD_WINNER}" = "true" ]; then
+        HPO_ARGS+=("--gcs-upload")
+    fi
+    if [ -n "${ARTIFACT_SUFFIX}" ]; then
+        HPO_ARGS+=("--artifact-suffix" "${ARTIFACT_SUFFIX}")
+    fi
+    if [ "${STRICT_SINKS}" = "true" ]; then
+        HPO_ARGS+=("--strict-sinks")
+    fi
+    run_stage hpo "${BIN_PATH}/run_hpo" "${HPO_ARGS[@]}"
 fi
 
 # Step 3: Backtest + Discrete Event Monte Carlo Stress-Test
 echo -e "\n[3/3] Running 1:1 Backtest & Monte Carlo Stress-Testing..."
 BACKTEST_ARGS=(
-    "--data" "${DATA_PATH}"
+    "--data" "${TARGET_DATA}"
     "--dollar-bar" "${DOLLAR_BAR}"
     "--config" "${CONFIG_PATH}"
     "--strategy" "${STRATEGY}"
@@ -362,9 +460,16 @@ fi
 if [ "${GCP_BIGQUERY}" = "true" ]; then
     BACKTEST_ARGS+=("--gcp-bigquery")
 fi
-STAGE_START=$(date +%s)
-./target/release/backtest "${BACKTEST_ARGS[@]}"
-stage_timing backtest "${STAGE_START}"
+if [ "${STRICT_SINKS}" = "true" ]; then
+    BACKTEST_ARGS+=("--strict-sinks")
+fi
+run_stage backtest "${BIN_PATH}/backtest" "${BACKTEST_ARGS[@]}"
+
+if [ "${DRY_RUN}" = "true" ]; then
+    echo ""
+    echo "[DRY-RUN] No commands were executed."
+    exit 0
+fi
 
 END_TOTAL=$(date +%s)
 TOTAL_DURATION=$((END_TOTAL - START_TOTAL))
