@@ -22,7 +22,7 @@ Branch: `feat/ephemeral-batch-hpo` (from `dev`) | Delivery: ask-on-risk (forecas
 
 | ID | Specs | Route | Status | Evidence |
 |----|-------|-------|--------|----------|
-| T1 | S5, S6 | inline | done | see L9 |
+| T1 | S5, S6 | inline | done | 6b0c798, 7b08025 (RDD high, granted, approved) |
 | T2 | S7, S8 | inline | pending | — |
 | T3 | S1, S2, S3, S4 | inline | pending | — |
 | T4 | S9 | inline | pending | — |
@@ -48,3 +48,5 @@ Task notes:
 - **L7 (user, verbatim):** "me parece genial. pues genera el plan exacto con sus partes para la refactorización" — this document. Next: user go-ahead to start T1 on `feat/ephemeral-batch-hpo`.
 - **L8 (user, verbatim):** "adelante" — T1 started on `feat/ephemeral-batch-hpo`.
 - **L9 (T1 evidence):** new `adapters::fetch_plan` (`plan_fetch_tasks`, `run_bounded`, `is_not_archived`) with 10 unit tests (task planning per period, order preservation, job limit, failure isolation, zero-jobs rejection); `fetch_data --jobs` (default 4, progress bars hidden when >1); `[TIMING]` lines in `fetch_data`, `run_hpo` (ingest, search, record_bigquery, upload_artifact, total), `backtest` (replay, record_bigquery, monte_carlo, record_monte_carlo, total) and pipeline stages. Checks: `cargo fmt --check` ok, `cargo clippy --all-targets -D warnings` ok, `cargo test --workspace` 0 failures. Smoke run (laptop, 8 cores, Jan 2026, 4 candidates, 2 folds): ingest 9.08 s, search 72.73 s, total 81.81 s — the search dominates even at tiny candidate counts. RED not observed before implementation (tests and module written together) — exception recorded honestly. Network download path not exercised (no external calls in tests by policy); offline skip path and `-j 0` rejection verified manually.
+- **L10 (T1 review):** native RDD review (lineage `review-a1873a4c8975b93e`, risk high, user granted). Four lenses; the refuter confirmed two candidate-caused CRITICAL findings (R2 readability, R3 reliability): T1 had rewritten existing `fetch_data` result messages and lost the per-item interleaving for `--jobs 1`. One bounded correction (77 lines, commit 7b08025) restored the baseline `    [OK] Month NN` / `    [INFO] Day NN` lines and the blank line before `[*] Processing`, and prints results inline when sequential; targeted validation approved; acknowledgement burned authority. The advisory (non-blocking) findings were not captured before the result file was removed.
+- **L11 (environment):** the laptop `/tmp` tmpfs has `usrquota`; 15,678 orphaned SQLite `.tmp*-wal/-shm` files (6.6 GB, owned by the user) exhausted the quota (EDQUOT). Purged with user authorization; their source is still unknown.
