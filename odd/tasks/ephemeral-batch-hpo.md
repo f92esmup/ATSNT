@@ -25,7 +25,7 @@ Branch: `feat/ephemeral-batch-hpo` (from `dev`) | Delivery: chained PRs stacked 
 | T1 | S5, S6 | inline | done | 6b0c798, 7b08025 (RDD high, granted, approved) |
 | T2 | S7, S8 | inline | done | 4d92060 (verifier PASS; RDD high, granted, approved) |
 | T3 | S1, S2, S3, S4 | inline | done | c04a961 (verifier PASS; RDD high, granted, approved) |
-| T4 | S9 | inline | pending | — |
+| T4 | S9 | inline | done | see L21 |
 | T5 | S10, S11 | inline | pending | — |
 | T6 | S12 | inline (remote, needs authorization) | pending | — |
 
@@ -59,3 +59,5 @@ Task notes:
 - **L18 (T3 verification + review):** independent verifier on c04a961 vs 228c6e1: S1-S4 PASS, forwarding argv identical set plus the new flags (captured with a stub `systemd-inhibit`), no blockers; shellcheck not installed. RDD lineage `review-f000cae6f1bbc52c` (high, user granted) approved without correction; acknowledgement burned authority. New follow-up advisories: `ATSNT_BIGQUERY_ENDPOINT` / `ATSNT_GCS_ENDPOINT` send the bearer token to whatever host is configured (restrict to https or loopback); `--log` help text lacks `[_<MM>]`; dry-run echo does not quote args; 404 detection is a string match; duplicated test HTTP servers. Still open from L15: strict sinks have no retry.
 - **Next:** delivery decision (branch at ~1.7k authored lines vs ~400/PR heuristic) before T4.
 - **L19 (user decision, 2026-10-14):** delivery = "PRs encadenadas a dev". Planned slices (one PR per task, each stacked on the previous): PR1 T1 = 6b0c798, 7b08025, da0b29f; PR2 T2 = 4d92060, 228c6e1; PR3 T3 = c04a961, 31e5404; later PRs for T4 and T5. Push and PR creation still pending explicit user go-ahead.
+- **L20 (user, verbatim):** "ahora vamos a ejecutar t4 y t5 y luego lo hacemos todo".
+- **L21 (T4 evidence):** multi-stage `Dockerfile` (rust:1.99-slim-bookworm builder with BuildKit cache mounts and `--locked`; debian:bookworm-slim runtime with ca-certificates; non-root `atsnt` uid 10001; `GIT_SHA` build arg feeds `ATSNT_GIT_SHA` because `.git` is not in the context; entrypoint `run_production_pipeline.sh --bin-dir /app/bin --no-inhibit --output-dir /app/work/data`). Market data lives in the container filesystem on the VM boot disk — no volumes, no GCS. `.dockerignore` excludes target, data, storage, odd, docs, .git, .env*, logs, parquet. `docker build` ok, image 190 MB (plan estimate of ~45 MB was wrong). Container run as `atsnt`: real Binance download of 2026-01-01 (438,119 trades, 9.82 s), pipeline `--skip-fetch` HPO 5 s + backtest 2 s, artifact written; entrypoint dry-run with the Batch arguments resolves `/app/bin/*`, the January file and `--gcs-upload --artifact-suffix --strict-sinks`.
