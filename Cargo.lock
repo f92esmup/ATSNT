@@ -278,6 +278,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strategies",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

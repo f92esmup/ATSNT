@@ -108,13 +108,21 @@ Run types: `backtest`, `monte_carlo` (child of its backtest), `hpo`, `hpo_trial`
 
 ## 5. Google Cloud Storage (GCS) Hierarchy
 
-GCS only stores the strategy deployment artifact uploaded by `run_hpo --gcs-upload`; analytics live in BigQuery.
+GCS only stores the strategy deployment artifact uploaded by `run_hpo --gcs-upload`; analytics live in BigQuery. Market data is never stored in GCS.
 
 ```text
 gs://atsnt-lake-${PROJECT_ID}/
 └── artifacts/
-    └── <output-config file name>.json     # StrategyDeploymentArtifact (RunSpec + HPO scorecard)
+    └── <output-config stem>-<suffix>.json  # StrategyDeploymentArtifact (RunSpec + HPO scorecard)
 ```
+
+`<suffix>` is `run_hpo --artifact-suffix <S>` (e.g. the Cloud Batch job name) or, by default, the UTC timestamp `YYYYMMDDTHHMMSSZ`, so runs never overwrite each other's artifact. Fetch one locally with `gcloud storage cp gs://atsnt-lake-${PROJECT_ID}/artifacts/<name>.json configs/` before deploying, backtesting or paper trading it.
+
+### 5.1 Sink failure policy (`--strict-sinks`)
+
+By default BigQuery recording and GCS uploads are tolerant: a failure is logged and the run still exits 0, so a local run never dies because the cloud is unreachable. `run_hpo --strict-sinks` and `backtest --strict-sinks` make any recording/upload failure (unresolved credentials, HTTP error, BigQuery `insertErrors`, or no winning artifact to upload) fatal: the run finishes its local work (artifact file, Monte Carlo) and then exits non-zero listing every failure. Use it on ephemeral infrastructure such as Cloud Batch, where a silently lost result is worse than a failed job.
+
+`ATSNT_BIGQUERY_ENDPOINT` and `ATSNT_GCS_ENDPOINT` override the API base URLs (emulators and offline tests).
 
 ---
 
@@ -228,7 +236,7 @@ Multi-line ASCII boxes have been eliminated in favor of concise, single-line clo
 ```text
 # [GCP :: BigQuery] Streamed 1 row(s) -> mi-facturador-bot-01:atsnt_bi.trades
 # [GCP :: Secret Manager] Secret 'BOT_TOKEN' resolved from project 'mi-facturador-bot-01'
-# [GCP :: Cloud Storage] File uploaded -> gs://atsnt-lake/artifacts/hpo_btcusdt_2026.json
+# [GCP :: Cloud Storage] File uploaded -> gs://atsnt-lake/artifacts/hpo_btcusdt_2026-20261014T180509Z.json
 ```
 
 ### 9.4 Real-Time & Executive Telegram Notifications

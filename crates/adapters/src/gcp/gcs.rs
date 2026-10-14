@@ -11,7 +11,16 @@ use tracing::{info, warn};
 use super::auth::GcpAuthResolver;
 use crate::error::AdapterError;
 
+/// Public Cloud Storage JSON API endpoint.
+const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
+
+/// Environment variable overriding the Cloud Storage API endpoint (emulators and tests).
+pub const ENDPOINT_ENV: &str = "ATSNT_GCS_ENDPOINT";
+
 /// Uploader of small artifact files to a GCS bucket.
+///
+/// Upload failures are logged and tolerated by default; in strict mode
+/// ([`GcsArtifactSink::with_strict`]) they are returned as errors.
 #[derive(Debug, Clone)]
 pub struct GcsArtifactSink {
     client: reqwest::Client,
@@ -20,6 +29,10 @@ pub struct GcsArtifactSink {
     /// Whether missing credentials may be resolved from the environment
     /// (metadata server, gcloud CLI). `false` keeps the sink fully offline.
     ambient_auth: bool,
+    /// Whether upload failures are returned as errors instead of being logged.
+    strict: bool,
+    /// Base URL of the Cloud Storage JSON API.
+    endpoint: String,
 }
 
 impl GcsArtifactSink {
@@ -34,6 +47,30 @@ impl GcsArtifactSink {
             bucket_name,
             auth_token,
             ambient_auth: true,
+            strict: false,
+            endpoint: DEFAULT_ENDPOINT.to_string(),
+        }
+    }
+
+    /// Makes upload failures (unresolved credentials, HTTP errors) return `Err`
+    /// instead of only being logged.
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    /// Overrides the Cloud Storage API base URL (e.g. an emulator).
+    pub fn with_endpoint(mut self, endpoint: &str) -> Self {
+        self.endpoint = endpoint.trim_end_matches('/').to_string();
+        self
+    }
+
+    /// Returns `Ok` in tolerant mode and the failure as an error in strict mode.
+    fn tolerate(&self, failure: String) -> Result<(), AdapterError> {
+        if self.strict {
+            Err(AdapterError::General(failure))
+        } else {
+            Ok(())
         }
     }
 
@@ -45,7 +82,8 @@ impl GcsArtifactSink {
         }
     }
 
-    /// Initializes from environment variables `GCS_BUCKET_NAME` and `GCP_AUTH_TOKEN`.
+    /// Initializes from environment variables `GCS_BUCKET_NAME`, `GCP_AUTH_TOKEN`
+    /// and the optional endpoint override [`ENDPOINT_ENV`].
     pub fn from_env() -> Self {
         let bucket = std::env::var("GCS_BUCKET_NAME")
             .ok()
@@ -53,7 +91,11 @@ impl GcsArtifactSink {
         let token = std::env::var("GCP_AUTH_TOKEN")
             .ok()
             .filter(|s| !s.trim().is_empty());
-        Self::new(bucket, token)
+        let sink = Self::new(bucket, token);
+        match std::env::var(ENDPOINT_ENV) {
+            Ok(endpoint) if !endpoint.trim().is_empty() => sink.with_endpoint(endpoint.trim()),
+            _ => sink,
+        }
     }
 
     /// Returns `true` if GCS cloud upload is explicitly configured.
@@ -93,12 +135,15 @@ impl GcsArtifactSink {
                 object = %object_name,
                 "GCS upload skipped (GCP credentials/bucket not resolved)"
             );
-            return Ok(());
+            return self.tolerate(format!(
+                "GCS upload of {} failed: credentials or bucket not resolved",
+                object_name
+            ));
         };
 
         let url = format!(
-            "https://storage.googleapis.com/upload/storage/v1/b/{}/o?uploadType=media&name={}",
-            bucket, object_name
+            "{}/upload/storage/v1/b/{}/o?uploadType=media&name={}",
+            self.endpoint, bucket, object_name
         );
 
         let res = self
@@ -171,6 +216,10 @@ impl GcsArtifactSink {
                 body = %body,
                 "GCS upload returned non-success"
             );
+            return self.tolerate(format!(
+                "GCS upload of gs://{}/{} failed with HTTP {}: {}",
+                bucket, object_name, status, body
+            ));
         } else {
             let size_kb = bytes.len() as f64 / 1024.0;
             println!(
@@ -212,6 +261,7 @@ impl GcsArtifactSink {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_http;
     use super::*;
 
     #[tokio::test]
@@ -222,5 +272,56 @@ mod tests {
             .upload_bytes(b"{}".to_vec(), "artifacts/test.json", "application/json")
             .await;
         assert!(result.is_ok());
+    }
+
+    fn configured_sink(base_url: &str) -> GcsArtifactSink {
+        GcsArtifactSink::new(Some("bucket".into()), Some("t".into())).with_endpoint(base_url)
+    }
+
+    #[tokio::test]
+    async fn strict_sink_fails_when_credentials_are_not_resolved() {
+        let sink = GcsArtifactSink::offline().with_strict(true);
+        let err = sink
+            .upload_bytes(b"{}".to_vec(), "artifacts/test.json", "application/json")
+            .await;
+        assert!(err
+            .unwrap_err()
+            .to_string()
+            .contains("credentials or bucket not resolved"));
+    }
+
+    #[tokio::test]
+    async fn default_sink_tolerates_http_errors() {
+        let server = test_http::OneShotServer::start("403 Forbidden", "{}");
+        let sink = configured_sink(&server.base_url);
+        let result = sink
+            .upload_bytes(b"{}".to_vec(), "artifacts/test.json", "application/json")
+            .await;
+        assert!(result.is_ok());
+        assert!(server.request_line().starts_with(
+            "POST /upload/storage/v1/b/bucket/o?uploadType=media&name=artifacts/test.json"
+        ));
+    }
+
+    #[tokio::test]
+    async fn strict_sink_fails_on_http_errors() {
+        let server = test_http::OneShotServer::start("403 Forbidden", "{}");
+        let sink = configured_sink(&server.base_url).with_strict(true);
+        let err = sink
+            .upload_bytes(b"{}".to_vec(), "artifacts/test.json", "application/json")
+            .await;
+        assert!(err.unwrap_err().to_string().contains("403"));
+        server.request_line();
+    }
+
+    #[tokio::test]
+    async fn strict_sink_succeeds_on_clean_upload() {
+        let server = test_http::OneShotServer::start("200 OK", "{}");
+        let sink = configured_sink(&server.base_url).with_strict(true);
+        let result = sink
+            .upload_bytes(b"{}".to_vec(), "artifacts/test.json", "application/json")
+            .await;
+        assert!(result.is_ok());
+        server.request_line();
     }
 }

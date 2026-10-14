@@ -41,3 +41,6 @@ path = "src/bin/paper_trading.rs"
 name = "live_trading"
 path = "src/bin/live_trading.rs"
 
+
+[dev-dependencies]
+tempfile = "3"

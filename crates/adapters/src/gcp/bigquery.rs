@@ -55,11 +55,19 @@ impl BigQueryRecord for SeriesPointRow {
 /// Rows per `insertAll` request, following BigQuery's recommended batch size.
 const MAX_ROWS_PER_REQUEST: usize = 500;
 
+/// Public BigQuery REST API endpoint.
+const DEFAULT_ENDPOINT: &str = "https://bigquery.googleapis.com";
+
+/// Environment variable overriding the BigQuery API endpoint (emulators and tests).
+pub const ENDPOINT_ENV: &str = "ATSNT_BIGQUERY_ENDPOINT";
+
 /// BigQuery streaming data sink.
 ///
 /// Dispatches rows directly to the BigQuery `tabledata.insertAll` REST API.
 /// If `project_id` or `auth_token` are not configured (e.g. during local tests or offline mode),
-/// writes complete gracefully with an informational log.
+/// writes complete gracefully with an informational log. In strict mode
+/// ([`BigQuerySink::with_strict`]) unresolved credentials, HTTP failures and row
+/// `insertErrors` are returned as errors instead.
 #[derive(Debug, Clone)]
 pub struct BigQuerySink {
     client: reqwest::Client,
@@ -69,6 +77,10 @@ pub struct BigQuerySink {
     /// Whether missing credentials may be resolved from the environment
     /// (metadata server, gcloud CLI). `false` keeps the sink fully offline.
     ambient_auth: bool,
+    /// Whether write failures are returned as errors instead of being logged.
+    strict: bool,
+    /// Base URL of the BigQuery REST API.
+    endpoint: String,
 }
 
 impl BigQuerySink {
@@ -83,6 +95,30 @@ impl BigQuerySink {
             dataset_id,
             auth_token,
             ambient_auth: true,
+            strict: false,
+            endpoint: DEFAULT_ENDPOINT.to_string(),
+        }
+    }
+
+    /// Makes write failures (unresolved credentials, HTTP errors, row
+    /// `insertErrors`) return `Err` instead of only being logged.
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    /// Overrides the BigQuery REST API base URL (e.g. an emulator).
+    pub fn with_endpoint(mut self, endpoint: &str) -> Self {
+        self.endpoint = endpoint.trim_end_matches('/').to_string();
+        self
+    }
+
+    /// Returns `Ok` in tolerant mode and the failure as an error in strict mode.
+    fn tolerate(&self, failure: String) -> Result<(), AdapterError> {
+        if self.strict {
+            Err(AdapterError::General(failure))
+        } else {
+            Ok(())
         }
     }
 
@@ -96,7 +132,8 @@ impl BigQuerySink {
         }
     }
 
-    /// Initializes from environment variables `GCP_PROJECT_ID`, `GCP_DATASET_ID`, and `GCP_AUTH_TOKEN`.
+    /// Initializes from environment variables `GCP_PROJECT_ID`, `GCP_DATASET_ID`,
+    /// `GCP_AUTH_TOKEN` and the optional endpoint override [`ENDPOINT_ENV`].
     pub fn from_env() -> Self {
         let project = std::env::var("GCP_PROJECT_ID")
             .ok()
@@ -105,7 +142,11 @@ impl BigQuerySink {
         let token = std::env::var("GCP_AUTH_TOKEN")
             .ok()
             .filter(|s| !s.trim().is_empty());
-        Self::new(project, dataset, token)
+        let sink = Self::new(project, dataset, token);
+        match std::env::var(ENDPOINT_ENV) {
+            Ok(endpoint) if !endpoint.trim().is_empty() => sink.with_endpoint(endpoint.trim()),
+            _ => sink,
+        }
     }
 
     /// Returns `true` if BigQuery streaming is enabled and configured.
@@ -146,12 +187,15 @@ impl BigQuerySink {
                 count = rows.len(),
                 "BigQuery insert skipped (GCP credentials/project not resolved)"
             );
-            return Ok(());
+            return self.tolerate(format!(
+                "BigQuery insert into {}.{} failed: credentials or project not resolved",
+                self.dataset_id, table_id
+            ));
         };
 
         let url = format!(
-            "https://bigquery.googleapis.com/bigquery/v2/projects/{}/datasets/{}/tables/{}/insertAll",
-            project_id, self.dataset_id, table_id
+            "{}/bigquery/v2/projects/{}/datasets/{}/tables/{}/insertAll",
+            self.endpoint, project_id, self.dataset_id, table_id
         );
 
         for chunk in rows.chunks(MAX_ROWS_PER_REQUEST) {
@@ -246,6 +290,10 @@ impl BigQuerySink {
                 body = %body,
                 "BigQuery streaming insert returned non-success"
             );
+            return self.tolerate(format!(
+                "BigQuery insert into {}.{} failed with HTTP {}: {}",
+                self.dataset_id, table_id, status, body
+            ));
         } else if let Ok(resp_json) = response.json::<serde_json::Value>().await {
             if let Some(errors) = resp_json.get("insertErrors") {
                 if let Some(arr) = errors.as_array() {
@@ -260,7 +308,10 @@ impl BigQuerySink {
                             errors = %errors,
                             "BigQuery streaming insert returned row validation errors"
                         );
-                        return Ok(());
+                        return self.tolerate(format!(
+                            "BigQuery insert into {}.{} returned insertErrors: {}",
+                            self.dataset_id, table_id, errors
+                        ));
                     }
                 }
             }
@@ -304,6 +355,7 @@ impl RunRecorder for BigQuerySink {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_http;
     use super::*;
     use rust_decimal_macros::dec;
 
@@ -330,6 +382,68 @@ mod tests {
             .record_series(&[equity_point("entry", "t1")])
             .await
             .is_ok());
+    }
+
+    fn configured_sink(base_url: &str) -> BigQuerySink {
+        BigQuerySink::new(Some("p".into()), "atsnt_bi".into(), Some("t".into()))
+            .with_endpoint(base_url)
+    }
+
+    fn one_run_row() -> RunMetricsRow {
+        RunMetricsRow::extras_only("r1", "backtest", "full", "t", "{}")
+    }
+
+    #[tokio::test]
+    async fn strict_sink_fails_when_credentials_are_not_resolved() {
+        let sink = BigQuerySink::offline("atsnt_bi").with_strict(true);
+        let err = sink.record_metrics(&[one_run_row()]).await;
+        assert!(err.is_err());
+        assert!(err
+            .unwrap_err()
+            .to_string()
+            .contains("credentials or project not resolved"));
+    }
+
+    #[tokio::test]
+    async fn default_sink_tolerates_http_errors() {
+        let server = test_http::OneShotServer::start("500 Internal Server Error", "{}");
+        let sink = configured_sink(&server.base_url);
+        assert!(sink.record_metrics(&[one_run_row()]).await.is_ok());
+        assert!(server.request_line().starts_with(
+            "POST /bigquery/v2/projects/p/datasets/atsnt_bi/tables/run_metrics/insertAll"
+        ));
+    }
+
+    #[tokio::test]
+    async fn strict_sink_fails_on_http_errors() {
+        let server = test_http::OneShotServer::start("500 Internal Server Error", "{}");
+        let sink = configured_sink(&server.base_url).with_strict(true);
+        let err = sink.record_metrics(&[one_run_row()]).await;
+        assert!(err.unwrap_err().to_string().contains("500"));
+        server.request_line();
+    }
+
+    #[tokio::test]
+    async fn strict_sink_fails_on_row_insert_errors() {
+        let server = test_http::OneShotServer::start(
+            "200 OK",
+            r#"{"insertErrors":[{"index":0,"errors":[{"reason":"invalid"}]}]}"#,
+        );
+        let sink = configured_sink(&server.base_url).with_strict(true);
+        let err = sink.record_metrics(&[one_run_row()]).await;
+        assert!(err.unwrap_err().to_string().contains("insertErrors"));
+        server.request_line();
+    }
+
+    #[tokio::test]
+    async fn strict_sink_succeeds_on_clean_insert() {
+        let server = test_http::OneShotServer::start(
+            "200 OK",
+            r#"{"kind":"bigquery#tableDataInsertAllResponse"}"#,
+        );
+        let sink = configured_sink(&server.base_url).with_strict(true);
+        assert!(sink.record_metrics(&[one_run_row()]).await.is_ok());
+        server.request_line();
     }
 
     #[test]

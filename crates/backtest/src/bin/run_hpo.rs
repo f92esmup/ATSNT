@@ -4,14 +4,16 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use adapters::{
-    BigQuerySink, BinanceCsvReader, BinanceParquetReader, GcsArtifactSink, MarketDataStream,
+    AdapterError, BigQuerySink, BinanceCsvReader, BinanceParquetReader, GcsArtifactSink,
+    MarketDataStream,
 };
 use anyhow::{Context, Result};
 use backtest::{
-    now_unix_ms, record_hpo, BacktestConfig, DataWindow, HpoScorecard, RunContext, RunSpec,
-    RunType, SamplingConfig, StrategyDeploymentArtifact, WalkForwardConfig, WalkForwardOptimizer,
-    WalkForwardSplitter,
+    artifact_object_name, artifact_run_suffix, now_unix_ms, record_hpo, BacktestConfig, DataWindow,
+    HpoScorecard, RunContext, RunSpec, RunType, SamplingConfig, SinkFailures,
+    StrategyDeploymentArtifact, WalkForwardConfig, WalkForwardOptimizer, WalkForwardSplitter,
 };
+use chrono::Utc;
 use clap::Parser;
 use domain::DollarBarAggregator;
 use rust_decimal::Decimal;
@@ -87,9 +89,20 @@ struct Args {
     #[arg(long, default_value_t = false)]
     gcp_bigquery: bool,
 
-    /// Upload the winning Strategy Deployment Artifact to Google Cloud Storage
+    /// Upload the winning Strategy Deployment Artifact to Google Cloud Storage as
+    /// `artifacts/<output-config stem>-<artifact suffix>.json`
     #[arg(long, default_value_t = false)]
     gcs_upload: bool,
+
+    /// Unique suffix for the uploaded artifact name (e.g. the Cloud Batch job name);
+    /// defaults to the UTC timestamp `YYYYMMDDTHHMMSSZ`
+    #[arg(long)]
+    artifact_suffix: Option<String>,
+
+    /// Exit non-zero if any BigQuery recording or GCS upload fails (or no winning
+    /// artifact can be uploaded); failures are reported after all local work finishes
+    #[arg(long, default_value_t = false)]
+    strict_sinks: bool,
 }
 
 #[tokio::main]
@@ -333,8 +346,10 @@ where
         execution_context: engine_config,
     };
 
+    let mut sinks = SinkFailures::new(args.strict_sinks);
+
     if args.gcp_bigquery && !evaluations.is_empty() {
-        let bq = BigQuerySink::from_env();
+        let bq = BigQuerySink::from_env().with_strict(args.strict_sinks);
         let sweep_ctx = RunContext::new(RunType::Hpo, &sweep_spec, started_at_ms);
         let data_window = DataWindow {
             source: Some(args.data.display().to_string()),
@@ -356,7 +371,7 @@ where
             sweep_ctx.run_id,
             evaluations.len()
         );
-        if let Err(e) = record_hpo(
+        let recorded = record_hpo(
             &bq,
             &sweep_ctx,
             &sweep_spec,
@@ -365,9 +380,8 @@ where
             settings,
         )
         .await
-        {
-            println!("[WARN] Failed to record HPO run: {e}");
-        }
+        .map(|_| ());
+        sinks.record("record HPO run", recorded);
         print_phase_timing("record_bigquery", record_start);
     }
 
@@ -428,25 +442,25 @@ where
 
         if args.gcs_upload {
             let upload_start = Instant::now();
-            let gcs = GcsArtifactSink::from_env();
-            let artifact_dest_name = args
-                .output_config
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or("strategy_artifact.json");
-            println!(
-                "[*] Uploading Strategy Deployment Artifact to GCS (artifacts/{artifact_dest_name})..."
-            );
-            let _ = gcs
-                .upload_file(
-                    &args.output_config,
-                    &format!("artifacts/{}", artifact_dest_name),
-                    "application/json",
-                )
+            let gcs = GcsArtifactSink::from_env().with_strict(args.strict_sinks);
+            let suffix = artifact_run_suffix(args.artifact_suffix.as_deref(), Utc::now());
+            let object_name = artifact_object_name(&args.output_config, &suffix);
+            println!("[*] Uploading Strategy Deployment Artifact to GCS ({object_name})...");
+            let uploaded = gcs
+                .upload_file(&args.output_config, &object_name, "application/json")
                 .await;
+            sinks.record("upload Strategy Deployment Artifact", uploaded);
             print_phase_timing("upload_artifact", upload_start);
         }
+    } else if args.gcs_upload {
+        sinks.record(
+            "upload Strategy Deployment Artifact",
+            Err(AdapterError::General(
+                "no winning configuration was produced".to_string(),
+            )),
+        );
     }
 
+    sinks.finish()?;
     Ok(())
 }

@@ -8,6 +8,7 @@ pub mod optimization;
 pub mod paper;
 pub mod recording;
 pub mod run;
+pub mod sinks;
 pub mod walk_forward;
 
 pub use artifact::{
@@ -35,4 +36,5 @@ pub use recording::{
     record_run_status, DataWindow, RunContext, RunStatus, GIT_SHA,
 };
 pub use run::{RunId, RunSpec, RunType};
+pub use sinks::{artifact_object_name, artifact_run_suffix, SinkFailures, StrictSinkError};
 pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};

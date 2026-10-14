@@ -175,7 +175,7 @@ cargo run -p backtest --bin run_hpo -- \
 - **Embargo Buffering**: Quarantines bars between train and test windows to prevent indicator lookahead leakage.
 - **Plateau Stability Score**: Evaluates parameter neighborhoods ($\pm \delta$) and penalizes fragile overfitting spikes.
 - **Deflated Sharpe Ratio (DSR)**: Assesses statistical significance ($p < 0.05$) adjusted for trial count.
-- **Automated Serialization**: Saves the winning Strategy Deployment Artifact to `configs/hpo_results.json` (`--gcs-upload` also uploads it to GCS). With `--gcp-bigquery`, records an `hpo` run plus one `hpo_trial` run per candidate with in-sample/out-of-sample metrics for every fold. `--execution-context <json>` sets the fee/slippage/capital schedule used by every trial.
+- **Automated Serialization**: Saves the winning Strategy Deployment Artifact to `configs/hpo_results.json` (`--gcs-upload` also uploads it to GCS as `artifacts/<config stem>-<suffix>.json`, where `--artifact-suffix` sets the suffix and the default is a UTC timestamp). `--strict-sinks` (also on `backtest`) makes any BigQuery/GCS failure exit non-zero after local work finishes. With `--gcp-bigquery`, records an `hpo` run plus one `hpo_trial` run per candidate with in-sample/out-of-sample metrics for every fold. `--execution-context <json>` sets the fee/slippage/capital schedule used by every trial.
 
 ---
 

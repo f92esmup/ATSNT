@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use backtest::{
     now_unix_ms, record_backtest, record_monte_carlo, BacktestConfig, BacktestEngine, DataWindow,
     MonteCarloConfig, MonteCarloSimulator, RunContext, RunSpec, RunType, SamplingConfig,
+    SinkFailures,
 };
 use clap::Parser;
 use domain::DollarBarAggregator;
@@ -64,6 +65,11 @@ struct Args {
     /// Record the run (spec, metrics, trades, equity events and Monte Carlo child run) to BigQuery
     #[arg(long, default_value_t = false)]
     gcp_bigquery: bool,
+
+    /// Exit non-zero if any BigQuery recording fails; failures are reported after
+    /// the backtest and Monte Carlo finish
+    #[arg(long, default_value_t = false)]
+    strict_sinks: bool,
 }
 
 #[tokio::main]
@@ -474,7 +480,10 @@ async fn main() -> Result<()> {
         execution_context: engine_config,
     };
     let run_ctx = RunContext::new(RunType::Backtest, &run_spec, started_at_ms);
-    let recorder = args.gcp_bigquery.then(BigQuerySink::from_env);
+    let recorder = args
+        .gcp_bigquery
+        .then(|| BigQuerySink::from_env().with_strict(args.strict_sinks));
+    let mut sinks = SinkFailures::new(args.strict_sinks);
 
     if let Some(bq) = &recorder {
         let record_start = Instant::now();
@@ -483,7 +492,7 @@ async fn main() -> Result<()> {
             run_ctx.run_id,
             closed_trades.len()
         );
-        if let Err(e) = record_backtest(
+        let recorded = record_backtest(
             bq,
             &run_ctx,
             &run_spec,
@@ -491,10 +500,8 @@ async fn main() -> Result<()> {
             &metrics,
             &closed_trades,
         )
-        .await
-        {
-            println!("[WARN] Failed to record backtest run: {e}");
-        }
+        .await;
+        sinks.record("record backtest run", recorded);
         print_phase_timing("record_bigquery", record_start);
     }
 
@@ -581,17 +588,16 @@ async fn main() -> Result<()> {
                     "[*] Recording Monte Carlo run {} (child of {}) to BigQuery...",
                     mc_ctx.run_id, run_ctx.run_id
                 );
-                if let Err(e) =
-                    record_monte_carlo(bq, &mc_ctx, &run_spec, &data_window, &mc_report).await
-                {
-                    println!("[WARN] Failed to record Monte Carlo run: {e}");
-                }
+                let recorded =
+                    record_monte_carlo(bq, &mc_ctx, &run_spec, &data_window, &mc_report).await;
+                sinks.record("record Monte Carlo run", recorded);
                 print_phase_timing("record_monte_carlo", mc_record_start);
             }
         }
     }
 
     print_phase_timing("total", start_total);
+    sinks.finish()?;
     Ok(())
 }
 
