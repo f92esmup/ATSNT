@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+# =============================================================================
+# ATSNT - Ephemeral Cloud Batch HPO Orchestrator
+#
+# Runs the production pipeline (fetch -> HPO -> backtest + Monte Carlo) on a
+# disposable Cloud Batch VM:
+#   1. Builds and pushes the batch image to Artifact Registry.
+#   2. Submits a Batch job (Spot by default) running the image with
+#      --gcp-bigquery --strict-sinks --upload-winner.
+#   3. Waits for the job, prints its task logs from Cloud Logging.
+#   4. Downloads the winning artifact from gs://<bucket>/artifacts/ into configs/.
+#
+# Market data lives only on the VM's disk and is destroyed with it: nothing but
+# the ~2 KB winning artifact is written to GCS. Metrics go to BigQuery.
+#
+# Prerequisites: scripts/gcp/setup_gcp_resources.sh (APIs, Artifact Registry
+# repository, Batch service account and its permissions).
+# =============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${PROJECT_ROOT}"
+
+PROJECT_ID="${GCP_PROJECT_ID:-}"
+REGION="${GCP_REGION:-europe-southwest1}"
+BUCKET_NAME="${GCS_BUCKET_NAME:-}"
+DATASET_ID="${GCP_DATASET_ID:-atsnt_bi}"
+REPOSITORY="atsnt"
+IMAGE_NAME="atsnt-batch"
+IMAGE_TAG=""
+SERVICE_ACCOUNT=""
+MACHINE_TYPE="c2-standard-60"
+PROVISIONING="SPOT"
+MAX_RETRIES="2"
+BOOT_DISK_GB="100"
+MAX_RUN_SECONDS="14400"
+POLL_SECONDS="30"
+SYMBOL="BTCUSDT"
+YEAR="$(date +%Y)"
+MONTH=""
+JOB_NAME=""
+DOWNLOAD_DIR="configs"
+SKIP_BUILD=false
+NO_WAIT=false
+DRY_RUN=false
+JOB_SPEC_OUT=""
+PIPELINE_EXTRA=()
+
+show_help() {
+    cat << EOF
+ATSNT - Ephemeral Cloud Batch HPO Orchestrator
+
+Usage:
+  $(basename "$0") [OPTIONS] [-- <extra run_production_pipeline.sh options>]
+
+Options:
+      --project <ID>         GCP project (default: \$GCP_PROJECT_ID)
+      --region <REGION>      Batch / Artifact Registry region (default: ${REGION})
+      --bucket <NAME>        Artifact bucket (default: atsnt-lake-<project>)
+  -s, --symbol <SYM>         Trading pair symbol (default: ${SYMBOL})
+  -y, --year <YYYY>          Year to process (default: ${YEAR})
+  -m, --month <MM>           Single completed month (default: whole year to date)
+      --job-name <NAME>      Batch job name, also the artifact suffix
+                             (default: hpo-<sym>-<year>[-<MM>]-<YYYYMMDD-HHMMSS>)
+      --machine-type <TYPE>  VM machine type (default: ${MACHINE_TYPE})
+      --standard             Use a standard VM instead of Spot
+      --max-retries <N>      Task retries, e.g. after Spot preemption (default: ${MAX_RETRIES})
+      --boot-disk-gb <N>     VM boot disk size; holds the market data (default: ${BOOT_DISK_GB})
+      --max-run-seconds <N>  Hard limit for the task (default: ${MAX_RUN_SECONDS})
+      --service-account <E>  VM service account (default: atsnt-batch@<project>.iam.gserviceaccount.com)
+      --image-tag <TAG>      Image tag (default: git short SHA, '-dirty' if uncommitted changes)
+      --skip-build           Reuse an already pushed image tag
+      --download-dir <DIR>   Where the winning artifact is downloaded (default: ${DOWNLOAD_DIR})
+      --no-wait              Submit and exit without waiting, logs or download
+      --dry-run              Render the job spec and print the plan; call no gcloud/docker
+      --job-spec-out <PATH>  Also write the rendered job spec to PATH
+  -h, --help                 Show this help message and exit
+
+Examples:
+  # January 2026 on a 60-vCPU Spot VM with 720 candidates:
+  $(basename "$0") --project my-proj --year 2026 --month 1 -- --candidates 720 --capital 200
+
+  # Inspect the job spec without touching GCP:
+  $(basename "$0") --project my-proj --year 2026 --month 1 --dry-run
+EOF
+}
+
+die() {
+    echo "[ERROR] $*" >&2
+    exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --project) PROJECT_ID="$2"; shift 2 ;;
+        --region) REGION="$2"; shift 2 ;;
+        --bucket) BUCKET_NAME="$2"; shift 2 ;;
+        -s|--symbol) SYMBOL="${2^^}"; shift 2 ;;
+        -y|--year) YEAR="$2"; shift 2 ;;
+        -m|--month) MONTH="$2"; shift 2 ;;
+        --job-name) JOB_NAME="$2"; shift 2 ;;
+        --machine-type) MACHINE_TYPE="$2"; shift 2 ;;
+        --standard) PROVISIONING="STANDARD"; shift ;;
+        --max-retries) MAX_RETRIES="$2"; shift 2 ;;
+        --boot-disk-gb) BOOT_DISK_GB="$2"; shift 2 ;;
+        --max-run-seconds) MAX_RUN_SECONDS="$2"; shift 2 ;;
+        --service-account) SERVICE_ACCOUNT="$2"; shift 2 ;;
+        --image-tag) IMAGE_TAG="$2"; shift 2 ;;
+        --skip-build) SKIP_BUILD=true; shift ;;
+        --download-dir) DOWNLOAD_DIR="$2"; shift 2 ;;
+        --no-wait) NO_WAIT=true; shift ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --job-spec-out) JOB_SPEC_OUT="$2"; shift 2 ;;
+        -h|--help) show_help; exit 0 ;;
+        --) shift; PIPELINE_EXTRA=("$@"); break ;;
+        *)
+            echo "[ERROR] Unknown option: $1" >&2
+            echo "Run '$(basename "$0") --help' for usage." >&2
+            exit 1
+            ;;
+    esac
+done
+
+# --- Validation (no GCP calls) ------------------------------------------------
+[ -n "${PROJECT_ID}" ] || die "--project (or GCP_PROJECT_ID) is required."
+[[ "${YEAR}" =~ ^[0-9]{4}$ ]] || die "--year must be YYYY (got '${YEAR}')."
+for n in MAX_RETRIES BOOT_DISK_GB MAX_RUN_SECONDS; do
+    [[ "${!n}" =~ ^[0-9]+$ ]] || die "${n,,} must be a non-negative integer (got '${!n}')."
+done
+
+MONTH_PADDED=""
+if [ -n "${MONTH}" ]; then
+    if ! [[ "${MONTH}" =~ ^[0-9]{1,2}$ ]] || [ $((10#${MONTH})) -lt 1 ] || [ $((10#${MONTH})) -gt 12 ]; then
+        die "--month must be between 1 and 12 (got '${MONTH}')."
+    fi
+    MONTH_PADDED="$(printf "%02d" "$((10#${MONTH}))")"
+fi
+
+PERIOD="${YEAR}${MONTH_PADDED:+_${MONTH_PADDED}}"
+if [ -z "${JOB_NAME}" ]; then
+    JOB_NAME="hpo-${SYMBOL,,}-${YEAR}${MONTH_PADDED:+-${MONTH_PADDED}}-$(date -u +%Y%m%d-%H%M%S)"
+fi
+# Cloud Batch job IDs: lowercase letter first, then lowercase letters, digits or hyphens, max 63.
+[[ "${JOB_NAME}" =~ ^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]] \
+    || die "Invalid job name '${JOB_NAME}': use lowercase letters, digits and hyphens (max 63, starting with a letter)."
+
+BUCKET_NAME="${BUCKET_NAME:-atsnt-lake-${PROJECT_ID}}"
+SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-atsnt-batch@${PROJECT_ID}.iam.gserviceaccount.com}"
+if [ -z "${IMAGE_TAG}" ]; then
+    IMAGE_TAG="$(git rev-parse --short=12 HEAD 2>/dev/null || echo latest)"
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        IMAGE_TAG="${IMAGE_TAG}-dirty"
+    fi
+fi
+IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+CONFIG_STEM="hpo_${SYMBOL,,}_${PERIOD}"
+ARTIFACT_OBJECT="artifacts/${CONFIG_STEM}-${JOB_NAME}.json"
+ARTIFACT_URI="gs://${BUCKET_NAME}/${ARTIFACT_OBJECT}"
+LOCAL_ARTIFACT="${DOWNLOAD_DIR}/${CONFIG_STEM}-${JOB_NAME}.json"
+
+# Arguments for scripts/run_production_pipeline.sh inside the container.
+PIPELINE_ARGS=(
+    --symbol "${SYMBOL}"
+    --year "${YEAR}"
+)
+[ -n "${MONTH_PADDED}" ] && PIPELINE_ARGS+=(--month "$((10#${MONTH_PADDED}))")
+PIPELINE_ARGS+=(
+    --config "/app/configs/${CONFIG_STEM}.json"
+    --gcp-bigquery
+    --strict-sinks
+    --upload-winner
+    --artifact-suffix "${JOB_NAME}"
+)
+if [ "${#PIPELINE_EXTRA[@]}" -gt 0 ]; then
+    PIPELINE_ARGS+=("${PIPELINE_EXTRA[@]}")
+fi
+
+# --- Job spec -----------------------------------------------------------------
+json_string() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '"%s"' "${s}"
+}
+
+json_array() {
+    local first=true item
+    printf '['
+    for item in "$@"; do
+        [ "${first}" = "true" ] || printf ', '
+        json_string "${item}"
+        first=false
+    done
+    printf ']'
+}
+
+render_job_spec() {
+    cat << EOF
+{
+  "taskGroups": [
+    {
+      "taskCount": 1,
+      "taskSpec": {
+        "runnables": [
+          {
+            "container": {
+              "imageUri": $(json_string "${IMAGE_URI}"),
+              "commands": $(json_array "${PIPELINE_ARGS[@]}")
+            },
+            "environment": {
+              "variables": {
+                "GCP_PROJECT_ID": $(json_string "${PROJECT_ID}"),
+                "GCP_DATASET_ID": $(json_string "${DATASET_ID}"),
+                "GCS_BUCKET_NAME": $(json_string "${BUCKET_NAME}")
+              }
+            }
+          }
+        ],
+        "maxRetryCount": ${MAX_RETRIES},
+        "maxRunDuration": "${MAX_RUN_SECONDS}s"
+      }
+    }
+  ],
+  "allocationPolicy": {
+    "instances": [
+      {
+        "policy": {
+          "machineType": $(json_string "${MACHINE_TYPE}"),
+          "provisioningModel": "${PROVISIONING}",
+          "bootDisk": { "sizeGb": ${BOOT_DISK_GB} }
+        }
+      }
+    ],
+    "location": { "allowedLocations": [$(json_string "regions/${REGION}")] },
+    "serviceAccount": { "email": $(json_string "${SERVICE_ACCOUNT}") }
+  },
+  "labels": { "app": "atsnt", "component": "hpo" },
+  "logsPolicy": { "destination": "CLOUD_LOGGING" }
+}
+EOF
+}
+
+SPEC_FILE="$(mktemp "${TMPDIR:-/tmp}/atsnt-batch-job.XXXXXX.json")"
+trap 'rm -f "${SPEC_FILE}"' EXIT
+render_job_spec > "${SPEC_FILE}"
+if [ -n "${JOB_SPEC_OUT}" ]; then
+    cp "${SPEC_FILE}" "${JOB_SPEC_OUT}"
+fi
+
+echo "============================================================"
+echo " ATSNT - Ephemeral Cloud Batch HPO"
+echo "============================================================"
+echo "Project:        ${PROJECT_ID}"
+echo "Region:         ${REGION}"
+echo "Job:            ${JOB_NAME}"
+echo "Machine:        ${MACHINE_TYPE} (${PROVISIONING}, ${BOOT_DISK_GB} GB disk, ${MAX_RETRIES} retries)"
+echo "Image:          ${IMAGE_URI}"
+echo "Pipeline args:  ${PIPELINE_ARGS[*]}"
+echo "Winner (GCS):   ${ARTIFACT_URI}"
+echo "Winner (local): ${LOCAL_ARTIFACT}"
+echo "Market data:    VM disk only (destroyed with the VM)"
+echo "------------------------------------------------------------"
+
+if [ "${DRY_RUN}" = "true" ]; then
+    echo "[DRY-RUN] Job spec:"
+    cat "${SPEC_FILE}"
+    echo ""
+    if [ "${SKIP_BUILD}" = "false" ]; then
+        echo "[DRY-RUN] docker build --build-arg GIT_SHA=<sha> -t ${IMAGE_URI} ."
+        echo "[DRY-RUN] docker push ${IMAGE_URI}"
+    fi
+    echo "[DRY-RUN] gcloud batch jobs submit ${JOB_NAME} --project=${PROJECT_ID} --location=${REGION} --config=<job spec>"
+    echo "[DRY-RUN] gcloud storage cp ${ARTIFACT_URI} ${LOCAL_ARTIFACT}"
+    echo "[DRY-RUN] No commands were executed."
+    exit 0
+fi
+
+command -v gcloud >/dev/null 2>&1 || die "gcloud CLI not found."
+
+# --- Preflight: machine type available in the region --------------------------
+echo "[1/5] Checking that ${MACHINE_TYPE} exists in ${REGION}..."
+ZONES="$(gcloud compute machine-types list --project="${PROJECT_ID}" \
+    --filter="name=${MACHINE_TYPE} AND zone~^${REGION}-" --format="value(zone)" 2>/dev/null || true)"
+[ -n "${ZONES}" ] || die "Machine type ${MACHINE_TYPE} is not offered in ${REGION}. Pick another with --machine-type or --region."
+echo "      [OK] Available in: $(echo "${ZONES}" | tr '\n' ' ')"
+
+# --- Build and push image -----------------------------------------------------
+if [ "${SKIP_BUILD}" = "false" ]; then
+    command -v docker >/dev/null 2>&1 || die "docker not found (or use --skip-build with an existing --image-tag)."
+    echo "[2/5] Building and pushing ${IMAGE_URI}..."
+    gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet >/dev/null
+    docker build --build-arg GIT_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || true)" -t "${IMAGE_URI}" .
+    docker push "${IMAGE_URI}"
+else
+    echo "[2/5] [SKIPPED] Image build (using ${IMAGE_URI})"
+fi
+
+# --- Submit -------------------------------------------------------------------
+echo "[3/5] Submitting Batch job ${JOB_NAME}..."
+gcloud batch jobs submit "${JOB_NAME}" \
+    --project="${PROJECT_ID}" \
+    --location="${REGION}" \
+    --config="${SPEC_FILE}"
+
+if [ "${NO_WAIT}" = "true" ]; then
+    echo "[OK] Submitted. Follow it with:"
+    echo "  gcloud batch jobs describe ${JOB_NAME} --project=${PROJECT_ID} --location=${REGION}"
+    echo "Download the winner when it succeeds with:"
+    echo "  gcloud storage cp ${ARTIFACT_URI} ${LOCAL_ARTIFACT}"
+    exit 0
+fi
+
+# --- Wait ---------------------------------------------------------------------
+echo "[4/5] Waiting for job ${JOB_NAME} (polling every ${POLL_SECONDS}s)..."
+STATE=""
+while true; do
+    STATE="$(gcloud batch jobs describe "${JOB_NAME}" --project="${PROJECT_ID}" \
+        --location="${REGION}" --format="value(status.state)" 2>/dev/null || echo "UNKNOWN")"
+    echo "      $(date -u +%H:%M:%S) state=${STATE}"
+    case "${STATE}" in
+        SUCCEEDED|FAILED|CANCELLED|DELETION_IN_PROGRESS) break ;;
+    esac
+    sleep "${POLL_SECONDS}"
+done
+
+JOB_UID="$(gcloud batch jobs describe "${JOB_NAME}" --project="${PROJECT_ID}" \
+    --location="${REGION}" --format="value(uid)")"
+echo "------------------------------------------------------------"
+echo " Task logs (Cloud Logging, job uid ${JOB_UID})"
+echo "------------------------------------------------------------"
+gcloud logging read \
+    "logName=\"projects/${PROJECT_ID}/logs/batch_task_logs\" AND labels.job_uid=\"${JOB_UID}\"" \
+    --project="${PROJECT_ID}" --order=asc --limit=100000 --format="value(textPayload)" || \
+    echo "[WARN] Could not read task logs; they may take a minute to appear in Cloud Logging."
+
+if [ "${STATE}" != "SUCCEEDED" ]; then
+    die "Batch job ${JOB_NAME} finished with state ${STATE}."
+fi
+
+# --- Download winner ----------------------------------------------------------
+echo "[5/5] Downloading winning artifact..."
+mkdir -p "${DOWNLOAD_DIR}"
+gcloud storage cp "${ARTIFACT_URI}" "${LOCAL_ARTIFACT}"
+
+echo "============================================================"
+echo " [SUCCESS] Ephemeral HPO completed; the VM and its market data are gone."
+echo " Winning artifact:  ${LOCAL_ARTIFACT}"
+echo " Run analytics:     BigQuery ${DATASET_ID} (v_runs, v_trades, v_equity)"
+echo " Next: ./scripts/gcp/deploy_to_vm.sh ${LOCAL_ARTIFACT}"
+echo "============================================================"

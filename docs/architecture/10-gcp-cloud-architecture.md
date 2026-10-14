@@ -202,6 +202,25 @@ cargo run -p backtest --bin run_hpo -- \
   --gcp-bigquery
 ```
 
+### Step 2b: Ephemeral HPO on Cloud Batch (no market data in the cloud)
+
+`scripts/gcp/run_ephemeral_batch_hpo.sh` runs fetch → HPO → backtest + Monte Carlo on a disposable Batch VM (Spot by default) built from the repository `Dockerfile`:
+
+1. Builds the image (`fetch_data`, `run_hpo`, `backtest`, pipeline script) and pushes it to Artifact Registry (`<region>-docker.pkg.dev/<project>/atsnt/atsnt-batch:<git sha>`).
+2. Submits a Batch job running `run_production_pipeline.sh --gcp-bigquery --strict-sinks --upload-winner --artifact-suffix <job>` as the `atsnt-batch` service account, with task logs sent to Cloud Logging.
+3. Market data is downloaded and processed inside the container filesystem on the VM boot disk (`--boot-disk-gb`) and is destroyed with the VM. GCS only receives the winning artifact `artifacts/hpo_<sym>_<period>-<job>.json`; metrics go to BigQuery.
+4. Waits for the job, prints its `batch_task_logs`, and downloads the winner to `configs/`. With `--strict-sinks`, a failed BigQuery write or artifact upload fails the job instead of losing the result silently; `--max-retries` covers Spot preemption.
+
+```bash
+# Inspect the rendered job spec without touching GCP:
+./scripts/gcp/run_ephemeral_batch_hpo.sh --project "$GCP_PROJECT_ID" --year 2026 --month 1 --dry-run
+
+# January 2026 on a 60-vCPU Spot VM with 720 candidates and 200 USDT capital:
+./scripts/gcp/run_ephemeral_batch_hpo.sh --project "$GCP_PROJECT_ID" --year 2026 --month 1 -- --candidates 720 --capital 200
+```
+
+The HPO search parallelizes across candidates, so use many more candidates than vCPUs. Before the first run, confirm the machine type exists in the region (the script checks it) and that the project's regional CPU / Spot quota covers it. `setup_gcp_resources.sh` grants the service account only `batch.agentReporter`, `logging.logWriter`, `artifactregistry.reader` on the `atsnt` repository, `storage.objectCreator` on the bucket, and `bigquery.dataEditor` on the four tables the pipeline writes.
+
 ### Step 3: Run Paper Trading on GCP `e2-micro` VM
 ```bash
 # Executed inside the VM (zero credentials needed, authenticated via GCE metadata server):

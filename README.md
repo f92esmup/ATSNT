@@ -113,6 +113,9 @@ tail -f pipeline_btcusdt_2026.log
 
 Argument resolution is covered by `bash scripts/tests/pipeline_args_test.sh` (dry-run based, no network or build).
 
+#### Ephemeral run on Google Cloud Batch
+The same pipeline runs on a disposable Cloud Batch VM (60 vCPU Spot by default) via `scripts/gcp/run_ephemeral_batch_hpo.sh`, which builds the repository `Dockerfile`, submits the job, streams its logs and downloads the winning artifact into `configs/`. Market data never leaves the VM disk; only the winning JSON goes to GCS and metrics to BigQuery. See [GCP architecture §8, Step 2b](docs/architecture/10-gcp-cloud-architecture.md). `bash scripts/tests/batch_job_test.sh` checks the rendered job spec in dry-run mode.
+
 ---
 
 ### Step 1: Download & Convert Real Market Data (Binance ETL)
