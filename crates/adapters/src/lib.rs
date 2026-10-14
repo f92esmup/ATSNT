@@ -8,6 +8,7 @@ pub mod binance_private_stream;
 pub mod binance_user_stream;
 pub mod binance_ws;
 pub mod error;
+pub mod fetch_plan;
 pub mod gcp;
 pub mod traits;
 
@@ -30,6 +31,7 @@ pub use binance_private_stream::{
 pub use binance_user_stream::{BinanceUserDataStream, ExecutionUpdate};
 pub use binance_ws::{BinanceAggTradePayload, BinanceWebSocketStream, BinanceWsConfig};
 pub use error::AdapterError;
+pub use fetch_plan::{is_not_archived, plan_fetch_tasks, run_bounded, FetchTask};
 pub use gcp::{
     datetime_in_madrid, format_unix_ms_rfc3339, now_in_madrid, BigQueryRecord, BigQuerySink,
     GcpSecretManager, GcsArtifactSink, TelegramNotifier,

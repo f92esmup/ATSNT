@@ -66,6 +66,7 @@ pub struct FetchSummary {
 /// Automated Binance historical market data ETL downloader and Parquet converter.
 pub struct BinanceDataFetcher {
     client: Client,
+    show_progress: bool,
 }
 
 impl Default for BinanceDataFetcher {
@@ -81,7 +82,24 @@ impl BinanceDataFetcher {
             .timeout(std::time::Duration::from_secs(300))
             .build()
             .unwrap_or_else(|_| Client::new());
-        Self { client }
+        Self {
+            client,
+            show_progress: true,
+        }
+    }
+
+    /// Enables or disables terminal progress bars (disable when fetching concurrently).
+    pub fn with_progress(mut self, show_progress: bool) -> Self {
+        self.show_progress = show_progress;
+        self
+    }
+
+    fn progress_bar(&self, len: Option<u64>) -> ProgressBar {
+        match (self.show_progress, len) {
+            (false, _) => ProgressBar::hidden(),
+            (true, Some(len)) => ProgressBar::new(len),
+            (true, None) => ProgressBar::new_spinner(),
+        }
     }
 
     /// Downloads the official ZIP archive and streams it directly into a compressed Parquet file.
@@ -106,7 +124,7 @@ impl BinanceDataFetcher {
         }
 
         let total_size = response.content_length().unwrap_or(0);
-        let download_pb = ProgressBar::new(total_size);
+        let download_pb = self.progress_bar(Some(total_size));
         download_pb.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
@@ -149,7 +167,7 @@ impl BinanceDataFetcher {
         let csv_file = archive.by_index(csv_index)?;
         let mut buf_reader = BufReader::with_capacity(1024 * 1024, csv_file);
 
-        let convert_pb = ProgressBar::new_spinner();
+        let convert_pb = self.progress_bar(None);
         convert_pb.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.green} [{elapsed_precise}] Converting to Parquet: {pos} trades parsed")

@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use adapters::{BigQuerySink, BinanceCsvReader, BinanceParquetReader, MarketDataStream};
 use anyhow::{Context, Result};
@@ -69,6 +70,7 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let started_at_ms = now_unix_ms();
+    let start_total = Instant::now();
 
     println!("============================================================");
     println!("     ATSNT - Quantitative Backtesting Engine (100% Rust)    ");
@@ -368,6 +370,7 @@ async fn main() -> Result<()> {
         ..DataWindow::default()
     };
 
+    let replay_start = Instant::now();
     while let Some(trade) = stream.next_trade()? {
         total_trades_processed += 1;
         last_price = trade.price;
@@ -392,6 +395,8 @@ async fn main() -> Result<()> {
         None
     };
     let (metrics, closed_trades) = engine.finish_with_trades(mark);
+
+    print_phase_timing("replay", replay_start);
 
     println!("\n============================================================");
     println!("               QUANTITATIVE PERFORMANCE REPORT              ");
@@ -472,6 +477,7 @@ async fn main() -> Result<()> {
     let recorder = args.gcp_bigquery.then(BigQuerySink::from_env);
 
     if let Some(bq) = &recorder {
+        let record_start = Instant::now();
         println!(
             "[*] Recording backtest run {} to BigQuery ({} trades)...",
             run_ctx.run_id,
@@ -489,6 +495,7 @@ async fn main() -> Result<()> {
         {
             println!("[WARN] Failed to record backtest run: {e}");
         }
+        print_phase_timing("record_bigquery", record_start);
     }
 
     // 4. Monte Carlo Stress-Testing
@@ -510,10 +517,12 @@ async fn main() -> Result<()> {
                 seed: Some(42),
             };
 
+            let mc_start = Instant::now();
             let simulator = MonteCarloSimulator::new(mc_config);
             let mc_report = simulator
                 .run(engine_config.initial_capital, &closed_trades)
                 .map_err(|e| anyhow::anyhow!("Monte Carlo error: {e}"))?;
+            print_phase_timing("monte_carlo", mc_start);
 
             println!(
                 " Simulations Simulated:     {}",
@@ -566,6 +575,7 @@ async fn main() -> Result<()> {
             println!("============================================================");
 
             if let Some(bq) = &recorder {
+                let mc_record_start = Instant::now();
                 let mc_ctx = run_ctx.child(RunType::MonteCarlo, now_unix_ms());
                 println!(
                     "[*] Recording Monte Carlo run {} (child of {}) to BigQuery...",
@@ -576,9 +586,19 @@ async fn main() -> Result<()> {
                 {
                     println!("[WARN] Failed to record Monte Carlo run: {e}");
                 }
+                print_phase_timing("record_monte_carlo", mc_record_start);
             }
         }
     }
 
+    print_phase_timing("total", start_total);
     Ok(())
+}
+
+/// Prints a machine-greppable elapsed-time line for one pipeline phase.
+fn print_phase_timing(phase: &str, since: Instant) {
+    println!(
+        "[TIMING] phase={phase} seconds={:.2}",
+        since.elapsed().as_secs_f64()
+    );
 }

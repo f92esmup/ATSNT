@@ -288,6 +288,11 @@ cargo build --release \
     -p backtest --bin backtest
 echo "      [OK] Binaries built successfully."
 
+# Prints a greppable elapsed-time line for a pipeline stage started at epoch seconds $2.
+stage_timing() {
+    echo "[TIMING] stage=$1 seconds=$(( $(date +%s) - $2 ))"
+}
+
 # Step 1: Binance ETL
 DATA_PATH="${OUTPUT_DIR}/${SYMBOL}"
 if [ "${SKIP_FETCH}" = "true" ]; then
@@ -302,7 +307,9 @@ else
     if [ -n "${MONTH}" ]; then
         FETCH_ARGS+=("--month" "${MONTH}")
     fi
+    STAGE_START=$(date +%s)
     ./target/release/fetch_data "${FETCH_ARGS[@]}"
+    stage_timing fetch "${STAGE_START}"
 fi
 
 # Step 2: Parallel Walk-Forward HPO
@@ -334,7 +341,9 @@ else
     if [ "${GCP_BIGQUERY}" = "true" ]; then
         HPO_ARGS+=("--gcp-bigquery")
     fi
+    STAGE_START=$(date +%s)
     ./target/release/run_hpo "${HPO_ARGS[@]}"
+    stage_timing hpo "${STAGE_START}"
 fi
 
 # Step 3: Backtest + Discrete Event Monte Carlo Stress-Test
@@ -353,7 +362,9 @@ fi
 if [ "${GCP_BIGQUERY}" = "true" ]; then
     BACKTEST_ARGS+=("--gcp-bigquery")
 fi
+STAGE_START=$(date +%s)
 ./target/release/backtest "${BACKTEST_ARGS[@]}"
+stage_timing backtest "${STAGE_START}"
 
 END_TOTAL=$(date +%s)
 TOTAL_DURATION=$((END_TOTAL - START_TOTAL))

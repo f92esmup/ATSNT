@@ -148,6 +148,7 @@ async fn main() -> Result<()> {
         bars.len(),
         start_total.elapsed().as_secs_f64()
     );
+    print_phase_timing("ingest", start_total);
 
     if bars.is_empty() {
         anyhow::bail!("No Dollar Bars were emitted; reduce --dollar-bar threshold.");
@@ -241,7 +242,16 @@ async fn main() -> Result<()> {
         }
     }
 
+    print_phase_timing("total", start_total);
     Ok(())
+}
+
+/// Prints a machine-greppable elapsed-time line for one pipeline phase.
+fn print_phase_timing(phase: &str, since: Instant) {
+    println!(
+        "[TIMING] phase={phase} seconds={:.2}",
+        since.elapsed().as_secs_f64()
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -281,6 +291,7 @@ where
         opt_duration,
         (evaluations.len() * folds.len() * 2) as f64 / opt_duration
     );
+    print_phase_timing("search", opt_start);
 
     // 4. Output Results and Reporting
     println!("\n============================================================");
@@ -339,6 +350,7 @@ where
             "raw_trades": raw_trades,
             "optimization_seconds": opt_duration,
         });
+        let record_start = Instant::now();
         println!(
             "[*] Recording HPO run {} with {} trial runs to BigQuery...",
             sweep_ctx.run_id,
@@ -356,6 +368,7 @@ where
         {
             println!("[WARN] Failed to record HPO run: {e}");
         }
+        print_phase_timing("record_bigquery", record_start);
     }
 
     if let Some(winner) = &winner {
@@ -414,6 +427,7 @@ where
         println!("        • Sampling:     DollarBar(${})", args.dollar_bar);
 
         if args.gcs_upload {
+            let upload_start = Instant::now();
             let gcs = GcsArtifactSink::from_env();
             let artifact_dest_name = args
                 .output_config
@@ -430,6 +444,7 @@ where
                     "application/json",
                 )
                 .await;
+            print_phase_timing("upload_artifact", upload_start);
         }
     }
 

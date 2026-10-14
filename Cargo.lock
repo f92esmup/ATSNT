@@ -16,6 +16,7 @@ dependencies = [
  "futures-util",
  "indicatif",
  "parquet",
+ "rayon",
  "reqwest",
  "ring",
  "rust_decimal",

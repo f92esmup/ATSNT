@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use adapters::{BinanceDataFetcher, FetchParams};
+use adapters::{
+    is_not_archived, plan_fetch_tasks, run_bounded, AdapterError, BinanceDataFetcher, FetchParams,
+    FetchSummary, FetchTask,
+};
 use anyhow::{bail, Result};
 use chrono::{Datelike, Utc};
 use clap::Parser;
@@ -34,6 +37,51 @@ struct Args {
     /// Force re-download and re-conversion even if the Parquet file already exists
     #[arg(short, long, default_value_t = false)]
     force: bool,
+
+    /// Maximum number of archives downloaded and converted concurrently
+    #[arg(short, long, default_value_t = 4)]
+    jobs: usize,
+}
+
+/// Result of processing one planned archive.
+enum TaskOutcome {
+    /// The Parquet file already existed and `--force` was not set.
+    Skipped { path: PathBuf, bytes: u64 },
+    /// The archive was downloaded and converted.
+    Converted(FetchSummary),
+}
+
+fn task_label(year: u32, task: &FetchTask) -> String {
+    match task.day {
+        Some(d) => format!("Day {:04}-{:02}-{:02}", year, task.month, d),
+        None => format!("Month {:04}-{:02}", year, task.month),
+    }
+}
+
+fn fetch_one(
+    fetcher: &BinanceDataFetcher,
+    args: &Args,
+    task: &FetchTask,
+) -> Result<TaskOutcome, AdapterError> {
+    let params = FetchParams {
+        symbol: args.symbol.to_uppercase(),
+        year: args.year,
+        month: task.month,
+        day: task.day,
+        output_dir: args.output_dir.clone(),
+    };
+    let target_path = params.target_parquet_path();
+    if target_path.exists() && !args.force {
+        let bytes = std::fs::metadata(&target_path)?.len();
+        return Ok(TaskOutcome::Skipped {
+            path: target_path,
+            bytes,
+        });
+    }
+    println!("[*] Processing {}...", task_label(args.year, task));
+    fetcher
+        .fetch_and_convert(&params)
+        .map(TaskOutcome::Converted)
 }
 
 fn main() -> Result<()> {
@@ -59,6 +107,10 @@ fn main() -> Result<()> {
         if args.year == current_year && m > current_month {
             bail!("Month {:02} is in the future for year {}", m, current_year);
         }
+    }
+
+    if args.jobs == 0 {
+        bail!("--jobs must be at least 1");
     }
 
     if let Some(d) = args.day {
@@ -107,117 +159,61 @@ fn main() -> Result<()> {
     );
     println!("------------------------------------------------------------");
 
-    let fetcher = BinanceDataFetcher::new();
+    let fetcher = BinanceDataFetcher::new().with_progress(args.jobs == 1);
     let mut total_trades_all = 0usize;
     let mut total_bytes_all = 0u64;
     let start_all = std::time::Instant::now();
 
-    // Work items to process: (month, Option<day>)
-    let mut tasks: Vec<(u32, Option<u32>)> = Vec::new();
+    let today = now.date_naive();
+    let tasks = plan_fetch_tasks(args.year, args.month, args.day, today);
+    println!(
+        "Jobs:       {} archive(s), up to {} concurrent download(s)",
+        tasks.len(),
+        args.jobs
+    );
 
-    if let Some(day) = args.day {
-        tasks.push((args.month.unwrap(), Some(day)));
-    } else if let Some(m) = args.month {
-        if args.year == current_year && m == current_month {
-            // Current month: download daily files up to current day
-            for d in 1..=current_day {
-                tasks.push((m, Some(d)));
-            }
-        } else {
-            tasks.push((m, None));
-        }
-    } else if args.year == current_year {
-        // Complete months YTD
-        for m in 1..current_month {
-            tasks.push((m, None));
-        }
-        // Current month: daily files up to current day
-        for d in 1..=current_day {
-            tasks.push((current_month, Some(d)));
-        }
-    } else {
-        // Historical full year
-        for m in 1..=12 {
-            tasks.push((m, None));
-        }
-    }
+    let outcomes = run_bounded(&tasks, args.jobs, |task| fetch_one(&fetcher, &args, task))?;
 
-    for (month, day) in tasks {
-        let params = FetchParams {
-            symbol: args.symbol.to_uppercase(),
-            year: args.year,
-            month,
-            day,
-            output_dir: args.output_dir.clone(),
-        };
-
-        let target_path = params.target_parquet_path();
-
-        if target_path.exists() && !args.force {
-            let meta = std::fs::metadata(&target_path)?;
-            let size_mb = meta.len() as f64 / (1024.0 * 1024.0);
-            if let Some(d) = day {
+    let mut failures = Vec::new();
+    for (task, outcome) in tasks.iter().zip(outcomes) {
+        let label = task_label(args.year, task);
+        match outcome {
+            Ok(TaskOutcome::Skipped { path, bytes }) => {
                 println!(
-                    "[SKIP] Day {:04}-{:02}-{:02} already exists: {} ({:.2} MB)",
-                    args.year,
-                    month,
-                    d,
-                    target_path.display(),
-                    size_mb
+                    "[SKIP] {label} already exists: {} ({:.2} MB)",
+                    path.display(),
+                    bytes as f64 / (1024.0 * 1024.0)
                 );
-            } else {
-                println!(
-                    "[SKIP] Month {:04}-{:02} already exists: {} ({:.2} MB)",
-                    args.year,
-                    month,
-                    target_path.display(),
-                    size_mb
-                );
+                total_bytes_all += bytes;
             }
-            total_bytes_all += meta.len();
-            continue;
-        }
-
-        if let Some(d) = day {
-            println!(
-                "\n[*] Processing Day {:04}-{:02}-{:02}...",
-                args.year, month, d
-            );
-        } else {
-            println!("\n[*] Processing Month {:04}-{:02}...", args.year, month);
-        }
-
-        match fetcher.fetch_and_convert(&params) {
-            Ok(summary) => {
-                let size_mb = summary.parquet_size_bytes as f64 / (1024.0 * 1024.0);
-                if let Some(d) = day {
-                    println!(
-                        "    [OK] Day {:02}: Converted {} trades in {:.2}s ({:.2} MB)",
-                        d, summary.total_trades, summary.duration_secs, size_mb
-                    );
-                } else {
-                    println!(
-                        "    [OK] Month {:02}: Converted {} trades in {:.2}s ({:.2} MB)",
-                        month, summary.total_trades, summary.duration_secs, size_mb
-                    );
-                }
+            Ok(TaskOutcome::Converted(summary)) => {
+                println!(
+                    "[OK]   {label}: Converted {} trades in {:.2}s ({:.2} MB)",
+                    summary.total_trades,
+                    summary.duration_secs,
+                    summary.parquet_size_bytes as f64 / (1024.0 * 1024.0)
+                );
                 total_trades_all += summary.total_trades;
                 total_bytes_all += summary.parquet_size_bytes;
             }
+            Err(e) if task.day.is_some() && is_not_archived(&e) => {
+                println!(
+                    "[INFO] {label} not available on Binance Vision (in progress or not yet archived)."
+                );
+            }
             Err(e) => {
-                let err_str = e.to_string();
-                if let Some(d) = day {
-                    if err_str.contains("HTTP 404") {
-                        println!(
-                            "    [INFO] Day {:02} not available on Binance Vision (in progress or not yet archived).",
-                            d
-                        );
-                        break;
-                    }
-                }
-                return Err(e.into());
+                println!("[FAIL] {label}: {e}");
+                failures.push(label);
             }
         }
+    }
+
+    if !failures.is_empty() {
+        bail!(
+            "{} archive(s) failed to download or convert: {}",
+            failures.len(),
+            failures.join(", ")
+        );
     }
 
     let elapsed = start_all.elapsed().as_secs_f64();
@@ -229,6 +225,7 @@ fn main() -> Result<()> {
         println!(" New Trades Converted:  {}", total_trades_all);
     }
     println!(" Total Elapsed Time:    {:.2}s", elapsed);
+    println!("[TIMING] phase=fetch seconds={:.2}", elapsed);
     println!(" Total Dataset Size:    {:.2} MB", total_mb);
     println!(
         " Parquet Directory:     {}",

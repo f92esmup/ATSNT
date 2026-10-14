@@ -120,7 +120,14 @@ cargo run --release -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2024
 
 # Download a single day (e.g. 2024-01-01) -> ~760k ticks in ~5MB Parquet
 cargo run --release -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2024 --month 1 --day 1
+
+# Download up to 8 archives concurrently (default: 4; --jobs 1 restores sequential mode with progress bars)
+cargo run --release -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2026 --jobs 8
 ```
+
+Each archive (month or day) is independent and writes its own Parquet file, so concurrent downloads produce exactly the same dataset. A daily archive that Binance has not published yet (HTTP 404) is reported and skipped; any other failure is collected and makes the command exit non-zero after the remaining archives finish.
+
+`fetch_data`, `run_hpo` and `backtest` print `[TIMING] phase=<name> seconds=<s>` lines (and the production pipeline prints `[TIMING] stage=<name> seconds=<s>`) so wall time per phase can be measured from logs.
 
 ---
 
