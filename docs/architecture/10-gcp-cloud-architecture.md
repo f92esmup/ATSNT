@@ -209,7 +209,7 @@ cargo run -p backtest --bin run_hpo -- \
 1. Builds the image (`fetch_data`, `run_hpo`, `backtest`, pipeline script) and pushes it to Artifact Registry (`<region>-docker.pkg.dev/<project>/atsnt/atsnt-batch:<git sha>`).
 2. Submits a Batch job running `run_production_pipeline.sh --gcp-bigquery --strict-sinks --upload-winner --artifact-suffix <job>` as the `atsnt-batch` service account, with task logs sent to Cloud Logging.
 3. Market data is downloaded and processed inside the container filesystem on the VM boot disk (`--boot-disk-gb`) and is destroyed with the VM. GCS only receives the winning artifact `artifacts/hpo_<sym>_<period>-<job>.json`; metrics go to BigQuery.
-4. Waits for the job, prints its `batch_task_logs`, and downloads the winner to `configs/`. With `--strict-sinks`, a failed BigQuery write or artifact upload fails the job instead of losing the result silently; `--max-retries` covers Spot preemption.
+4. Waits for the job, prints its `batch_task_logs`, and downloads the winner to `configs/`. With `--strict-sinks`, a failed BigQuery write or artifact upload fails the job instead of losing the result silently; `--max-retries` (0-10) covers Spot preemption. The artifact upload is create-only (`ifGenerationMatch=0`): when a retried task re-uploads the same object name, the first attempt's artifact is kept and the upload counts as successful, so no overwrite permission is needed.
 
 ```bash
 # Inspect the rendered job spec without touching GCP:
@@ -219,7 +219,7 @@ cargo run -p backtest --bin run_hpo -- \
 ./scripts/gcp/run_ephemeral_batch_hpo.sh --project "$GCP_PROJECT_ID" --year 2026 --month 1 -- --candidates 720 --capital 200
 ```
 
-The HPO search parallelizes across candidates, so use many more candidates than vCPUs. Before the first run, confirm the machine type exists in the region (the script checks it) and that the project's regional CPU / Spot quota covers it. `setup_gcp_resources.sh` grants the service account only `batch.agentReporter`, `logging.logWriter`, `artifactregistry.reader` on the `atsnt` repository, `storage.objectCreator` on the bucket, and `bigquery.dataEditor` on the four tables the pipeline writes.
+The HPO search parallelizes across candidates, so use many more candidates than vCPUs. Before the first run, confirm the machine type exists in the region (the script checks it) and that the project's regional CPU / Spot quota covers it. Prerequisites: the submitting user needs `roles/iam.serviceAccountUser` on `atsnt-batch`, and the region's default VPC must allow egress to `data.binance.vision`. On a first `setup_gcp_resources.sh` run, IAM bindings can fail while the new service account propagates; re-running the script fixes it. `setup_gcp_resources.sh` grants the service account only `batch.agentReporter`, `logging.logWriter`, `artifactregistry.reader` on the `atsnt` repository, `storage.objectCreator` on the bucket, and `bigquery.dataEditor` on the four tables the pipeline writes.
 
 ### Step 3: Run Paper Trading on GCP `e2-micro` VM
 ```bash

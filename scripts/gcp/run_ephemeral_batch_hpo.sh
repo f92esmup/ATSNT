@@ -14,7 +14,9 @@
 # the ~2 KB winning artifact is written to GCS. Metrics go to BigQuery.
 #
 # Prerequisites: scripts/gcp/setup_gcp_resources.sh (APIs, Artifact Registry
-# repository, Batch service account and its permissions).
+# repository, Batch service account and its permissions); the submitting user
+# needs roles/iam.serviceAccountUser on the atsnt-batch service account; the
+# region's default VPC must allow egress to data.binance.vision.
 # =============================================================================
 
 set -euo pipefail
@@ -128,6 +130,21 @@ done
 [[ "${YEAR}" =~ ^[0-9]{4}$ ]] || die "--year must be YYYY (got '${YEAR}')."
 for n in MAX_RETRIES BOOT_DISK_GB MAX_RUN_SECONDS; do
     [[ "${!n}" =~ ^[0-9]+$ ]] || die "${n,,} must be a non-negative integer (got '${!n}')."
+done
+# Cloud Batch accepts 0-10 task retries.
+[ "${MAX_RETRIES}" -le 10 ] || die "--max-retries must be between 0 and 10 (got '${MAX_RETRIES}')."
+
+# The orchestrator owns the options that decide where the winner is uploaded and
+# downloaded from; overriding them after -- would make the announced paths wrong.
+for arg in "${PIPELINE_EXTRA[@]}"; do
+    case "${arg}" in
+        -s|--symbol|-y|--year|-m|--month|--config|--artifact-suffix|--upload-winner|--strict-sinks|--gcp-bigquery|--bin-dir|-o|--output-dir|-d|--detach|--dry-run)
+            die "Pipeline option ${arg} is set by this script; use the orchestrator option instead (see --help)."
+            ;;
+    esac
+    case "${arg}" in
+        *$'\n'*|*$'\r'*|*$'\t'*) die "Pipeline arguments must not contain newlines or tabs." ;;
+    esac
 done
 
 MONTH_PADDED=""
@@ -316,9 +333,19 @@ fi
 # --- Wait ---------------------------------------------------------------------
 echo "[4/5] Waiting for job ${JOB_NAME} (polling every ${POLL_SECONDS}s)..."
 STATE=""
+DESCRIBE_FAILURES=0
+MAX_DESCRIBE_FAILURES=10
 while true; do
-    STATE="$(gcloud batch jobs describe "${JOB_NAME}" --project="${PROJECT_ID}" \
-        --location="${REGION}" --format="value(status.state)" 2>/dev/null || echo "UNKNOWN")"
+    if STATE="$(gcloud batch jobs describe "${JOB_NAME}" --project="${PROJECT_ID}" \
+        --location="${REGION}" --format="value(status.state)" 2>/dev/null)"; then
+        DESCRIBE_FAILURES=0
+    else
+        DESCRIBE_FAILURES=$((DESCRIBE_FAILURES + 1))
+        STATE="UNKNOWN"
+        if [ "${DESCRIBE_FAILURES}" -ge "${MAX_DESCRIBE_FAILURES}" ]; then
+            die "Could not read the state of job ${JOB_NAME} ${MAX_DESCRIBE_FAILURES} times in a row (deleted job or lost credentials?)."
+        fi
+    fi
     echo "      $(date -u +%H:%M:%S) state=${STATE}"
     case "${STATE}" in
         SUCCEEDED|FAILED|CANCELLED|DELETION_IN_PROGRESS) break ;;
@@ -327,14 +354,18 @@ while true; do
 done
 
 JOB_UID="$(gcloud batch jobs describe "${JOB_NAME}" --project="${PROJECT_ID}" \
-    --location="${REGION}" --format="value(uid)")"
+    --location="${REGION}" --format="value(uid)" 2>/dev/null || true)"
 echo "------------------------------------------------------------"
-echo " Task logs (Cloud Logging, job uid ${JOB_UID})"
+echo " Task logs (Cloud Logging, job uid ${JOB_UID:-unknown})"
 echo "------------------------------------------------------------"
+if [ -z "${JOB_UID}" ]; then
+    echo "[WARN] Could not read the job uid; task logs are not available."
+else
 gcloud logging read \
     "logName=\"projects/${PROJECT_ID}/logs/batch_task_logs\" AND labels.job_uid=\"${JOB_UID}\"" \
     --project="${PROJECT_ID}" --order=asc --limit=100000 --format="value(textPayload)" || \
     echo "[WARN] Could not read task logs; they may take a minute to appear in Cloud Logging."
+fi
 
 if [ "${STATE}" != "SUCCEEDED" ]; then
     die "Batch job ${JOB_NAME} finished with state ${STATE}."

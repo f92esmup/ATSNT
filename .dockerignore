@@ -12,3 +12,6 @@ docs/
 **/*.parquet
 .env
 .env.*
+**/.env
+**/.env.*
+**/*.env

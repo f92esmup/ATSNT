@@ -13,14 +13,20 @@ use adapters::BinanceParquetWriter;
 use domain::{Side, Trade};
 use rust_decimal::Decimal;
 
-/// Local endpoint answering every request with HTTP 500 and recording request lines.
+/// Local endpoint answering every request with one fixed HTTP status and recording request lines.
 struct FailingServer {
     base_url: String,
     requests: Arc<Mutex<Vec<String>>>,
 }
 
 impl FailingServer {
+    /// Answers every request with `500 Internal Server Error`.
     fn start() -> Self {
+        Self::with_status("500 Internal Server Error")
+    }
+
+    /// Answers every request with `status` (e.g. `"412 Precondition Failed"`).
+    fn with_status(status: &'static str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test port");
         let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -49,9 +55,10 @@ impl FailingServer {
                 let mut body = vec![0u8; content_length];
                 let _ = reader.read_exact(&mut body);
                 seen.lock().expect("request log").push(request_line);
-                let _ = reader.get_mut().write_all(
-                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
                 );
+                let _ = reader.get_mut().write_all(response.as_bytes());
             }
         });
         Self { base_url, requests }
@@ -99,6 +106,16 @@ fn run_backtest(data: &Path, server: &FailingServer, strict: bool) -> Output {
 }
 
 fn run_hpo(data: &Path, config: &Path, server: &FailingServer, strict: bool) -> Output {
+    run_hpo_with(data, config, server, strict, true)
+}
+
+fn run_hpo_with(
+    data: &Path,
+    config: &Path,
+    server: &FailingServer,
+    strict: bool,
+    bigquery: bool,
+) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_run_hpo"));
     cmd.arg("--data")
         .arg(data)
@@ -113,11 +130,13 @@ fn run_hpo(data: &Path, config: &Path, server: &FailingServer, strict: bool) -> 
             "2",
             "--embargo-bars",
             "5",
-            "--gcp-bigquery",
             "--gcs-upload",
             "--artifact-suffix",
             "job-42",
         ]);
+    if bigquery {
+        cmd.arg("--gcp-bigquery");
+    }
     if strict {
         cmd.arg("--strict-sinks");
     }
@@ -189,4 +208,26 @@ fn run_hpo_tolerates_sink_failures_by_default() {
     let out = run_hpo(&data, &config, &server, false);
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
     assert!(config.exists());
+}
+
+#[test]
+fn run_hpo_strict_retry_keeps_existing_artifact() {
+    // A retried Batch task re-uploads the same object name; GCS answers 412 for the
+    // create-only upload because the first attempt already stored the artifact.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data = write_fixture(dir.path());
+    let config = dir.path().join("hpo_btcusdt_2026_01.json");
+    let server = FailingServer::with_status("412 Precondition Failed");
+    let out = run_hpo_with(&data, &config, &server, true, false);
+    let stdout = text(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        text(&out.stderr)
+    );
+    assert!(stdout.contains("already exists; keeping the existing object"));
+    assert!(server
+        .requests()
+        .iter()
+        .any(|r| r.contains("name=artifacts/hpo_btcusdt_2026_01-job-42.json&ifGenerationMatch=0")));
 }

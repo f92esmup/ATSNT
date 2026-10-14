@@ -442,7 +442,11 @@ where
 
         if args.gcs_upload {
             let upload_start = Instant::now();
-            let gcs = GcsArtifactSink::from_env().with_strict(args.strict_sinks);
+            // Create-only: a retried Batch task re-uploading the same name keeps the
+            // first attempt's artifact instead of failing on overwrite.
+            let gcs = GcsArtifactSink::from_env()
+                .with_strict(args.strict_sinks)
+                .with_create_only(true);
             let suffix = artifact_run_suffix(args.artifact_suffix.as_deref(), Utc::now());
             let object_name = artifact_object_name(&args.output_config, &suffix);
             println!("[*] Uploading Strategy Deployment Artifact to GCS ({object_name})...");

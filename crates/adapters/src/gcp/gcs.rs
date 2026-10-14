@@ -33,6 +33,8 @@ pub struct GcsArtifactSink {
     strict: bool,
     /// Base URL of the Cloud Storage JSON API.
     endpoint: String,
+    /// Whether uploads only create new objects (`ifGenerationMatch=0`).
+    create_only: bool,
 }
 
 impl GcsArtifactSink {
@@ -49,7 +51,35 @@ impl GcsArtifactSink {
             ambient_auth: true,
             strict: false,
             endpoint: DEFAULT_ENDPOINT.to_string(),
+            create_only: false,
         }
+    }
+
+    /// Makes uploads create-only (`ifGenerationMatch=0`): an object that already
+    /// exists is kept and the upload counts as successful. This makes retried
+    /// uploads to a fixed object name idempotent and needs no overwrite permission
+    /// (`roles/storage.objectCreator` cannot overwrite objects).
+    pub fn with_create_only(mut self, create_only: bool) -> Self {
+        self.create_only = create_only;
+        self
+    }
+
+    /// Returns `true` when a create-only upload hit an existing object.
+    fn already_exists(&self, status: reqwest::StatusCode) -> bool {
+        self.create_only && status == reqwest::StatusCode::PRECONDITION_FAILED
+    }
+
+    fn report_already_exists(bucket: &str, object_name: &str) {
+        println!(
+            "# [GCP :: Cloud Storage] gs://{}/{} already exists; keeping the existing object",
+            bucket, object_name
+        );
+        info!(
+            target: "gcs",
+            bucket = %bucket,
+            object = %object_name,
+            "GCS create-only upload found an existing object"
+        );
     }
 
     /// Makes upload failures (unresolved credentials, HTTP errors) return `Err`
@@ -141,9 +171,14 @@ impl GcsArtifactSink {
             ));
         };
 
+        let precondition = if self.create_only {
+            "&ifGenerationMatch=0"
+        } else {
+            ""
+        };
         let url = format!(
-            "{}/upload/storage/v1/b/{}/o?uploadType=media&name={}",
-            self.endpoint, bucket, object_name
+            "{}/upload/storage/v1/b/{}/o?uploadType=media&name={}{}",
+            self.endpoint, bucket, object_name, precondition
         );
 
         let res = self
@@ -170,6 +205,10 @@ impl GcsArtifactSink {
                     .body(bytes.clone())
                     .send()
                     .await?;
+                if self.already_exists(retry.status()) {
+                    Self::report_already_exists(&bucket, object_name);
+                    return Ok(());
+                }
                 if retry.status().is_success() {
                     let size_kb = bytes.len() as f64 / 1024.0;
                     println!(
@@ -195,6 +234,11 @@ impl GcsArtifactSink {
                     return Ok(());
                 }
             }
+        }
+
+        if self.already_exists(res.status()) {
+            Self::report_already_exists(&bucket, object_name);
+            return Ok(());
         }
 
         if !res.status().is_success() {
@@ -312,6 +356,46 @@ mod tests {
             .await;
         assert!(err.unwrap_err().to_string().contains("403"));
         server.request_line();
+    }
+
+    #[tokio::test]
+    async fn create_only_upload_sends_generation_precondition() {
+        let server = test_http::OneShotServer::start("200 OK", "{}");
+        let sink = configured_sink(&server.base_url)
+            .with_strict(true)
+            .with_create_only(true);
+        let result = sink
+            .upload_bytes(b"{}".to_vec(), "artifacts/test.json", "application/json")
+            .await;
+        assert!(result.is_ok());
+        assert!(server
+            .request_line()
+            .contains("name=artifacts/test.json&ifGenerationMatch=0 "));
+    }
+
+    #[tokio::test]
+    async fn create_only_upload_keeps_existing_object_in_strict_mode() {
+        // A retried Batch task re-uploads to the same name; the first attempt's object wins.
+        let server = test_http::OneShotServer::start("412 Precondition Failed", "{}");
+        let sink = configured_sink(&server.base_url)
+            .with_strict(true)
+            .with_create_only(true);
+        let result = sink
+            .upload_bytes(b"{}".to_vec(), "artifacts/test.json", "application/json")
+            .await;
+        assert!(result.is_ok());
+        server.request_line();
+    }
+
+    #[tokio::test]
+    async fn default_upload_has_no_precondition_and_412_stays_an_error_when_strict() {
+        let server = test_http::OneShotServer::start("412 Precondition Failed", "{}");
+        let sink = configured_sink(&server.base_url).with_strict(true);
+        let result = sink
+            .upload_bytes(b"{}".to_vec(), "artifacts/test.json", "application/json")
+            .await;
+        assert!(result.unwrap_err().to_string().contains("412"));
+        assert!(!server.request_line().contains("ifGenerationMatch"));
     }
 
     #[tokio::test]

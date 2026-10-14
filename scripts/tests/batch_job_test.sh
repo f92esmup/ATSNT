@@ -109,6 +109,17 @@ check "validation: invalid month rejected" '[ "${STATUS}" -ne 0 ] && has "--mont
 run --project my-proj --job-name hpo-x --year 2026 --bogus
 check "validation: unknown option rejected" '[ "${STATUS}" -ne 0 ] && has "Unknown option: --bogus"'
 
+run --project my-proj --job-name hpo-x --year 2026 --max-retries 11
+check "validation: retries above Batch limit rejected" '[ "${STATUS}" -ne 0 ] && has "--max-retries must be between 0 and 10"'
+run --project my-proj --job-name hpo-x --year 2026 -- --config other.json
+check "validation: reserved pipeline option rejected" '[ "${STATUS}" -ne 0 ] && has "Pipeline option --config is set by this script"'
+run --project my-proj --job-name hpo-x --year 2026 -- --month 2
+check "validation: period cannot be overridden after --" '[ "${STATUS}" -ne 0 ] && has "Pipeline option --month"'
+run --project my-proj --job-name hpo-x --year 2026 -- --param-space $'a\nb'
+check "validation: newline in pipeline args rejected" '[ "${STATUS}" -ne 0 ] && has "newlines or tabs"'
+run --project my-proj --job-name hpo-x --year 2026 -- --param-space 'a "b" c\d'
+check "escaping: quotes and backslashes survive in the job JSON" '[ "$(spec "j[\"taskGroups\"][0][\"taskSpec\"][\"runnables\"][0][\"container\"][\"commands\"][-1]")" = "a \"b\" c\\d" ]'
+
 # Default job name is valid and derived from the period.
 run --project my-proj --year 2026 --month 3
 check "default job name: derived and valid" '[[ "$(spec "${ARGS_EXPR}")" =~ --artifact-suffix\ hpo-btcusdt-2026-03-[0-9]{8}-[0-9]{6} ]]'
