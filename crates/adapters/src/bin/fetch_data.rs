@@ -58,6 +58,38 @@ fn task_label(year: u32, task: &FetchTask) -> String {
     }
 }
 
+/// Short label used by the per-archive result lines (`Day 01`, `Month 01`).
+fn short_label(task: &FetchTask) -> String {
+    match task.day {
+        Some(d) => format!("Day {:02}", d),
+        None => format!("Month {:02}", task.month),
+    }
+}
+
+/// Prints the result line for one archive, keeping the sequential output format.
+fn print_outcome(year: u32, task: &FetchTask, outcome: &Result<TaskOutcome, AdapterError>) {
+    match outcome {
+        Ok(TaskOutcome::Skipped { path, bytes }) => println!(
+            "[SKIP] {} already exists: {} ({:.2} MB)",
+            task_label(year, task),
+            path.display(),
+            *bytes as f64 / (1024.0 * 1024.0)
+        ),
+        Ok(TaskOutcome::Converted(summary)) => println!(
+            "    [OK] {}: Converted {} trades in {:.2}s ({:.2} MB)",
+            short_label(task),
+            summary.total_trades,
+            summary.duration_secs,
+            summary.parquet_size_bytes as f64 / (1024.0 * 1024.0)
+        ),
+        Err(e) if task.day.is_some() && is_not_archived(e) => println!(
+            "    [INFO] {} not available on Binance Vision (in progress or not yet archived).",
+            short_label(task)
+        ),
+        Err(e) => println!("    [FAIL] {}: {e}", short_label(task)),
+    }
+}
+
 fn fetch_one(
     fetcher: &BinanceDataFetcher,
     args: &Args,
@@ -78,7 +110,7 @@ fn fetch_one(
             bytes,
         });
     }
-    println!("[*] Processing {}...", task_label(args.year, task));
+    println!("\n[*] Processing {}...", task_label(args.year, task));
     fetcher
         .fetch_and_convert(&params)
         .map(TaskOutcome::Converted)
@@ -172,39 +204,30 @@ fn main() -> Result<()> {
         args.jobs
     );
 
-    let outcomes = run_bounded(&tasks, args.jobs, |task| fetch_one(&fetcher, &args, task))?;
+    // Sequential runs print each result right after its "Processing" line; concurrent
+    // runs print all results afterwards in task (month) order.
+    let sequential = args.jobs == 1;
+    let outcomes = run_bounded(&tasks, args.jobs, |task| {
+        let outcome = fetch_one(&fetcher, &args, task);
+        if sequential {
+            print_outcome(args.year, task, &outcome);
+        }
+        outcome
+    })?;
 
     let mut failures = Vec::new();
-    for (task, outcome) in tasks.iter().zip(outcomes) {
-        let label = task_label(args.year, task);
+    for (task, outcome) in tasks.iter().zip(&outcomes) {
+        if !sequential {
+            print_outcome(args.year, task, outcome);
+        }
         match outcome {
-            Ok(TaskOutcome::Skipped { path, bytes }) => {
-                println!(
-                    "[SKIP] {label} already exists: {} ({:.2} MB)",
-                    path.display(),
-                    bytes as f64 / (1024.0 * 1024.0)
-                );
-                total_bytes_all += bytes;
-            }
+            Ok(TaskOutcome::Skipped { bytes, .. }) => total_bytes_all += bytes,
             Ok(TaskOutcome::Converted(summary)) => {
-                println!(
-                    "[OK]   {label}: Converted {} trades in {:.2}s ({:.2} MB)",
-                    summary.total_trades,
-                    summary.duration_secs,
-                    summary.parquet_size_bytes as f64 / (1024.0 * 1024.0)
-                );
                 total_trades_all += summary.total_trades;
                 total_bytes_all += summary.parquet_size_bytes;
             }
-            Err(e) if task.day.is_some() && is_not_archived(&e) => {
-                println!(
-                    "[INFO] {label} not available on Binance Vision (in progress or not yet archived)."
-                );
-            }
-            Err(e) => {
-                println!("[FAIL] {label}: {e}");
-                failures.push(label);
-            }
+            Err(e) if task.day.is_some() && is_not_archived(e) => {}
+            Err(_) => failures.push(task_label(args.year, task)),
         }
     }
 
