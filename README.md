@@ -116,6 +116,33 @@ Argument resolution is covered by `bash scripts/tests/pipeline_args_test.sh` (dr
 #### Ephemeral run on Google Cloud Batch
 The same pipeline runs on a disposable Cloud Batch VM (`n2-highcpu-64` Spot by default; the project's CPU quota must cover it, e.g. `--machine-type n2-custom-30-30720` for 30 vCPU) via `scripts/gcp/run_ephemeral_batch_hpo.sh`, which builds the repository `Dockerfile`, submits the job, waits for it, prints its task logs and downloads the winning artifact into `configs/`. Market data never leaves the VM disk; only the winning JSON goes to GCS and metrics to BigQuery. See [GCP architecture §8, Step 2b](docs/architecture/10-gcp-cloud-architecture.md). `bash scripts/tests/batch_job_test.sh` checks the rendered job spec in dry-run mode.
 
+#### Recommended intraday HPO run (full year, 30-vCPU Spot VM)
+
+A dollar bar closes when its traded notional reaches the threshold, so the threshold fixes how long a bar lasts and therefore what the strategy's bar-count parameters mean in clock time. Averages measured on BTCUSDT (September 2026, about $344B traded, i.e. 6.87 M bars at $50k); real bar duration varies with market activity:
+
+| `--dollar-bar` | Avg. bar | CUSUM window (8-20 bars) | Max. holding (6-20 bars) | Style |
+|---|---|---|---|---|
+| `50000` | ~0.4 s | 3-8 s | seconds | noise, ~7 M bars/month, days of compute |
+| `1000000` | ~7.5 s | 1-2.5 min | 45 s-2.5 min | scalping |
+| **`10000000`** | **~75 s** | **10-25 min** | **8-25 min** | **intraday / day trading (recommended)** |
+| `25000000` | ~3 min | 25-60 min | 18-60 min | slower day trading |
+
+The default CUSUM search space has 720 combinations (5 x 4 x 4 x 3 x 3); `--candidates 120` evaluates a seeded random sample of 120 of them (a multiple of the 30 vCPU, so Rayon gives each thread four candidates), which is enough to decide whether the strategy produces trades at that scale. Search time grows linearly with bars x candidates x months, while fetching and VM start-up are fixed costs.
+
+```bash
+./scripts/gcp/run_ephemeral_batch_hpo.sh \
+    --project "$GCP_PROJECT_ID" --region europe-southwest1 \
+    --machine-type n2-custom-30-30720 \
+    --year 2026 \
+    -- --dollar-bar 10000000 --candidates 120 --capital 200
+```
+
+- `--year 2026` without `--month` fetches every closed month plus the current month day by day, and one job optimizes over all of them.
+- The winner is uploaded create-only to `gs://<bucket>/artifacts/hpo_btcusdt_2026-<job>.json` and downloaded to `configs/`; trials, the HPO run and the backtest go to BigQuery (`v_runs`, `v_trades`, `v_equity`).
+- Check `DSR p` and the closed-trade count in the log before deploying the winner: a configuration with 0 trades or a failed DSR is not tradeable.
+- Spot preemption restarts the task from scratch (`--max-retries 2`); add `--standard` for multi-hour runs you cannot afford to repeat, and `--max-run-seconds` above the default 14400 for anything longer than four hours.
+- The project CPU quota (`CPUS_ALL_REGIONS` and the family quota) must cover the machine; the script aborts before submitting when it does not.
+
 ---
 
 ### Step 1: Download & Convert Real Market Data (Binance ETL)
