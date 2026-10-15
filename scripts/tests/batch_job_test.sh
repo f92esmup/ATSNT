@@ -63,7 +63,7 @@ run "${BASE[@]}"
 check "dry-run: exit 0" '[ "${STATUS}" -eq 0 ]'
 check "dry-run: job spec written" '[ -s "${JOB_JSON}" ]'
 check "spec: SPOT provisioning" '[ "$(spec "j[\"allocationPolicy\"][\"instances\"][0][\"policy\"][\"provisioningModel\"]")" = "SPOT" ]'
-check "spec: default machine type" '[ "$(spec "j[\"allocationPolicy\"][\"instances\"][0][\"policy\"][\"machineType\"]")" = "c2-standard-60" ]'
+check "spec: default machine type" '[ "$(spec "j[\"allocationPolicy\"][\"instances\"][0][\"policy\"][\"machineType\"]")" = "n2-highcpu-64" ]'
 check "spec: boot disk sized" '[ "$(spec "j[\"allocationPolicy\"][\"instances\"][0][\"policy\"][\"bootDisk\"][\"sizeGb\"]")" = "100" ]'
 check "spec: retries" '[ "$(spec "j[\"taskGroups\"][0][\"taskSpec\"][\"maxRetryCount\"]")" = "2" ]'
 check "spec: region restricted" '[ "$(spec "j[\"allocationPolicy\"][\"location\"][\"allowedLocations\"][0]")" = "regions/europe-southwest1" ]'

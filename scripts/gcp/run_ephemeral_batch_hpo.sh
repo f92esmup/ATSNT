@@ -33,7 +33,7 @@ REPOSITORY="atsnt"
 IMAGE_NAME="atsnt-batch"
 IMAGE_TAG=""
 SERVICE_ACCOUNT=""
-MACHINE_TYPE="c2-standard-60"
+MACHINE_TYPE="n2-highcpu-64"
 PROVISIONING="SPOT"
 MAX_RETRIES="2"
 BOOT_DISK_GB="100"
@@ -297,12 +297,49 @@ fi
 
 command -v gcloud >/dev/null 2>&1 || die "gcloud CLI not found."
 
-# --- Preflight: machine type available in the region --------------------------
+# --- Preflight: machine type available in the region, CPU quota free ----------
 echo "[1/5] Checking that ${MACHINE_TYPE} exists in ${REGION}..."
-ZONES="$(gcloud compute machine-types list --project="${PROJECT_ID}" \
-    --filter="name=${MACHINE_TYPE} AND zone~^${REGION}-" --format="value(zone)" 2>/dev/null || true)"
+# `machine-types list` omits custom types (e.g. n2-custom-30-30720), so describe
+# the type in each zone of the region instead.
+ZONES=""
+GUEST_CPUS=""
+for zone in $(gcloud compute zones list --project="${PROJECT_ID}" \
+    --filter="region~/${REGION}\$" --format="value(name)" 2>/dev/null || true); do
+    if cpus="$(gcloud compute machine-types describe "${MACHINE_TYPE}" --zone="${zone}" \
+        --project="${PROJECT_ID}" --format="value(guestCpus)" 2>/dev/null)" && [ -n "${cpus}" ]; then
+        ZONES="${ZONES}${zone} "
+        GUEST_CPUS="${cpus}"
+    fi
+done
 [ -n "${ZONES}" ] || die "Machine type ${MACHINE_TYPE} is not offered in ${REGION}. Pick another with --machine-type or --region."
-echo "      [OK] Available in: $(echo "${ZONES}" | tr '\n' ' ')"
+echo "      [OK] Available in: ${ZONES}(${GUEST_CPUS} vCPU)"
+
+# Free vCPUs of a quota metric: "<scope> describe" output, metric name.
+free_cpus() {
+    awk -F, -v metric="$2" '$1 == metric { print int($2 - $3) }' <<< "$1"
+}
+# Without the quota Batch keeps the job QUEUED forever (CODE_GCE_QUOTA_EXCEEDED).
+GLOBAL_QUOTAS="$(gcloud compute project-info describe --project="${PROJECT_ID}" --flatten=quotas \
+    --format="csv[no-heading](quotas.metric,quotas.limit,quotas.usage)" 2>/dev/null || true)"
+REGION_QUOTAS="$(gcloud compute regions describe "${REGION}" --project="${PROJECT_ID}" --flatten=quotas \
+    --format="csv[no-heading](quotas.metric,quotas.limit,quotas.usage)" 2>/dev/null || true)"
+# Regional vCPUs are charged to the family metric (N2_CPUS, C2_CPUS...) when it
+# exists, else to CPUS (N1); Spot uses PREEMPTIBLE_CPUS when that quota is granted.
+REGION_METRIC="$(tr '[:lower:]' '[:upper:]' <<< "${MACHINE_TYPE%%-*}")_CPUS"
+grep -q "^${REGION_METRIC}," <<< "${REGION_QUOTAS}" || REGION_METRIC="CPUS"
+if [ "${PROVISIONING}" = "SPOT" ] && awk -F, '$1 == "PREEMPTIBLE_CPUS" && $2 > 0 { found = 1 } END { exit !found }' <<< "${REGION_QUOTAS}"; then
+    REGION_METRIC="PREEMPTIBLE_CPUS"
+fi
+for check in "CPUS_ALL_REGIONS:${GLOBAL_QUOTAS}" "${REGION_METRIC}:${REGION_QUOTAS}"; do
+    metric="${check%%:*}"
+    free="$(free_cpus "${check#*:}" "${metric}")"
+    if [ -z "${free}" ]; then
+        echo "      [WARN] Could not read quota ${metric}; skipping the check."
+    elif [ "${free}" -lt "${GUEST_CPUS}" ]; then
+        die "Quota ${metric} has ${free} free vCPU but ${MACHINE_TYPE} needs ${GUEST_CPUS}. Request a quota increase or pick a smaller --machine-type."
+    fi
+done
+echo "      [OK] CPU quota allows ${GUEST_CPUS} vCPU."
 
 # --- Build and push image -----------------------------------------------------
 if [ "${SKIP_BUILD}" = "false" ]; then
