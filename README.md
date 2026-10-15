@@ -138,6 +138,8 @@ The default CUSUM search space has 720 combinations (5 x 4 x 4 x 3 x 3); `--cand
 ```
 
 - `--year 2026` without `--month` fetches every closed month plus the current month day by day, and one job optimizes over all of them.
+- Measured on 2026-10-15 (2026-01-01 to 2026-10-14, 447.8 M ticks, `n2-custom-30-30720` Spot): fetch 302 s, ingest 77 s (333,517 bars), search 206 s (120 candidates x 5 folds), backtest 92 s; the job ran 10.4 minutes from `RUNNING` to `SUCCEEDED`. Scale from these numbers: search time is linear in bars x candidates, fetch in months.
+- The infrastructure path is validated end to end, the strategy is not: that run's best candidate lost the whole 200 USDT capital (1,145 trades, 16.85% win rate, Sortino -346) and failed DSR (p = 1.0). Do not deploy a winner without positive out-of-sample Sortino and a passing DSR.
 - The winner is uploaded create-only to `gs://<bucket>/artifacts/hpo_btcusdt_2026-<job>.json` and downloaded to `configs/`; trials, the HPO run and the backtest go to BigQuery (`v_runs`, `v_trades`, `v_equity`).
 - Check `DSR p` and the closed-trade count in the log before deploying the winner: a configuration with 0 trades or a failed DSR is not tradeable.
 - Spot preemption restarts the task from scratch (`--max-retries 2`); add `--standard` for multi-hour runs you cannot afford to repeat, and `--max-run-seconds` above the default 14400 for anything longer than four hours.
