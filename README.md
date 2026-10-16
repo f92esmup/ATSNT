@@ -120,12 +120,12 @@ The same pipeline runs on a disposable Cloud Batch VM (`n2-highcpu-64` Spot by d
 
 A dollar bar closes when its traded notional reaches the threshold, so the threshold fixes how long a bar lasts and therefore what the strategy's bar-count parameters mean in clock time. Averages measured on BTCUSDT (September 2026, about $344B traded, i.e. 6.87 M bars at $50k); real bar duration varies with market activity:
 
-| `--dollar-bar` | Avg. bar | CUSUM window (8-20 bars) | Max. holding (fixed 100 bars) | Style |
+| `--dollar-bar` | Avg. bar | CUSUM window (14-40 bars) | Max. holding (fixed 100 bars) | Style |
 |---|---|---|---|---|
-| `50000` | ~0.4 s | 3-8 s | ~40 s | noise, ~7 M bars/month, days of compute |
-| `1000000` | ~7.5 s | 1-2.5 min | ~12 min | scalping |
-| **`10000000`** | **~75 s** | **10-25 min** | **~2 h** | **intraday / day trading (recommended)** |
-| `25000000` | ~3 min | 25-60 min | ~5 h | slower day trading |
+| `50000` | ~0.4 s | 6-16 s | ~40 s | noise, ~7 M bars/month, days of compute |
+| `1000000` | ~7.5 s | 2-5 min | ~12 min | scalping |
+| **`10000000`** | **~75 s** | **17-50 min** | **~2 h** | **intraday / day trading (recommended)** |
+| `25000000` | ~3 min | 42-120 min | ~5 h | slower day trading |
 
 The default CUSUM search space has 1372 combinations (7 x 7 x 7 x 4 x 1; the time barrier is fixed at 100 bars, about 2 h at `--dollar-bar 10000000`, so trades close by take profit or stop loss rather than by the clock); `--candidates 120` evaluates a seeded random sample of 120 of them (about 9 %, and a multiple of the 30 vCPU, so Rayon gives each thread four candidates), which is enough to decide whether the strategy produces trades at that scale. Search time grows linearly with bars x candidates x months, while fetching and VM start-up are fixed costs.
 
