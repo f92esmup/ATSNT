@@ -28,6 +28,23 @@ pub struct BacktestEngine {
     current_day_utc: Option<i64>,
     daily_peak_equity: Decimal,
     daily_circuit_breaker_tripped: bool,
+    current_month_key: Option<i64>,
+    monthly_peak_equity: Decimal,
+    halted: bool,
+}
+
+/// Converts a Unix-millisecond timestamp into a `YYYYMM` UTC month key.
+fn utc_month_key(timestamp_ms: i64) -> i64 {
+    // Howard Hinnant's civil-from-days algorithm (proleptic Gregorian calendar).
+    let z = timestamp_ms.div_euclid(86_400_000) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    year * 100 + month
 }
 
 impl BacktestEngine {
@@ -52,7 +69,16 @@ impl BacktestEngine {
             current_day_utc: None,
             daily_peak_equity: initial,
             daily_circuit_breaker_tripped: false,
+            current_month_key: None,
+            monthly_peak_equity: initial,
+            halted: false,
         }
+    }
+
+    /// Whether the monthly kill-switch has permanently halted this simulation.
+    #[inline]
+    pub fn is_halted(&self) -> bool {
+        self.halted
     }
 
     /// Current cash equity balance (excluding unrealized PnL).
@@ -151,6 +177,9 @@ impl BacktestEngine {
     /// Ingests a closed DollarBar, updates position barriers, and steps the strategy.
     pub fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &DollarBar) {
         self.last_bar_end_time = Some(bar.end_time);
+        if self.halted {
+            return;
+        }
         let day_key = bar.end_time / 86_400_000;
         let mark_before = self.total_equity(bar.open);
 
@@ -159,6 +188,13 @@ impl BacktestEngine {
             self.current_day_utc = Some(day_key);
             self.daily_peak_equity = mark_before;
             self.daily_circuit_breaker_tripped = false;
+        }
+
+        // Monthly session rollover: reset only the monthly watermark at the UTC month boundary.
+        let month_key = utc_month_key(bar.end_time);
+        if self.current_month_key != Some(month_key) {
+            self.current_month_key = Some(month_key);
+            self.monthly_peak_equity = mark_before;
         }
 
         let had_position = self.active_position.is_some();
@@ -174,6 +210,34 @@ impl BacktestEngine {
         if !had_position {
             if let Some(intent) = strategy.on_bar(bar) {
                 self.evaluate_entry(intent, bar.close, bar.end_time);
+            }
+        }
+
+        // 2b. Monthly kill-switch: flatten at market and halt the simulation for good.
+        let mark_now = self.total_equity(bar.close);
+        if mark_now > self.monthly_peak_equity {
+            self.monthly_peak_equity = mark_now;
+        }
+        let month_dd_pct = if self.monthly_peak_equity > Decimal::ZERO {
+            (self.monthly_peak_equity - mark_now).max(Decimal::ZERO) / self.monthly_peak_equity
+        } else {
+            Decimal::ZERO
+        };
+        if month_dd_pct >= self.config.max_monthly_drawdown_pct {
+            self.halted = true;
+            if let Some(side) = self.active_position.as_ref().map(|pos| pos.side) {
+                let slip = bar.close * self.config.slippage_pct;
+                let exit_price = match side {
+                    PositionSide::Long => bar.close - slip,
+                    PositionSide::Short => bar.close + slip,
+                };
+                self.execute_close(
+                    bar.end_time,
+                    exit_price,
+                    slip,
+                    true,
+                    "MonthlyCircuitBreaker",
+                );
             }
         }
 
@@ -848,5 +912,122 @@ mod tests {
             engine.active_position.is_some(),
             "Trading should resume on Day 2!"
         );
+    }
+
+    /// Emits one long intent per query with a wide stop so losses come from mark-to-market.
+    struct ScriptedLong {
+        stop: Decimal,
+    }
+
+    impl Strategy for ScriptedLong {
+        fn name(&self) -> &str {
+            "ScriptedLong"
+        }
+
+        fn compatible_market_types(&self) -> &'static [strategies::MarketType] {
+            &[strategies::MarketType::UsdMPerpetual]
+        }
+
+        fn on_bar(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
+            domain::OrderIntent::new(
+                bar.end_time,
+                Side::Buy,
+                bar.close,
+                self.stop,
+                bar.close * dec!(2),
+                1_000,
+            )
+            .ok()
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    const JAN_1: i64 = 1_704_067_200_000;
+    const DAY: i64 = 86_400_000;
+
+    fn flat_bar(time: i64, close: Decimal) -> DollarBar {
+        create_test_bar(time, close, close, close, close)
+    }
+
+    fn breaker_config(daily: Decimal, monthly: Decimal, risk: Decimal) -> BacktestConfig {
+        BacktestConfig {
+            max_daily_drawdown_pct: daily,
+            max_monthly_drawdown_pct: monthly,
+            risk_per_trade_pct: risk,
+            ..BacktestConfig::default()
+        }
+    }
+
+    #[test]
+    fn month_key_follows_utc_calendar() {
+        assert_eq!(utc_month_key(JAN_1), 202_401);
+        assert_eq!(utc_month_key(JAN_1 + 31 * DAY - 1), 202_401);
+        assert_eq!(utc_month_key(JAN_1 + 31 * DAY), 202_402);
+        assert_eq!(utc_month_key(JAN_1 + 60 * DAY), 202_403); // 2024 is a leap year
+        assert_eq!(utc_month_key(0), 197_001);
+    }
+
+    #[test]
+    fn monthly_breaker_closes_open_position_and_halts_for_good() {
+        let mut engine = BacktestEngine::new(breaker_config(dec!(0.5), dec!(0.10), dec!(0.9)));
+        let mut strategy = ScriptedLong { stop: dec!(1) };
+
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1, dec!(100)));
+        assert!(engine.active_position().is_some());
+
+        // Mark-to-market loss of ~14% of equity while far from the stop.
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 1_000, dec!(85)));
+        assert!(engine.is_halted());
+        assert!(engine.active_position().is_none());
+        assert_eq!(engine.closed_trades().len(), 1);
+        assert_eq!(
+            engine.closed_trades()[0].exit_reason,
+            "MonthlyCircuitBreaker"
+        );
+
+        // Neither later bars of the month nor the next month reopen anything.
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 2_000, dec!(100)));
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 40 * DAY, dec!(100)));
+        assert!(engine.active_position().is_none());
+        assert_eq!(engine.closed_trades().len(), 1);
+    }
+
+    #[test]
+    fn monthly_breaker_stays_idle_below_the_limit() {
+        let mut engine = BacktestEngine::new(breaker_config(dec!(0.5), dec!(0.30), dec!(0.9)));
+        let mut strategy = ScriptedLong { stop: dec!(1) };
+
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1, dec!(100)));
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 1_000, dec!(85)));
+
+        assert!(!engine.is_halted());
+        assert!(engine.active_position().is_some());
+    }
+
+    #[test]
+    fn daily_breaker_blocks_entries_until_next_utc_day_but_monthly_stays_open() {
+        let mut engine = BacktestEngine::new(breaker_config(dec!(0.05), dec!(0.90), dec!(0.2)));
+        let mut strategy = ScriptedLong { stop: dec!(50) };
+
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1, dec!(100)));
+        assert!(engine.active_position().is_some());
+
+        // Stop-loss breach: ~20% loss trips the daily breaker.
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(JAN_1 + 1_000, dec!(100), dec!(100), dec!(40), dec!(45)),
+        );
+        assert_eq!(engine.closed_trades().len(), 1);
+        assert!(engine.active_position().is_none());
+
+        // Same UTC day: strategy keeps signalling but entries are blocked.
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 2_000, dec!(100)));
+        assert!(engine.active_position().is_none());
+
+        // Next UTC day at 00:00: breaker resets and trading resumes.
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + DAY, dec!(100)));
+        assert!(engine.active_position().is_some());
+        assert!(!engine.is_halted());
     }
 }
