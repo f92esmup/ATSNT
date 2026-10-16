@@ -114,6 +114,10 @@ pub struct RunMetricsRow {
     pub avg_mfe_pct: Option<Decimal>,
     /// JSON object: exit reason -> trade count.
     pub exit_reason_counts: Option<String>,
+    /// `true` when the monthly kill-switch halted the run; omitted (NULL) otherwise so rows
+    /// of runs that never halted do not depend on the column existing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub halted: Option<bool>,
     /// JSON object: run-type specific values (DSR, stability, ruin probability, ...).
     pub extras: Option<String>,
 }
@@ -152,6 +156,7 @@ impl RunMetricsRow {
             avg_mae_pct: None,
             avg_mfe_pct: None,
             exit_reason_counts: None,
+            halted: None,
             extras: Some(extras.into()),
         }
     }

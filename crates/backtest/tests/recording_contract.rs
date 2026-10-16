@@ -104,6 +104,26 @@ fn metrics_row_maps_every_metric_and_scope() {
     assert_eq!(row.extras.as_deref(), Some("{\"k\":1}"));
 }
 
+#[test]
+fn halted_runs_flag_the_metrics_row_and_others_omit_the_column() {
+    let normal = BacktestMetrics::calculate(dec!(10_000), &[closed_trade()], dec!(10), dec!(0.001));
+    let mut halted = normal.clone();
+    halted.halted = true;
+
+    let ctx = RunContext::new(RunType::Backtest, &spec(), 0);
+    let normal_row = ctx.metrics_row("full", &normal, None);
+    let halted_row = ctx.metrics_row("full", &halted, None);
+
+    assert_eq!(normal_row.halted, None);
+    assert_eq!(halted_row.halted, Some(true));
+    assert!(!serde_json::to_string(&normal_row)
+        .unwrap()
+        .contains("halted"));
+    assert!(serde_json::to_string(&halted_row)
+        .unwrap()
+        .contains("\"halted\":true"));
+}
+
 fn metrics_fee_drag(m: &BacktestMetrics) -> Option<rust_decimal::Decimal> {
     Some(m.fee_drag_pct)
 }

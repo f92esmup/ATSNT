@@ -84,7 +84,7 @@ The architecture is deliberately dimensioned to run at **0,00 € / mes** indefi
 
 ## 4. BigQuery Data Warehouse Schemas (`atsnt_bi`)
 
-The canonical DDL is [`scripts/gcp/bigquery_schema.sql`](../../scripts/gcp/bigquery_schema.sql). Datasets created with the previous model must first run [`scripts/gcp/bigquery_drop_legacy.sql`](../../scripts/gcp/bigquery_drop_legacy.sql) (destructive).
+The canonical DDL is [`scripts/gcp/bigquery_schema.sql`](../../scripts/gcp/bigquery_schema.sql). Datasets created with the previous model must first run [`scripts/gcp/bigquery_drop_legacy.sql`](../../scripts/gcp/bigquery_drop_legacy.sql) (destructive). `run_metrics.halted` (TRUE when the monthly kill-switch stopped a run, NULL otherwise) is added to existing datasets by the idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` at the end of the `run_metrics` DDL; only halted runs write the column, so deploying before running the DDL does not break normal runs.
 
 Every execution mode records the same run-centric contract through the `RunRecorder` port (`crates/adapters/src/analytics.rs`), keyed by `run_id` (UUID v7):
 

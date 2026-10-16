@@ -162,6 +162,7 @@ impl RunContext {
             avg_mae_pct: Some(m.avg_mae_pct),
             avg_mfe_pct: Some(m.avg_mfe_pct),
             exit_reason_counts: serde_json::to_string(&m.exit_reason_counts).ok(),
+            halted: m.halted.then_some(true),
             extras: extras.map(|v| v.to_string()),
         }
     }
