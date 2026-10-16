@@ -40,7 +40,8 @@ pub struct BacktestConfig {
     pub risk_per_trade_pct: Decimal,
     /// Daily drawdown threshold from the day's marked-equity peak; resets at 00:00:00 UTC.
     pub max_daily_drawdown_pct: Decimal,
-    /// Monthly kill-switch threshold from the in-month marked-equity peak (e.g. 0.15 = 15%).
+    /// Monthly kill-switch threshold: loss versus the equity at the start of the UTC month
+    /// (e.g. 0.15 = 15%).
     ///
     /// When breached the open position is closed at market and trading halts for good.
     #[serde(default = "default_max_monthly_drawdown_pct")]
@@ -57,6 +58,36 @@ pub struct BacktestConfig {
     /// Minimum order notional in quote currency (exchange MIN_NOTIONAL).
     #[serde(default = "default_min_order_notional")]
     pub min_order_notional: Decimal,
+}
+
+impl BacktestConfig {
+    /// Rejects thresholds and execution rules that would trip or distort every run.
+    pub fn validate(&self) -> Result<(), crate::error::BacktestError> {
+        let fraction = |name: &str, value: Decimal| {
+            if value <= Decimal::ZERO || value > Decimal::ONE {
+                Err(crate::error::BacktestError::General(format!(
+                    "{name} must be greater than 0 and at most 1, got {value}"
+                )))
+            } else {
+                Ok(())
+            }
+        };
+        fraction("max_daily_drawdown_pct", self.max_daily_drawdown_pct)?;
+        fraction("max_monthly_drawdown_pct", self.max_monthly_drawdown_pct)?;
+        for (name, value) in [
+            ("max_leverage", self.max_leverage),
+            ("min_order_quantity", self.min_order_quantity),
+            ("quantity_step_size", self.quantity_step_size),
+            ("min_order_notional", self.min_order_notional),
+        ] {
+            if value <= Decimal::ZERO {
+                return Err(crate::error::BacktestError::General(format!(
+                    "{name} must be positive, got {value}"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for BacktestConfig {
@@ -88,5 +119,23 @@ mod tests {
         let config: BacktestConfig = serde_json::from_str(json).unwrap();
 
         assert_eq!(config, BacktestConfig::default());
+    }
+
+    #[test]
+    fn validate_accepts_defaults_and_rejects_degenerate_thresholds() {
+        assert!(BacktestConfig::default().validate().is_ok());
+
+        for bad in [Decimal::ZERO, dec!(-0.1), dec!(1.5)] {
+            let config = BacktestConfig {
+                max_monthly_drawdown_pct: bad,
+                ..BacktestConfig::default()
+            };
+            assert!(config.validate().is_err(), "monthly {bad} must be rejected");
+        }
+        let config = BacktestConfig {
+            max_leverage: Decimal::ZERO,
+            ..BacktestConfig::default()
+        };
+        assert!(config.validate().is_err());
     }
 }

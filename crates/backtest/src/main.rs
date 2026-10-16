@@ -364,6 +364,7 @@ async fn main() -> Result<()> {
         );
         engine_config.risk_per_trade_pct = risk;
     }
+    engine_config.validate()?;
     let mut engine = BacktestEngine::new(engine_config);
 
     println!("[*] Initial Capital: ${}", engine.cash_equity());
@@ -393,6 +394,12 @@ async fn main() -> Result<()> {
                 );
             }
             engine.process_bar(&mut strategy, &bar);
+            if engine.is_halted() {
+                println!(
+                    "\n[!] Monthly circuit breaker tripped: simulation halted early, remaining market data skipped."
+                );
+                break;
+            }
         }
     }
 

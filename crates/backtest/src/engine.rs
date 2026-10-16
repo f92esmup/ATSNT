@@ -4,6 +4,7 @@ use strategies::Strategy;
 
 use crate::config::BacktestConfig;
 use crate::metrics::{BacktestMetrics, ClosedTrade, TradeExcursion};
+use crate::monthly_guard::utc_month_key;
 
 /// Deterministic, discrete-event backtesting simulator.
 ///
@@ -29,22 +30,10 @@ pub struct BacktestEngine {
     daily_peak_equity: Decimal,
     daily_circuit_breaker_tripped: bool,
     current_month_key: Option<i64>,
-    monthly_peak_equity: Decimal,
+    /// Marked equity at the first bar of the current UTC month (monthly drawdown reference).
+    monthly_open_equity: Decimal,
+    monthly_trip_drawdown_pct: Option<Decimal>,
     halted: bool,
-}
-
-/// Converts a Unix-millisecond timestamp into a `YYYYMM` UTC month key.
-fn utc_month_key(timestamp_ms: i64) -> i64 {
-    // Howard Hinnant's civil-from-days algorithm (proleptic Gregorian calendar).
-    let z = timestamp_ms.div_euclid(86_400_000) + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    year * 100 + month
 }
 
 impl BacktestEngine {
@@ -70,19 +59,26 @@ impl BacktestEngine {
             daily_peak_equity: initial,
             daily_circuit_breaker_tripped: false,
             current_month_key: None,
-            monthly_peak_equity: initial,
+            monthly_open_equity: initial,
+            monthly_trip_drawdown_pct: None,
             halted: false,
         }
     }
 
-    /// Current drawdown from the in-month marked-equity peak.
+    /// Current loss versus the equity at the start of the UTC month (never negative).
     pub fn monthly_drawdown_pct_at(&self, current_price: Decimal) -> Decimal {
-        if self.monthly_peak_equity > Decimal::ZERO {
-            (self.monthly_peak_equity - self.total_equity(current_price)).max(Decimal::ZERO)
-                / self.monthly_peak_equity
+        if self.monthly_open_equity > Decimal::ZERO {
+            (self.monthly_open_equity - self.total_equity(current_price)).max(Decimal::ZERO)
+                / self.monthly_open_equity
         } else {
             Decimal::ZERO
         }
+    }
+
+    /// Monthly drawdown measured at the moment the kill-switch tripped, if it did.
+    #[inline]
+    pub fn monthly_trip_drawdown_pct(&self) -> Option<Decimal> {
+        self.monthly_trip_drawdown_pct
     }
 
     /// Whether the monthly kill-switch has permanently halted this simulation.
@@ -200,11 +196,11 @@ impl BacktestEngine {
             self.daily_circuit_breaker_tripped = false;
         }
 
-        // Monthly session rollover: reset only the monthly watermark at the UTC month boundary.
+        // Monthly session rollover: the reference is the equity at the start of the UTC month.
         let month_key = utc_month_key(bar.end_time);
         if self.current_month_key != Some(month_key) {
             self.current_month_key = Some(month_key);
-            self.monthly_peak_equity = mark_before;
+            self.monthly_open_equity = mark_before;
         }
 
         let had_position = self.active_position.is_some();
@@ -216,25 +212,11 @@ impl BacktestEngine {
             self.check_barriers(bar);
         }
 
-        // 2. If no position was active at the start of this bar, query the strategy for signals
-        if !had_position {
-            if let Some(intent) = strategy.on_bar(bar) {
-                self.evaluate_entry(intent, bar.close, bar.end_time);
-            }
-        }
-
-        // 2b. Monthly kill-switch: flatten at market and halt the simulation for good.
-        let mark_now = self.total_equity(bar.close);
-        if mark_now > self.monthly_peak_equity {
-            self.monthly_peak_equity = mark_now;
-        }
-        let month_dd_pct = if self.monthly_peak_equity > Decimal::ZERO {
-            (self.monthly_peak_equity - mark_now).max(Decimal::ZERO) / self.monthly_peak_equity
-        } else {
-            Decimal::ZERO
-        };
+        // 1b. Monthly kill-switch: flatten at market and halt for good, before any new entry.
+        let month_dd_pct = self.monthly_drawdown_pct_at(bar.close);
         if month_dd_pct >= self.config.max_monthly_drawdown_pct {
             self.halted = true;
+            self.monthly_trip_drawdown_pct = Some(month_dd_pct);
             if let Some(side) = self.active_position.as_ref().map(|pos| pos.side) {
                 let slip = bar.close * self.config.slippage_pct;
                 let exit_price = match side {
@@ -248,6 +230,13 @@ impl BacktestEngine {
                     true,
                     "MonthlyCircuitBreaker",
                 );
+            }
+        }
+
+        // 2. If no position was active at the start of this bar, query the strategy for signals
+        if !had_position && !self.halted {
+            if let Some(intent) = strategy.on_bar(bar) {
+                self.evaluate_entry(intent, bar.close, bar.end_time);
             }
         }
 
@@ -514,12 +503,13 @@ impl BacktestEngine {
             }
         }
 
-        let metrics = BacktestMetrics::calculate(
+        let mut metrics = BacktestMetrics::calculate(
             self.config.initial_capital,
             &self.closed_trades,
             self.max_drawdown_amount,
             self.max_drawdown_pct,
         );
+        metrics.halted = self.halted;
         (metrics, self.closed_trades)
     }
 
@@ -1039,5 +1029,50 @@ mod tests {
         engine.process_bar(&mut strategy, &flat_bar(JAN_1 + DAY, dec!(100)));
         assert!(engine.active_position().is_some());
         assert!(!engine.is_halted());
+    }
+
+    #[test]
+    fn monthly_drawdown_is_measured_from_month_open_not_from_the_peak() {
+        let mut engine = BacktestEngine::new(breaker_config(dec!(0.9), dec!(0.10), dec!(0.9)));
+        let mut strategy = ScriptedLong { stop: dec!(1) };
+
+        // Open, rally (gain ~+4.5% of equity), then fall back to a level still above month open.
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1, dec!(100)));
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 1_000, dec!(105)));
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 2_000, dec!(92)));
+
+        // ~-11% from the peak would trip a peak-based breaker, but equity is only ~-7% vs open.
+        assert!(!engine.is_halted());
+        assert!(engine.active_position().is_some());
+    }
+
+    #[test]
+    fn monthly_reference_resets_at_the_new_month_open() {
+        let mut engine = BacktestEngine::new(breaker_config(dec!(0.9), dec!(0.10), dec!(0.5)));
+        let mut strategy = ScriptedLong { stop: dec!(1) };
+
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1, dec!(100)));
+        // A slow bleed that never breaches 10% inside one month keeps the run alive...
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 1_000, dec!(95)));
+        assert!(!engine.is_halted());
+        // ...and the next month starts from the lower equity, not from January's.
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 31 * DAY, dec!(95)));
+        assert!(!engine.is_halted());
+    }
+
+    #[test]
+    fn tripping_bar_closes_without_opening_a_new_position_and_flags_metrics() {
+        let mut engine = BacktestEngine::new(breaker_config(dec!(0.9), dec!(0.10), dec!(0.9)));
+        let mut strategy = ScriptedLong { stop: dec!(1) };
+
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1, dec!(100)));
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 1_000, dec!(85)));
+
+        assert!(engine.is_halted());
+        assert!(engine.monthly_trip_drawdown_pct().unwrap() >= dec!(0.10));
+        let (metrics, trades) = engine.finish_with_trades(Some(dec!(85)));
+        assert!(metrics.halted);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].exit_reason, "MonthlyCircuitBreaker");
     }
 }

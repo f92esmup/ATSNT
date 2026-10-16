@@ -62,7 +62,7 @@ pub enum PaperTradingEvent {
     CircuitBreakerTripped {
         /// Breaker horizon that tripped (currently `"monthly"`).
         scope: String,
-        /// Drawdown from the scope's equity peak at the moment of the trip.
+        /// Loss versus the start-of-month equity at the moment of the trip.
         drawdown_pct: Decimal,
     },
 }
@@ -185,6 +185,7 @@ pub struct PaperTradingSession {
 impl PaperTradingSession {
     /// Initializes a new paper trading session from the provided configuration.
     pub fn new(config: PaperTradingConfig) -> Result<Self, BacktestError> {
+        config.backtest.validate()?;
         let aggregator = DollarBarAggregator::new(config.dollar_bar_threshold)?;
         let strategy = DollarBarsCusumStrategy::new(config.strategy)?;
         let engine = BacktestEngine::new(config.backtest);
@@ -374,7 +375,10 @@ impl PaperTradingSession {
         if !was_halted_before_tick && self.engine.is_halted() {
             events.push(PaperTradingEvent::CircuitBreakerTripped {
                 scope: "monthly".to_string(),
-                drawdown_pct: self.engine.monthly_drawdown_pct_at(trade.price),
+                drawdown_pct: self
+                    .engine
+                    .monthly_trip_drawdown_pct()
+                    .unwrap_or(Decimal::ZERO),
             });
         }
 

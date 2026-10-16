@@ -4,6 +4,7 @@ pub mod engine;
 pub mod error;
 pub mod metrics;
 pub mod monte_carlo;
+pub mod monthly_guard;
 pub mod optimization;
 pub mod paper;
 pub mod recording;
@@ -23,6 +24,7 @@ pub use monte_carlo::{
     FanChartTrajectory, MonteCarloConfig, MonteCarloMetrics, MonteCarloReport, MonteCarloSimulator,
     ResampleMethod,
 };
+pub use monthly_guard::{utc_month_key, MonthlyGuard};
 pub use optimization::{
     calculate_dsr, calculate_parameter_stability, run_backtest_slice, CandidateEvaluation,
     FoldMetrics, ParameterSpace, WalkForwardOptimizer,

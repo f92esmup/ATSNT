@@ -392,6 +392,7 @@ async fn main() -> Result<()> {
             ..artifact_context
         },
     };
+    run_spec.execution_context.validate()?;
     let run_ctx = RunContext::new(RunType::Live, &run_spec, started_at_ms);
     let mut data_window = DataWindow {
         source: Some(ws_source),
@@ -408,6 +409,8 @@ async fn main() -> Result<()> {
     }
 
     let mut aggregator = DollarBarAggregator::new(effective_dollar_bar)?;
+    let mut monthly_guard =
+        backtest::MonthlyGuard::new(run_spec.execution_context.max_monthly_drawdown_pct);
     let mut peak_equity = effective_capital;
     let mut current_equity = effective_capital;
     let mut total_ticks: u64 = 0;
@@ -684,6 +687,22 @@ async fn main() -> Result<()> {
                             );
                         }
 
+                        // Monthly kill-switch: stop opening positions and alert once on the trip.
+                        if let Some(drawdown) = monthly_guard.observe(trade.timestamp, current_equity) {
+                            eprintln!(
+                                "[CRITICAL] Monthly circuit breaker tripped at {:.2}% drawdown vs month open: no new positions will be opened. Review and flatten any open position manually.",
+                                drawdown * dec!(100)
+                            );
+                            if let Some(t) = &telegram {
+                                let msg = TelegramNotifier::format_circuit_breaker(
+                                    &symbol_upper,
+                                    drawdown * dec!(100),
+                                    run_spec.execution_context.max_monthly_drawdown_pct * dec!(100),
+                                );
+                                let _ = t.send_alert(&msg).await;
+                            }
+                        }
+
                         // Periodic MTM logging and BigQuery telemetry
                         if last_mtm_print.elapsed() >= mtm_interval {
                             last_mtm_print = Instant::now();
@@ -746,7 +765,9 @@ async fn main() -> Result<()> {
                                 );
 
                                 // Check if we already have an active open position
-                                if !position_open {
+                                if monthly_guard.is_halted() {
+                                    println!("[RISK] Signal skipped: monthly circuit breaker is active.");
+                                } else if !position_open {
                                     println!("[GATEWAY] Dispatching live order to Binance...");
                                     match gateway.place_order(
                                         &symbol_upper,

@@ -120,6 +120,9 @@ pub struct BacktestMetrics {
     /// Mean maximum favorable excursion, as a fraction of entry equity.
     #[serde(default)]
     pub avg_mfe_pct: Decimal,
+    /// True when the monthly kill-switch stopped the run before the data ended.
+    #[serde(default)]
+    pub halted: bool,
 }
 
 impl BacktestMetrics {
@@ -261,6 +264,7 @@ impl BacktestMetrics {
             avg_holding_seconds: holding_seconds_sum / n,
             avg_mae_pct: mae_pct_sum / n,
             avg_mfe_pct: mfe_pct_sum / n,
+            halted: false,
         }
     }
 
@@ -286,6 +290,7 @@ impl BacktestMetrics {
             avg_holding_seconds: Decimal::ZERO,
             avg_mae_pct: Decimal::ZERO,
             avg_mfe_pct: Decimal::ZERO,
+            halted: false,
         }
     }
 }

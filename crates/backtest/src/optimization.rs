@@ -21,12 +21,16 @@ pub fn run_backtest_slice<S: OptimizableStrategy>(
     strat_config: &S::Config,
     bars: &[DollarBar],
 ) -> Result<BacktestMetrics, BacktestError> {
+    config.validate()?;
     let mut strategy =
         S::from_config(strat_config.clone()).map_err(|e| BacktestError::Strategy(e.to_string()))?;
     let mut engine = BacktestEngine::new(config);
 
     for bar in bars {
         engine.process_bar(&mut strategy, bar);
+        if engine.is_halted() {
+            break;
+        }
     }
 
     let mark_price = bars.last().map(|b| b.close);
