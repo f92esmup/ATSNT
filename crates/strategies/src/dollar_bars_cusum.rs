@@ -69,11 +69,28 @@ pub struct DollarBarsCusumSpace {
 impl Default for DollarBarsCusumSpace {
     fn default() -> Self {
         Self {
-            rolling_window_lens: vec![10, 15, 20, 25, 30],
-            cusum_vol_multipliers: vec![dec!(1.0), dec!(1.5), dec!(2.0), dec!(2.5)],
-            z_entry_thresholds: vec![dec!(1.2), dec!(1.5), dec!(1.8), dec!(2.2)],
-            z_stop_thresholds: vec![dec!(2.5), dec!(3.0), dec!(3.5)],
-            time_barrier_bars: vec![10, 15, 20],
+            rolling_window_lens: vec![14, 18, 22, 26, 30, 35, 40],
+            cusum_vol_multipliers: vec![
+                dec!(0.8),
+                dec!(1.0),
+                dec!(1.2),
+                dec!(1.5),
+                dec!(1.8),
+                dec!(2.0),
+                dec!(2.4),
+            ],
+            z_entry_thresholds: vec![
+                dec!(1.5),
+                dec!(1.7),
+                dec!(1.9),
+                dec!(2.1),
+                dec!(2.3),
+                dec!(2.6),
+                dec!(3.0),
+            ],
+            z_stop_thresholds: vec![dec!(2.5), dec!(3.0), dec!(3.5), dec!(4.0)],
+            // Fixed wide barrier: trades resolve by TP/SL, search budget goes to the real edge.
+            time_barrier_bars: vec![100],
         }
     }
 }
@@ -318,6 +335,16 @@ mod tests {
             buy_dollar_volume: price * dec!(0.5),
             sell_dollar_volume: price * dec!(0.5),
         }
+    }
+
+    #[test]
+    fn default_space_fixes_time_barrier_and_densifies_edge_parameters() {
+        let space = DollarBarsCusumSpace::default();
+
+        assert_eq!(space.time_barrier_bars, vec![100]);
+        let candidates = space.generate_candidates(usize::MAX);
+        assert_eq!(candidates.len(), 7 * 7 * 7 * 4);
+        assert!(candidates.iter().all(|c| c.time_barrier_bars == 100));
     }
 
     #[test]

@@ -18,7 +18,7 @@ Branch: `feat/binance-parity-monthly-breaker` (from `main`) | Delivery: single b
 - [x] T2 — S2, S3 — inline — config + engine wiring
 - [x] T3 — S4 — inline — monthly breaker in engine
 - [x] T4 — S5 — inline — paper propagation
-- [ ] T5 — S6 — inline — HPO space
+- [x] T5 — S6 — inline — HPO space
 - [ ] T6 — all — final checks + independent verifier
 
 ## Log
