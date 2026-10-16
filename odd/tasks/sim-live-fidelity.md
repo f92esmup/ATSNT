@@ -19,7 +19,7 @@ Branch: feat/sim-live-fidelity | Delivery: ask-on-risk | Test runner: `cargo tes
 - [x] T3 (S3) P0 — real commissions in live PnL | inline | commit: 66739e1 | RED: `futures_order_trade_update_*commission*`, `fee_ledger::tests::*`
 - [x] T4 (S4) P0 — ROADMAP/README/doc-comment correction | inline | commit: eba49d8 | structural readback (passive docs)
 - [x] T5.1 (S7) P1 — `ports` crate: move `MarketDataStream`, `AsyncMarketDataStream`, `AlertNotifier`, `ExitGateway`; old paths re-export | inline | pure move, no behavior change | RED: `ports_depend_only_on_the_domain` (architecture_contract.rs); previous behavior kept by the unchanged suite | commit: see log
-- [ ] T5.2 (S8) P1 — `ExecutionVenue` port + `TradingSession` with a fake venue; not wired to live | inline
+- [x] T5.2 (S8) P1 — `ExecutionVenue` port + `TradingSession` with a fake venue; not wired to live | inline | RED: `session::tests::*` (13 cases) | commit: see git log
 - [ ] T5.3 (S9) P1 — `BinanceVenue` + `live_trading` migrated to the session | inline | money path: needs testnet validation by the user
 - [ ] T6 (S5, S6) P2 — market entries, latency, tape slippage, taker TP, mark-price stop | pending
 - [ ] T7 (S6) P3 — funding and liquidation | pending

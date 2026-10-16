@@ -3,6 +3,7 @@ pub mod config;
 pub mod daily_watermark;
 pub mod engine;
 pub mod error;
+pub mod excursion;
 pub mod fee_ledger;
 pub mod live_exits;
 pub mod metrics;
@@ -12,6 +13,7 @@ pub mod optimization;
 pub mod paper;
 pub mod recording;
 pub mod run;
+pub mod session;
 pub mod sinks;
 pub mod walk_forward;
 
@@ -23,6 +25,7 @@ pub use config::BacktestConfig;
 pub use daily_watermark::DailyWatermark;
 pub use engine::BacktestEngine;
 pub use error::BacktestError;
+pub use excursion::ExcursionTracker;
 pub use live_exits::{ExitEvent, ExitGateway, ExitManager, HaltState};
 pub use metrics::{BacktestMetrics, ClosedTrade, TradeExcursion};
 pub use monte_carlo::{
