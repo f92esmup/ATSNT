@@ -67,7 +67,10 @@ pub struct RiskPolicy {
     pub max_position_notional: Decimal,
     /// Maximum order notional size allowed in a single order (e.g. 10,000 USDT).
     pub max_order_notional: Decimal,
-    /// Maximum session drawdown from marked-equity peak; no daily reset (e.g. 0.05 = 5%).
+    /// Maximum drawdown from the peak supplied by the caller (e.g. 0.05 = 5%).
+    ///
+    /// The policy applies no reset itself: the simulator and the live loop both pass the
+    /// marked-equity peak of the current UTC day.
     pub max_daily_drawdown_pct: Decimal,
     /// Maximum effective leverage; sized quantity is clamped to `equity * max_leverage / price`.
     #[serde(default = "default_max_leverage")]

@@ -464,6 +464,7 @@ async fn main() -> Result<()> {
     let mut monthly_guard =
         backtest::MonthlyGuard::new(run_spec.execution_context.max_monthly_drawdown_pct);
     let mut peak_equity = effective_capital;
+    let mut daily_watermark = backtest::DailyWatermark::new();
     let mut current_equity = effective_capital;
     let mut total_ticks: u64 = 0;
     let mut total_bars: u64 = 0;
@@ -901,6 +902,19 @@ async fn main() -> Result<()> {
                                 excursion_tracker.mark(bar.end_time, current_equity, side, entry_price, qty, bar.close);
                             }
 
+                            // Daily breaker reference: same per-UTC-day peak the simulator uses
+                            // (marked at the bar open, then at the bar close).
+                            let open_position = active_position_tracker
+                                .map(|(side, entry, qty, _)| (side, entry, qty));
+                            daily_watermark.observe(
+                                bar.end_time,
+                                backtest::marked_equity(current_equity, open_position, bar.open),
+                            );
+                            let daily_peak_equity = daily_watermark.observe(
+                                bar.end_time,
+                                backtest::marked_equity(current_equity, open_position, bar.close),
+                            );
+
                             // Strategy signal evaluation
                             if let Some(intent) = strategy.on_bar(&bar) {
                                 println!(
@@ -926,7 +940,7 @@ async fn main() -> Result<()> {
                                         &symbol_upper,
                                         &intent,
                                         current_equity,
-                                        peak_equity,
+                                        daily_peak_equity,
                                         Decimal::ZERO,
                                     ).await {
                                         Ok(report) => {

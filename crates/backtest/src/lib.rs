@@ -1,5 +1,6 @@
 pub mod artifact;
 pub mod config;
+pub mod daily_watermark;
 pub mod engine;
 pub mod error;
 pub mod live_exits;
@@ -18,6 +19,7 @@ pub use artifact::{
     StrategyDeploymentArtifact,
 };
 pub use config::BacktestConfig;
+pub use daily_watermark::DailyWatermark;
 pub use engine::BacktestEngine;
 pub use error::BacktestError;
 pub use live_exits::{ExitEvent, ExitGateway, ExitManager, HaltState};
