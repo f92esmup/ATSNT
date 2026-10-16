@@ -30,6 +30,34 @@ pub enum RiskError {
     /// Risk policy was constructed with invalid parameters.
     #[error("Invalid risk policy parameters: {0}")]
     InvalidParameters(String),
+    /// Sized quantity falls below the exchange minimum lot (LOT_SIZE `minQty`).
+    #[error("Order quantity {quantity} is below the minimum lot size {min_quantity}")]
+    OrderBelowMinLotSize {
+        quantity: String,
+        min_quantity: String,
+    },
+    /// Sized order value falls below the exchange minimum notional (MIN_NOTIONAL).
+    #[error("Order notional {notional} is below the minimum notional {min_notional}")]
+    OrderBelowMinNotional {
+        notional: String,
+        min_notional: String,
+    },
+}
+
+fn default_max_leverage() -> Decimal {
+    Decimal::new(20, 0)
+}
+
+fn default_min_order_quantity() -> Decimal {
+    Decimal::new(1, 3)
+}
+
+fn default_quantity_step_size() -> Decimal {
+    Decimal::new(1, 3)
+}
+
+fn default_min_order_notional() -> Decimal {
+    Decimal::new(5, 0)
 }
 
 /// Pre-trade risk policy configuration.
@@ -41,6 +69,18 @@ pub struct RiskPolicy {
     pub max_order_notional: Decimal,
     /// Maximum session drawdown from marked-equity peak; no daily reset (e.g. 0.05 = 5%).
     pub max_daily_drawdown_pct: Decimal,
+    /// Maximum effective leverage; sized quantity is clamped to `equity * max_leverage / price`.
+    #[serde(default = "default_max_leverage")]
+    pub max_leverage: Decimal,
+    /// Minimum order quantity in base units (exchange LOT_SIZE `minQty`).
+    #[serde(default = "default_min_order_quantity")]
+    pub min_order_quantity: Decimal,
+    /// Quantity increment in base units (exchange LOT_SIZE `stepSize`).
+    #[serde(default = "default_quantity_step_size")]
+    pub quantity_step_size: Decimal,
+    /// Minimum order notional in quote currency (exchange MIN_NOTIONAL).
+    #[serde(default = "default_min_order_notional")]
+    pub min_order_notional: Decimal,
 }
 
 impl Default for RiskPolicy {
@@ -49,6 +89,10 @@ impl Default for RiskPolicy {
             max_position_notional: Decimal::new(50_000, 0),
             max_order_notional: Decimal::new(10_000, 0),
             max_daily_drawdown_pct: Decimal::new(5, 2), // 0.05
+            max_leverage: default_max_leverage(),
+            min_order_quantity: default_min_order_quantity(),
+            quantity_step_size: default_quantity_step_size(),
+            min_order_notional: default_min_order_notional(),
         }
     }
 }
@@ -80,7 +124,38 @@ impl RiskPolicy {
             max_position_notional,
             max_order_notional,
             max_daily_drawdown_pct,
+            max_leverage: default_max_leverage(),
+            min_order_quantity: default_min_order_quantity(),
+            quantity_step_size: default_quantity_step_size(),
+            min_order_notional: default_min_order_notional(),
         })
+    }
+
+    /// Returns a copy with exchange execution rules (leverage cap, lot and notional filters).
+    pub fn with_execution_rules(
+        mut self,
+        max_leverage: Decimal,
+        min_order_quantity: Decimal,
+        quantity_step_size: Decimal,
+        min_order_notional: Decimal,
+    ) -> Result<Self, RiskError> {
+        for (name, value) in [
+            ("max_leverage", max_leverage),
+            ("min_order_quantity", min_order_quantity),
+            ("quantity_step_size", quantity_step_size),
+            ("min_order_notional", min_order_notional),
+        ] {
+            if value <= Decimal::ZERO {
+                return Err(RiskError::InvalidParameters(format!(
+                    "{name} must be positive"
+                )));
+            }
+        }
+        self.max_leverage = max_leverage;
+        self.min_order_quantity = min_order_quantity;
+        self.quantity_step_size = quantity_step_size;
+        self.min_order_notional = min_order_notional;
+        Ok(self)
     }
 
     /// Calculates peak-to-trough drawdown from marked session equity.
@@ -104,7 +179,8 @@ impl RiskPolicy {
 
     /// Sizes an order from stop distance and rejects it when policy limits fail.
     ///
-    /// The quantity is never clamped to fit a notional limit: a breach rejects the order.
+    /// The quantity is clamped to `max_leverage` and floored to the lot step, but never
+    /// clamped to fit a notional limit: a breach of those limits rejects the order.
     /// `execution_price` is the simulated fill price in backtests and submitted price in live.
     pub fn size_order(
         &self,
@@ -151,11 +227,33 @@ impl RiskPolicy {
             ));
         }
 
-        let quantity = (mark_to_market_equity * risk_per_trade_pct) / stop_distance;
-        if quantity <= Decimal::ZERO {
-            return Err(RiskError::InvalidParameters(
-                "calculated order quantity must be positive".to_string(),
-            ));
+        // A tripped session breaker must win over any sizing error on a degraded account.
+        if current_session_drawdown_pct >= self.max_daily_drawdown_pct {
+            return Err(RiskError::CircuitBreakerTriggered {
+                current_pct: current_session_drawdown_pct.to_string(),
+                limit_pct: self.max_daily_drawdown_pct.to_string(),
+            });
+        }
+
+        let risk_quantity = (mark_to_market_equity * risk_per_trade_pct) / stop_distance;
+        // Leverage cap: tight stops must not inflate the position beyond max_leverage.
+        let max_quantity = (mark_to_market_equity * self.max_leverage) / execution_price;
+        let capped = risk_quantity.min(max_quantity);
+        // Exchange LOT_SIZE: floor to a whole number of steps.
+        let quantity = (capped / self.quantity_step_size).floor() * self.quantity_step_size;
+
+        if quantity < self.min_order_quantity {
+            return Err(RiskError::OrderBelowMinLotSize {
+                quantity: quantity.to_string(),
+                min_quantity: self.min_order_quantity.to_string(),
+            });
+        }
+        let notional = quantity * execution_price;
+        if notional < self.min_order_notional {
+            return Err(RiskError::OrderBelowMinNotional {
+                notional: notional.to_string(),
+                min_notional: self.min_order_notional.to_string(),
+            });
         }
 
         self.evaluate_order_at_price(
@@ -455,5 +553,105 @@ mod tests {
         let current_pos = dec!(46000.00); // 46,000 + 6,500 = 52,500 > 50,000
         let res = policy.evaluate_order(&intent, qty, current_pos, dec!(0.01));
         assert!(matches!(res, Err(RiskError::PositionLimitExceeded { .. })));
+    }
+
+    #[test]
+    fn degraded_account_is_rejected_below_min_lot_instead_of_dust_position() {
+        let result = RiskPolicy::default().size_order(
+            &sample_intent(dec!(100)),
+            dec!(100),
+            dec!(0.1),
+            dec!(0.01),
+            Decimal::ZERO,
+            Decimal::ZERO,
+        );
+
+        assert!(matches!(
+            result,
+            Err(RiskError::OrderBelowMinLotSize { .. })
+        ));
+    }
+
+    #[test]
+    fn quantity_below_min_notional_is_rejected() {
+        let policy = RiskPolicy::default()
+            .with_execution_rules(dec!(20), dec!(0.001), dec!(0.001), dec!(100))
+            .unwrap();
+        // risk qty = 100 * 0.01 / 2 = 0.5 -> notional 50 < 100
+        let result = policy.size_order(
+            &sample_intent(dec!(100)),
+            dec!(100),
+            dec!(100),
+            dec!(0.01),
+            Decimal::ZERO,
+            Decimal::ZERO,
+        );
+
+        assert!(matches!(
+            result,
+            Err(RiskError::OrderBelowMinNotional { .. })
+        ));
+    }
+
+    #[test]
+    fn tight_stop_is_capped_at_max_leverage() {
+        let policy = RiskPolicy::new(dec!(10_000_000), dec!(10_000_000), dec!(0.05)).unwrap();
+        let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.9), dec!(101), 15).unwrap();
+        // risk qty = 10_000 * 0.01 / 0.1 = 1000 (10x of 100 price = 100_000 notional = 10x? no: 100k/10k = 10x)
+        // use 5% risk so uncapped leverage would be 50x.
+        let quantity = policy
+            .size_order(
+                &intent,
+                dec!(100),
+                dec!(10_000),
+                dec!(0.05),
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+
+        assert_eq!(quantity * dec!(100), dec!(200_000));
+    }
+
+    #[test]
+    fn sized_quantity_is_exact_multiple_of_step() {
+        let quantity = RiskPolicy::default()
+            .size_order(
+                &sample_intent(dec!(30_000)),
+                dec!(30_000),
+                dec!(10_000),
+                dec!(0.01),
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+
+        assert_eq!(quantity % dec!(0.001), Decimal::ZERO);
+        assert_eq!(quantity, dec!(0.166));
+    }
+
+    #[test]
+    fn tripped_breaker_wins_over_min_lot_error() {
+        let result = RiskPolicy::default().size_order(
+            &sample_intent(dec!(100)),
+            dec!(100),
+            dec!(0.5),
+            dec!(0.01),
+            Decimal::ZERO,
+            dec!(0.06),
+        );
+
+        assert!(matches!(
+            result,
+            Err(RiskError::CircuitBreakerTriggered { .. })
+        ));
+    }
+
+    #[test]
+    fn legacy_serialized_policy_without_execution_rules_still_loads() {
+        let json = r#"{"max_position_notional":"50000","max_order_notional":"10000","max_daily_drawdown_pct":"0.05"}"#;
+        let policy: RiskPolicy = serde_json::from_str(json).unwrap();
+
+        assert_eq!(policy, RiskPolicy::default());
     }
 }
