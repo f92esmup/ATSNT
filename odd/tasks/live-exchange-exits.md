@@ -15,7 +15,7 @@ Branch: `feat/live-exchange-exits` (from `main` + A/B branch commits) | Delivery
 ## Tasks
 
 - [x] T1 — S1, S3, S5 — inline — gateway primitives (protective exits, cancel, close at market, position amount)
-- [ ] T2 — S2, S3, S4, S5 — inline — `ExitManager` state machine over a gateway trait, mock-tested
+- [x] T2 — S2, S3, S4, S5 — inline — `ExitManager` state machine over a gateway trait, mock-tested
 - [ ] T3 — S1-S5 — inline — wire the live loop, docs, runbook
 - [ ] T4 — all — independent verifier
 

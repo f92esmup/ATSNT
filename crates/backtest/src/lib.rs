@@ -2,6 +2,7 @@ pub mod artifact;
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod live_exits;
 pub mod metrics;
 pub mod monte_carlo;
 pub mod monthly_guard;
@@ -19,6 +20,7 @@ pub use artifact::{
 pub use config::BacktestConfig;
 pub use engine::BacktestEngine;
 pub use error::BacktestError;
+pub use live_exits::{ExitEvent, ExitGateway, ExitManager, HaltState};
 pub use metrics::{BacktestMetrics, ClosedTrade, TradeExcursion};
 pub use monte_carlo::{
     FanChartTrajectory, MonteCarloConfig, MonteCarloMetrics, MonteCarloReport, MonteCarloSimulator,
