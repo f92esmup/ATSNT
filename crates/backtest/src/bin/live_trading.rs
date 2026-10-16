@@ -22,7 +22,7 @@ use backtest::{
 };
 use chrono::Timelike;
 use clap::Parser;
-use domain::{DollarBarAggregator, OrderIntent, PositionSide, RiskPolicy, Side};
+use domain::{DollarBarAggregator, OrderIntent, PositionSide, Side};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategies::{
@@ -56,9 +56,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     production: bool,
 
-    /// Fixed fractional risk percentage per trade (e.g. 0.01 for 1%)
-    #[arg(long, default_value = "0.01")]
-    risk_pct: Decimal,
+    /// Fixed fractional risk percentage per trade (e.g. 0.01 for 1%).
+    /// Overrides the --config artifact; defaults to the artifact value (1% without one).
+    #[arg(long)]
+    risk_pct: Option<Decimal>,
 
     /// Explicit capital allocation in USDT for this live session (partitioned virtual wallet).
     /// If omitted, defaults to the full available USDT balance on Binance.
@@ -251,6 +252,18 @@ async fn main() -> Result<()> {
         .map(|ctx| ctx.taker_fee_pct)
         .unwrap_or(dec!(0.0005));
 
+    // The artifact is authoritative for sizing and risk limits so live gates orders exactly
+    // like the simulation that selected the strategy; only `--risk-pct` may override it.
+    let artifact_context = loaded_config
+        .as_ref()
+        .and_then(|c| c.execution_context())
+        .copied()
+        .unwrap_or_default();
+    let risk_per_trade_pct = args.risk_pct.unwrap_or(artifact_context.risk_per_trade_pct);
+    let risk_policy = artifact_context
+        .risk_policy()
+        .with_context(|| "Invalid risk limits in the execution context")?;
+
     println!("============================================================");
     println!("     ATSNT - Live Algorithmic Execution Engine             ");
     println!("============================================================");
@@ -264,7 +277,15 @@ async fn main() -> Result<()> {
         }
     );
     println!(" Dollar Bar Threshold: ${}", effective_dollar_bar);
-    println!(" Risk per Trade:       {:.2}%", args.risk_pct * dec!(100));
+    println!(
+        " Risk per Trade:       {:.2}%",
+        risk_per_trade_pct * dec!(100)
+    );
+    println!(
+        " Daily Drawdown Limit: {:.2}% | Max Leverage: {}x",
+        artifact_context.max_daily_drawdown_pct * dec!(100),
+        artifact_context.max_leverage
+    );
     println!(
         " Est. Taker Fee:       {:.4}%",
         estimated_taker_fee_pct * dec!(100)
@@ -319,7 +340,8 @@ async fn main() -> Result<()> {
         testnet: is_testnet,
         spot: false, // USD-M Perpetual
         recv_window_ms: 5000,
-        risk_policy: RiskPolicy::default(),
+        risk_policy,
+        risk_per_trade_pct,
     };
     let gateway = Arc::new(BinanceGateway::new(gateway_config)?);
 
@@ -401,11 +423,6 @@ async fn main() -> Result<()> {
     let mut market_stream = BinanceWebSocketStream::connect(ws_config)
         .with_context(|| "Failed to connect to public Binance WebSocket feed")?;
 
-    let artifact_context = loaded_config
-        .as_ref()
-        .and_then(|c| c.execution_context())
-        .copied()
-        .unwrap_or_default();
     let run_spec = RunSpec {
         strategy_id: DollarBarsCusumStrategy::id().to_string(),
         symbol: symbol_upper.clone(),
@@ -417,7 +434,7 @@ async fn main() -> Result<()> {
         execution_context: BacktestConfig {
             initial_capital: effective_capital,
             taker_fee_pct: estimated_taker_fee_pct,
-            risk_per_trade_pct: args.risk_pct,
+            risk_per_trade_pct,
             ..artifact_context
         },
     };

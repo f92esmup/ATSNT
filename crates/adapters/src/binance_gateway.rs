@@ -120,6 +120,8 @@ pub struct BinanceGatewayConfig {
     pub recv_window_ms: u64,
     /// Pre-trade risk policy constraints.
     pub risk_policy: RiskPolicy,
+    /// Fixed fractional equity risked per trade (e.g. 0.01 = 1%), shared with the simulator.
+    pub risk_per_trade_pct: Decimal,
 }
 
 impl Default for BinanceGatewayConfig {
@@ -131,6 +133,7 @@ impl Default for BinanceGatewayConfig {
             spot: true,
             recv_window_ms: 5000,
             risk_policy: RiskPolicy::default(),
+            risk_per_trade_pct: Decimal::new(1, 2),
         }
     }
 }
@@ -1210,7 +1213,7 @@ impl BinanceGateway {
             intent,
             intent.price,
             mark_to_market_equity,
-            Decimal::new(1, 2),
+            self.config.risk_per_trade_pct,
             sizing_position_notional,
             current_session_drawdown_pct,
         )?;
@@ -3004,6 +3007,39 @@ mod tests {
         assert!(requests
             .iter()
             .any(|request| request.starts_with("POST /fapi/v1/order?")));
+    }
+
+    #[tokio::test]
+    async fn futures_order_quantity_uses_the_configured_risk_per_trade() {
+        let (base_url, requests, server) =
+            spawn_futures_mock_server(valid_futures_responses(current_unix_time_ms().unwrap()));
+        let mut gateway = BinanceGateway::new(BinanceGatewayConfig {
+            spot: false,
+            risk_per_trade_pct: dec!(0.02),
+            ..Default::default()
+        })
+        .unwrap();
+        gateway.base_url = base_url;
+        let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(90), dec!(110), 5).unwrap();
+
+        let report = gateway
+            .place_order("BTCUSDT", &intent, dec!(5_000), dec!(5_000), Decimal::ZERO)
+            .await
+            .unwrap();
+
+        // 2% of 5_000 over a 10-unit stop distance is 10; the default 1% would size only 5.
+        assert_eq!(report.original_qty, dec!(10));
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        let post = requests
+            .iter()
+            .find(|request| request.starts_with("POST /fapi/v1/order?"))
+            .expect("order should be submitted");
+        let submitted: Decimal = request_parameter(post, "quantity")
+            .expect("order should carry a quantity")
+            .parse()
+            .unwrap();
+        assert_eq!(submitted, dec!(10));
     }
 
     fn futures_submission_test_gateway(base_url: String) -> BinanceGateway {

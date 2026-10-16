@@ -437,6 +437,7 @@ async fn main() -> Result<()> {
         spot: false,
         recv_window_ms: 5000,
         risk_policy: RiskPolicy::default(),
+        risk_per_trade_pct: rust_decimal::Decimal::new(1, 2),
     })?);
     let entry = EntryClient {
         base_url: gateway.base_url().to_string(),

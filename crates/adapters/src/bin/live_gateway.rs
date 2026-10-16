@@ -95,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
         spot: is_spot,
         recv_window_ms: 5000,
         risk_policy: domain::RiskPolicy::default(),
+        risk_per_trade_pct: rust_decimal::Decimal::new(1, 2),
     };
 
     let gateway = Arc::new(BinanceGateway::new(config)?);

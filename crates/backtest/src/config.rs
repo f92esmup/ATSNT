@@ -61,6 +61,25 @@ pub struct BacktestConfig {
 }
 
 impl BacktestConfig {
+    /// Builds the pre-trade [`domain::RiskPolicy`] shared by the simulator and the live gateway.
+    ///
+    /// Notional caps keep the policy defaults; the drawdown limit, leverage cap and lot rules
+    /// come from this configuration so both environments size and gate orders identically.
+    pub fn risk_policy(&self) -> Result<domain::RiskPolicy, domain::RiskError> {
+        let defaults = domain::RiskPolicy::default();
+        domain::RiskPolicy::new(
+            defaults.max_position_notional,
+            defaults.max_order_notional,
+            self.max_daily_drawdown_pct,
+        )?
+        .with_execution_rules(
+            self.max_leverage,
+            self.min_order_quantity,
+            self.quantity_step_size,
+            self.min_order_notional,
+        )
+    }
+
     /// Rejects thresholds and execution rules that would trip or distort every run.
     pub fn validate(&self) -> Result<(), crate::error::BacktestError> {
         let fraction = |name: &str, value: Decimal| {
@@ -119,6 +138,35 @@ mod tests {
         let config: BacktestConfig = serde_json::from_str(json).unwrap();
 
         assert_eq!(config, BacktestConfig::default());
+    }
+
+    #[test]
+    fn risk_policy_carries_the_configured_limits() {
+        let config = BacktestConfig {
+            max_daily_drawdown_pct: dec!(0.20),
+            max_leverage: dec!(5),
+            min_order_quantity: dec!(0.01),
+            quantity_step_size: dec!(0.01),
+            min_order_notional: dec!(10),
+            ..BacktestConfig::default()
+        };
+
+        let policy = config.risk_policy().unwrap();
+
+        assert_eq!(policy.max_daily_drawdown_pct, dec!(0.20));
+        assert_eq!(policy.max_leverage, dec!(5));
+        assert_eq!(policy.min_order_quantity, dec!(0.01));
+        assert_eq!(policy.quantity_step_size, dec!(0.01));
+        assert_eq!(policy.min_order_notional, dec!(10));
+    }
+
+    #[test]
+    fn risk_policy_keeps_the_default_notional_caps() {
+        let policy = BacktestConfig::default().risk_policy().unwrap();
+        let defaults = domain::RiskPolicy::default();
+
+        assert_eq!(policy.max_position_notional, defaults.max_position_notional);
+        assert_eq!(policy.max_order_notional, defaults.max_order_notional);
     }
 
     #[test]

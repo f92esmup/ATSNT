@@ -371,20 +371,7 @@ impl BacktestEngine {
         let Ok(current_daily_drawdown_pct) = self.current_daily_drawdown_pct_at(mark_price) else {
             return;
         };
-        let defaults = RiskPolicy::default();
-        let Ok(risk_policy) = RiskPolicy::new(
-            defaults.max_position_notional,
-            defaults.max_order_notional,
-            self.config.max_daily_drawdown_pct,
-        )
-        .and_then(|policy| {
-            policy.with_execution_rules(
-                self.config.max_leverage,
-                self.config.min_order_quantity,
-                self.config.quantity_step_size,
-                self.config.min_order_notional,
-            )
-        }) else {
+        let Ok(risk_policy) = self.config.risk_policy() else {
             return;
         };
         let mark_to_market_equity = self.total_equity(mark_price);
