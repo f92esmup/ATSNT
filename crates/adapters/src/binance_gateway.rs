@@ -23,6 +23,9 @@ const USER_STREAM_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_
 #[path = "binance_gateway/exits.rs"]
 mod exits;
 pub use exits::{ExitKind, PositionClosureReport, ProtectiveExitReport};
+#[path = "binance_gateway/account_check.rs"]
+mod account_check;
+pub use account_check::{AccountFix, AccountReport, Finding, FindingStatus};
 
 #[cfg(test)]
 #[path = "binance_gateway/t6_tests.rs"]
