@@ -31,7 +31,7 @@ Paper Trading is the critical intermediate proving ground between **historical d
      ▼
 ┌────────────────────────────────────────┐
 │ tokio::sync::broadcast (Capacity 10k)  │ ──► PaperTradingEvent Stream
-└────────────────────────────────────────┘     (Web /ws/telemetry via envelope)
+└────────────────────────────────────────┘     (Retired web endpoint)          
 ```
 
 ---
@@ -89,7 +89,7 @@ ATSNT enforces the **Zero-Toy-Assumption Principle**:
 
 ## 4. Event Streaming Contract (`PaperTradingEvent`)
 
-The raw event/config APIs below remain compatible. The current web endpoint is `/ws/telemetry`, consuming T2a's separate timestamped, symbol/strategy-aware envelope; see the [current envelope and snapshot contract](07-web-telemetry-dashboard.md#32-websocket-streaming-wstelemetry). The web binary's real paper-session wiring remains T3 pending at base HEAD `c7ae8f4107b9214a3c7f4fc20193393b65da617c`; this diagram is not evidence of that integration.
+The raw event/config APIs below remain compatible. The former web endpoint `/ws/telemetry` and the web binary were retired with the in-process web server in Milestone 5; paper-session telemetry now streams to BigQuery (see [the telemetry specification](07-web-telemetry-dashboard.md)).
 
 All live state mutations are broadcast over an asynchronous `tokio::sync::broadcast` channel, decoupled from the presentation layer:
 

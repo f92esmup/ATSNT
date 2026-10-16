@@ -38,7 +38,7 @@ The ATSNT quantitative trading engine is designed as an **outbound-only, air-gap
 │        3. GCP DATA WAREHOUSE & DATA LAKE               │       │       2. GCP COMPUTE (e2-micro)      │
 │                                                        │       │  - paper_trading / live_gateway      │
 │  A. Google Cloud Storage (Bucket: gs://atsnt-lake)     │       │  - Continuous 24/7 Tokio runtime     │
-│     - /simulations/monte_carlo_<run_id>.parquet        │       │  - Resident Memory: 15 MB - 40 MB    │
+│     - (no simulation exports: runs live in BigQuery)   │       │  - Resident Memory: 15 MB - 40 MB    │
 │     - /hpo/wfo_results_<run_id>.json                   │       │  - Zero inbound listening ports      │
 │     - /market_data/<symbol>/...                        │       └──────────────────┬───────────────────┘
 │                                                        │                          │
@@ -72,7 +72,7 @@ The architecture is deliberately dimensioned to run at **0,00 € / mes** indefi
 | **Standard Persistent Disk** | 30 GB HDD / month | 10 - 20 GB operating system boot disk | **0,00 €** |
 | **BigQuery Ingestion & Storage** | 10 GB storage free / month | < 50 MB / month (tabular logs and snapshots) | **0,00 €** |
 | **BigQuery Query Engine** | 1 TB analytical queries free / month | < 2 GB / month (consumer queries: every view scans under 2 MB) | **0,00 €** |
-| **Google Cloud Storage (GCS)** | 5 GB Standard Storage / month (US regions) | < 250 MB / month (compressed Parquet files) | **0,00 € - 0,01 €** |
+| **Google Cloud Storage (GCS)** | 5 GB Standard Storage / month (US regions) | < 250 MB / month (deployment artifacts) | **0,00 € - 0,01 €** |
 | **Total Monthly Spend** | | | **0,00 €** |
 
 > [!NOTE]

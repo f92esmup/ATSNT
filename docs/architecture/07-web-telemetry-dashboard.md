@@ -30,9 +30,9 @@ The trading engine operates as a strictly headless, outbound-only system. It exp
         ▼                      ▼                      ▼
 ┌──────────────────┐  ┌──────────────────┐  ┌────────────────────────────┐
 │ Google BigQuery  │  │  Google Storage  │  │    Telegram Bot API        │
-│ (atsnt_bi)       │  │  (GCS Parquet)   │  │    (@BotFather webhook)    │
+│ (atsnt_bi)       │  │  (GCS artifacts) │  │    (@BotFather webhook)    │
 └────────┬─────────┘  └──────────────────┘  └──────────────┬─────────────┘
-         │ Direct 1-Click Connection                       │ Push Notification
+         │ Read-only view queries                          │ Push Notification
          ▼                                                 ▼
 ┌────────────────────────────────────────┐  ┌────────────────────────────┐
 │      Analytics consumers (read-only)   │  │    Mobile Push Alerts      │
@@ -55,7 +55,7 @@ The trading engine operates as a strictly headless, outbound-only system. It exp
 3. **Instant Mobile Situational Awareness (Telegram)**:
    - Critical operational events (position entries, exits, risk threshold violations) are pushed directly to mobile devices in under 200 milliseconds.
 4. **Massive Scale at Minimal Cost**:
-   - Heavy simulation curves (e.g. 10,000 Monte Carlo trajectories) are compressed into columnar Apache Parquet files and archived in GCS, readable on demand.
+   - Monte Carlo fan-chart curves are stored as event-based series rows in `atsnt_bi.run_series` (a handful of percentile curves per run), not as one file per trajectory.
 
 ---
 
@@ -91,103 +91,13 @@ The notifier formats events with visual cues and dispatches them asynchronously:
 
 ---
 
-## 3. Data Warehouse Schemas & BigQuery DDL (`atsnt_bi`)
+## 3. Data Warehouse Schema (`atsnt_bi`)
 
-The engine streams tabular metrics directly into four analytical tables:
-
-### 3.1 `atsnt_bi.trades` (Execution Audit & Trade Journal)
-```sql
-CREATE TABLE IF NOT EXISTS atsnt_bi.trades (
-    trade_id STRING NOT NULL,
-    session_id STRING NOT NULL,
-    strategy_id STRING NOT NULL,
-    symbol STRING NOT NULL,
-    side STRING NOT NULL,               -- 'Buy' | 'Sell'
-    entry_timestamp TIMESTAMP NOT NULL,
-    exit_timestamp TIMESTAMP NOT NULL,
-    entry_price NUMERIC NOT NULL,
-    exit_price NUMERIC NOT NULL,
-    quantity NUMERIC NOT NULL,
-    gross_pnl NUMERIC NOT NULL,
-    fees_paid NUMERIC NOT NULL,
-    net_pnl NUMERIC NOT NULL,
-    exit_reason STRING NOT NULL,        -- 'StopLoss' | 'TakeProfit' | 'TimeBarrier'
-    holding_duration_seconds INT64
-)
-PARTITION BY DATE(exit_timestamp)
-CLUSTER BY symbol, strategy_id;
-```
-
-### 3.2 `atsnt_bi.equity_snapshots` (Account Balance & Drawdown Telemetry)
-```sql
-CREATE TABLE IF NOT EXISTS atsnt_bi.equity_snapshots (
-    timestamp TIMESTAMP NOT NULL,
-    session_id STRING NOT NULL,
-    symbol STRING NOT NULL,
-    cash_equity NUMERIC NOT NULL,
-    unrealized_pnl NUMERIC NOT NULL,
-    total_equity NUMERIC NOT NULL,
-    drawdown_pct NUMERIC NOT NULL,
-    active_position_side STRING,         -- 'Long' | 'Short' | NULL
-    active_position_qty NUMERIC
-)
-PARTITION BY DATE(timestamp)
-CLUSTER BY session_id;
-```
-
-### 3.3 `atsnt_bi.hpo_evaluations` (Hyperparameter Optimization Surface)
-```sql
-CREATE TABLE IF NOT EXISTS atsnt_bi.hpo_evaluations (
-    run_id STRING NOT NULL,
-    timestamp TIMESTAMP NOT NULL,
-    strategy_id STRING NOT NULL,
-    parameter_space STRING NOT NULL,     -- JSON: {"dollar_threshold": 1000000, "z_entry": 2.1...}
-    is_sharpe NUMERIC NOT NULL,
-    oos_sharpe NUMERIC NOT NULL,
-    deflated_sharpe_ratio NUMERIC NOT NULL,
-    parameter_stability_score NUMERIC NOT NULL,
-    total_trades INT64 NOT NULL,
-    win_rate NUMERIC NOT NULL,
-    max_drawdown_pct NUMERIC NOT NULL
-)
-PARTITION BY DATE(timestamp)
-CLUSTER BY strategy_id;
-```
-
-### 3.4 `atsnt_bi.monte_carlo_runs` (Quantitative Stress Testing Summary)
-```sql
-CREATE TABLE IF NOT EXISTS atsnt_bi.monte_carlo_runs (
-    run_id STRING NOT NULL,
-    timestamp TIMESTAMP NOT NULL,
-    strategy_id STRING NOT NULL,
-    iterations INT64 NOT NULL,
-    resample_method STRING NOT NULL,     -- 'IID' | 'CircularBlockBootstrap'
-    historical_max_drawdown NUMERIC NOT NULL,
-    p50_max_drawdown NUMERIC NOT NULL,
-    p95_max_drawdown NUMERIC NOT NULL,
-    p99_max_drawdown NUMERIC NOT NULL,
-    probability_of_ruin_pct NUMERIC NOT NULL
-)
-PARTITION BY DATE(timestamp)
-CLUSTER BY strategy_id;
-```
+The engine streams run-centric rows into four append-only tables (`runs`, `run_metrics`, `trades`, `run_series`) and exposes deduplicated `v_*` views. The DDL is `scripts/gcp/bigquery_schema.sql`; the columns, semantics and rules of change that consumers can rely on are the contract in [12-bi-data-contract.md](12-bi-data-contract.md). (The earlier per-purpose tables `trades`, `equity_snapshots`, `hpo_evaluations` and `monte_carlo_runs` described in previous revisions of this document were replaced by this model and are dropped by `scripts/gcp/bigquery_drop_legacy.sql`.)
 
 ---
 
-## 4. Massive Trajectory Archival (GCS Parquet)
-
-For detailed Monte Carlo stress simulations (e.g. 10,000 synthetic equity curves with 500 points each):
-1. Trajectories are encoded in memory using Apache Arrow `Float64Array` columns:
-   - `trajectory_id`: Integer identifier.
-   - `step_index`: Trade or bar index.
-   - `equity`: Simulated equity level.
-2. Compressed using Snappy into Apache Parquet format.
-3. Uploaded to `gs://atsnt-lake/simulations/monte_carlo_<timestamp>.parquet`.
-4. BigQuery can optionally query this bucket directly via **External Tables** (`CREATE EXTERNAL TABLE ... OPTIONS (format = 'PARQUET')`).
-
----
-
-## 5. CLI Execution & Operation
+## 4. CLI Execution & Operation
 
 All three core analytics runners support Cloud-First export flags:
 
@@ -203,12 +113,11 @@ cargo run -p backtest --bin run_hpo -- \
   --data data/historical/BTCUSDT/BTCUSDT-aggTrades-2024-01-01.parquet \
   --gcp-bigquery
 
-# 3. Backtest & Monte Carlo with BigQuery and GCS Parquet
+# 3. Backtest & Monte Carlo with BigQuery
 cargo run -p backtest -- \
   --monte-carlo \
   --mc-iterations 10000 \
-  --gcp-bigquery \
-  --gcs-parquet
+  --gcp-bigquery
 ```
 
 ### Environment Configuration (Fail-Open / Offline Safe)
