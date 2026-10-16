@@ -465,6 +465,7 @@ async fn main() -> Result<()> {
         backtest::MonthlyGuard::new(run_spec.execution_context.max_monthly_drawdown_pct);
     let mut peak_equity = effective_capital;
     let mut daily_watermark = backtest::DailyWatermark::new();
+    let mut fee_ledger = backtest::fee_ledger::FeeLedger::new();
     let mut current_equity = effective_capital;
     let mut total_ticks: u64 = 0;
     let mut total_bars: u64 = 0;
@@ -623,6 +624,16 @@ async fn main() -> Result<()> {
                             update.cumulative_filled_quantity,
                         );
 
+                        // Book the commission of every fill (partial ones included) as charged.
+                        if update.last_filled_quantity > Decimal::ZERO {
+                            fee_ledger.record_fill(
+                                update.commission,
+                                update.commission_asset.as_deref(),
+                                update.last_filled_price * update.last_filled_quantity,
+                                estimated_taker_fee_pct,
+                            );
+                        }
+
                         if update.status == "FILLED" {
                             let is_closing = active_position_tracker.is_some();
                             if !is_closing {
@@ -691,7 +702,12 @@ async fn main() -> Result<()> {
                                     Side::Buy => (update.last_filled_price - entry_price) * entry_qty,
                                     Side::Sell => (entry_price - update.last_filled_price) * entry_qty,
                                 };
-                                let fees_paid = (entry_price * entry_qty + update.last_filled_price * entry_qty) * estimated_taker_fee_pct;
+                                // Real commissions charged over the position's fills; the estimate
+                                // only stands in when no fill was observed (e.g. after a restart).
+                                let fees_paid = fee_ledger.take().unwrap_or(
+                                    (entry_price * entry_qty + update.last_filled_price * entry_qty)
+                                        * estimated_taker_fee_pct,
+                                );
                                 let net_pnl = gross_pnl - fees_paid;
                                 let return_pct = if entry_price > Decimal::ZERO && entry_qty > Decimal::ZERO {
                                     net_pnl / (entry_price * entry_qty)

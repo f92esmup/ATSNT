@@ -611,6 +611,10 @@ pub struct FuturesOrderTradeUpdate {
     pub last_filled_price: Decimal,
     pub cumulative_filled_quantity: Decimal,
     pub trade_id: Option<i64>,
+    /// Commission charged for this fill (zero when Binance omits it).
+    pub commission: Decimal,
+    /// Asset the commission was charged in; `None` when no commission applies.
+    pub commission_asset: Option<String>,
 }
 
 /// Private stream errors intentionally omit endpoint, key, credential, and payload values.
@@ -863,7 +867,23 @@ fn parse_futures_order_trade_update(
         last_filled_price: required_decimal(order, "L")?,
         cumulative_filled_quantity: required_decimal(order, "z")?,
         trade_id: (trade_id >= 0).then_some(trade_id),
+        commission: optional_decimal(order, "n")?,
+        commission_asset: match order.get("N") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(asset)) if !asset.is_empty() => Some(asset.clone()),
+            _ => return Err(BinancePrivateStreamError::EventReconciliationRequired),
+        },
     })
+}
+
+/// Reads a decimal that Binance may omit; a present but malformed value still fails closed.
+fn optional_decimal(value: &Value, key: &str) -> Result<Decimal, BinancePrivateStreamError> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(Decimal::ZERO),
+        Some(Value::String(raw)) => Decimal::from_str(raw)
+            .map_err(|_| BinancePrivateStreamError::EventReconciliationRequired),
+        Some(_) => Err(BinancePrivateStreamError::EventReconciliationRequired),
+    }
 }
 
 fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, BinancePrivateStreamError> {
@@ -996,6 +1016,34 @@ mod tests {
                 assert_eq!(update.last_filled_price, dec!(42000.5));
                 assert_eq!(update.cumulative_filled_quantity, dec!(0.002));
                 assert_eq!(update.trade_id, Some(456));
+            }
+            other => panic!("expected Futures order update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn futures_order_trade_update_carries_the_commission_charged_for_the_fill() {
+        let event = r#"{"e":"ORDER_TRADE_UPDATE","E":1700000000004,"T":1700000000003,"o":{"s":"BTCUSDT","c":"client-1","S":"BUY","X":"FILLED","i":123,"l":"0.002","L":"42000.5","z":"0.002","t":456,"ps":"BOTH","n":"0.0336004","N":"USDT"}}"#;
+
+        match parse_private_user_event(event).expect("order update with commission should parse") {
+            BinancePrivateEvent::FuturesOrderTradeUpdate(update) => {
+                assert_eq!(update.commission, dec!(0.0336004));
+                assert_eq!(update.commission_asset.as_deref(), Some("USDT"));
+            }
+            other => panic!("expected Futures order update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn futures_order_trade_update_without_commission_fields_reports_zero_commission() {
+        // Binance omits `n`/`N` on events that charge nothing (e.g. order acknowledgements).
+        let event = r#"{"e":"ORDER_TRADE_UPDATE","E":1700000000004,"T":1700000000003,"o":{"s":"BTCUSDT","c":"client-1","S":"BUY","X":"NEW","i":123,"l":"0","L":"0","z":"0","t":-1,"ps":"BOTH"}}"#;
+
+        match parse_private_user_event(event).expect("order update without commission should parse")
+        {
+            BinancePrivateEvent::FuturesOrderTradeUpdate(update) => {
+                assert_eq!(update.commission, Decimal::ZERO);
+                assert_eq!(update.commission_asset, None);
             }
             other => panic!("expected Futures order update, got {other:?}"),
         }

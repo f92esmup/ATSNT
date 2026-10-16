@@ -3,6 +3,7 @@ pub mod config;
 pub mod daily_watermark;
 pub mod engine;
 pub mod error;
+pub mod fee_ledger;
 pub mod live_exits;
 pub mod metrics;
 pub mod monte_carlo;
