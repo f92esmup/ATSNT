@@ -124,6 +124,15 @@ Known limits: there is no reconciliation on restart (SL/TP stay on the exchange,
 
 Harness: `GCP_PROJECT_ID=<project> cargo run -p backtest --bin testnet_exit_check -- scenario|leave-open|inspect|cleanup|capture-events`. It only targets testnet.
 
+### 3.3.2 Account Profile Verification
+Before any stream is opened, `live_trading` calls `BinanceGateway::verify_account` and prints a report (`[OK]`, `[FIXED] from -> to`, `[BLOCKING] reason. To fix: ...`). It checks one-way position mode, single-asset (USDT) mode, USDT-only collateral, a positive USDT balance, auto-add margin off, isolated margin on the symbol, a flat account (no position, regular or conditional orders) and **leverage viability**: the exchange bracket must allow the leverage the largest order may need. Any blocking finding stops the bot with an error that says what to change.
+
+- **The only automatic change** is the symbol margin type to `ISOLATED` (`POST /fapi/v1/marginType`), and only when the account is flat with no orders. The result is re-read before it is reported as fixed; `-4046` ("no need to change") is not trusted unless the re-read agrees, and `-4047`/`-4048` (orders or position exist) stay blocking.
+- **Leverage is never set.** It is an output of risk sizing: the per-order preflight keeps choosing the minimum sufficient leverage for each operation.
+- **Re-verification** runs every 10 minutes and right after a listen-key expiry. While a position or order exists it is read-only; on drift it raises a critical alert (Telegram) and blocks new entries until the account matches again.
+- **Flags**: `--verify-only` prints the report and exits without changing anything; `--no-auto-fix` verifies and stops on any mismatch.
+- Manual check against the testnet: `testnet_exit_check verify-account`.
+
 ### 3.4 User Data Stream Listener (`BinanceUserDataStream`)
 - Located at [`crates/adapters/src/binance_user_stream.rs`](../../crates/adapters/src/binance_user_stream.rs).
 - Connects to WebSocket using `listenKey`.

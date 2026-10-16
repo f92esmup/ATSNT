@@ -38,6 +38,8 @@ enum Command {
     LeaveOpen,
     /// Cancels every order and flattens the position.
     Cleanup,
+    /// Read-only account profile verification (the same report the live bot prints at startup).
+    VerifyAccount,
     /// Prints the raw private-stream events (type and payload keys) for N seconds.
     CaptureEvents {
         #[arg(long, default_value_t = 90)]
@@ -489,6 +491,11 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Command::VerifyAccount => {
+            let report = gateway.verify_account(&symbol, false, false).await?;
+            println!("{}", report.render());
+            println!("  ready: {}", report.is_ready());
         }
         Command::Cleanup => {
             flatten_all(&gateway, &symbol).await;

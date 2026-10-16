@@ -84,7 +84,19 @@ struct Args {
     /// Print individual raw market trade ticks to stdout (verbose debug mode)
     #[arg(long, default_value_t = false)]
     show_ticks: bool,
+
+    /// Verify the Binance account against the strategy profile, print the report and exit
+    /// without changing anything.
+    #[arg(long, default_value_t = false)]
+    verify_only: bool,
+
+    /// Verify the account profile but never change it: any mismatch stops the bot.
+    #[arg(long, default_value_t = false)]
+    no_auto_fix: bool,
 }
+
+/// Seconds between account profile re-verifications while the bot runs.
+const ACCOUNT_RECHECK_SECS: u64 = 600;
 
 fn validate_strategy_market(strategy: &DollarBarsCusumStrategy, market: MarketType) -> Result<()> {
     if !strategy.supports_market_type(market) {
@@ -311,6 +323,23 @@ async fn main() -> Result<()> {
     };
     let gateway = Arc::new(BinanceGateway::new(gateway_config)?);
 
+    // 2b. Verify (and, when safe, prepare) the account before any stream is opened.
+    println!("[*] Verifying the Binance account profile for {symbol_upper}...");
+    let startup_report = gateway
+        .verify_account(&symbol_upper, !args.no_auto_fix && !args.verify_only, false)
+        .await
+        .with_context(|| "Failed to read the Binance account configuration")?;
+    println!("{}", startup_report.render());
+    if !startup_report.is_ready() {
+        anyhow::bail!(
+            "the account does not match the strategy profile; fix the BLOCKING items above and restart"
+        );
+    }
+    if args.verify_only {
+        println!("[OK] --verify-only: the account matches the profile; nothing was changed.");
+        return Ok(());
+    }
+
     // 3. Query Account Balance & Health Check
     println!("[*] Verifying HMAC signatures & querying account balance...");
     let initial_balance = gateway
@@ -409,6 +438,9 @@ async fn main() -> Result<()> {
     }
 
     let mut aggregator = DollarBarAggregator::new(effective_dollar_bar)?;
+    let mut account_ok = true;
+    let mut account_check = tokio::time::interval(Duration::from_secs(ACCOUNT_RECHECK_SECS));
+    account_check.tick().await; // the startup verification already covered the first period
     let mut exit_manager = ExitManager::new(symbol_upper.clone());
     let mut last_halt_attempt: Option<Instant> = None;
     let mut monthly_guard =
@@ -443,6 +475,42 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             biased;
+
+            // Periodic account re-verification; never changes anything while exposed.
+            _ = account_check.tick() => {
+                let exposed = position_open
+                    || active_position_tracker.is_some()
+                    || !exit_manager.can_open();
+                match gateway
+                    .verify_account(&symbol_upper, !args.no_auto_fix && !exposed, exposed)
+                    .await
+                {
+                    Ok(report) if report.is_ready() => {
+                        if !account_ok {
+                            println!("[OK] Account profile matches again; entries re-enabled.");
+                        }
+                        account_ok = true;
+                    }
+                    Ok(report) => {
+                        let first = account_ok;
+                        account_ok = false;
+                        eprintln!("[CRITICAL] Account profile drifted; new entries are blocked.\n{}", report.render());
+                        if first {
+                            if let Some(t) = &telegram {
+                                let _ = t
+                                    .send_alert(&format!(
+                                        "🚨 *ATSNT ACCOUNT DRIFT* `{symbol_upper}`: new entries blocked.\n{}",
+                                        report.render()
+                                    ))
+                                    .await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Account re-verification could not read the exchange; keeping the last verdict");
+                    }
+                }
+            }
 
             // Handle graceful shutdown on Ctrl+C
             _ = &mut shutdown_signal => {
@@ -676,6 +744,9 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
+                    Ok(BinancePrivateEvent::FuturesListenKeyExpired { .. }) => {
+                        account_check.reset_immediately();
+                    }
                     Ok(_) => {}
                     Err(e) => {
                         warn!(error = %e, "Private user data stream warning/error encountered");
@@ -810,7 +881,9 @@ async fn main() -> Result<()> {
                                 );
 
                                 // Check if we already have an active open position
-                                if monthly_guard.is_halted() || exit_manager.halt_state() != HaltState::Running {
+                                if !account_ok {
+                                    println!("[RISK] Signal skipped: the account no longer matches the strategy profile.");
+                                } else if monthly_guard.is_halted() || exit_manager.halt_state() != HaltState::Running {
                                     println!("[RISK] Signal skipped: trading is halted (monthly circuit breaker or emergency halt).");
                                 } else if !exit_manager.can_open() {
                                     println!("[RISK] Signal skipped: exits or cleanup still pending.");
