@@ -313,7 +313,15 @@ impl BacktestEngine {
             defaults.max_position_notional,
             defaults.max_order_notional,
             self.config.max_daily_drawdown_pct,
-        ) else {
+        )
+        .and_then(|policy| {
+            policy.with_execution_rules(
+                self.config.max_leverage,
+                self.config.min_order_quantity,
+                self.config.quantity_step_size,
+                self.config.min_order_notional,
+            )
+        }) else {
             return;
         };
         let mark_to_market_equity = self.total_equity(mark_price);
@@ -501,6 +509,7 @@ mod tests {
             slippage_pct: dec!(0.0005),
             risk_per_trade_pct: dec!(0.01),
             max_daily_drawdown_pct: dec!(0.05),
+            ..BacktestConfig::default()
         };
         let mut engine = BacktestEngine::new(btc_cfg);
 
@@ -675,6 +684,7 @@ mod tests {
             slippage_pct: dec!(0.01), // 1% slippage for prominent measurement
             risk_per_trade_pct: dec!(0.01),
             max_daily_drawdown_pct: dec!(0.20),
+            ..BacktestConfig::default()
         };
         let mut engine = BacktestEngine::new(btc_cfg);
 
@@ -745,6 +755,7 @@ mod tests {
             slippage_pct: dec!(0.0005),
             risk_per_trade_pct: dec!(0.05), // large position to trigger breaker
             max_daily_drawdown_pct: dec!(0.05), // 5% daily breaker
+            ..BacktestConfig::default()
         };
         let mut engine = BacktestEngine::new(btc_cfg);
 

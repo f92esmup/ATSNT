@@ -236,10 +236,7 @@ async fn main() -> Result<()> {
                 } else {
                     artifact_ctx.risk_per_trade_pct
                 },
-                maker_fee_pct: artifact_ctx.maker_fee_pct,
-                taker_fee_pct: artifact_ctx.taker_fee_pct,
-                slippage_pct: artifact_ctx.slippage_pct,
-                max_daily_drawdown_pct: artifact_ctx.max_daily_drawdown_pct,
+                ..*artifact_ctx
             }
         } else {
             BacktestConfig {

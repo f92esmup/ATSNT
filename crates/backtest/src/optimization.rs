@@ -339,6 +339,7 @@ mod tests {
             slippage_pct: dec!(0.0005),
             risk_per_trade_pct: dec!(0.01),
             max_daily_drawdown_pct: dec!(0.05),
+            ..BacktestConfig::default()
         };
 
         let param_space = ParameterSpace {
@@ -483,6 +484,7 @@ mod tests {
             slippage_pct: dec!(0.0005),
             risk_per_trade_pct: dec!(0.01),
             max_daily_drawdown_pct: dec!(0.05),
+            ..BacktestConfig::default()
         };
 
         let optimizer = WalkForwardOptimizer::<MockStrategy>::with_default_space(engine_config);

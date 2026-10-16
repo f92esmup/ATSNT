@@ -331,6 +331,7 @@ async fn main() -> Result<()> {
             slippage_pct: dec!(0.0005),     // 0.05%
             risk_per_trade_pct: dec!(0.01), // 1.0% risk per trade
             max_daily_drawdown_pct: dec!(0.05),
+            ..BacktestConfig::default()
         }
     };
 
