@@ -132,6 +132,8 @@ impl Default for BinanceGatewayConfig {
 struct SpotSymbolInfo {
     base_asset: String,
     quote_asset: String,
+    /// `(min_qty, step_size, min_notional)` from the exchange filters, when all are published.
+    lot_rules: Option<(Decimal, Decimal, Decimal)>,
 }
 
 const FUTURES_MAX_DATA_AGE: std::time::Duration = std::time::Duration::from_secs(2);
@@ -962,6 +964,7 @@ impl BinanceGateway {
         Ok(SpotSymbolInfo {
             base_asset,
             quote_asset,
+            lot_rules: parse_spot_lot_rules(item),
         })
     }
 
@@ -1071,8 +1074,8 @@ impl BinanceGateway {
         symbol: &str,
         intent: &OrderIntent,
         quantity: Decimal,
+        symbol_info: &SpotSymbolInfo,
     ) -> Result<(), GatewayError> {
-        let symbol_info = self.fetch_spot_symbol_info(symbol).await?;
         let balances = self.fetch_spot_balances().await?;
         let notional = intent.price * quantity;
         let (required_asset, required_amount, received_amount) = match intent.side {
@@ -1105,7 +1108,7 @@ impl BinanceGateway {
                 let asset_price = self
                     .fetch_discount_asset_price_in_quote(
                         &commission.discount_asset,
-                        &symbol_info,
+                        symbol_info,
                         intent,
                     )
                     .await?;
@@ -1130,6 +1133,36 @@ impl BinanceGateway {
             ));
         }
         Ok(())
+    }
+
+    /// Overlays the symbol's real exchange filters onto the configured risk policy.
+    ///
+    /// Futures use the live `LOT_SIZE`/`MIN_NOTIONAL` rules; Spot cannot borrow, so leverage is 1x.
+    fn exchange_sized_policy(
+        &self,
+        futures: Option<&FuturesPreflightSnapshot>,
+        spot: Option<&SpotSymbolInfo>,
+    ) -> Result<RiskPolicy, GatewayError> {
+        let base = &self.config.risk_policy;
+        let policy = match (futures, spot) {
+            (Some(snapshot), _) => base.clone().with_execution_rules(
+                base.max_leverage,
+                snapshot.rules.min_qty,
+                snapshot.rules.step_size,
+                snapshot.rules.min_notional,
+            )?,
+            (None, Some(info)) => {
+                let (min_qty, step_size, min_notional) = info.lot_rules.unwrap_or((
+                    base.min_order_quantity,
+                    base.quantity_step_size,
+                    base.min_order_notional,
+                ));
+                base.clone()
+                    .with_execution_rules(Decimal::ONE, min_qty, step_size, min_notional)?
+            }
+            (None, None) => base.clone(),
+        };
+        Ok(policy)
     }
 
     /// Sizes with the shared session policy, then submits a signed live order to Binance.
@@ -1159,7 +1192,14 @@ impl BinanceGateway {
         // 1. Mandatory shared sizing and pre-trade risk gatekeeping.
         let current_session_drawdown_pct =
             RiskPolicy::calculate_session_drawdown_pct(session_peak_equity, mark_to_market_equity)?;
-        let quantity = self.config.risk_policy.size_order(
+        let spot_info = if self.config.spot {
+            Some(self.fetch_spot_symbol_info(symbol).await?)
+        } else {
+            None
+        };
+        let sizing_policy =
+            self.exchange_sized_policy(futures_snapshot.as_ref(), spot_info.as_ref())?;
+        let quantity = sizing_policy.size_order(
             intent,
             intent.price,
             mark_to_market_equity,
@@ -1168,8 +1208,8 @@ impl BinanceGateway {
             current_session_drawdown_pct,
         )?;
 
-        if self.config.spot {
-            self.validate_spot_preflight(symbol, intent, quantity)
+        if let Some(symbol_info) = spot_info.as_ref() {
+            self.validate_spot_preflight(symbol, intent, quantity, symbol_info)
                 .await?;
         } else if let Some(snapshot) = futures_snapshot.as_ref() {
             self.validate_futures_preflight(symbol, intent, quantity, snapshot)
@@ -1634,6 +1674,34 @@ fn is_valid_asset(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+/// Reads LOT_SIZE and (MIN_)NOTIONAL from a Spot symbol; `None` unless every bound is valid.
+fn parse_spot_lot_rules(item: &serde_json::Value) -> Option<(Decimal, Decimal, Decimal)> {
+    let filters = item.get("filters")?.as_array()?;
+    let find = |names: &[&str]| {
+        filters.iter().find(|filter| {
+            filter
+                .get("filterType")
+                .and_then(|value| value.as_str())
+                .is_some_and(|kind| names.contains(&kind))
+        })
+    };
+    let field = |filter: &serde_json::Value, key: &str| {
+        filter
+            .get(key)?
+            .as_str()?
+            .parse::<Decimal>()
+            .ok()
+            .filter(|value| *value > Decimal::ZERO)
+    };
+    let lot = find(&["LOT_SIZE"])?;
+    let notional = find(&["NOTIONAL", "MIN_NOTIONAL"])?;
+    Some((
+        field(lot, "minQty")?,
+        field(lot, "stepSize")?,
+        field(notional, "minNotional")?,
+    ))
 }
 
 fn required_asset_field(
@@ -2858,11 +2926,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn futures_preflight_rejects_invalid_quantity_filter_without_dispatch() {
+    async fn futures_preflight_rejects_quantity_above_max_qty_without_dispatch() {
         let mut responses = valid_futures_responses(current_unix_time_ms().unwrap());
         responses.insert(
             "/fapi/v1/exchangeInfo",
-            r#"{"symbols":[{"symbol":"BTCUSDT","status":"TRADING","contractType":"PERPETUAL","quoteAsset":"USDT","marginAsset":"USDT","filters":[{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"1000000","tickSize":"0.01"},{"filterType":"LOT_SIZE","minQty":"0.001","maxQty":"1000","stepSize":"0.03"},{"filterType":"MIN_NOTIONAL","notional":"5"}]}]}"#.to_string(),
+            r#"{"symbols":[{"symbol":"BTCUSDT","status":"TRADING","contractType":"PERPETUAL","quoteAsset":"USDT","marginAsset":"USDT","filters":[{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"1000000","tickSize":"0.01"},{"filterType":"LOT_SIZE","minQty":"0.001","maxQty":"5","stepSize":"0.001"},{"filterType":"MIN_NOTIONAL","notional":"5"}]}]}"#.to_string(),
         );
         let (base_url, requests, server) = spawn_futures_mock_server(responses);
         let mut gateway = BinanceGateway::new(BinanceGatewayConfig {
@@ -3605,5 +3673,35 @@ mod tests {
                 RiskError::CircuitBreakerTriggered { .. }
             ))
         ));
+    }
+
+    #[test]
+    fn spot_lot_rules_are_read_from_exchange_filters() {
+        let item: serde_json::Value = serde_json::from_str(
+            r#"{"filters":[{"filterType":"LOT_SIZE","minQty":"1","stepSize":"1"},{"filterType":"NOTIONAL","minNotional":"5.0"}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            parse_spot_lot_rules(&item),
+            Some((dec!(1), dec!(1), dec!(5.0)))
+        );
+        assert_eq!(parse_spot_lot_rules(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn spot_sizing_policy_uses_symbol_filters_and_no_leverage() {
+        let gateway = BinanceGateway::new(BinanceGatewayConfig::default()).unwrap();
+        let info = SpotSymbolInfo {
+            base_asset: "DOGE".to_string(),
+            quote_asset: "USDT".to_string(),
+            lot_rules: Some((dec!(1), dec!(1), dec!(5))),
+        };
+
+        let policy = gateway.exchange_sized_policy(None, Some(&info)).unwrap();
+
+        assert_eq!(policy.max_leverage, Decimal::ONE);
+        assert_eq!(policy.quantity_step_size, dec!(1));
+        assert_eq!(policy.min_order_quantity, dec!(1));
     }
 }
