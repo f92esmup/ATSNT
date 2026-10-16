@@ -17,8 +17,8 @@ use adapters::{
 use anyhow::{Context, Result};
 use backtest::{
     now_unix_ms, record_closed_trade, record_run_status, BacktestConfig, BacktestMetrics,
-    ClosedTrade, DataWindow, RunContext, RunSpec, RunStatus, RunType, SamplingConfig,
-    TradeExcursion,
+    ClosedTrade, DataWindow, ExitEvent, ExitManager, HaltState, RunContext, RunSpec, RunStatus,
+    RunType, SamplingConfig, TradeExcursion,
 };
 use chrono::Timelike;
 use clap::Parser;
@@ -409,6 +409,8 @@ async fn main() -> Result<()> {
     }
 
     let mut aggregator = DollarBarAggregator::new(effective_dollar_bar)?;
+    let mut exit_manager = ExitManager::new(symbol_upper.clone());
+    let mut last_halt_attempt: Option<Instant> = None;
     let mut monthly_guard =
         backtest::MonthlyGuard::new(run_spec.execution_context.max_monthly_drawdown_pct);
     let mut peak_equity = effective_capital;
@@ -532,6 +534,24 @@ async fn main() -> Result<()> {
                                 position_open = true;
                                 excursion_tracker.open(update.transaction_time_ms as i64, current_equity);
 
+                                // Exits live on the exchange so they survive a crash of this process.
+                                let exit_event = match &active_order_intent {
+                                    Some(intent) => {
+                                        exit_manager
+                                            .on_entry_filled(
+                                                gateway.as_ref(),
+                                                update.side,
+                                                intent.stop_loss,
+                                                intent.take_profit,
+                                                intent.max_bars_hold,
+                                            )
+                                            .await
+                                    }
+                                    // A fill without its intent cannot be protected: flatten and stop.
+                                    None => exit_manager.halt(gateway.as_ref()).await,
+                                };
+                                announce_exit_event(&telegram, &symbol_upper, &exit_event).await;
+
                                 if let Some(t) = &telegram {
                                     let side_str = match update.side {
                                         Side::Buy => "Long",
@@ -553,7 +573,11 @@ async fn main() -> Result<()> {
                                     let _ = t.send_alert(&msg).await;
                                 }
                             } else {
-                                // Position closed
+                                // Position closed: drop leftover protective and entry orders.
+                                let cleanup = exit_manager
+                                    .on_position_closed_by_exchange(gateway.as_ref())
+                                    .await;
+                                announce_exit_event(&telegram, &symbol_upper, &cleanup).await;
                                 let (entry_side, entry_price, entry_qty, entry_ts) = active_position_tracker.take().unwrap_or((
                                     update.side,
                                     update.last_filled_price,
@@ -710,6 +734,17 @@ async fn main() -> Result<()> {
                             }
                         }
 
+                        // Emergency close: retried every few seconds until the exchange confirms flat.
+                        if monthly_guard.is_halted()
+                            && exit_manager.halt_state() != HaltState::Halted
+                            && last_halt_attempt
+                                .map_or(true, |at| at.elapsed() >= Duration::from_secs(5))
+                        {
+                            last_halt_attempt = Some(Instant::now());
+                            let halt_event = exit_manager.halt(gateway.as_ref()).await;
+                            announce_exit_event(&telegram, &symbol_upper, &halt_event).await;
+                        }
+
                         // Periodic MTM logging and BigQuery telemetry
                         if last_mtm_print.elapsed() >= mtm_interval {
                             last_mtm_print = Instant::now();
@@ -731,6 +766,9 @@ async fn main() -> Result<()> {
                         // Feed trade to DollarBarAggregator
                         if let Some(bar) = aggregator.process_trade(&trade) {
                             total_bars += 1;
+                            if let Some(bar_event) = exit_manager.on_bar_closed(gateway.as_ref()).await {
+                                announce_exit_event(&telegram, &symbol_upper, &bar_event).await;
+                            }
                             tracing::info!(
                                 target: "live_trading",
                                 bar_id = total_bars,
@@ -772,8 +810,10 @@ async fn main() -> Result<()> {
                                 );
 
                                 // Check if we already have an active open position
-                                if monthly_guard.is_halted() {
+                                if monthly_guard.is_halted() || exit_manager.halt_state() != HaltState::Running {
                                     println!("[RISK] Signal skipped: monthly circuit breaker is active.");
+                                } else if !exit_manager.can_open() {
+                                    println!("[RISK] Signal skipped: exits or cleanup still pending.");
                                 } else if !position_open {
                                     println!("[GATEWAY] Dispatching live order to Binance...");
                                     match gateway.place_order(
@@ -860,6 +900,48 @@ async fn main() -> Result<()> {
 }
 
 /// Appends a lifecycle row for the live run; failures are logged, never fatal.
+/// Prints an exit-lifecycle event and alerts on Telegram for the ones an operator must see.
+async fn announce_exit_event(telegram: &Option<TelegramNotifier>, symbol: &str, event: &ExitEvent) {
+    let (critical, text) = match event {
+        ExitEvent::Protected => (false, "Exchange-held stop loss and take profit are live".to_string()),
+        ExitEvent::CleanedUp => (false, "Leftover orders cancelled after the exit".to_string()),
+        ExitEvent::TimeBarrierClosed => (false, "Time barrier reached: position closed at market".to_string()),
+        ExitEvent::Halted => (false, "Monthly halt complete: position flat, orders cancelled".to_string()),
+        ExitEvent::UnprotectedEntryClosed { reason } => (
+            true,
+            format!("Protective orders failed ({reason}); position closed at market"),
+        ),
+        ExitEvent::UnprotectedEntryCloseFailed { reason } => (
+            true,
+            format!("POSITION MAY BE UNPROTECTED and the emergency close failed ({reason}). Check the account NOW"),
+        ),
+        ExitEvent::CleanupPending { reason } => (
+            true,
+            format!("Could not cancel leftover orders ({reason}); retrying on the next bar"),
+        ),
+        ExitEvent::TimeBarrierCloseFailed { reason } => (
+            true,
+            format!("Time-barrier close failed ({reason}); exchange SL/TP remain, retrying"),
+        ),
+        ExitEvent::HaltingFailed { reason } => (
+            true,
+            format!("Monthly halt could not confirm a flat position ({reason}); retrying"),
+        ),
+    };
+    if critical {
+        eprintln!("[CRITICAL] {symbol}: {text}");
+    } else {
+        println!("[EXITS] {symbol}: {text}");
+    }
+    if critical || matches!(event, ExitEvent::Halted) {
+        if let Some(notifier) = telegram {
+            let _ = notifier
+                .send_alert(&format!("🚨 *ATSNT EXITS* `{}`: {}", symbol, text))
+                .await;
+        }
+    }
+}
+
 async fn record_lifecycle<R: RunRecorder>(
     recorder: &R,
     ctx: &RunContext,

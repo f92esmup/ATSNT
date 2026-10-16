@@ -423,6 +423,7 @@ fn private_event_time_ms(event: &BinancePrivateEvent) -> u64 {
         BinancePrivateEvent::SpotExecution { event_time_ms, .. } => *event_time_ms,
         BinancePrivateEvent::FuturesAccountUpdate(update) => update.event_time_ms,
         BinancePrivateEvent::FuturesOrderTradeUpdate(update) => update.event_time_ms,
+        BinancePrivateEvent::FuturesAlgoUpdate { event_time_ms } => *event_time_ms,
         BinancePrivateEvent::FuturesListenKeyExpired { event_time_ms } => *event_time_ms,
     }
 }
@@ -530,6 +531,9 @@ pub enum BinancePrivateEvent {
     FuturesAccountUpdate(FuturesAccountUpdate),
     /// USD-M order trade event with normalized execution quantities and prices.
     FuturesOrderTradeUpdate(FuturesOrderTradeUpdate),
+    /// A conditional (algo) order was created or changed status. Only the event time is read:
+    /// the resulting fills arrive as `FuturesOrderTradeUpdate`, so the payload is not retained.
+    FuturesAlgoUpdate { event_time_ms: u64 },
     /// The listen key expired; the caller must reconcile account state.
     FuturesListenKeyExpired { event_time_ms: u64 },
 }
@@ -708,6 +712,9 @@ pub fn parse_private_user_event(
         }
         "ORDER_TRADE_UPDATE" => parse_futures_order_trade_update(value)
             .map(BinancePrivateEvent::FuturesOrderTradeUpdate),
+        "ALGO_UPDATE" => Ok(BinancePrivateEvent::FuturesAlgoUpdate {
+            event_time_ms: required_u64(value, "E")?,
+        }),
         "listenKeyExpired" => {
             // Validate presence, but never retain or expose the secret listen key.
             if required_string(value, "listenKey")?.is_empty() {
@@ -991,6 +998,22 @@ mod tests {
     fn futures_order_trade_update_rejects_unsupported_hedge_position_side() {
         let event = r#"{"e":"ORDER_TRADE_UPDATE","E":1700000000004,"T":1700000000003,"o":{"s":"BTCUSDT","c":"client-1","S":"BUY","X":"PARTIALLY_FILLED","i":123,"l":"0.002","L":"42000.5","z":"0.002","t":456,"ps":"LONG"}}"#;
         assert!(parse_private_user_event(event).is_err());
+    }
+
+    #[test]
+    fn futures_algo_update_is_accepted_by_event_time_only() {
+        let event = parse_private_user_event(
+            r#"{"e":"ALGO_UPDATE","E":1700000000007,"T":1700000000006,"o":{"unknown":"shape"}}"#,
+        )
+        .expect("algo updates must not break the stream");
+
+        assert_eq!(
+            event,
+            BinancePrivateEvent::FuturesAlgoUpdate {
+                event_time_ms: 1_700_000_000_007
+            }
+        );
+        assert!(parse_private_user_event(r#"{"e":"ALGO_UPDATE"}"#).is_err());
     }
 
     #[test]

@@ -101,6 +101,26 @@ The gateway seamlessly switches between testnet and production with a single con
 
 For standard Spot orders, `place_order` also fails closed before dispatch unless the symbol is an active Spot pair, the account response has valid free balances, and the order is funded (quote asset for buys, base asset for sells). It loads the account's symbol-specific commission rates, accounts for maker/taker plus side and special/tax rates, and checks the configured discount asset when applicable. Missing, malformed, unpriceable, or insufficient preflight data prevents order submission. USD-M Futures retain the existing risk-policy path.
 
+### 3.3.1 Exchange-Held Exits and Emergency Close
+The live session keeps its exits on the exchange so they survive a crash of the bot:
+
+- After the entry order is `FILLED`, `BinanceGateway::place_protective_exits` places a `STOP_MARKET` and a `TAKE_PROFIT_MARKET` conditional order through `POST /fapi/v1/algoOrder` (`algoType=CONDITIONAL`, `closePosition=true`, `workingType=MARK_PRICE`, opposite side to the entry). The legacy `/fapi/v1/order` rejects these types. Trigger prices are aligned to the symbol tick toward the entry price.
+- `ExitManager` ([`crates/backtest/src/live_exits.rs`](../../crates/backtest/src/live_exits.rs)) owns the lifecycle with bounded retries (3 immediate attempts, then retried on the next bar or tick):
+  - If either protective order cannot be placed, the position is closed at market (`MARKET`, `reduceOnly`) and all orders cancelled; a critical alert is raised. A position is never left unprotected silently.
+  - When the exchange closes the position (SL or TP fill), `cancel_exit_orders` removes the leftover orders (Binance Futures has no OCO). The entry preflight rejects when conditional orders exist, so cleanup is mandatory.
+  - Time barrier: not expressible on the exchange, so the bot closes at market after `max_bars_hold` bars (close first, cancel afterwards). Only this barrier depends on the process being alive; SL and TP do not.
+  - Monthly kill-switch (`MonthlyGuard`): `Running -> Halting -> Halted`. The flatten sequence is close, cancel, then re-read the position to confirm flat (a pending entry that fills in between is closed too). It reports `Halted` only after the exchange confirms a flat position; otherwise it stays `Halting`, alerts and retries every 5 s.
+- The private stream accepts `ALGO_UPDATE` events by event time only; the resulting fills arrive as regular `ORDER_TRADE_UPDATE` events.
+
+Known limits: protection starts after the entry is fully `FILLED` (partial fills are not protected until then), an entry LIMIT order that never fills is not cancelled automatically, and the `ALGO_UPDATE` payload and the exact trigger/fill event sequence were not verified against the exchange.
+
+**Testnet validation runbook (required before any production use)**, with explicit authorization to operate against `--testnet`:
+1. Open a minimal long and a minimal short; confirm two algo orders appear in `GET /fapi/v1/openAlgoOrders` with `closePosition=true`.
+2. Let the stop loss trigger: confirm the position is flat and `openAlgoOrders` is empty afterwards (no leftover take profit).
+3. Kill the bot process while a position is open: confirm the exchange still closes it at SL/TP.
+4. Force `max_monthly_drawdown_pct` to a tiny value: confirm `Halted` is reported only after `positionRisk` shows zero.
+5. Confirm the private stream does not reconnect when `ALGO_UPDATE` events arrive.
+
 ### 3.4 User Data Stream Listener (`BinanceUserDataStream`)
 - Located at [`crates/adapters/src/binance_user_stream.rs`](../../crates/adapters/src/binance_user_stream.rs).
 - Connects to WebSocket using `listenKey`.
