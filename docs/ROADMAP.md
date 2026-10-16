@@ -90,6 +90,9 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] Quantitative engine hardening:
   - Exact slippage accounting: removed double-deductions in net PnL and cash equity; exact cash identity $\text{Cash} = \text{Initial Capital} + \sum \text{Net PnL}$ verified.
   - 00:00:00 UTC daily circuit breaker rollover: watermark and halt reset every midnight UTC for continuous multi-month backtesting.
+  - Binance execution parity: leverage cap, lot-step flooring and minimum lot/notional rejection in `RiskPolicy::size_order`; live gateway uses per-symbol exchange filters.
+  - Monthly kill-switch (loss versus UTC month-open equity): closes at market, halts the run, flags `halted` in metrics, emits a paper event and blocks live entries.
+  - Denser CUSUM HPO grid with a fixed 100-bar time barrier.
   - Microstructure friction guard (`min_take_profit_pct`): prevents executing sub-friction trades in compressed volatility regimes.
 - [ ] Volume-Synchronized Probability of Toxicity (VPIN) pipeline.
 - [ ] Pure Rust ML integration (`ort` for ONNX models / native Rust inference).

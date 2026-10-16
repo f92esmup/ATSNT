@@ -118,6 +118,11 @@ pub enum PaperTradingEvent {
         total_equity: Decimal,
         drawdown_pct: Decimal,
     },
+    /// The monthly kill-switch closed the position and halted the session.
+    CircuitBreakerTripped {
+        scope: String,
+        drawdown_pct: Decimal,
+    },
 }
 ```
 
@@ -149,7 +154,12 @@ Upon receiving an interruption signal (`SIGINT` / `Ctrl+C`), the session liquida
     "taker_fee_pct": "0.0005",
     "slippage_pct": "0.0005",
     "risk_per_trade_pct": "0.01",
-    "max_daily_drawdown_pct": "0.05"
+    "max_daily_drawdown_pct": "0.05",
+    "max_monthly_drawdown_pct": "0.15",
+    "max_leverage": "20",
+    "min_order_quantity": "0.001",
+    "quantity_step_size": "0.001",
+    "min_order_notional": "5"
   },
   "metrics": {
     "total_trades": 4,

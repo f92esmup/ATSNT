@@ -43,6 +43,7 @@ The Live Execution Gateway (`crates/adapters`) represents the final frontier: tr
 1. **Pre-Trade Gatekeeping (The Circuit Breaker)**:
    - No order reaches network sockets without clearing the pure domain [`RiskPolicy`](../../crates/domain/src/risk.rs).
    - If account drawdown breaches `max_daily_drawdown_pct`, the engine hard-halts all order dispatch.
+   - Sizing is clamped to `max_leverage`, floored to the lot step and rejected below the minimum lot or notional (`OrderBelowMinLotSize`, `OrderBelowMinNotional`). The gateway applies the symbol's real `LOT_SIZE`/`MIN_NOTIONAL` filters (futures) or 1x with the Spot filters.
    - If order size exceeds `max_order_notional` or position exposure exceeds `max_position_notional`, the order is rejected in-memory in zero microseconds.
 
 2. **Cryptographic Integrity**:
@@ -87,6 +88,7 @@ The gateway seamlessly switches between testnet and production with a single con
   - `max_order_notional`: Hard ceiling on a single order (e.g. $10,000 USDT).
   - `max_position_notional`: Aggregate account exposure limit (e.g. $50,000 USDT).
   - `max_daily_drawdown_pct`: Circuit breaker halting execution upon drawdown breach (e.g. 5%).
+  - `max_leverage`, `min_order_quantity`, `quantity_step_size`, `min_order_notional`: Binance-parity sizing rules (defaults 20x, 0.001, 0.001, 5 USDT), overridden per symbol by the exchange filters.
 
 ### 3.3 Execution Gateway (`BinanceGateway`)
 - Located at [`crates/adapters/src/binance_gateway.rs`](../../crates/adapters/src/binance_gateway.rs).
