@@ -20,7 +20,8 @@ pub use binance_auth::BinanceAuth;
 pub use binance_csv::BinanceCsvReader;
 pub use binance_fetcher::{BinanceDataFetcher, FetchParams, FetchSummary};
 pub use binance_gateway::{
-    BinanceGateway, BinanceGatewayConfig, GatewayError, OrderExecutionReport,
+    BinanceGateway, BinanceGatewayConfig, ExitKind, GatewayError, OrderExecutionReport,
+    PositionClosureReport, ProtectiveExitReport,
 };
 pub use binance_parquet::{BinanceParquetReader, BinanceParquetWriter};
 pub use binance_private_stream::{

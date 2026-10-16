@@ -20,6 +20,10 @@ use crate::binance_private_stream::ListenKeyRenewer;
 
 const USER_STREAM_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+#[path = "binance_gateway/exits.rs"]
+mod exits;
+pub use exits::{ExitKind, PositionClosureReport, ProtectiveExitReport};
+
 #[cfg(test)]
 #[path = "binance_gateway/t6_tests.rs"]
 mod t6_listen_key_tests;
