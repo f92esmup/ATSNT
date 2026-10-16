@@ -354,6 +354,8 @@ fn last_sunday_of_month(year: i32, month: u32) -> u32 {
 }
 
 impl AlertNotifier for TelegramNotifier {
+    type Error = AdapterError;
+
     async fn send_alert(&self, message: &str) -> Result<(), AdapterError> {
         let (Some(token), Some(chat_id)) = (&self.bot_token, &self.chat_id) else {
             info!(target: "telegram", "Alert omitted (Telegram credentials not set): {}", message);

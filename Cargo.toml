@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/domain",
+    "crates/ports",
     "crates/strategies",
     "crates/adapters",
     "crates/backtest",
@@ -16,6 +17,7 @@ rust-version = "1.80"
 [workspace.dependencies]
 # Internal workspace crates
 domain = { path = "crates/domain" }
+ports = { path = "crates/ports" }
 strategies = { path = "crates/strategies" }
 adapters = { path = "crates/adapters" }
 backtest = { path = "crates/backtest" }

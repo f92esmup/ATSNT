@@ -8,6 +8,7 @@ default-run = "backtest"
 
 [dependencies]
 domain.workspace = true
+ports.workspace = true
 strategies.workspace = true
 adapters.workspace = true
 reqwest.workspace = true

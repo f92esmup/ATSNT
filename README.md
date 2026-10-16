@@ -20,8 +20,9 @@ A high-performance, modular algorithmic trading engine built 100% in Rust from f
 ATSNT/
 ├── crates/
 │   ├── domain/       # Pure business logic (DollarBar, Aggregator, CusumFilter, Z-Score, Order FSM, Position)
+│   ├── ports/        # Hexagonal contracts (MarketDataStream, AlertNotifier, ExitGateway); depends only on `domain`
 │   ├── strategies/   # Strategy traits & implementations (DollarBarsCusumStrategy, OrderFlowImbalanceStrategy)
-│   ├── adapters/     # Ports & infrastructure adapters (Binance CSV, Parquet columnar, Binance ETL fetcher, Binance WebSocket Stream, GCP BigQuery/GCS/Telegram)
+│   ├── adapters/     # Infrastructure adapters implementing the ports (Binance CSV, Parquet columnar, Binance ETL fetcher, Binance WebSocket Stream, GCP BigQuery/GCS/Telegram)
 │   └── backtest/     # 1:1 Event Simulator, Walk-Forward Splitter, Rayon HPO Engine, Monte Carlo, Real-Time Paper Trading
 ├── data/             # Historical market data (CSV samples & compressed Parquet archives)
 ├── configs/          # Serialized strategy parameters and winning HPO artifacts

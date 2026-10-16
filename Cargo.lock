@@ -16,6 +16,7 @@ dependencies = [
  "futures-util",
  "indicatif",
  "parquet",
+ "ports",
  "rayon",
  "reqwest",
  "ring",
@@ -272,6 +273,7 @@ dependencies = [
  "domain",
  "futures-util",
  "indicatif",
+ "ports",
  "rand 0.8.8",
  "rayon",
  "reqwest",
@@ -1431,6 +1433,14 @@ name = "portable-atomic"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+
+[[package]]
+name = "ports"
+version = "0.1.0"
+dependencies = [
+ "domain",
+ "rust_decimal",
+]
 
 [[package]]
 name = "potential_utf"

@@ -8,6 +8,9 @@ Branch: feat/sim-live-fidelity | Delivery: ask-on-risk | Test runner: `cargo tes
 - S3: Live PnL reports the real commissions charged by the exchange instead of an estimated taker fee.
 - S4: `docs/ROADMAP.md` must not claim features that do not exist (M4 "Real-time order matching against live bid/ask spreads").
 - S5 (decision, user): entries are `market` orders (taker), "si quiero que sea market".
+- S7: A `ports` crate holds the contracts between the core and the outside world (market data, alerts, exit/execution, later the venue and clock) and depends only on `domain`; adapters implement them and no contract is defined inside a concrete adapter.
+- S8: One `TradingSession` owns the entry -> protection -> exit -> accounting lifecycle independently of the venue, and is tested with a fake venue.
+- S9: Live runs through that session via a `BinanceVenue` with unchanged observable behavior (signal gates, exchange-held exits, time barrier, halts, alerts, trade recording).
 - S6 (later phases): venue ports (`ExecutionVenue`, `Clock`, `MarketData`) with `SimulatedVenue` and `BinanceVenue`; tick-level realism (latency, tape-based market slippage, taker TP, mark-price stop); funding and liquidation; parity harness with live warm-up; single `StrategyRegistry` plus a generic strategy contract suite.
 
 ## Tasks
@@ -15,7 +18,9 @@ Branch: feat/sim-live-fidelity | Delivery: ask-on-risk | Test runner: `cargo tes
 - [x] T2 (S2) P0 — UTC-daily peak watermark in live | inline | commit: 5d77a3c | RED: `daily_watermark::tests::*`
 - [x] T3 (S3) P0 — real commissions in live PnL | inline | commit: 66739e1 | RED: `futures_order_trade_update_*commission*`, `fee_ledger::tests::*`
 - [x] T4 (S4) P0 — ROADMAP/README/doc-comment correction | inline | commit: eba49d8 | structural readback (passive docs)
-- [ ] T5 (S5, S6) P1 — ports and shared `TradingSession` | pending, needs its own plan
+- [x] T5.1 (S7) P1 — `ports` crate: move `MarketDataStream`, `AsyncMarketDataStream`, `AlertNotifier`, `ExitGateway`; old paths re-export | inline | pure move, no behavior change | RED: `ports_depend_only_on_the_domain` (architecture_contract.rs); previous behavior kept by the unchanged suite | commit: see log
+- [ ] T5.2 (S8) P1 — `ExecutionVenue` port + `TradingSession` with a fake venue; not wired to live | inline
+- [ ] T5.3 (S9) P1 — `BinanceVenue` + `live_trading` migrated to the session | inline | money path: needs testnet validation by the user
 - [ ] T6 (S5, S6) P2 — market entries, latency, tape slippage, taker TP, mark-price stop | pending
 - [ ] T7 (S6) P3 — funding and liquidation | pending
 - [ ] T8 (S6) P4 — warm-up and parity harness | pending

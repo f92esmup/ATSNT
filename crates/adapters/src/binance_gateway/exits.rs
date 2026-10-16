@@ -329,6 +329,33 @@ impl BinanceGateway {
     }
 }
 
+/// Binance USD-M implementation of the exit lifecycle port.
+impl ports::ExitGateway for BinanceGateway {
+    type Error = GatewayError;
+
+    async fn place_exits(
+        &self,
+        symbol: &str,
+        entry_side: Side,
+        stop_loss: Decimal,
+        take_profit: Decimal,
+    ) -> Result<(), Self::Error> {
+        self.place_protective_exits(symbol, entry_side, stop_loss, take_profit)
+            .await
+            .map(|_| ())
+    }
+
+    async fn cancel_orders(&self, symbol: &str) -> Result<(), Self::Error> {
+        self.cancel_exit_orders(symbol).await
+    }
+
+    async fn close_position(&self, symbol: &str) -> Result<bool, Self::Error> {
+        self.close_position_market(symbol)
+            .await
+            .map(|report| report.is_some())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

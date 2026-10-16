@@ -1,7 +1,7 @@
 # Market Data Adapters & Binance Ingestion Specification
 
 ## 1. Architectural Role
-In accordance with Hexagonal Architecture (Ports and Adapters), the adapters crate (`crates/adapters`) contains concrete implementations of external interfaces. The core trading engine and domain logic remain completely decoupled from network protocols, file formats, and broker-specific APIs.
+In accordance with Hexagonal Architecture (Ports and Adapters), the contracts live in the `ports` crate (`crates/ports`, depending only on `domain`) and the adapters crate (`crates/adapters`) contains their concrete implementations. The dependency rule is enforced by `crates/backtest/tests/architecture_contract.rs`. The core trading engine and domain logic remain completely decoupled from network protocols, file formats, and broker-specific APIs.
 
 ---
 
