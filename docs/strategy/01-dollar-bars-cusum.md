@@ -123,11 +123,11 @@ If $\text{Leverage}_{\text{eff}} > \text{Leverage}_{\text{max}}$ (exchange or ac
 ### 5.1 Optimization Search Space (`DollarBarsCusumSpace`)
 The strategy implements `OptimizableStrategy` and defines its parameter search space and perturbation rules in `DollarBarsCusumSpace`:
 - **Default Ranges**:
-  - `rolling_window_lens`: `[10, 15, 20, 25, 30]`
-  - `cusum_vol_multipliers`: `[1.0, 1.5, 2.0, 2.5]`
-  - `z_entry_thresholds`: `[1.2, 1.5, 1.8, 2.2]`
-  - `z_stop_thresholds`: `[2.5, 3.0, 3.5]`
-  - `time_barrier_bars`: `[10, 15, 20]`
+  - `rolling_window_lens`: `[14, 18, 22, 26, 30, 35, 40]`
+  - `cusum_vol_multipliers`: `[0.8, 1.0, 1.2, 1.5, 1.8, 2.0, 2.4]`
+  - `z_entry_thresholds`: `[1.5, 1.7, 1.9, 2.1, 2.3, 2.6, 3.0]`
+  - `z_stop_thresholds`: `[2.5, 3.0, 3.5, 4.0]`
+  - `time_barrier_bars`: `[100]` (fixed, so trades resolve by TP/SL)
 - **Stability Perturbation (`perturb_neighbors`)**:
   - Perturbs `cusum_vol_multiplier ± 0.2` and `z_entry_threshold ± 0.2` to evaluate performance plateaus against overfitting.
 

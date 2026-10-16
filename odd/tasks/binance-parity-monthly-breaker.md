@@ -19,7 +19,7 @@ Branch: `feat/binance-parity-monthly-breaker` (from `main`) | Delivery: single b
 - [x] T3 — S4 — inline — monthly breaker in engine
 - [x] T4 — S5 — inline — paper propagation
 - [x] T5 — S6 — inline — HPO space
-- [ ] T6 — all — final checks + independent verifier
+- [x] T6 (verifier: no blockers; advisories: live gateway uses BTC-centric defaults, halted runs not flagged in reports, zero monthly threshold unvalidated) — all — final checks + independent verifier
 
 ## Log
 
