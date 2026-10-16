@@ -617,6 +617,20 @@ pub struct FuturesOrderTradeUpdate {
     pub commission_asset: Option<String>,
 }
 
+impl From<&FuturesOrderTradeUpdate> for ports::ExecutionReport {
+    fn from(update: &FuturesOrderTradeUpdate) -> Self {
+        Self {
+            time_ms: i64::try_from(update.transaction_time_ms).unwrap_or(i64::MAX),
+            side: update.side,
+            last_quantity: update.last_filled_quantity,
+            last_price: update.last_filled_price,
+            order_filled: update.status == "FILLED",
+            commission: update.commission,
+            commission_asset: update.commission_asset.clone(),
+        }
+    }
+}
+
 /// Private stream errors intentionally omit endpoint, key, credential, and payload values.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum BinancePrivateStreamError {
@@ -1032,6 +1046,29 @@ mod tests {
             }
             other => panic!("expected Futures order update, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_futures_order_update_converts_to_a_venue_execution_report() {
+        let filled = r#"{"e":"ORDER_TRADE_UPDATE","E":1700000000004,"T":1700000000003,"o":{"s":"BTCUSDT","c":"client-1","S":"SELL","X":"FILLED","i":123,"l":"0.002","L":"42000.5","z":"0.004","t":456,"ps":"BOTH","n":"0.0336004","N":"USDT"}}"#;
+        let partial = filled.replace("\"FILLED\"", "\"PARTIALLY_FILLED\"");
+
+        let report = |raw: &str| match parse_private_user_event(raw).expect("valid event") {
+            BinancePrivateEvent::FuturesOrderTradeUpdate(update) => {
+                ports::ExecutionReport::from(&update)
+            }
+            other => panic!("expected Futures order update, got {other:?}"),
+        };
+
+        let complete = report(filled);
+        assert_eq!(complete.time_ms, 1_700_000_000_003);
+        assert_eq!(complete.side, Side::Sell);
+        assert_eq!(complete.last_quantity, dec!(0.002));
+        assert_eq!(complete.last_price, dec!(42000.5));
+        assert_eq!(complete.commission, dec!(0.0336004));
+        assert_eq!(complete.commission_asset.as_deref(), Some("USDT"));
+        assert!(complete.order_filled);
+        assert!(!report(&partial).order_filled);
     }
 
     #[test]

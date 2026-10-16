@@ -3010,6 +3010,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_gateway_acts_as_an_execution_venue_for_entries() {
+        use ports::ExecutionVenue;
+
+        let (base_url, requests, server) =
+            spawn_futures_mock_server(valid_futures_responses(current_unix_time_ms().unwrap()));
+        let gateway = futures_submission_test_gateway(base_url);
+
+        let ack = gateway
+            .submit_entry(
+                "BTCUSDT",
+                &futures_submission_test_intent(),
+                dec!(10_000),
+                dec!(10_000),
+            )
+            .await
+            .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(ack.quantity, dec!(10));
+        assert_eq!(ack.status, "NEW");
+        assert!(!ack.order_id.is_empty());
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.starts_with("POST /fapi/v1/order?")));
+    }
+
+    #[tokio::test]
     async fn futures_order_quantity_uses_the_configured_risk_per_trade() {
         let (base_url, requests, server) =
             spawn_futures_mock_server(valid_futures_responses(current_unix_time_ms().unwrap()));

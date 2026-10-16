@@ -356,6 +356,28 @@ impl ports::ExitGateway for BinanceGateway {
     }
 }
 
+/// Binance USD-M implementation of the venue contract: the gateway sizes, pre-checks and
+/// dispatches the entry, and already manages the exits through [`ports::ExitGateway`].
+impl ports::ExecutionVenue for BinanceGateway {
+    async fn submit_entry(
+        &self,
+        symbol: &str,
+        intent: &OrderIntent,
+        equity: Decimal,
+        session_peak: Decimal,
+    ) -> Result<ports::EntryAck, Self::Error> {
+        let report = self
+            .place_order(symbol, intent, equity, session_peak, Decimal::ZERO)
+            .await?;
+        Ok(ports::EntryAck {
+            order_id: report.client_order_id,
+            status: report.status,
+            quantity: report.original_qty,
+            price: report.price,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

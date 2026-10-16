@@ -12,6 +12,8 @@ pub struct EntryAck {
     pub status: String,
     /// Quantity the venue accepted after sizing and exchange rounding.
     pub quantity: Decimal,
+    /// Limit or average price reported with the acknowledgement.
+    pub price: Decimal,
 }
 
 /// One execution (partial or complete) reported by the venue for any order of the session.

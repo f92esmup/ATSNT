@@ -15,14 +15,15 @@ use adapters::{
     BinanceWebSocketStream, BinanceWsConfig, GcpSecretManager, RunRecorder, TelegramNotifier,
 };
 use anyhow::{Context, Result};
+use backtest::session::{SessionConfig, SessionEvent, SkipReason, TradingSession};
 use backtest::{
     now_unix_ms, record_closed_trade, record_run_status, BacktestConfig, BacktestMetrics,
-    ClosedTrade, DataWindow, ExitEvent, ExitManager, HaltState, RunContext, RunSpec, RunStatus,
-    RunType, SamplingConfig, TradeExcursion,
+    DataWindow, ExitEvent, RunContext, RunSpec, RunStatus, RunType, SamplingConfig,
 };
 use chrono::Timelike;
 use clap::Parser;
-use domain::{DollarBarAggregator, OrderIntent, PositionSide, Side};
+use domain::{DollarBarAggregator, PositionSide, Side};
+use ports::ExecutionReport;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategies::{
@@ -321,7 +322,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    let mut strategy = DollarBarsCusumStrategy::new(strat_config.clone())?;
+    let strategy = DollarBarsCusumStrategy::new(strat_config.clone())?;
     validate_strategy_market(&strategy, MarketType::UsdMPerpetual)?;
 
     println!(
@@ -444,8 +445,6 @@ async fn main() -> Result<()> {
         source: Some(ws_source),
         ..DataWindow::default()
     };
-    let mut excursion_tracker = backtest::ExcursionTracker::new(effective_capital);
-    let mut closed_trades: Vec<ClosedTrade> = Vec::new();
     if let Some(bq) = &bq_sink {
         println!(
             "[*] Recording live run {} to BigQuery (Allocated Capital: ${:.2})",
@@ -459,30 +458,33 @@ async fn main() -> Result<()> {
     let mut account_read_failures: u32 = 0;
     let mut account_check = tokio::time::interval(Duration::from_secs(ACCOUNT_RECHECK_SECS));
     account_check.tick().await; // the startup verification already covered the first period
-    let mut exit_manager = ExitManager::new(symbol_upper.clone());
-    let mut last_halt_attempt: Option<Instant> = None;
-    let mut monthly_guard =
-        backtest::MonthlyGuard::new(run_spec.execution_context.max_monthly_drawdown_pct);
     let mut peak_equity = effective_capital;
-    let mut daily_watermark = backtest::DailyWatermark::new();
-    let mut fee_ledger = backtest::fee_ledger::FeeLedger::new();
     let mut current_equity = effective_capital;
+    let mut session = TradingSession::new(
+        SessionConfig {
+            symbol: symbol_upper.clone(),
+            initial_equity: effective_capital,
+            fallback_fee_pct: estimated_taker_fee_pct,
+            max_monthly_drawdown_pct: run_spec.execution_context.max_monthly_drawdown_pct,
+            halt_retry_ms: 5_000,
+        },
+        strategy,
+    );
+    let sink = EventSink {
+        telegram: &telegram,
+        bq: &bq_sink,
+        run_ctx: &run_ctx,
+        symbol: &symbol_upper,
+        monthly_limit_pct: run_spec.execution_context.max_monthly_drawdown_pct,
+    };
     let mut total_ticks: u64 = 0;
     let mut total_bars: u64 = 0;
     let mut last_mtm_print = Instant::now();
     let mtm_interval = Duration::from_secs(5);
-    let mut active_order_intent: Option<OrderIntent> = None;
-    let mut position_open: bool = false;
-    let mut active_position_tracker: Option<(Side, Decimal, Decimal, u64)> = None;
 
     let mut current_day = now_in_madrid().date_naive();
     let mut last_daily_report_date: Option<chrono::NaiveDate> = None;
-    let mut daily_trades_count: usize = 0;
-    let mut daily_wins: usize = 0;
-    let mut daily_losses: usize = 0;
-    let mut daily_gross_pnl = Decimal::ZERO;
-    let mut daily_fees = Decimal::ZERO;
-    let mut daily_net_pnl = Decimal::ZERO;
+    let mut stats = LiveStats::default();
     let mut daily_timer = tokio::time::interval(Duration::from_secs(10));
 
     println!("------------------------------------------------------------");
@@ -498,9 +500,7 @@ async fn main() -> Result<()> {
 
             // Periodic account re-verification; never changes anything while exposed.
             _ = account_check.tick() => {
-                let exposed = position_open
-                    || active_position_tracker.is_some()
-                    || !exit_manager.can_open();
+                let exposed = session.is_exposed();
                 match gateway
                     .verify_account(&symbol_upper, !args.no_auto_fix && !exposed, exposed)
                     .await
@@ -511,11 +511,13 @@ async fn main() -> Result<()> {
                             println!("[OK] Account profile matches again; entries re-enabled.");
                         }
                         account_ok = true;
+                        session.set_account_ok(true);
                     }
                     Ok(report) => {
                         account_read_failures = 0;
                         let first = account_ok;
                         account_ok = false;
+                        session.set_account_ok(false);
                         eprintln!("[CRITICAL] Account profile drifted; new entries are blocked.\n{}", report.render());
                         if first {
                             if let Some(t) = &telegram {
@@ -558,19 +560,14 @@ async fn main() -> Result<()> {
                 let now_madrid = now_in_madrid();
                 if now_madrid.date_naive() != current_day {
                     current_day = now_madrid.date_naive();
-                    daily_trades_count = 0;
-                    daily_wins = 0;
-                    daily_losses = 0;
-                    daily_gross_pnl = Decimal::ZERO;
-                    daily_fees = Decimal::ZERO;
-                    daily_net_pnl = Decimal::ZERO;
+                    stats.reset_day();
                 }
 
                 if now_madrid.hour() == 20 && last_daily_report_date != Some(now_madrid.date_naive()) {
                     last_daily_report_date = Some(now_madrid.date_naive());
                     if let Some(t) = &telegram {
-                        let active_pos_desc = match &active_position_tracker {
-                            Some((s, ep, q, _)) => format!("{:?} (qty: {}, entry: ${})", s, q, ep),
+                        let active_pos_desc = match session.open_position() {
+                            Some((s, ep, q)) => format!("{:?} (qty: {}, entry: ${})", s, q, ep),
                             None => "Flat (No open position)".to_string(),
                         };
                         let dd = if peak_equity > Decimal::ZERO && peak_equity > current_equity {
@@ -583,12 +580,12 @@ async fn main() -> Result<()> {
                             &date_str,
                             if is_testnet { "Futures Testnet" } else { "Futures Production" },
                             &symbol_upper,
-                            daily_trades_count,
-                            daily_wins,
-                            daily_losses,
-                            daily_gross_pnl,
-                            daily_fees,
-                            daily_net_pnl,
+                            stats.trades,
+                            stats.wins,
+                            stats.losses,
+                            stats.gross,
+                            stats.fees,
+                            stats.net,
                             current_equity,
                             current_equity,
                             dd,
@@ -624,164 +621,9 @@ async fn main() -> Result<()> {
                             update.cumulative_filled_quantity,
                         );
 
-                        // Book the commission of every fill (partial ones included) as charged.
-                        if update.last_filled_quantity > Decimal::ZERO {
-                            fee_ledger.record_fill(
-                                update.commission,
-                                update.commission_asset.as_deref(),
-                                update.last_filled_price * update.last_filled_quantity,
-                                estimated_taker_fee_pct,
-                            );
-                        }
-
-                        if update.status == "FILLED" {
-                            let is_closing = active_position_tracker.is_some();
-                            if !is_closing {
-                                // Position opened
-                                active_position_tracker = Some((
-                                    update.side,
-                                    update.last_filled_price,
-                                    update.cumulative_filled_quantity,
-                                    update.transaction_time_ms,
-                                ));
-                                position_open = true;
-                                excursion_tracker.open(update.transaction_time_ms as i64, current_equity);
-
-                                // Exits live on the exchange so they survive a crash of this process.
-                                let exit_event = match &active_order_intent {
-                                    Some(intent) => {
-                                        exit_manager
-                                            .on_entry_filled(
-                                                gateway.as_ref(),
-                                                update.side,
-                                                intent.stop_loss,
-                                                intent.take_profit,
-                                                intent.max_bars_hold,
-                                            )
-                                            .await
-                                    }
-                                    // A fill without its intent cannot be protected: flatten and stop.
-                                    None => exit_manager.halt(gateway.as_ref()).await,
-                                };
-                                announce_exit_event(&telegram, &symbol_upper, &exit_event).await;
-
-                                if let Some(t) = &telegram {
-                                    let side_str = match update.side {
-                                        Side::Buy => "Long",
-                                        Side::Sell => "Short",
-                                    };
-                                    let (sl, tp) = match &active_order_intent {
-                                        Some(intent) => (intent.stop_loss, intent.take_profit),
-                                        None => (Decimal::ZERO, Decimal::ZERO),
-                                    };
-                                    let msg = TelegramNotifier::format_position_opened(
-                                        &symbol_upper,
-                                        side_str,
-                                        update.last_filled_price,
-                                        update.cumulative_filled_quantity,
-                                        sl,
-                                        tp,
-                                        current_equity,
-                                    );
-                                    let _ = t.send_alert(&msg).await;
-                                }
-                            } else {
-                                // Position closed: drop leftover protective and entry orders.
-                                let cleanup = exit_manager
-                                    .on_position_closed_by_exchange(gateway.as_ref())
-                                    .await;
-                                announce_exit_event(&telegram, &symbol_upper, &cleanup).await;
-                                let (entry_side, entry_price, entry_qty, entry_ts) = active_position_tracker.take().unwrap_or((
-                                    update.side,
-                                    update.last_filled_price,
-                                    update.cumulative_filled_quantity,
-                                    update.transaction_time_ms,
-                                ));
-                                let duration_secs = ((update.transaction_time_ms.saturating_sub(entry_ts)) / 1000) as i64;
-                                let gross_pnl = match entry_side {
-                                    Side::Buy => (update.last_filled_price - entry_price) * entry_qty,
-                                    Side::Sell => (entry_price - update.last_filled_price) * entry_qty,
-                                };
-                                // Real commissions charged over the position's fills; the estimate
-                                // only stands in when no fill was observed (e.g. after a restart).
-                                let fees_paid = fee_ledger.take().unwrap_or(
-                                    (entry_price * entry_qty + update.last_filled_price * entry_qty)
-                                        * estimated_taker_fee_pct,
-                                );
-                                let net_pnl = gross_pnl - fees_paid;
-                                let return_pct = if entry_price > Decimal::ZERO && entry_qty > Decimal::ZERO {
-                                    net_pnl / (entry_price * entry_qty)
-                                } else {
-                                    Decimal::ZERO
-                                };
-
-                                daily_trades_count += 1;
-                                if net_pnl > Decimal::ZERO {
-                                    daily_wins += 1;
-                                } else if net_pnl < Decimal::ZERO {
-                                    daily_losses += 1;
-                                }
-                                daily_gross_pnl += gross_pnl;
-                                daily_fees += fees_paid;
-                                daily_net_pnl += net_pnl;
-                                position_open = false;
-                                active_order_intent = None;
-
-                                if let Some(t) = &telegram {
-                                    let side_str = match entry_side {
-                                        Side::Buy => "Long",
-                                        Side::Sell => "Short",
-                                    };
-                                    let msg = TelegramNotifier::format_trade_summary(
-                                        &symbol_upper,
-                                        side_str,
-                                        &update.status,
-                                        entry_price,
-                                        update.last_filled_price,
-                                        entry_qty,
-                                        duration_secs,
-                                        gross_pnl,
-                                        fees_paid,
-                                        net_pnl,
-                                        return_pct,
-                                        current_equity,
-                                    );
-                                    let _ = t.send_alert(&msg).await;
-                                }
-
-                                let exit_time = update.transaction_time_ms as i64;
-                                let entry_equity = excursion_tracker.entry_equity().unwrap_or(current_equity);
-                                let exit_equity = entry_equity + net_pnl;
-                                let excursion = excursion_tracker
-                                    .close(exit_time, exit_equity)
-                                    .unwrap_or_else(|| TradeExcursion::start(exit_time, exit_equity));
-                                let closed = ClosedTrade {
-                                    entry_time: entry_ts as i64,
-                                    exit_time,
-                                    entry_price,
-                                    exit_price: update.last_filled_price,
-                                    quantity: entry_qty,
-                                    side: match entry_side {
-                                        Side::Buy => PositionSide::Long,
-                                        Side::Sell => PositionSide::Short,
-                                    },
-                                    pnl_gross: gross_pnl,
-                                    fees_paid,
-                                    slippage_paid: Decimal::ZERO,
-                                    pnl_net: net_pnl,
-                                    return_pct,
-                                    exit_reason: update.status.clone(),
-                                    holding_duration_seconds: duration_secs,
-                                    excursion,
-                                };
-                                closed_trades.push(closed);
-                                if let (Some(bq), Some(closed)) = (&bq_sink, closed_trades.last()) {
-                                    if let Err(e) = record_closed_trade(bq, &run_ctx, closed, closed_trades.len()).await {
-                                        println!("[WARN] Failed to record live trade #{}: {e}", closed_trades.len());
-                                    }
-                                }
-                            }
-                        }
+                        let report = ExecutionReport::from(&update);
+                        let events = session.on_execution(gateway.as_ref(), &report).await;
+                        sink.handle(events, &mut stats, session.wallet_equity()).await;
                     }
                     Ok(BinancePrivateEvent::FuturesAccountUpdate(acct)) => {
                         for bal in acct.balances {
@@ -790,7 +632,7 @@ async fn main() -> Result<()> {
                                 if current_equity > peak_equity {
                                     peak_equity = current_equity;
                                 }
-                                excursion_tracker.observe_cash(current_equity);
+                                session.on_wallet_balance(current_equity);
                             }
                         }
                     }
@@ -832,39 +674,11 @@ async fn main() -> Result<()> {
                             );
                         }
 
-                        // Monthly kill-switch: stop opening positions and alert once on the trip.
-                        if let Some(drawdown) = monthly_guard.observe(
-                            trade.timestamp,
-                            backtest::marked_equity(
-                                current_equity,
-                                active_position_tracker.map(|(side, entry, qty, _)| (side, entry, qty)),
-                                trade.price,
-                            ),
-                        ) {
-                            eprintln!(
-                                "[CRITICAL] Monthly circuit breaker tripped at {:.2}% drawdown vs month open: no new positions will be opened. Review and flatten any open position manually.",
-                                drawdown * dec!(100)
-                            );
-                            if let Some(t) = &telegram {
-                                let msg = TelegramNotifier::format_circuit_breaker(
-                                    &symbol_upper,
-                                    drawdown * dec!(100),
-                                    run_spec.execution_context.max_monthly_drawdown_pct * dec!(100),
-                                );
-                                let _ = t.send_alert(&msg).await;
-                            }
-                        }
-
-                        // Emergency close: retried every few seconds until the exchange confirms flat.
-                        if monthly_guard.is_halted()
-                            && exit_manager.halt_state() != HaltState::Halted
-                            && last_halt_attempt
-                                .map_or(true, |at| at.elapsed() >= Duration::from_secs(5))
-                        {
-                            last_halt_attempt = Some(Instant::now());
-                            let halt_event = exit_manager.halt(gateway.as_ref()).await;
-                            announce_exit_event(&telegram, &symbol_upper, &halt_event).await;
-                        }
+                        // Monthly kill-switch and emergency close (retried until confirmed flat).
+                        let events = session
+                            .on_trade(gateway.as_ref(), trade.timestamp, trade.price)
+                            .await;
+                        sink.handle(events, &mut stats, session.wallet_equity()).await;
 
                         // Periodic MTM logging and BigQuery telemetry
                         if last_mtm_print.elapsed() >= mtm_interval {
@@ -887,9 +701,6 @@ async fn main() -> Result<()> {
                         // Feed trade to DollarBarAggregator
                         if let Some(bar) = aggregator.process_trade(&trade) {
                             total_bars += 1;
-                            if let Some(bar_event) = exit_manager.on_bar_closed(gateway.as_ref()).await {
-                                announce_exit_event(&telegram, &symbol_upper, &bar_event).await;
-                            }
                             tracing::info!(
                                 target: "live_trading",
                                 bar_id = total_bars,
@@ -913,78 +724,9 @@ async fn main() -> Result<()> {
                                 bar.close,
                                 bar.dollar_volume
                             );
-                            // Mark the open position at the bar close to track its MAE/MFE (no per-bar persistence).
-                            if let Some((side, entry_price, qty, _)) = active_position_tracker {
-                                excursion_tracker.mark(bar.end_time, current_equity, side, entry_price, qty, bar.close);
-                            }
-
-                            // Daily breaker reference: same per-UTC-day peak the simulator uses
-                            // (marked at the bar open, then at the bar close).
-                            let open_position = active_position_tracker
-                                .map(|(side, entry, qty, _)| (side, entry, qty));
-                            daily_watermark.observe(
-                                bar.end_time,
-                                backtest::marked_equity(current_equity, open_position, bar.open),
-                            );
-                            let daily_peak_equity = daily_watermark.observe(
-                                bar.end_time,
-                                backtest::marked_equity(current_equity, open_position, bar.close),
-                            );
-
-                            // Strategy signal evaluation
-                            if let Some(intent) = strategy.on_bar(&bar) {
-                                println!(
-                                    "\n************************************************************\n\
-                                     [STRATEGY SIGNAL] Intent: {:?} at ${}\n\
-                                     Stop Loss:    ${}\n\
-                                     Take Profit:  ${}\n\
-                                     Max Hold:     {} bars\n\
-                                     ************************************************************",
-                                    intent.side, intent.price, intent.stop_loss, intent.take_profit, intent.max_bars_hold
-                                );
-
-                                // Check if we already have an active open position
-                                if !account_ok {
-                                    println!("[RISK] Signal skipped: the account no longer matches the strategy profile.");
-                                } else if monthly_guard.is_halted() || exit_manager.halt_state() != HaltState::Running {
-                                    println!("[RISK] Signal skipped: trading is halted (monthly circuit breaker or emergency halt).");
-                                } else if !exit_manager.can_open() {
-                                    println!("[RISK] Signal skipped: exits or cleanup still pending.");
-                                } else if !position_open {
-                                    println!("[GATEWAY] Dispatching live order to Binance...");
-                                    match gateway.place_order(
-                                        &symbol_upper,
-                                        &intent,
-                                        current_equity,
-                                        daily_peak_equity,
-                                        Decimal::ZERO,
-                                    ).await {
-                                        Ok(report) => {
-                                            println!(
-                                                "\n[ORDER PLACED] Order submitted to Binance!\n\
-                                                 Order ID:        {}\n\
-                                                 Client Order ID: {}\n\
-                                                 Status:          {}\n\
-                                                 Price:           ${}\n\
-                                                 Quantity:        {}\n",
-                                                report.order_id,
-                                                report.client_order_id,
-                                                report.status,
-                                                report.price,
-                                                report.original_qty
-                                            );
-                                            active_order_intent = Some(intent);
-                                            position_open = true;
-                                        }
-                                        Err(e) => {
-                                            error!(error = %e, "Failed to submit live order to Binance");
-                                            eprintln!("[ERROR] Order placement failed: {}", e);
-                                        }
-                                    }
-                                } else {
-                                    println!("[RISK] Signal skipped: Position already open.");
-                                }
-                            }
+                            // Time barrier, excursion marks, daily peak, strategy signal and entry.
+                            let events = session.on_bar(gateway.as_ref(), &bar).await;
+                            sink.handle(events, &mut stats, session.wallet_equity()).await;
                         }
                     }
                     Ok(None) => {}
@@ -1007,6 +749,7 @@ async fn main() -> Result<()> {
     println!("============================================================\n");
 
     if let Some(bq) = &bq_sink {
+        let closed_trades = session.closed_trades();
         let max_dd_amount = closed_trades
             .iter()
             .map(|t| t.excursion.max_drawdown_amount)
@@ -1017,12 +760,8 @@ async fn main() -> Result<()> {
             .map(|t| t.excursion.max_drawdown_pct)
             .max()
             .unwrap_or_default();
-        let metrics = BacktestMetrics::calculate(
-            effective_capital,
-            &closed_trades,
-            max_dd_amount,
-            max_dd_pct,
-        );
+        let metrics =
+            BacktestMetrics::calculate(effective_capital, closed_trades, max_dd_amount, max_dd_pct);
         record_lifecycle(bq, &run_ctx, &run_spec, RunStatus::Stopped, &data_window).await;
         if let Err(e) = bq
             .record_metrics(&[run_ctx.metrics_row("full", &metrics, None)])
@@ -1033,6 +772,173 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Per-day trade statistics for the Telegram summary plus the lifetime count of recorded trades.
+#[derive(Default)]
+struct LiveStats {
+    trades: usize,
+    wins: usize,
+    losses: usize,
+    gross: Decimal,
+    fees: Decimal,
+    net: Decimal,
+    recorded_trades: usize,
+}
+
+impl LiveStats {
+    /// Clears the daily figures at the day rollover; the lifetime trade count is kept.
+    fn reset_day(&mut self) {
+        *self = Self {
+            recorded_trades: self.recorded_trades,
+            ..Self::default()
+        };
+    }
+}
+
+/// Turns the session's events into console output, Telegram alerts and BigQuery rows.
+struct EventSink<'a> {
+    telegram: &'a Option<TelegramNotifier>,
+    bq: &'a Option<BigQuerySink>,
+    run_ctx: &'a RunContext,
+    symbol: &'a str,
+    monthly_limit_pct: Decimal,
+}
+
+impl EventSink<'_> {
+    async fn handle(&self, events: Vec<SessionEvent>, stats: &mut LiveStats, wallet: Decimal) {
+        for event in events {
+            match event {
+                SessionEvent::Signal(intent) => println!(
+                    "\n************************************************************\n\
+                     [STRATEGY SIGNAL] Intent: {:?} at ${}\n\
+                     Stop Loss:    ${}\n\
+                     Take Profit:  ${}\n\
+                     Max Hold:     {} bars\n\
+                     ************************************************************",
+                    intent.side,
+                    intent.price,
+                    intent.stop_loss,
+                    intent.take_profit,
+                    intent.max_bars_hold
+                ),
+                SessionEvent::SignalSkipped(reason) => println!(
+                    "[RISK] Signal skipped: {}",
+                    match reason {
+                        SkipReason::AccountMismatch =>
+                            "the account no longer matches the strategy profile.",
+                        SkipReason::Halted =>
+                            "trading is halted (monthly circuit breaker or emergency halt).",
+                        SkipReason::ExitsPending => "exits or cleanup still pending.",
+                        SkipReason::PositionOpen => "Position already open.",
+                    }
+                ),
+                SessionEvent::EntrySubmitted(ack) => println!(
+                    "[GATEWAY] Dispatching live order to Binance...\n\
+                     \n[ORDER PLACED] Order submitted to Binance!\n\
+                     Client Order ID: {}\n\
+                     Status:          {}\n\
+                     Price:           ${}\n\
+                     Quantity:        {}\n",
+                    ack.order_id, ack.status, ack.price, ack.quantity
+                ),
+                SessionEvent::EntryFailed(reason) => {
+                    error!(error = %reason, "Failed to submit live order to Binance");
+                    eprintln!("[ERROR] Order placement failed: {reason}");
+                }
+                SessionEvent::PositionOpened {
+                    side,
+                    price,
+                    quantity,
+                    stop_loss,
+                    take_profit,
+                    protection,
+                    ..
+                } => {
+                    announce_exit_event(self.telegram, self.symbol, &protection).await;
+                    if let Some(t) = self.telegram {
+                        let side_str = match side {
+                            Side::Buy => "Long",
+                            Side::Sell => "Short",
+                        };
+                        let msg = TelegramNotifier::format_position_opened(
+                            self.symbol,
+                            side_str,
+                            price,
+                            quantity,
+                            stop_loss,
+                            take_profit,
+                            wallet,
+                        );
+                        let _ = t.send_alert(&msg).await;
+                    }
+                }
+                SessionEvent::Exit(exit) => {
+                    announce_exit_event(self.telegram, self.symbol, &exit).await;
+                }
+                SessionEvent::PositionClosed(trade) => {
+                    stats.trades += 1;
+                    if trade.pnl_net > Decimal::ZERO {
+                        stats.wins += 1;
+                    } else if trade.pnl_net < Decimal::ZERO {
+                        stats.losses += 1;
+                    }
+                    stats.gross += trade.pnl_gross;
+                    stats.fees += trade.fees_paid;
+                    stats.net += trade.pnl_net;
+
+                    if let Some(t) = self.telegram {
+                        let side_str = match trade.side {
+                            PositionSide::Long => "Long",
+                            PositionSide::Short => "Short",
+                        };
+                        let msg = TelegramNotifier::format_trade_summary(
+                            self.symbol,
+                            side_str,
+                            &trade.exit_reason,
+                            trade.entry_price,
+                            trade.exit_price,
+                            trade.quantity,
+                            trade.holding_duration_seconds,
+                            trade.pnl_gross,
+                            trade.fees_paid,
+                            trade.pnl_net,
+                            trade.return_pct,
+                            wallet,
+                        );
+                        let _ = t.send_alert(&msg).await;
+                    }
+
+                    stats.recorded_trades += 1;
+                    if let Some(bq) = self.bq {
+                        if let Err(e) =
+                            record_closed_trade(bq, self.run_ctx, &trade, stats.recorded_trades)
+                                .await
+                        {
+                            println!(
+                                "[WARN] Failed to record live trade #{}: {e}",
+                                stats.recorded_trades
+                            );
+                        }
+                    }
+                }
+                SessionEvent::MonthlyBreakerTripped { drawdown } => {
+                    eprintln!(
+                        "[CRITICAL] Monthly circuit breaker tripped at {:.2}% drawdown vs month open: no new positions will be opened. Review and flatten any open position manually.",
+                        drawdown * dec!(100)
+                    );
+                    if let Some(t) = self.telegram {
+                        let msg = TelegramNotifier::format_circuit_breaker(
+                            self.symbol,
+                            drawdown * dec!(100),
+                            self.monthly_limit_pct * dec!(100),
+                        );
+                        let _ = t.send_alert(&msg).await;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Appends a lifecycle row for the live run; failures are logged, never fatal.

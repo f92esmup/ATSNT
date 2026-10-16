@@ -63,6 +63,8 @@ pub enum SessionEvent {
         price: Decimal,
         quantity: Decimal,
         time_ms: i64,
+        stop_loss: Decimal,
+        take_profit: Decimal,
         protection: ExitEvent,
     },
     /// The exit lifecycle reported progress (time barrier, cleanup, halt, ...).
@@ -159,6 +161,18 @@ impl<S: Strategy> TradingSession<S> {
     /// Whether the monthly breaker or an emergency halt blocks new entries.
     pub fn is_halted(&self) -> bool {
         self.monthly.is_halted() || self.exits.halt_state() != HaltState::Running
+    }
+
+    /// Latest wallet equity known to the session.
+    pub fn wallet_equity(&self) -> Decimal {
+        self.wallet
+    }
+
+    /// Whether an entry is pending, a position is open or its exits are still being cleaned up.
+    ///
+    /// While exposed the account profile must not be modified.
+    pub fn is_exposed(&self) -> bool {
+        !matches!(self.phase, Phase::Flat) || !self.exits.can_open()
     }
 
     /// Records the latest wallet balance reported by the venue.
@@ -313,7 +327,8 @@ impl<S: Strategy> TradingSession<S> {
         events
     }
 
-    fn open_position(&self) -> Option<(Side, Decimal, Decimal)> {
+    /// Side, average entry price and quantity of the open position, if any.
+    pub fn open_position(&self) -> Option<(Side, Decimal, Decimal)> {
         match &self.phase {
             Phase::Open {
                 side,
@@ -370,6 +385,7 @@ impl<S: Strategy> TradingSession<S> {
     ) -> Vec<SessionEvent> {
         let side = report.side;
         let price = fills.average_price();
+        let (stop_loss, take_profit) = (intent.stop_loss, intent.take_profit);
         self.excursion.open(report.time_ms, self.wallet);
         // Exits live on the venue so they survive a crash of this process.
         let protection = self
@@ -402,6 +418,8 @@ impl<S: Strategy> TradingSession<S> {
             price,
             quantity: fills.quantity,
             time_ms: report.time_ms,
+            stop_loss,
+            take_profit,
             protection,
         }]
     }
@@ -606,6 +624,7 @@ mod tests {
                 order_id: "entry-1".to_string(),
                 status: "NEW".to_string(),
                 quantity: dec!(1),
+                price: dec!(100),
             })
         }
     }
@@ -780,6 +799,8 @@ mod tests {
             price: dec!(100),
             quantity: dec!(1),
             time_ms: JAN_1 + 20,
+            stop_loss: dec!(90),
+            take_profit: dec!(110),
             protection: ExitEvent::Protected,
         }));
         assert!(venue.calls().contains(&"place Buy 90 110".to_string()));
@@ -810,6 +831,8 @@ mod tests {
             price: dec!(103),
             quantity: dec!(4),
             time_ms: JAN_1 + 30,
+            stop_loss: dec!(90),
+            take_profit: dec!(110),
             protection: ExitEvent::Protected,
         }));
     }
