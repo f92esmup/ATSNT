@@ -3,7 +3,7 @@
 --
 -- Run-centric analytics model. Every execution mode (backtest, hpo, hpo_trial,
 -- monte_carlo, paper, live) writes the same four append-only tables keyed by
--- `run_id`; Looker Studio reads only the `v_*` views.
+-- `run_id`; consumers read only the `v_*` views (contract: docs/architecture/12-bi-data-contract.md).
 --
 -- Run with `bq query --use_legacy_sql=false < bigquery_schema.sql`
 -- (scripts/gcp/setup_gcp_resources.sh does this). Legacy objects from the
@@ -139,7 +139,7 @@ CLUSTER BY run_id, series
 OPTIONS (description = "Event-based series points keyed by run_id");
 
 -- =============================================================================
--- ANALYTICAL VIEWS FOR LOOKER STUDIO (deduplicated, latest-row semantics)
+-- ANALYTICAL VIEWS FOR CONSUMERS (deduplicated, latest-row semantics)
 -- =============================================================================
 
 -- Latest metrics row per (run_id, scope).

@@ -1,7 +1,7 @@
 # Milestone 5/6 Closure
 
 ## Objective
-Close the authorized M5/M6 reliability and execution-gateway work, T1–T7. This tracker does **not** own the future web-workspace redesign. Keep all W0–W6 design decisions and implementation phases in the separate canonical contract, currently on branch `docs/web-workspace-contract` at `docs/architecture/09-read-only-web-workspace.md` (not yet merged into this branch).
+Close the authorized M5/M6 reliability and execution-gateway work, T1–T7. The in-process web workspace was retired (W0–W6 documents removed); analytics are consumed from BigQuery under [`docs/architecture/12-bi-data-contract.md`](../../docs/architecture/12-bi-data-contract.md).
 
 ## Authorization and scope
 - Authorized work: M5 T2b–T3, M6 T4–T6, and T7 verification, task by task, on `feature/m5-6-reliability-gateway`, based on `c7ae8f4`. Local work-unit commits are authorized.

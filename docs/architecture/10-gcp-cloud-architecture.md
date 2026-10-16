@@ -3,7 +3,7 @@
 > [!NOTE]
 > **Document Status**: Production Specification (Milestone 5 Phase 2)  
 > **Target Cloud Provider**: Google Cloud Platform (GCP)  
-> **BI Tool**: Google Looker Studio (formerly Data Studio)  
+> **Analytics consumers**: read-only clients of the `v_*` views (see [12-bi-data-contract.md](12-bi-data-contract.md))  
 > **Hosting & Analytics Cost**: **0,00 € / mes** (100% Always Free Tier compliant)
 
 ---
@@ -17,7 +17,7 @@ The ATSNT quantitative trading engine is designed as an **outbound-only, air-gap
 3. **Decoupled Workload Topology**:
    - **Local Workstation / Spot Heavy Compute**: Caches historical market data, runs parallel Walk-Forward Optimization (HPO) with `rayon`, and simulates 10,000 Monte Carlo trajectories.
    - **GCP Compute Engine (`e2-micro`)**: Runs the long-lived, 24/7 event loop for `paper_trading` or `live_gateway`, consuming between 15 MB and 40 MB of RAM.
-   - **GCP Analytics & BI**: BigQuery and GCS ingest telemetry, and Looker Studio displays dashboards with zero frontend code.
+   - **GCP Analytics & BI**: BigQuery and GCS ingest telemetry, and downstream consumers read the views; the engine ships no dashboards.
 
 ---
 
@@ -49,10 +49,10 @@ The ATSNT quantitative trading engine is designed as an **outbound-only, air-gap
 │     - run_series (event-based equity, MC curves)       │
 └───────────────────────────────┬────────────────────────┘
                                 │
-                                │ Native BigQuery Connector (Zero ETL)
+                                │ Read-only queries on the v_* views
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                  4. LOOKER STUDIO DASHBOARDS                    │
+│                  4. ANALYTICS CONSUMERS                         │
 │  - Real-time Equity Curves, Drawdowns & Active Positions        │
 │  - Cumulative PnL, Win Rate, Profit Factor & Payoff Ratio       │
 │  - Walk-Forward In-Sample vs Out-of-Sample Parameter Heatmaps   │
@@ -71,9 +71,8 @@ The architecture is deliberately dimensioned to run at **0,00 € / mes** indefi
 | **Compute Engine** | 1 `e2-micro` instance (in `us-central1`, `us-east1`, or `us-west1`) | 1 instance running 24/7 (paper or live engine) | **0,00 €** |
 | **Standard Persistent Disk** | 30 GB HDD / month | 10 - 20 GB operating system boot disk | **0,00 €** |
 | **BigQuery Ingestion & Storage** | 10 GB storage free / month | < 50 MB / month (tabular logs and snapshots) | **0,00 €** |
-| **BigQuery Query Engine** | 1 TB analytical queries free / month | < 2 GB / month (Looker Studio dashboard caching) | **0,00 €** |
+| **BigQuery Query Engine** | 1 TB analytical queries free / month | < 2 GB / month (consumer queries: every view scans under 2 MB) | **0,00 €** |
 | **Google Cloud Storage (GCS)** | 5 GB Standard Storage / month (US regions) | < 250 MB / month (compressed Parquet files) | **0,00 € - 0,01 €** |
-| **Looker Studio** | 100% Free Google SaaS product | Unlimited dashboards and scheduled reports | **0,00 €** |
 | **Total Monthly Spend** | | | **0,00 €** |
 
 > [!NOTE]
@@ -172,9 +171,9 @@ If none of the above are configured or network access fails, the engine operates
 
 ---
 
-## 7. Looker Studio BI Dashboard Specification
+## 7. BI Data Contract for Consumers
 
-Looker Studio reads only the views defined in `bigquery_schema.sql`: `v_runs` (latest run row + `full` metrics + flattened spec fields), `v_run_metrics`, `v_trades`, `v_series`, `v_equity` (event-based equity with running peak and drawdown), `v_latest_equity` (paper/live monitor), and the flattened `v_hpo_trials`, `v_hpo_folds` and `v_monte_carlo`. The report layout is specified in [11-looker-studio-bi-spec.md](11-looker-studio-bi-spec.md).
+Consumers read only the views defined in `bigquery_schema.sql`: `v_runs` (latest run row + `full` metrics + flattened spec fields), `v_run_metrics`, `v_trades`, `v_series`, `v_equity` (event-based equity with running peak and drawdown), `v_latest_equity` (paper/live monitor), and the flattened `v_hpo_trials`, `v_hpo_folds` and `v_monte_carlo`. Their columns, types, semantics and rules of change are the contract in [12-bi-data-contract.md](12-bi-data-contract.md).
 
 ---
 
@@ -249,7 +248,7 @@ To ensure high reliability, zero terminal lockup on constrained cloud virtual ma
 | **Operational Push Alerts** | Key business execution events | Very low (minutes/hours) | Telegram Bot API | Position Opened, Stop Loss hit, Trade Closed summary, Daily 20:00 Madrid report |
 | **Structured System Logs** | Engine lifecycle & audit | Medium (seconds/minutes) | `journald` (100 MB rotating disk) | Bar finalized, order executed, socket reconnect, network error |
 | **Hot Path Market Ticks** | High-throughput trade ticks | High (10-100s per second) | `tracing::trace!` (stdout only if `--show-ticks`) | `[TICK #1042] ts: ... price: 65420.50` (silent in production) |
-| **Analytical BI Telemetry** | Aggregated equity curves & PnL | Periodic (1s / 5s) | BigQuery (`atsnt_bi`) | Streaming inserts for real-time Looker Studio dashboards |
+| **Analytical BI Telemetry** | Aggregated equity curves & PnL | Periodic (1s / 5s) | BigQuery (`atsnt_bi`) | Streaming inserts for downstream consumers |
 
 ### 9.2 Hot-Path Tick Telemetry (`--show-ticks`)
 In production, streaming thousands of individual trade ticks to standard output saturates CPU, network, and terminal buffers.

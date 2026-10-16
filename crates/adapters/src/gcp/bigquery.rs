@@ -1,8 +1,8 @@
 //! Google Cloud BigQuery Streaming Ingestion Adapter for ATSNT.
 //!
 //! Implements the [`RunRecorder`] port with streaming writes to the run-centric
-//! analytics tables (`runs`, `run_metrics`, `trades`, `run_series`) that Looker
-//! Studio reads through the `v_*` views (see `scripts/gcp/bigquery_schema.sql`).
+//! analytics tables (`runs`, `run_metrics`, `trades`, `run_series`) that consumers
+//! read through the `v_*` views (see `scripts/gcp/bigquery_schema.sql`).
 
 use serde::Serialize;
 use serde_json::json;

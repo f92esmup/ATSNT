@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > **Evolution Note (Milestone 5 Transition):**
-> This specification supersedes the former in-process web presentation crate (`crates/web`). Under Milestone 5, the in-process Axum web server and static SPA frontend were **completely decommissioned** to achieve true air-gapped isolation, eliminate open inbound network ports, and replace custom UI maintenance with institutional Business Intelligence (**Google Cloud BigQuery + Looker Studio**) and instant mobile push notifications (**Telegram Bot Webhooks**).
+> This specification supersedes the former in-process web presentation crate (`crates/web`). Under Milestone 5, the in-process Axum web server and static SPA frontend were **completely decommissioned** to achieve true air-gapped isolation, eliminate open inbound network ports, and replace custom UI maintenance with institutional Business Intelligence (**Google Cloud BigQuery as the analytics store, read by downstream consumers**) and instant mobile push notifications (**Telegram Bot Webhooks**).
 
 ---
 
@@ -35,7 +35,7 @@ The trading engine operates as a strictly headless, outbound-only system. It exp
          │ Direct 1-Click Connection                       │ Push Notification
          ▼                                                 ▼
 ┌────────────────────────────────────────┐  ┌────────────────────────────┐
-│      Looker Studio (Google BI)         │  │    Mobile Push Alerts      │
+│      Analytics consumers (read-only)   │  │    Mobile Push Alerts      │
 │  - Real-time Equity & Drawdown Curves  │  │  - Position Opened/Closed  │
 │  - Post-Trade Performance Attribution  │  │  - Stop Loss & Take Profit │
 │  - Monte Carlo Probability of Ruin     │  │  - Circuit Breaker Trips   │
@@ -49,8 +49,8 @@ The trading engine operates as a strictly headless, outbound-only system. It exp
 1. **True Air-Gapped Headless Execution (Zero Inbound Ports)**:
    - The engine does not bind to any network interface.
    - All external interactions with the monitoring layer are strictly **outbound HTTPS POST requests** (to BigQuery streaming insert API, GCS upload API, and Telegram webhook).
-2. **Zero Maintenance BI Dashboards (Looker Studio)**:
-   - Data scientists and operators consume normalized tabular SQL data directly in Looker Studio.
+2. **Zero Maintenance Analytics (Downstream Consumers)**:
+   - Data scientists and operators consume normalized tabular SQL data directly from the `v_*` views in their own tools (see [12-bi-data-contract.md](12-bi-data-contract.md)).
    - Zero JavaScript/CSS/HTML maintenance; zero client-side WebSocket synchronization bugs.
 3. **Instant Mobile Situational Awareness (Telegram)**:
    - Critical operational events (position entries, exits, risk threshold violations) are pushed directly to mobile devices in under 200 milliseconds.

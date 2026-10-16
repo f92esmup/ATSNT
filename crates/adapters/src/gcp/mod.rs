@@ -1,7 +1,7 @@
 //! Google Cloud Platform (GCP) and Outbound Alerting Adapters for ATSNT.
 //!
 //! Provides cloud-first streaming telemetry, serverless data warehousing, and mobile push notifications:
-//! - [`bigquery`]: [`crate::RunRecorder`] implementation streaming run analytics (`runs`, `run_metrics`, `trades`, `run_series`) for Looker Studio.
+//! - [`bigquery`]: [`crate::RunRecorder`] implementation streaming run analytics (`runs`, `run_metrics`, `trades`, `run_series`) for downstream consumers.
 //! - [`gcs`]: Uploads of strategy deployment artifacts to Cloud Storage.
 //! - [`telegram`]: Mobile push alerting via official Telegram Bot API webhooks.
 

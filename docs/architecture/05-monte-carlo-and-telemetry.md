@@ -79,7 +79,7 @@ From the $N$ synthetic equity curves, the engine computes:
 
 ## 4. Telemetry & Web Presentation Architecture
 
-For proposed read-only research catalog/detail/comparison/replay requirements, see the [canonical workspace contract](09-read-only-web-workspace.md#5-proposed-laboratory-contract), especially W4/W5. The schemas and route examples here are design specifications, not guarantees of the current web API (documented in [the dashboard contract](07-web-telemetry-dashboard.md#31-rest-api-specification)). The example `fan_chart_trajectories` differs from the current browser's `fan_chart_curves` reader; W4 must reconcile actual report producers and consumers without assuming either example is authoritative for stored reports.
+The schemas and route examples in this section are historical design specifications from before the in-process web server was decommissioned (Milestone 5); they are not a current API. Consumers read the BigQuery views described in [12-bi-data-contract.md](12-bi-data-contract.md).
 
 ### 4.1 The "Anti-Bloat" Storage Contract
 A critical architectural pitfall in quantitative dashboards is attempting to serialize and persist all $10,000$ synthetic equity curves at tick or trade resolution. Doing so creates massive multi-gigabyte JSON files that choke browser rendering, exhaust server memory, and degrade I/O throughput.
@@ -126,4 +126,4 @@ Results are not written to local JSON files. With `--gcp-bigquery`, a Monte Carl
 To respect our architectural principles:
 - **`crates/domain`**: Implements pure mathematical functions (`bootstrap_resample`, `compute_drawdown_distribution`, `calculate_ruin_probability`). Zero I/O, zero network, 100% deterministic via seeded RNG.
 - **`crates/backtest`**: Coordinates execution of the strategy over the event stream, invokes domain Monte Carlo routines, and compiles the `BacktestReport`.
-- **`crates/adapters`**: Implements the `RunRecorder` port (`BigQuerySink`, plus `InMemoryRunRecorder` for tests) that persists runs, metrics, trades, and event series to BigQuery for Looker Studio, `GcsArtifactSink` for deployment artifact uploads, and `TelegramNotifier` for real-time mobile push alerting. `crates/backtest::recording` translates domain results into those rows.
+- **`crates/adapters`**: Implements the `RunRecorder` port (`BigQuerySink`, plus `InMemoryRunRecorder` for tests) that persists runs, metrics, trades, and event series to BigQuery for downstream consumers, `GcsArtifactSink` for deployment artifact uploads, and `TelegramNotifier` for real-time mobile push alerting. `crates/backtest::recording` translates domain results into those rows.

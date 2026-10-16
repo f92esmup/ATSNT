@@ -287,7 +287,7 @@ cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --config co
 
 ### Step 7: Cloud-First BI Telemetry & Mobile Alerting
 
-ATSNT runs headless and air-gapped without exposing inbound HTTP/WebSocket ports. Telemetry and metrics are streamed directly to Google Cloud BigQuery for Looker Studio visualization, and critical trade events are dispatched to Telegram:
+ATSNT runs headless and air-gapped without exposing inbound HTTP/WebSocket ports. Telemetry and metrics are streamed directly to Google Cloud BigQuery, where downstream consumers read them through a stable set of views, and critical trade events are dispatched to Telegram:
 
 ```bash
 # 1. Run paper trading with BigQuery streaming and Telegram alerts
@@ -309,7 +309,7 @@ cargo run -p backtest -- \
   --mc-iterations 10000 \
   --gcp-bigquery
 ```
-- **Looker Studio**: Reads the run-centric views in BigQuery dataset `atsnt_bi` (`v_runs`, `v_run_metrics`, `v_trades`, `v_equity`, `v_latest_equity`); see `docs/architecture/11-looker-studio-bi-spec.md`.
+- **BI consumers** (for example the `/trading` module of Econoweb): read the run-centric views in BigQuery dataset `atsnt_bi` (`v_runs`, `v_run_metrics`, `v_trades`, `v_series`, `v_equity`, `v_hpo_trials`, `v_hpo_folds`, `v_monte_carlo`); the contract is in `docs/architecture/12-bi-data-contract.md`.
 - **Telegram Bot Webhook**: Dispatches instant push notifications (<200ms) for position entries, exits, stop loss triggers, and circuit breakers.
 - **Fail-Open / Offline Safe**: If GCP/Telegram environment variables (`GCP_PROJECT_ID`, `TELEGRAM_BOT_TOKEN`, etc.) are omitted, sinks safely log information and continue without interruption.
 

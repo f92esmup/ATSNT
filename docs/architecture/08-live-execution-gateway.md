@@ -2,7 +2,7 @@
 
 ## 1. Architectural Philosophy: The Real Capital Boundary
 
-**Monitoring & Reporting boundary:** Telemetry and post-trade analytics are decoupled from live execution and streamed to Google Cloud BigQuery for Looker Studio visualization, while critical execution and risk events trigger real-time mobile alerts via Telegram Bot. Live values must be unavailable or explicitly stale until a real supported source exists. This cross-link does not change the gateway profile, guarantees or task status; the [closure tracker](../../odd/tasks/milestone-5-6-closure.md) owns that evidence.
+**Monitoring & Reporting boundary:** Telemetry and post-trade analytics are decoupled from live execution and streamed to Google Cloud BigQuery for downstream analytics consumers, while critical execution and risk events trigger real-time mobile alerts via Telegram Bot. Live values must be unavailable or explicitly stale until a real supported source exists. This cross-link does not change the gateway profile, guarantees or task status; the [closure tracker](../../odd/tasks/milestone-5-6-closure.md) owns that evidence.
 
 The Live Execution Gateway (`crates/adapters`) represents the final frontier: transitioning algorithmic strategies from simulated paper trading to **live financial execution** with real exchange capital.
 
