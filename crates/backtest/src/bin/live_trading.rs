@@ -439,6 +439,7 @@ async fn main() -> Result<()> {
 
     let mut aggregator = DollarBarAggregator::new(effective_dollar_bar)?;
     let mut account_ok = true;
+    let mut account_read_failures: u32 = 0;
     let mut account_check = tokio::time::interval(Duration::from_secs(ACCOUNT_RECHECK_SECS));
     account_check.tick().await; // the startup verification already covered the first period
     let mut exit_manager = ExitManager::new(symbol_upper.clone());
@@ -486,12 +487,14 @@ async fn main() -> Result<()> {
                     .await
                 {
                     Ok(report) if report.is_ready() => {
+                        account_read_failures = 0;
                         if !account_ok {
                             println!("[OK] Account profile matches again; entries re-enabled.");
                         }
                         account_ok = true;
                     }
                     Ok(report) => {
+                        account_read_failures = 0;
                         let first = account_ok;
                         account_ok = false;
                         eprintln!("[CRITICAL] Account profile drifted; new entries are blocked.\n{}", report.render());
@@ -507,7 +510,20 @@ async fn main() -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        warn!(error = %e, "Account re-verification could not read the exchange; keeping the last verdict");
+                        account_read_failures += 1;
+                        warn!(error = %e, failures = account_read_failures, "Account re-verification could not read the exchange; keeping the last verdict");
+                        // Three misses in a row (30 min) means the profile is effectively unverified.
+                        if account_read_failures == 3 {
+                            eprintln!("[CRITICAL] The account profile could not be verified for {} minutes.", 3 * ACCOUNT_RECHECK_SECS / 60);
+                            if let Some(t) = &telegram {
+                                let _ = t
+                                    .send_alert(&format!(
+                                        "🚨 *ATSNT* `{symbol_upper}`: the account profile could not be verified for the last {} minutes (last error: {e}).",
+                                        3 * ACCOUNT_RECHECK_SECS / 60
+                                    ))
+                                    .await;
+                            }
+                        }
                     }
                 }
             }
