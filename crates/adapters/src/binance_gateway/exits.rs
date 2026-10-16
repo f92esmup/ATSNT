@@ -227,6 +227,35 @@ impl BinanceGateway {
         algo.and(regular).map(|_| ())
     }
 
+    /// Number of pending conditional (algo) orders of `symbol`.
+    pub async fn open_algo_order_count(&self, symbol: &str) -> Result<usize, GatewayError> {
+        self.require_futures()?;
+        if !is_valid_asset(symbol) {
+            return Err(GatewayError::Config(
+                "symbol must contain only ASCII letters and digits".to_string(),
+            ));
+        }
+        let path = self.signed_futures_path("/fapi/v1/openAlgoOrders", &format!("symbol={symbol}"));
+        let body = self.get_binance_json(&path).await?;
+        body.as_array().map(Vec::len).ok_or_else(|| {
+            GatewayError::FuturesPreflight("open algo orders response is not an array".to_string())
+        })
+    }
+
+    /// Latest USD-M mark price of `symbol`.
+    pub async fn futures_mark_price(&self, symbol: &str) -> Result<Decimal, GatewayError> {
+        self.require_futures()?;
+        if !is_valid_asset(symbol) {
+            return Err(GatewayError::Config(
+                "symbol must contain only ASCII letters and digits".to_string(),
+            ));
+        }
+        let body = self
+            .get_binance_json(&format!("/fapi/v1/premiumIndex?symbol={symbol}"))
+            .await?;
+        futures_decimal_field(&body, "markPrice", "mark price")
+    }
+
     /// Signed position size of `symbol` in the one-way profile (positive long, negative short).
     pub async fn open_position_amount(&self, symbol: &str) -> Result<Decimal, GatewayError> {
         self.require_futures()?;
@@ -539,6 +568,30 @@ mod tests {
         assert_eq!(param(post, "side").as_deref(), Some("BUY"));
         assert_eq!(param(post, "reduceOnly").as_deref(), Some("true"));
         assert_eq!(param(post, "quantity").as_deref(), Some("0.250"));
+    }
+
+    #[tokio::test]
+    async fn algo_order_count_and_mark_price_are_read_from_the_exchange() {
+        let (url, _) = spawn_mock(vec![
+            (
+                "GET /fapi/v1/openAlgoOrders",
+                200,
+                r#"[{"algoId":1},{"algoId":2}]"#,
+            ),
+            (
+                "GET /fapi/v1/premiumIndex",
+                200,
+                r#"{"markPrice":"61234.50"}"#,
+            ),
+        ])
+        .await;
+        let gateway = gateway(&url, false);
+
+        assert_eq!(gateway.open_algo_order_count("BTCUSDT").await.unwrap(), 2);
+        assert_eq!(
+            gateway.futures_mark_price("BTCUSDT").await.unwrap(),
+            dec!(61234.50)
+        );
     }
 
     #[tokio::test]
