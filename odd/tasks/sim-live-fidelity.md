@@ -11,10 +11,10 @@ Branch: feat/sim-live-fidelity | Delivery: ask-on-risk | Test runner: `cargo tes
 - S6 (later phases): venue ports (`ExecutionVenue`, `Clock`, `MarketData`) with `SimulatedVenue` and `BinanceVenue`; tick-level realism (latency, tape-based market slippage, taker TP, mark-price stop); funding and liquidation; parity harness with live warm-up; single `StrategyRegistry` plus a generic strategy contract suite.
 
 ## Tasks
-- [ ] T1 (S1) P0 — risk policy and risk-per-trade from the artifact in live | inline | commit: -
-- [ ] T2 (S2) P0 — UTC-daily peak watermark in live | inline | commit: -
-- [ ] T3 (S3) P0 — real commissions in live PnL | inline | commit: -
-- [ ] T4 (S4) P0 — ROADMAP correction | inline | commit: -
+- [x] T1 (S1) P0 — risk policy and risk-per-trade from the artifact in live | inline | commit: 7418287 | RED: `risk_policy_*` (config.rs), `futures_order_quantity_uses_the_configured_risk_per_trade` | previous behavior kept: `futures_preflight_chooses_minimum_supported_leverage_before_dispatch`, `legacy_artifact_context_*`
+- [x] T2 (S2) P0 — UTC-daily peak watermark in live | inline | commit: 5d77a3c | RED: `daily_watermark::tests::*`
+- [x] T3 (S3) P0 — real commissions in live PnL | inline | commit: 66739e1 | RED: `futures_order_trade_update_*commission*`, `fee_ledger::tests::*`
+- [x] T4 (S4) P0 — ROADMAP/README/doc-comment correction | inline | commit: eba49d8 | structural readback (passive docs)
 - [ ] T5 (S5, S6) P1 — ports and shared `TradingSession` | pending, needs its own plan
 - [ ] T6 (S5, S6) P2 — market entries, latency, tape slippage, taker TP, mark-price stop | pending
 - [ ] T7 (S6) P3 — funding and liquidation | pending
@@ -24,4 +24,5 @@ Branch: feat/sim-live-fidelity | Delivery: ask-on-risk | Test runner: `cargo tes
 ## Log
 - L1 (2026-10-16): "Quiero que hagas una investigación exhaustiva sobre la fidelidad entre el netorno simulado y live. Nosotros buscamos una similitud 1:1 para que las estrategias que evaluamos no arrojen datos sesgados. Se ha conseguido? hay cosas que ajustar? Lo segundo a auditar es que el proyecto este aplicando bien la generalización y esquema hexagonal, que todos los modulos sean estandarizados para qeu cuando cree una nueva estrategia. esta no tenga fricción."
 - L2 (2026-10-16): "me parece una idea genial lo de las venues. Voy a seguir tus recomendaciones. si quiero que sea market. Adelante con la refactorización. vamos paso a paso"
+- L4 (P0 closed, 2026-10-16): suite, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` green after each task. Notes for later phases: (a) live derives entry price/qty from the last fill only (`last_filled_price`, `cumulative_filled_quantity`); market entries will often fill in several trades, so T6 must use the order's average price; (b) the gateway mock's leverage endpoint always answers 2x, so gateway tests that change notional must keep it near 1000 USDT; (c) `BinanceGatewayConfig` is built by literal in 5 places without `..Default::default()`, so new fields touch them; (d) the engine still keeps its own inline daily-peak logic: T5 should make it use `DailyWatermark` when the session core is extracted; (e) `--risk-pct` is now `Option`, so an unspecified flag means "artifact value" instead of a fixed 1%.
 - L3: Audit evidence: live gateway sizes with `RiskPolicy::default()` (live_trading.rs:322) and `Decimal::new(1, 2)` (binance_gateway.rs:1213); the artifact `risk_pct`/`execution_context` only reach run metadata. Live passes a whole-session peak to the breaker while the engine resets daily (engine.rs:189-197).
