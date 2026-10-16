@@ -23,3 +23,4 @@ Branch: `feat/startup-account-verification` (from `main`) | Delivery: single bra
 ## Log
 
 - L1 (2026-10-16): "adelante, comienza la implementación" after the plan; margin auto-fix allowed ("lo permito"); "hemos dicho que la estrategia establece el apalancamiento para cada operación? ... hay que respetarlo. El resto si estoy de acuerdo". Verified: `OrderIntent` has no leverage field; memory #109 and strategy doc §4 say leverage is derived from risk sizing.
+- L2 (2026-10-16): "verifica primero, luego mergeas y cierras las modiciaciones". Read-only `verify-account` on testnet: report correct (BLOCKING collateral BTC/USDC and CROSSED margin, everything else OK). The marginType write was NOT run on the exchange (no authorization to change testnet settings).

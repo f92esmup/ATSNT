@@ -131,7 +131,7 @@ Before any stream is opened, `live_trading` calls `BinanceGateway::verify_accoun
 - **Leverage is never set.** It is an output of risk sizing: the per-order preflight keeps choosing the minimum sufficient leverage for each operation.
 - **Re-verification** runs every 10 minutes and right after a listen-key expiry. While a position or order exists it is read-only; on drift it raises a critical alert (Telegram) and blocks new entries until the account matches again.
 - **Flags**: `--verify-only` prints the report and exits without changing anything; `--no-auto-fix` verifies and stops on any mismatch.
-- Manual check against the testnet: `testnet_exit_check verify-account`.
+- Manual check against the testnet: `testnet_exit_check verify-account`. Validated read-only on 2026-10-16 against the real Binance USD-M testnet: all eight endpoints parse, and the report flags the default testnet account correctly (non-USDT collateral and cross margin). The `marginType` write itself has only been exercised against a simulated exchange; confirm it on an account that has only USDT before relying on it.
 
 ### 3.4 User Data Stream Listener (`BinanceUserDataStream`)
 - Located at [`crates/adapters/src/binance_user_stream.rs`](../../crates/adapters/src/binance_user_stream.rs).
