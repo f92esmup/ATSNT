@@ -104,6 +104,8 @@ The gateway seamlessly switches between testnet and production with a single con
 
 For standard Spot orders, `place_order` also fails closed before dispatch unless the symbol is an active Spot pair, the account response has valid free balances, and the order is funded (quote asset for buys, base asset for sells). It loads the account's symbol-specific commission rates, accounts for maker/taker plus side and special/tax rates, and checks the configured discount asset when applicable. Missing, malformed, unpriceable, or insufficient preflight data prevents order submission. USD-M Futures retain the existing risk-policy path.
 
+**Entry orders**: USD-M entries are `MARKET` (taker) orders sized at the signal price. A resting limit at the signal bar's close would fill mainly when the signal is wrong, which the simulation cannot reproduce. Binance acknowledges a market order with `price` 0 and may omit `cumQuote`; the fills arrive on the private stream. If an entry ends (cancelled, expired) after a partial fill, the session opens and protects the executed quantity; if it ends without a fill, the session returns to flat. Spot entries keep their limit order.
+
 ### 3.3.1 Exchange-Held Exits and Emergency Close
 The live session keeps its exits on the exchange so they survive a crash of the bot:
 
@@ -115,7 +117,7 @@ The live session keeps its exits on the exchange so they survive a crash of the 
   - Monthly kill-switch (`MonthlyGuard`): `Running -> Halting -> Halted`. The flatten sequence is close, cancel, then re-read the position to confirm flat (a pending entry that fills in between is closed too). It reports `Halted` only after the exchange confirms a flat position; otherwise it stays `Halting`, alerts and retries every 5 s.
 - The private stream accepts `ALGO_UPDATE` events by event time only; the resulting fills arrive as regular `ORDER_TRADE_UPDATE` events.
 
-Known limits: there is no reconciliation on restart (SL/TP stay on the exchange, but a new process has no tracker or time barrier and could open another position, so check the account before restarting); a fill without its order intent triggers an emergency halt that lasts until restart; protection starts only after the entry is fully `FILLED`, so a partial fill that is then cancelled stays unprotected; an entry LIMIT order that never fills is not cancelled automatically; and an actual SL/TP trigger fill (as opposed to the bot's own market close) has not been observed on the exchange.
+Known limits: there is no reconciliation on restart (SL/TP stay on the exchange, but a new process has no tracker or time barrier and could open another position, so check the account before restarting); a fill without its order intent triggers an emergency halt that lasts until restart; an entry that stays `NEW` without any execution report (a silent stream) has no timeout; and an actual SL/TP trigger fill (as opposed to the bot's own market close) has not been observed on the exchange.
 
 **Testnet validation (executed 2026-10-16 on Binance USD-M testnet with `testnet_exit_check`)**: 19/19 checks passed against the real exchange.
 - SL and TP are accepted as `closePosition=true` algo orders (2 pending after protection); the time-barrier close leaves nothing behind; cleanup after a close leaves no algo orders; the emergency halt reports `Halted` only with `positionAmt = 0` and zero orders; a stop that would trigger immediately is rejected with `-2021` and the position is closed rather than left naked.

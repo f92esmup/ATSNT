@@ -57,6 +57,8 @@ pub enum SessionEvent {
     EntrySubmitted(EntryAck),
     /// The venue rejected the entry order; the session stays flat.
     EntryFailed(String),
+    /// The entry order ended (cancelled, expired or rejected) without any fill; back to flat.
+    EntryCancelled,
     /// The entry completed and the exit protection was attempted.
     PositionOpened {
         side: Side,
@@ -286,8 +288,12 @@ impl<S: Strategy> TradingSession<S> {
             }
             Phase::EntryPending { intent, mut fills } => {
                 fills.add(report);
-                if report.order_filled && fills.quantity > Decimal::ZERO {
+                let ended = report.order_filled || report.order_closed;
+                if ended && fills.quantity > Decimal::ZERO {
+                    // A partially filled order that then ended still left a position: protect it.
                     events.extend(self.open_position_from(venue, intent, &fills, report).await);
+                } else if ended {
+                    events.push(SessionEvent::EntryCancelled);
                 } else {
                     self.phase = Phase::EntryPending { intent, fills };
                 }
@@ -706,8 +712,23 @@ mod tests {
             last_quantity: quantity,
             last_price: price,
             order_filled,
+            order_closed: order_filled,
             commission,
             commission_asset: Some("USDT".to_string()),
+        }
+    }
+
+    /// A report that ends an order without completing it (cancelled, expired, rejected).
+    fn terminated(side: Side, time_ms: i64) -> ExecutionReport {
+        ExecutionReport {
+            time_ms,
+            side,
+            last_quantity: Decimal::ZERO,
+            last_price: Decimal::ZERO,
+            order_filled: false,
+            order_closed: true,
+            commission: Decimal::ZERO,
+            commission_asset: None,
         }
     }
 
@@ -779,6 +800,52 @@ mod tests {
             .any(|e| matches!(e, SessionEvent::EntryFailed(_))));
         assert!(second.contains(&SessionEvent::Signal(long_intent())));
         assert_eq!(venue.entries.borrow().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_entry_cancelled_without_fills_returns_the_session_to_flat() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent(), long_intent()]);
+        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+
+        let events = session
+            .on_execution(&venue, &terminated(Side::Buy, JAN_1 + 20))
+            .await;
+        let exposed_after_cancel = session.is_exposed();
+        let next = session.on_bar(&venue, &bar(JAN_1 + 30, dec!(100))).await;
+
+        assert!(events.contains(&SessionEvent::EntryCancelled));
+        assert!(!exposed_after_cancel);
+        assert!(next.contains(&SessionEvent::Signal(long_intent())));
+        assert_eq!(venue.entries.borrow().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_entry_that_expires_after_a_partial_fill_is_opened_and_protected() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent()]);
+        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_execution(
+                &venue,
+                &fill(Side::Buy, dec!(2), dec!(100), false, JAN_1 + 20, dec!(0.05)),
+            )
+            .await;
+
+        let events = session
+            .on_execution(&venue, &terminated(Side::Buy, JAN_1 + 30))
+            .await;
+
+        assert!(events.contains(&SessionEvent::PositionOpened {
+            side: Side::Buy,
+            price: dec!(100),
+            quantity: dec!(2),
+            time_ms: JAN_1 + 30,
+            stop_loss: dec!(90),
+            take_profit: dec!(110),
+            protection: ExitEvent::Protected,
+        }));
+        assert!(venue.calls().contains(&"place Buy 90 110".to_string()));
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@ pub struct EntryAck {
     pub status: String,
     /// Quantity the venue accepted after sizing and exchange rounding.
     pub quantity: Decimal,
-    /// Limit or average price reported with the acknowledgement.
+    /// Reference price of the order: the signal price the entry was sized at.
     pub price: Decimal,
 }
 
@@ -32,6 +32,9 @@ pub struct ExecutionReport {
     pub last_price: Decimal,
     /// `true` when this report completes its order.
     pub order_filled: bool,
+    /// `true` when the order will report no further executions: it was filled, cancelled,
+    /// expired or rejected.
+    pub order_closed: bool,
     /// Commission charged for this execution (zero when none).
     pub commission: Decimal,
     /// Asset the commission was charged in.

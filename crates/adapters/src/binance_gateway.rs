@@ -548,16 +548,19 @@ impl BinanceGateway {
             Side::Buy => "BUY",
             Side::Sell => "SELL",
         };
+        // Entries are market orders (taker): the strategy signals on a closed bar, so a resting
+        // limit at the bar close would fill only when the signal is wrong. Binance reports a
+        // market order with price 0; the intent price is only a sizing and sanity reference.
         let order = FuturesOrderRequest {
             symbol: symbol.to_string(),
             client_order_id: lease.client_order_id.clone(),
             side: intent.side,
-            price: intent.price,
+            price: Decimal::ZERO,
             quantity,
         };
         let parameters = format!(
-            "symbol={}&side={side}&type=LIMIT&timeInForce=GTC&quantity={quantity}&price={}&newClientOrderId={}",
-            order.symbol, intent.price, order.client_order_id
+            "symbol={}&side={side}&type=MARKET&quantity={quantity}&newClientOrderId={}",
+            order.symbol, order.client_order_id
         );
         let signed_query = self
             .auth
@@ -1624,7 +1627,11 @@ fn parse_futures_order_report(
         })?;
     let original_qty = futures_decimal_field(body, "origQty", "USD-M order response")?;
     let executed_qty = futures_decimal_field(body, "executedQty", "USD-M order response")?;
-    let cumulative_quote_qty = futures_decimal_field(body, "cumQuote", "USD-M order response")?;
+    // Order acknowledgements may omit `cumQuote`; a present but malformed value still fails.
+    let cumulative_quote_qty = match body.get("cumQuote") {
+        None | Some(serde_json::Value::Null) => Decimal::ZERO,
+        Some(_) => futures_decimal_field(body, "cumQuote", "USD-M order response")?,
+    };
     let price = futures_decimal_field(body, "price", "USD-M order response")?;
     let timestamp_ms = ["updateTime", "time", "transactTime"]
         .into_iter()
@@ -1657,7 +1664,7 @@ fn parse_futures_order_report(
         || executed_qty < Decimal::ZERO
         || executed_qty > original_qty
         || cumulative_quote_qty < Decimal::ZERO
-        || price <= Decimal::ZERO
+        || price < Decimal::ZERO
         || status.is_empty()
     {
         return Err(GatewayError::FuturesPreflight(
@@ -2239,10 +2246,9 @@ fn validate_futures_order_rules(
     quantity: Decimal,
 ) -> Result<(), GatewayError> {
     let notional = price * quantity;
-    if price < rules.min_price
-        || price > rules.max_price
-        || price % rules.tick_size != Decimal::ZERO
-    {
+    // `price` is the reference of a market order, never sent to the exchange, so it only has to
+    // lie inside the contract bounds; tick alignment applies to limit prices only.
+    if price < rules.min_price || price > rules.max_price {
         return Err(GatewayError::FuturesPreflight(
             "order price violates the contract price filter".to_string(),
         ));
@@ -3036,6 +3042,69 @@ mod tests {
             .unwrap()
             .iter()
             .any(|request| request.starts_with("POST /fapi/v1/order?")));
+    }
+
+    #[test]
+    fn the_real_market_order_acknowledgement_without_cumulative_quote_is_accepted() {
+        // Captured from Binance Futures testnet: a MARKET ack reports price 0 and no `cumQuote`.
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{"orderId":28636945020,"symbol":"BTCUSDT","status":"NEW","clientOrderId":"probe-market-1","price":"0.00","origQty":"0.0020","executedQty":"0.0000","cumQty":"0.0000","timeInForce":"GTC","type":"MARKET","reduceOnly":false,"closePosition":false,"side":"BUY","positionSide":"BOTH","stopPrice":"0.00","workingType":"CONTRACT_PRICE","priceProtect":false,"origType":"MARKET","priceMatch":"NONE","selfTradePreventionMode":"EXPIRE_MAKER","goodTillDate":0,"updateTime":1792178222682}"#,
+        )
+        .unwrap();
+        let expected = FuturesOrderRequest {
+            symbol: "BTCUSDT".to_string(),
+            client_order_id: "probe-market-1".to_string(),
+            side: Side::Buy,
+            price: Decimal::ZERO,
+            quantity: dec!(0.002),
+        };
+
+        let report = parse_futures_order_report(&body, &expected).unwrap();
+
+        assert_eq!(report.status, "NEW");
+        assert_eq!(report.original_qty, dec!(0.002));
+        assert_eq!(report.cumulative_quote_qty, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn futures_entries_are_market_orders_without_a_limit_price() {
+        let (base_url, requests, server) =
+            spawn_futures_mock_server(valid_futures_responses(current_unix_time_ms().unwrap()));
+        let gateway = futures_submission_test_gateway(base_url);
+
+        let report = submit_futures_test_order(&gateway).await.unwrap();
+
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        let post = requests
+            .iter()
+            .find(|request| request.starts_with("POST /fapi/v1/order?"))
+            .expect("order should be submitted");
+        assert_eq!(request_parameter(post, "type").as_deref(), Some("MARKET"));
+        assert_eq!(request_parameter(post, "price"), None);
+        assert_eq!(request_parameter(post, "timeInForce"), None);
+        assert_eq!(report.original_qty, dec!(10));
+    }
+
+    #[tokio::test]
+    async fn a_market_entry_does_not_require_a_tick_aligned_reference_price() {
+        let (base_url, _requests, server) =
+            spawn_futures_mock_server(valid_futures_responses(current_unix_time_ms().unwrap()));
+        let gateway = futures_submission_test_gateway(base_url);
+        let intent = OrderIntent::new(1, Side::Buy, dec!(100.005), dec!(90), dec!(110), 5).unwrap();
+
+        let report = gateway
+            .place_order(
+                "BTCUSDT",
+                &intent,
+                dec!(10_000),
+                dec!(10_000),
+                Decimal::ZERO,
+            )
+            .await;
+
+        server.join().unwrap();
+        assert!(report.is_ok(), "market entry rejected: {report:?}");
     }
 
     #[tokio::test]

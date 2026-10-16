@@ -842,6 +842,10 @@ impl EventSink<'_> {
                      Quantity:        {}\n",
                     ack.order_id, ack.status, ack.price, ack.quantity
                 ),
+                SessionEvent::EntryCancelled => println!(
+                    "[ORDER] {}: the entry order ended without any fill; no position was opened.",
+                    self.symbol
+                ),
                 SessionEvent::EntryFailed(reason) => {
                     error!(error = %reason, "Failed to submit live order to Binance");
                     eprintln!("[ERROR] Order placement failed: {reason}");

@@ -373,7 +373,7 @@ impl ports::ExecutionVenue for BinanceGateway {
             order_id: report.client_order_id,
             status: report.status,
             quantity: report.original_qty,
-            price: report.price,
+            price: intent.price,
         })
     }
 }

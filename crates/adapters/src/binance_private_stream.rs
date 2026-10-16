@@ -625,6 +625,10 @@ impl From<&FuturesOrderTradeUpdate> for ports::ExecutionReport {
             last_quantity: update.last_filled_quantity,
             last_price: update.last_filled_price,
             order_filled: update.status == "FILLED",
+            order_closed: matches!(
+                update.status.as_str(),
+                "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
+            ),
             commission: update.commission,
             commission_asset: update.commission_asset.clone(),
         }
@@ -1068,7 +1072,15 @@ mod tests {
         assert_eq!(complete.commission, dec!(0.0336004));
         assert_eq!(complete.commission_asset.as_deref(), Some("USDT"));
         assert!(complete.order_filled);
+        assert!(complete.order_closed);
         assert!(!report(&partial).order_filled);
+        assert!(!report(&partial).order_closed);
+        let cancelled = report(&filled.replace("\"FILLED\"", "\"CANCELED\""));
+        assert!(!cancelled.order_filled);
+        assert!(cancelled.order_closed);
+        let expired = report(&filled.replace("\"FILLED\"", "\"EXPIRED\""));
+        assert!(!expired.order_filled);
+        assert!(expired.order_closed);
     }
 
     #[test]
