@@ -688,7 +688,14 @@ async fn main() -> Result<()> {
                         }
 
                         // Monthly kill-switch: stop opening positions and alert once on the trip.
-                        if let Some(drawdown) = monthly_guard.observe(trade.timestamp, current_equity) {
+                        if let Some(drawdown) = monthly_guard.observe(
+                            trade.timestamp,
+                            backtest::marked_equity(
+                                current_equity,
+                                active_position_tracker.map(|(side, entry, qty, _)| (side, entry, qty)),
+                                trade.price,
+                            ),
+                        ) {
                             eprintln!(
                                 "[CRITICAL] Monthly circuit breaker tripped at {:.2}% drawdown vs month open: no new positions will be opened. Review and flatten any open position manually.",
                                 drawdown * dec!(100)

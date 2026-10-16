@@ -1,6 +1,23 @@
 //! Monthly drawdown guard shared by the simulator and the live session loop.
 
+use domain::Side;
 use rust_decimal::Decimal;
+
+/// Wallet balance plus the open position's unrealized PnL at `mark_price`.
+///
+/// `position` is `(entry side, entry price, quantity)`; `None` means flat. The exchange wallet
+/// balance only moves on realization, so a guard fed with it alone reacts late to open losses.
+pub fn marked_equity(
+    wallet_balance: Decimal,
+    position: Option<(Side, Decimal, Decimal)>,
+    mark_price: Decimal,
+) -> Decimal {
+    match position {
+        Some((Side::Buy, entry, quantity)) => wallet_balance + (mark_price - entry) * quantity,
+        Some((Side::Sell, entry, quantity)) => wallet_balance + (entry - mark_price) * quantity,
+        None => wallet_balance,
+    }
+}
 
 /// Converts a Unix-millisecond timestamp into a `YYYYMM` UTC month key.
 pub fn utc_month_key(timestamp_ms: i64) -> i64 {
@@ -71,6 +88,36 @@ mod tests {
 
     const JAN_1: i64 = 1_704_067_200_000;
     const DAY: i64 = 86_400_000;
+
+    #[test]
+    fn marked_equity_adds_unrealized_pnl_for_long_and_short() {
+        assert_eq!(marked_equity(dec!(1000), None, dec!(100)), dec!(1000));
+        assert_eq!(
+            marked_equity(dec!(1000), Some((Side::Buy, dec!(100), dec!(2))), dec!(90)),
+            dec!(980)
+        );
+        assert_eq!(
+            marked_equity(dec!(1000), Some((Side::Sell, dec!(100), dec!(2))), dec!(90)),
+            dec!(1020)
+        );
+    }
+
+    #[test]
+    fn unrealized_loss_alone_can_trip_the_guard() {
+        let mut guard = MonthlyGuard::new(dec!(0.15));
+        let wallet = dec!(1000);
+        let long = Some((Side::Buy, dec!(100), dec!(10)));
+
+        assert_eq!(
+            guard.observe(JAN_1, marked_equity(wallet, long, dec!(100))),
+            None
+        );
+        // Wallet is unchanged, but the open long is down 150 -> -15% marked.
+        assert_eq!(
+            guard.observe(JAN_1 + DAY, marked_equity(wallet, long, dec!(85))),
+            Some(dec!(0.15))
+        );
+    }
 
     #[test]
     fn trips_once_when_loss_versus_month_open_reaches_the_limit() {

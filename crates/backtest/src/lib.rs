@@ -24,7 +24,7 @@ pub use monte_carlo::{
     FanChartTrajectory, MonteCarloConfig, MonteCarloMetrics, MonteCarloReport, MonteCarloSimulator,
     ResampleMethod,
 };
-pub use monthly_guard::{utc_month_key, MonthlyGuard};
+pub use monthly_guard::{marked_equity, utc_month_key, MonthlyGuard};
 pub use optimization::{
     calculate_dsr, calculate_parameter_stability, run_backtest_slice, CandidateEvaluation,
     FoldMetrics, ParameterSpace, WalkForwardOptimizer,
