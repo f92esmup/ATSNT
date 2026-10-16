@@ -75,6 +75,16 @@ impl BacktestEngine {
         }
     }
 
+    /// Current drawdown from the in-month marked-equity peak.
+    pub fn monthly_drawdown_pct_at(&self, current_price: Decimal) -> Decimal {
+        if self.monthly_peak_equity > Decimal::ZERO {
+            (self.monthly_peak_equity - self.total_equity(current_price)).max(Decimal::ZERO)
+                / self.monthly_peak_equity
+        } else {
+            Decimal::ZERO
+        }
+    }
+
     /// Whether the monthly kill-switch has permanently halted this simulation.
     #[inline]
     pub fn is_halted(&self) -> bool {

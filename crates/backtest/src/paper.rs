@@ -58,6 +58,13 @@ pub enum PaperTradingEvent {
         /// Current peak-to-trough drawdown percentage.
         drawdown_pct: Decimal,
     },
+    /// A drawdown circuit breaker halted the session; no further entries will open.
+    CircuitBreakerTripped {
+        /// Breaker horizon that tripped (currently `"monthly"`).
+        scope: String,
+        /// Drawdown from the scope's equity peak at the moment of the trip.
+        drawdown_pct: Decimal,
+    },
 }
 
 impl PaperTradingEvent {
@@ -69,6 +76,7 @@ impl PaperTradingEvent {
             Self::PositionOpened { .. } => "PositionOpened",
             Self::PositionClosed { .. } => "PositionClosed",
             Self::MarkToMarket { .. } => "MarkToMarket",
+            Self::CircuitBreakerTripped { .. } => "CircuitBreakerTripped",
         }
     }
 }
@@ -259,6 +267,7 @@ impl PaperTradingSession {
     /// and barrier exits, and returns all events generated during this tick.
     pub fn process_trade(&mut self, trade: &Trade) -> Vec<PaperTradingEvent> {
         let mut events = Vec::new();
+        let was_halted_before_tick = self.engine.is_halted();
 
         // 1. Mark to market on current trade if there is an active position
         if let Some(pos) = self.engine.active_position() {
@@ -318,6 +327,12 @@ impl PaperTradingSession {
                     };
 
                     if let Some(closed_trade) = self.engine.closed_trades().last() {
+                        // The monthly kill-switch exits at market, not through a barrier.
+                        let exit_reason = if closed_trade.exit_reason == "MonthlyCircuitBreaker" {
+                            "MonthlyCircuitBreaker"
+                        } else {
+                            exit_reason
+                        };
                         let exit_price = if pos.quantity > Decimal::ZERO {
                             match pos.side {
                                 PositionSide::Long => {
@@ -354,6 +369,13 @@ impl PaperTradingSession {
                     });
                 }
             }
+        }
+
+        if !was_halted_before_tick && self.engine.is_halted() {
+            events.push(PaperTradingEvent::CircuitBreakerTripped {
+                scope: "monthly".to_string(),
+                drawdown_pct: self.engine.monthly_drawdown_pct_at(trade.price),
+            });
         }
 
         // 3. Broadcast events to all active subscribers
@@ -734,6 +756,60 @@ mod tests {
             assert_eq!(exit_reason, "StopLoss");
             assert!(*net_pnl < Decimal::ZERO);
         }
+    }
+
+    #[test]
+    fn test_monthly_breaker_emits_event_and_blocks_new_positions() {
+        let config = PaperTradingConfig {
+            dollar_bar_threshold: dec!(100),
+            backtest: BacktestConfig {
+                max_daily_drawdown_pct: dec!(0.5),
+                max_monthly_drawdown_pct: dec!(0.005),
+                ..BacktestConfig::default()
+            },
+            strategy: DollarBarsCusumConfig {
+                rolling_window_len: 4,
+                cusum_vol_multiplier: dec!(1.0),
+                z_entry_threshold: dec!(1.5),
+                z_stop_threshold: dec!(2.0),
+                time_barrier_bars: 10,
+                min_take_profit_pct: dec!(0.0025),
+            },
+            channel_capacity: 100,
+        };
+        let mut session = PaperTradingSession::new(config).expect("init session");
+
+        for (i, p) in [dec!(100), dec!(101), dec!(99), dec!(100)]
+            .iter()
+            .enumerate()
+        {
+            session.process_trade(&make_trade((i as i64 + 1) * 1000, *p, dec!(1.0), Side::Buy));
+        }
+        session.process_trade(&make_trade(5000, dec!(90), dec!(1.5), Side::Sell));
+        assert!(session.active_position().is_some());
+
+        let crash_events =
+            session.process_trade(&make_trade(6000, dec!(70), dec!(1.5), Side::Sell));
+
+        let tripped = crash_events
+            .iter()
+            .find_map(|e| match e {
+                PaperTradingEvent::CircuitBreakerTripped {
+                    scope,
+                    drawdown_pct,
+                } => Some((scope.clone(), *drawdown_pct)),
+                _ => None,
+            })
+            .expect("CircuitBreakerTripped event");
+        assert_eq!(tripped.0, "monthly");
+        assert!(tripped.1 >= dec!(0.005));
+
+        // Once halted, no further event may reopen a position or re-announce the trip.
+        let later = session.process_trade(&make_trade(7000, dec!(100), dec!(1.0), Side::Buy));
+        assert!(session.active_position().is_none());
+        assert!(!later
+            .iter()
+            .any(|e| matches!(e, PaperTradingEvent::CircuitBreakerTripped { .. })));
     }
 
     #[test]

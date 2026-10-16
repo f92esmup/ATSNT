@@ -545,6 +545,13 @@ async fn main() -> Result<()> {
                                         record_closed_trade(bq, &run_ctx, ct, trade_counter).await;
                                     }
                                 }
+                                PaperTradingEvent::CircuitBreakerTripped { scope, drawdown_pct } => {
+                                    println!(
+                                        "\n[ALERT] {} circuit breaker tripped at {:.2}% drawdown: trading halted, no new positions will open.",
+                                        scope,
+                                        drawdown_pct * dec!(100)
+                                    );
+                                }
                                 PaperTradingEvent::MarkToMarket { current_price, unrealized_pnl, total_equity, drawdown_pct } => {
                                     // Periodic display to avoid terminal flooding
                                     if last_mtm_print.elapsed() >= mtm_interval {
