@@ -8,8 +8,9 @@ use crate::monthly_guard::utc_month_key;
 
 /// Deterministic, discrete-event backtesting simulator.
 ///
-/// Implements 1:1 behavioral parity without toy assumptions, modeling
-/// exchange fees, latency slippage, and Triple Barrier exit mechanics.
+/// Models exchange fees, a fixed per-fill slippage, and Triple Barrier exits evaluated per
+/// bar. Entries fill at the signal bar close; tick-level fills, latency and funding are
+/// tracked in `odd/tasks/sim-live-fidelity.md`.
 #[derive(Debug, Clone)]
 pub struct BacktestEngine {
     config: BacktestConfig,

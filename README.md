@@ -9,7 +9,7 @@ A high-performance, modular algorithmic trading engine built 100% in Rust from f
 - **Zero Black-Box Frameworks**: We deliberately avoid monolithic trading frameworks (e.g. NautilusTrader). We design and own domain models, state machines, indicators, risk managers, and execution pipelines from first principles.
 - **Hexagonal Architecture (Ports & Adapters)**: Strict separation of concerns. Pure business logic has zero I/O or network dependencies; infrastructure adapters plug in via abstract traits.
 - **Financial Correctness (Zero-Float Rule)**: Never use `f32` or `f64` for quantities, prices, or account balances. All financial calculations use fixed-point arithmetic via `rust_decimal::Decimal`.
-- **Zero-Toy Assumptions**: Every backtest models realistic fee schedules (maker/taker), latency-induced slippage, and Triple Barrier exits.
+- **Zero-Toy Assumptions**: Every backtest models realistic fee schedules (maker/taker), a fixed per-fill slippage penalty, and Triple Barrier exits. Remaining simulation gaps versus live are tracked in the [ROADMAP](docs/ROADMAP.md#simulation-fidelity-simulated-vs-live-parity).
 - **Anti-Overfitting Validation**: Parameter optimization enforces Walk-Forward temporal splits with Embargo periods (AFML Ch. 7), Parameter Stability Plateau scoring, Deflated Sharpe Ratio (DSR), and Discrete Event Monte Carlo trade sequence bootstrapping.
 
 ---

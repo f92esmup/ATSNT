@@ -89,6 +89,9 @@ The gateway seamlessly switches between testnet and production with a single con
   - `max_position_notional`: Aggregate account exposure limit (e.g. $50,000 USDT).
   - `max_daily_drawdown_pct`: Circuit breaker halting execution upon drawdown breach (e.g. 5%).
   - `max_leverage`, `min_order_quantity`, `quantity_step_size`, `min_order_notional`: Binance-parity sizing rules (defaults 20x, 0.001, 0.001, 5 USDT), overridden per symbol by the exchange filters.
+- **Source of the limits**: the `live_trading` runner builds the policy and `risk_per_trade_pct` from the deployment artifact's `execution_context` (`BacktestConfig::risk_policy()`, the same call the simulator uses), so live gates orders like the simulation that selected the strategy. `--risk-pct` is an explicit override; without an artifact the defaults apply.
+- **Drawdown reference**: the breaker measures loss against the marked-equity peak of the current UTC day (`DailyWatermark`), resetting at 00:00:00 UTC exactly like the simulator.
+- **Fees**: live PnL accumulates the commissions Binance reports for each fill (`FeeLedger`); the configured taker fee is only a fallback.
 
 ### 3.3 Execution Gateway (`BinanceGateway`)
 - Located at [`crates/adapters/src/binance_gateway.rs`](../../crates/adapters/src/binance_gateway.rs).

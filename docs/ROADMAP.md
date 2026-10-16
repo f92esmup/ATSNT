@@ -41,7 +41,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 
 ### Milestone 4: Real-Time Paper Trading Engine
 - [x] Connect `BacktestEngine` to live WebSocket stream.
-- [x] Real-time order matching against live bid/ask spreads.
+- [x] Bar-level fills through the same `BacktestEngine` (fixed slippage, no bid/ask book): see the fidelity gaps below.
 - [x] Mark-to-market live PnL and active position telemetry without risking capital.
 
 ---
@@ -82,6 +82,17 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] Local JSON reports and GCS Parquet exports removed; GCS keeps only deployment artifacts.
 - [x] Looker Studio report built from [`docs/architecture/11-looker-studio-bi-spec.md`](architecture/11-looker-studio-bi-spec.md).
 - [ ] Technical debt: model perpetual futures funding payments as cash-flow events.
+
+---
+
+### Simulation Fidelity (simulated vs live parity)
+*(Feature log: [`odd/tasks/sim-live-fidelity.md`](../odd/tasks/sim-live-fidelity.md))*
+- [x] Live sizing, drawdown limit and leverage cap come from the deployment artifact, as in the simulator.
+- [x] Live daily drawdown breaker uses the per-UTC-day peak, as in the simulator.
+- [x] Live PnL reports the commissions Binance charged instead of an estimate.
+- [ ] Known gaps, not yet modeled by the simulator: market-order entries with latency and tape-based slippage (entries fill at the signal bar close today), taker fee and slippage on take-profit exits, mark-price stop triggers, bid/ask spread, perpetual funding, liquidation, and live warm-up of rolling strategy windows.
+- [ ] Venue ports (`ExecutionVenue`, `Clock`, `MarketData`) so simulation, paper and live share one session core.
+- [ ] Single strategy registry and a generic contract suite for new strategies.
 
 ---
 

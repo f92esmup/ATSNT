@@ -24,8 +24,9 @@ fn default_min_order_notional() -> Decimal {
 
 /// Friction parameters and account risk settings for 1:1 realistic simulation.
 ///
-/// Implements the Zero-Toy-Assumption Principle specified in AGENTS.md,
-/// enforcing fee schedules, spreads, and latency slippage.
+/// Targets the Zero-Toy-Assumption Principle specified in AGENTS.md. Today it models fee
+/// schedules and a fixed per-fill slippage; bid/ask spread, latency and funding are not yet
+/// modeled (see `odd/tasks/sim-live-fidelity.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BacktestConfig {
     /// Starting capital in quote currency (USDT).
@@ -34,7 +35,8 @@ pub struct BacktestConfig {
     pub maker_fee_pct: Decimal,
     /// Exchange fee for market taker orders (e.g. 0.0005 = 0.05%).
     pub taker_fee_pct: Decimal,
-    /// Simulated latency and spread penalty on entry/exit (e.g. 0.0005 = 0.05%).
+    /// Fixed slippage penalty applied to market-style fills (e.g. 0.0005 = 0.05%); a stand-in
+    /// for spread and latency until those are modeled explicitly.
     pub slippage_pct: Decimal,
     /// Fixed fractional capital risk allocated per trade (e.g. 0.01 = 1.0%).
     pub risk_per_trade_pct: Decimal,
