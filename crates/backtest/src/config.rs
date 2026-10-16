@@ -31,12 +31,13 @@ fn default_min_order_notional() -> Decimal {
 pub struct BacktestConfig {
     /// Starting capital in quote currency (USDT).
     pub initial_capital: Decimal,
-    /// Exchange fee for limit maker orders (e.g. 0.0002 = 0.02%).
+    /// Exchange fee for limit maker orders (e.g. 0.0002 = 0.02%). The bar-level engine only
+    /// sends market orders, so it does not charge it yet.
     pub maker_fee_pct: Decimal,
     /// Exchange fee for market taker orders (e.g. 0.0005 = 0.05%).
     pub taker_fee_pct: Decimal,
-    /// Fixed slippage penalty applied to market-style fills (e.g. 0.0005 = 0.05%); a stand-in
-    /// for spread and latency until those are modeled explicitly.
+    /// Fixed slippage penalty applied to every market fill, entries and barrier exits (e.g.
+    /// 0.0005 = 0.05%); a stand-in for spread and latency until those are modeled explicitly.
     pub slippage_pct: Decimal,
     /// Fixed fractional capital risk allocated per trade (e.g. 0.01 = 1.0%).
     pub risk_per_trade_pct: Decimal,

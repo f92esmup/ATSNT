@@ -6,11 +6,20 @@ use crate::config::BacktestConfig;
 use crate::metrics::{BacktestMetrics, ClosedTrade, TradeExcursion};
 use crate::monthly_guard::utc_month_key;
 
+/// A submitted entry: the strategy intent and the quantity sized when it was signalled.
+#[derive(Debug, Clone)]
+struct PendingEntry {
+    intent: domain::OrderIntent,
+    quantity: Decimal,
+}
+
 /// Deterministic, discrete-event backtesting simulator.
 ///
-/// Models exchange fees, a fixed per-fill slippage, and Triple Barrier exits evaluated per
-/// bar. Entries fill at the signal bar close; tick-level fills, latency and funding are
-/// tracked in `odd/tasks/sim-live-fidelity.md`.
+/// Models exchange fees, a fixed per-fill slippage and Triple Barrier exits evaluated per bar.
+/// A signal becomes a market order that fills at the next bar's open (the first price after
+/// the signal); take-profit and stop exits are market orders too, so they pay taker fees and
+/// slippage and fill at the open when a bar gaps through the trigger. Tick-level fills,
+/// latency and funding are tracked in `odd/tasks/sim-live-fidelity.md`.
 #[derive(Debug, Clone)]
 pub struct BacktestEngine {
     config: BacktestConfig,
@@ -20,6 +29,8 @@ pub struct BacktestEngine {
     max_drawdown_pct: Decimal,
     active_position: Option<Position>,
     active_intent: Option<domain::OrderIntent>,
+    /// Market order sized at the signal bar and waiting for the next bar's open to fill.
+    pending_entry: Option<PendingEntry>,
     bars_held: usize,
     closed_trades: Vec<ClosedTrade>,
     entry_time: Option<i64>,
@@ -49,6 +60,7 @@ impl BacktestEngine {
             max_drawdown_pct: Decimal::ZERO,
             active_position: None,
             active_intent: None,
+            pending_entry: None,
             bars_held: 0,
             closed_trades: Vec::new(),
             entry_time: None,
@@ -139,6 +151,12 @@ impl BacktestEngine {
         self.active_position.as_ref()
     }
 
+    /// Returns the intent of the market order waiting to fill at the next bar's open, if any.
+    #[inline]
+    pub fn pending_intent(&self) -> Option<&domain::OrderIntent> {
+        self.pending_entry.as_ref().map(|pending| &pending.intent)
+    }
+
     /// Returns the active order intent for the current position, if any.
     #[inline]
     pub fn active_intent(&self) -> Option<&domain::OrderIntent> {
@@ -204,6 +222,11 @@ impl BacktestEngine {
             self.monthly_open_equity = mark_before;
         }
 
+        // 0. A market order submitted on the previous bar fills at this bar's open.
+        if let Some(pending) = self.pending_entry.take() {
+            self.fill_entry(pending, bar);
+        }
+
         let had_position = self.active_position.is_some();
         let trades_before = self.closed_trades.len();
 
@@ -234,10 +257,23 @@ impl BacktestEngine {
             }
         }
 
-        // 2. If no position was active at the start of this bar, query the strategy for signals
-        if !had_position && !self.halted {
-            if let Some(intent) = strategy.on_bar(bar) {
-                self.evaluate_entry(intent, bar.close, bar.end_time);
+        // 2. The strategy sees every bar so its rolling state matches the live session; a
+        //    signal only becomes an order when flat. A time-barrier close is sent at the end of
+        //    the bar and is still settling live, so that bar cannot open a new trade.
+        if !self.halted {
+            let signal = strategy.on_bar(bar);
+            let closed_by_time_barrier = self.closed_trades.len() > trades_before
+                && self
+                    .closed_trades
+                    .last()
+                    .is_some_and(|trade| trade.exit_reason == "TimeBarrier");
+            if let Some(intent) = signal {
+                if self.active_position.is_none()
+                    && self.pending_entry.is_none()
+                    && !closed_by_time_barrier
+                {
+                    self.submit_entry(intent, bar.close);
+                }
             }
         }
 
@@ -297,21 +333,29 @@ impl BacktestEngine {
 
         let mut exit_fill: Option<(Decimal, Decimal, bool, &'static str)> = None; // (exit_price, slippage, is_taker, exit_reason)
 
+        // Barrier exits are market orders: they fill at the trigger or, when the bar gapped
+        // through it, at the open, and pay slippage against the position. The reported
+        // slippage is measured against the trigger so it includes the gap.
+        let pct = self.config.slippage_pct;
         match pos.side {
             PositionSide::Long => {
                 // Stop Loss breach (price traded through barrier)
                 if bar.low <= intent.stop_loss {
-                    let slip = intent.stop_loss * self.config.slippage_pct;
-                    let fill_price = intent.stop_loss - slip;
-                    exit_fill = Some((fill_price, slip, true, "StopLoss"));
+                    let reference = intent.stop_loss.min(bar.open);
+                    let fill_price = reference - reference * pct;
+                    let slippage = (intent.stop_loss - fill_price).max(Decimal::ZERO);
+                    exit_fill = Some((fill_price, slippage, true, "StopLoss"));
                 }
                 // Take Profit hit
                 else if bar.high >= intent.take_profit {
-                    exit_fill = Some((intent.take_profit, Decimal::ZERO, false, "TakeProfit"));
+                    let reference = intent.take_profit.max(bar.open);
+                    let fill_price = reference - reference * pct;
+                    let slippage = (intent.take_profit - fill_price).max(Decimal::ZERO);
+                    exit_fill = Some((fill_price, slippage, true, "TakeProfit"));
                 }
                 // Time barrier reached
                 else if self.bars_held >= intent.max_bars_hold {
-                    let slip = bar.close * self.config.slippage_pct;
+                    let slip = bar.close * pct;
                     let fill_price = bar.close - slip;
                     exit_fill = Some((fill_price, slip, true, "TimeBarrier"));
                 }
@@ -319,17 +363,21 @@ impl BacktestEngine {
             PositionSide::Short => {
                 // Stop Loss breach
                 if bar.high >= intent.stop_loss {
-                    let slip = intent.stop_loss * self.config.slippage_pct;
-                    let fill_price = intent.stop_loss + slip;
-                    exit_fill = Some((fill_price, slip, true, "StopLoss"));
+                    let reference = intent.stop_loss.max(bar.open);
+                    let fill_price = reference + reference * pct;
+                    let slippage = (fill_price - intent.stop_loss).max(Decimal::ZERO);
+                    exit_fill = Some((fill_price, slippage, true, "StopLoss"));
                 }
                 // Take Profit hit
                 else if bar.low <= intent.take_profit {
-                    exit_fill = Some((intent.take_profit, Decimal::ZERO, false, "TakeProfit"));
+                    let reference = intent.take_profit.min(bar.open);
+                    let fill_price = reference + reference * pct;
+                    let slippage = (fill_price - intent.take_profit).max(Decimal::ZERO);
+                    exit_fill = Some((fill_price, slippage, true, "TakeProfit"));
                 }
                 // Time barrier reached
                 else if self.bars_held >= intent.max_bars_hold {
-                    let slip = bar.close * self.config.slippage_pct;
+                    let slip = bar.close * pct;
                     let fill_price = bar.close + slip;
                     exit_fill = Some((fill_price, slip, true, "TimeBarrier"));
                 }
@@ -347,27 +395,13 @@ impl BacktestEngine {
         }
     }
 
-    fn evaluate_entry(
-        &mut self,
-        intent: domain::OrderIntent,
-        mark_price: Decimal,
-        entry_time: i64,
-    ) {
+    /// Gates and sizes a signal exactly like the live gateway (at the signal price) and queues
+    /// the market order; it fills at the next bar's open.
+    fn submit_entry(&mut self, intent: domain::OrderIntent, mark_price: Decimal) {
         // If daily circuit breaker is tripped, halt trading for the remainder of today
         if self.daily_circuit_breaker_tripped {
             return;
         }
-
-        let (fill_price, slippage_per_unit) = match intent.side {
-            Side::Buy => {
-                let slip = intent.price * self.config.slippage_pct;
-                (intent.price + slip, slip)
-            }
-            Side::Sell => {
-                let slip = intent.price * self.config.slippage_pct;
-                (intent.price - slip, slip)
-            }
-        };
 
         let Ok(current_daily_drawdown_pct) = self.current_daily_drawdown_pct_at(mark_price) else {
             return;
@@ -378,7 +412,7 @@ impl BacktestEngine {
         let mark_to_market_equity = self.total_equity(mark_price);
         let Ok(quantity) = risk_policy.size_order(
             &intent,
-            fill_price,
+            intent.price,
             mark_to_market_equity,
             self.config.risk_per_trade_pct,
             Decimal::ZERO,
@@ -386,13 +420,30 @@ impl BacktestEngine {
         ) else {
             return;
         };
+        self.pending_entry = Some(PendingEntry { intent, quantity });
+    }
+
+    /// Fills a pending market order at the bar's open plus adverse slippage.
+    fn fill_entry(&mut self, pending: PendingEntry, bar: &DollarBar) {
+        if self.halted {
+            return;
+        }
+        let PendingEntry { intent, quantity } = pending;
+        let slip = bar.open * self.config.slippage_pct;
+        let fill_price = match intent.side {
+            Side::Buy => bar.open + slip,
+            Side::Sell => bar.open - slip,
+        };
 
         // Entry Fee (Taker)
-        let entry_notional = fill_price * quantity;
-        let entry_fee = entry_notional * self.config.taker_fee_pct;
-        let entry_slippage = slippage_per_unit * quantity;
+        let entry_fee = fill_price * quantity * self.config.taker_fee_pct;
         // Slippage is already embedded in fill_price; do not deduct from cash equity here
         self.equity -= entry_fee;
+        // Reported slippage is the adverse distance from the signal price, gap included.
+        let adverse_per_unit = match intent.side {
+            Side::Buy => (fill_price - intent.price).max(Decimal::ZERO),
+            Side::Sell => (intent.price - fill_price).max(Decimal::ZERO),
+        };
 
         let pos_side = match intent.side {
             Side::Buy => PositionSide::Long,
@@ -403,9 +454,9 @@ impl BacktestEngine {
             self.active_position = Some(pos);
             self.active_intent = Some(intent);
             self.bars_held = 0;
-            self.entry_time = Some(entry_time);
+            self.entry_time = Some(bar.start_time);
             self.entry_fee = entry_fee;
-            self.entry_slippage = entry_slippage;
+            self.entry_slippage = adverse_per_unit * quantity;
         }
     }
 
@@ -511,7 +562,226 @@ impl BacktestEngine {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
-    use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy};
+    use std::collections::VecDeque;
+    use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType};
+
+    /// Emits one scripted decision per bar and counts how many bars it was shown.
+    struct Scripted {
+        decisions: VecDeque<Option<domain::OrderIntent>>,
+        bars_seen: usize,
+    }
+
+    impl Scripted {
+        fn new(decisions: Vec<Option<domain::OrderIntent>>) -> Self {
+            Self {
+                decisions: decisions.into(),
+                bars_seen: 0,
+            }
+        }
+    }
+
+    impl Strategy for Scripted {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+
+        fn compatible_market_types(&self) -> &'static [MarketType] {
+            &[MarketType::UsdMPerpetual]
+        }
+
+        fn on_bar(&mut self, _: &DollarBar) -> Option<domain::OrderIntent> {
+            self.bars_seen += 1;
+            self.decisions.pop_front().flatten()
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    /// Long intent at 100 with SL 95, TP 110 and the given time barrier.
+    fn long_intent(max_bars_hold: usize) -> Option<domain::OrderIntent> {
+        Some(
+            domain::OrderIntent::new(1, Side::Buy, dec!(100), dec!(95), dec!(110), max_bars_hold)
+                .unwrap(),
+        )
+    }
+
+    fn realistic_engine() -> BacktestEngine {
+        BacktestEngine::new(BacktestConfig {
+            initial_capital: dec!(10_000),
+            maker_fee_pct: dec!(0.0002),
+            taker_fee_pct: dec!(0.0005),
+            slippage_pct: dec!(0.01),
+            risk_per_trade_pct: dec!(0.01),
+            max_daily_drawdown_pct: dec!(0.50),
+            ..BacktestConfig::default()
+        })
+    }
+
+    fn ohlc_bar(
+        time: i64,
+        open: Decimal,
+        high: Decimal,
+        low: Decimal,
+        close: Decimal,
+    ) -> DollarBar {
+        create_test_bar(time, open, high, low, close)
+    }
+
+    #[test]
+    fn the_strategy_sees_every_bar_even_while_a_position_is_open() {
+        let mut engine = realistic_engine();
+        let mut strategy = Scripted::new(vec![long_intent(50), None, None, None]);
+
+        for (i, price) in [dec!(100), dec!(100), dec!(101), dec!(102)]
+            .iter()
+            .enumerate()
+        {
+            let t = 1000 * (i as i64 + 1);
+            engine.process_bar(&mut strategy, &ohlc_bar(t, *price, *price, *price, *price));
+        }
+
+        assert!(engine.active_position().is_some());
+        assert_eq!(strategy.bars_seen, 4);
+    }
+
+    #[test]
+    fn a_market_entry_fills_at_the_next_bar_open_with_slippage() {
+        let mut engine = realistic_engine();
+        let mut strategy = Scripted::new(vec![long_intent(50), None]);
+
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+        assert!(
+            engine.active_position().is_none(),
+            "the order only exists after the signal bar"
+        );
+
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(2000, dec!(102), dec!(103), dec!(101), dec!(102)),
+        );
+
+        let position = engine.active_position().expect("filled at the next bar");
+        // Open 102 plus 1% slippage; sized at the signal price: 10_000 * 1% / (100 - 95) = 20.
+        assert_eq!(position.entry_price, dec!(103.02));
+        assert_eq!(position.quantity, dec!(20));
+        assert_eq!(engine.bars_held(), 1);
+    }
+
+    #[test]
+    fn take_profit_is_a_taker_exit_with_slippage() {
+        let mut engine = realistic_engine();
+        let mut strategy = Scripted::new(vec![long_intent(50), None, None]);
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(2000, dec!(100), dec!(101), dec!(99), dec!(100)),
+        );
+
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(3000, dec!(101), dec!(112), dec!(100), dec!(111)),
+        );
+
+        let (_, trades) = engine.finish_with_trades(None);
+        let trade = &trades[0];
+        assert_eq!(trade.exit_reason, "TakeProfit");
+        // Trigger 110, market sell: one percent worse than the trigger.
+        assert_eq!(trade.exit_price, dec!(108.9));
+        let entry_fee = trade.entry_price * trade.quantity * dec!(0.0005);
+        let exit_fee = trade.exit_price * trade.quantity * dec!(0.0005);
+        assert_eq!(trade.fees_paid, entry_fee + exit_fee);
+    }
+
+    #[test]
+    fn a_stop_through_a_gap_fills_at_the_open_not_at_the_trigger() {
+        let mut engine = realistic_engine();
+        let mut strategy = Scripted::new(vec![long_intent(50), None, None]);
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(2000, dec!(100), dec!(101), dec!(99), dec!(100)),
+        );
+
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(3000, dec!(90), dec!(91), dec!(89), dec!(90)),
+        );
+
+        let (_, trades) = engine.finish_with_trades(None);
+        assert_eq!(trades[0].exit_reason, "StopLoss");
+        // Gapped below the 95 stop: filled around the 90 open, minus slippage.
+        assert_eq!(trades[0].exit_price, dec!(89.1));
+    }
+
+    #[test]
+    fn a_take_profit_gap_in_favor_fills_at_the_open() {
+        let mut engine = realistic_engine();
+        let mut strategy = Scripted::new(vec![long_intent(50), None, None]);
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(2000, dec!(100), dec!(101), dec!(99), dec!(100)),
+        );
+
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(3000, dec!(120), dec!(121), dec!(119), dec!(120)),
+        );
+
+        let (_, trades) = engine.finish_with_trades(None);
+        assert_eq!(trades[0].exit_reason, "TakeProfit");
+        assert_eq!(trades[0].exit_price, dec!(118.8));
+    }
+
+    #[test]
+    fn no_entry_is_taken_on_the_bar_where_the_time_barrier_closed_the_position() {
+        let mut engine = realistic_engine();
+        // Signal, fill bar, time-barrier bar (which also signals again), one more bar.
+        let mut strategy = Scripted::new(vec![long_intent(2), None, long_intent(50), None]);
+
+        for (i, price) in [dec!(100), dec!(100), dec!(100), dec!(100)]
+            .iter()
+            .enumerate()
+        {
+            let t = 1000 * (i as i64 + 1);
+            engine.process_bar(
+                &mut strategy,
+                &ohlc_bar(t, *price, *price + dec!(1), *price - dec!(1), *price),
+            );
+        }
+
+        assert!(engine.active_position().is_none());
+        let (_, trades) = engine.finish_with_trades(None);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].exit_reason, "TimeBarrier");
+    }
+
+    #[test]
+    fn an_order_still_pending_when_the_data_ends_never_trades() {
+        let mut engine = realistic_engine();
+        let mut strategy = Scripted::new(vec![long_intent(50)]);
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+
+        let (metrics, trades) = engine.finish_with_trades(Some(dec!(100)));
+
+        assert!(trades.is_empty());
+        assert_eq!(metrics.total_trades, 0);
+    }
 
     fn create_test_bar(
         time: i64,
@@ -598,12 +868,22 @@ mod tests {
             &mut strategy,
             &create_test_bar(5000, dec!(90), dec!(91), dec!(89), dec!(90)),
         );
+        assert!(
+            engine.active_position.is_none(),
+            "the order fills on the next bar"
+        );
+
+        // Next bar: the market order fills at its open (flat bar, no barrier is touched).
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(6000, dec!(90), dec!(90), dec!(90), dec!(90)),
+        );
         assert!(engine.active_position.is_some());
 
         // Rebound back above mean (100) -> Take profit hit!
         engine.process_bar(
             &mut strategy,
-            &create_test_bar(6000, dec!(95), dec!(102), dec!(94), dec!(100)),
+            &create_test_bar(7000, dec!(95), dec!(102), dec!(94), dec!(100)),
         );
         assert!(engine.active_position.is_none());
 
@@ -653,12 +933,22 @@ mod tests {
             &mut strategy,
             &create_test_bar(5000, dec!(90), dec!(91), dec!(89), dec!(90)),
         );
+        assert!(
+            engine.active_position.is_none(),
+            "the order fills on the next bar"
+        );
+
+        // Next bar: the market order fills at its open (flat bar, no barrier is touched).
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(6000, dec!(90), dec!(90), dec!(90), dec!(90)),
+        );
         assert!(engine.active_position.is_some());
 
         // Further crash to 70 -> hits Stop Loss!
         engine.process_bar(
             &mut strategy,
-            &create_test_bar(6000, dec!(80), dec!(81), dec!(69), dec!(70)),
+            &create_test_bar(7000, dec!(80), dec!(81), dec!(69), dec!(70)),
         );
         assert!(engine.active_position.is_none());
 
@@ -702,19 +992,20 @@ mod tests {
             &create_test_bar(4000, dec!(100), dec!(100), dec!(100), dec!(100)),
         );
 
-        // Entry
+        // Signal
         engine.process_bar(
             &mut strategy,
             &create_test_bar(5000, dec!(90), dec!(91), dec!(89), dec!(90)),
         );
-        assert!(engine.active_position.is_some());
+        assert!(engine.active_position.is_none());
 
-        // Bar 1 of hold (within barrier)
+        // The market order fills at this bar's open: bar 1 of the hold (within barrier)
         engine.process_bar(
             &mut strategy,
             &create_test_bar(6000, dec!(91), dec!(92), dec!(89), dec!(91)),
         );
         assert!(engine.active_position.is_some());
+        assert_eq!(engine.bars_held(), 1);
 
         // Bar 2 of hold -> reaches time_barrier_bars (2) -> Forced market close!
         engine.process_bar(
@@ -768,19 +1059,24 @@ mod tests {
             &create_test_bar(4000, dec!(100), dec!(100), dec!(100), dec!(100)),
         );
 
-        // Plunge to 90 -> triggers Long entry
-        // fill_price = 90 + (90 * 0.01) = 90.90
+        // Plunge to 90 -> triggers the Long signal
         engine.process_bar(
             &mut strategy,
             &create_test_bar(5000, dec!(90), dec!(91), dec!(89), dec!(90)),
         );
-        assert!(engine.active_position.is_some());
+        assert!(engine.active_position.is_none());
 
-        // Rebound back above mean (100) -> Take profit hit at 100!
-        // exit_price = 100.00 (maker exit at TP, zero exit slippage)
+        // The order fills at the next open: fill_price = 90 + (90 * 0.01) = 90.90
         engine.process_bar(
             &mut strategy,
-            &create_test_bar(6000, dec!(95), dec!(102), dec!(94), dec!(100)),
+            &create_test_bar(6000, dec!(90), dec!(90), dec!(90), dec!(90)),
+        );
+        assert!(engine.active_position.is_some());
+
+        // Rebound back above mean (100) -> Take profit hit: a taker exit that pays slippage too.
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(7000, dec!(95), dec!(102), dec!(94), dec!(100)),
         );
         assert!(engine.active_position.is_none());
 
@@ -842,17 +1138,23 @@ mod tests {
             &create_test_bar(day_1_ms + 3000, dec!(100), dec!(100), dec!(100), dec!(100)),
         );
 
-        // Day 1: Plunge to 90 -> triggers Long entry
+        // Day 1: Plunge to 90 -> triggers the Long signal; it fills on the next bar's open
         engine.process_bar(
             &mut strategy,
             &create_test_bar(day_1_ms + 4000, dec!(90), dec!(91), dec!(89), dec!(90)),
         );
-        assert!(engine.active_position.is_some());
-
-        // Day 1: Crash to 70 -> hits Stop Loss and loses >5% of account!
+        assert!(engine.active_position.is_none());
         engine.process_bar(
             &mut strategy,
-            &create_test_bar(day_1_ms + 5000, dec!(80), dec!(81), dec!(69), dec!(70)),
+            &create_test_bar(day_1_ms + 4500, dec!(90), dec!(90), dec!(90), dec!(90)),
+        );
+        assert!(engine.active_position.is_some());
+
+        // Day 1: Crash through the stop without a gap (it opens at the entry price) -> the stop
+        // fills near its trigger and the loss exceeds 5% of the account, tripping the breaker.
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_1_ms + 5000, dec!(90), dec!(90), dec!(69), dec!(70)),
         );
         assert!(engine.active_position.is_none());
         assert!(engine.daily_circuit_breaker_tripped);
@@ -891,10 +1193,14 @@ mod tests {
             &create_test_bar(day_2_ms + 3000, dec!(60), dec!(60), dec!(60), dec!(60)),
         );
 
-        // Day 2: Plunge to 50 -> triggers entry on Day 2 successfully!
+        // Day 2: Plunge to 50 -> triggers the signal; the order fills on the next bar
         engine.process_bar(
             &mut strategy,
             &create_test_bar(day_2_ms + 4000, dec!(50), dec!(51), dec!(49), dec!(50)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &create_test_bar(day_2_ms + 4500, dec!(50), dec!(50), dec!(50), dec!(50)),
         );
         assert!(
             engine.active_position.is_some(),
@@ -962,6 +1268,11 @@ mod tests {
         let mut strategy = ScriptedLong { stop: dec!(1) };
 
         engine.process_bar(&mut strategy, &flat_bar(JAN_1, dec!(100)));
+        assert!(
+            engine.active_position().is_none(),
+            "the order fills on the next bar"
+        );
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 500, dec!(100)));
         assert!(engine.active_position().is_some());
 
         // Mark-to-market loss of ~14% of equity while far from the stop.
@@ -987,6 +1298,7 @@ mod tests {
         let mut strategy = ScriptedLong { stop: dec!(1) };
 
         engine.process_bar(&mut strategy, &flat_bar(JAN_1, dec!(100)));
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 500, dec!(100)));
         engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 1_000, dec!(85)));
 
         assert!(!engine.is_halted());
@@ -999,9 +1311,13 @@ mod tests {
         let mut strategy = ScriptedLong { stop: dec!(50) };
 
         engine.process_bar(&mut strategy, &flat_bar(JAN_1, dec!(100)));
-        assert!(engine.active_position().is_some());
+        assert!(
+            engine.active_position().is_none(),
+            "the order fills on the next bar"
+        );
 
-        // Stop-loss breach: ~20% loss trips the daily breaker.
+        // The order fills at this bar's open and the same bar breaches the stop:
+        // a ~20% loss trips the daily breaker.
         engine.process_bar(
             &mut strategy,
             &create_test_bar(JAN_1 + 1_000, dec!(100), dec!(100), dec!(40), dec!(45)),
@@ -1013,8 +1329,10 @@ mod tests {
         engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 2_000, dec!(100)));
         assert!(engine.active_position().is_none());
 
-        // Next UTC day at 00:00: breaker resets and trading resumes.
+        // Next UTC day at 00:00: the breaker resets, the strategy signals again and the
+        // order fills on the following bar.
         engine.process_bar(&mut strategy, &flat_bar(JAN_1 + DAY, dec!(100)));
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + DAY + 500, dec!(100)));
         assert!(engine.active_position().is_some());
         assert!(!engine.is_halted());
     }
@@ -1026,6 +1344,7 @@ mod tests {
 
         // Open, rally (gain ~+4.5% of equity), then fall back to a level still above month open.
         engine.process_bar(&mut strategy, &flat_bar(JAN_1, dec!(100)));
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 500, dec!(100)));
         engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 1_000, dec!(105)));
         engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 2_000, dec!(92)));
 
@@ -1040,6 +1359,7 @@ mod tests {
         let mut strategy = ScriptedLong { stop: dec!(1) };
 
         engine.process_bar(&mut strategy, &flat_bar(JAN_1, dec!(100)));
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 500, dec!(100)));
         // A slow bleed that never breaches 10% inside one month keeps the run alive...
         engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 1_000, dec!(95)));
         assert!(!engine.is_halted());
@@ -1054,6 +1374,7 @@ mod tests {
         let mut strategy = ScriptedLong { stop: dec!(1) };
 
         engine.process_bar(&mut strategy, &flat_bar(JAN_1, dec!(100)));
+        engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 500, dec!(100)));
         engine.process_bar(&mut strategy, &flat_bar(JAN_1 + 1_000, dec!(85)));
 
         assert!(engine.is_halted());

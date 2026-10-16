@@ -30,7 +30,8 @@ fn configured_session_preserves_raw_events_and_market_metadata() {
         (2000, dec!(101), dec!(1)),
         (3000, dec!(99), dec!(1.1)),
         (4000, dec!(100), dec!(1)),
-        (5000, dec!(90), dec!(1.5)),
+        (5000, dec!(90), dec!(1.5)), // signal: the market order fills on the next bar
+        (5200, dec!(90), dec!(1.5)), // fill bar: the position opens at its open
         (5500, dec!(91), dec!(0.1)),
         (6000, dec!(101), dec!(1)),
     ] {

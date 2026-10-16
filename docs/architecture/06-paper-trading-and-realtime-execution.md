@@ -66,14 +66,15 @@ pub trait AsyncMarketDataStream {
 ATSNT enforces the **Zero-Toy-Assumption Principle**:
 
 1. **Entry Friction**:
-   - Market order entries pay **Taker Fee** ($0.05\%$ default on Binance Futures).
-   - Latency slippage penalty ($0.05\%$ default) shifts the fill price away from the signal price:
-     $$\text{Fill}_{\text{Buy}} = P \cdot (1 + \text{Slippage}), \quad \text{Fill}_{\text{Sell}} = P \cdot (1 - \text{Slippage})$$
+   - A strategy signal becomes a **market order** sized at the signal price (the same sizing the live gateway uses). It cannot fill on the bar that produced the signal, because that bar has already closed: it fills at the **next bar's open**.
+   - Market entries pay the **Taker Fee** ($0.05\%$ default on Binance Futures) and a slippage penalty ($0.05\%$ default) that moves the fill away from that open:
+     $$\text{Fill}_{\text{Buy}} = O_{k+1} \cdot (1 + \text{Slippage}), \quad \text{Fill}_{\text{Sell}} = O_{k+1} \cdot (1 - \text{Slippage})$$
+   - The strategy sees **every** bar, also while a position is open, exactly like the live session, so its rolling state (windows, accumulators) is identical in both. Signals only turn into orders while flat; a bar whose time barrier just closed a position cannot open a new one (the close is still settling live).
 
-2. **Triple Barrier Exits**:
-   - **Stop Loss**: Triggered when bar price breaches the stop loss level. Executed as a taker market order with slippage.
-   - **Take Profit**: Resting limit order hit when bar price touches the target level. Executed as a maker order ($0.02\%$ fee) with zero slippage.
-   - **Time Barrier**: Forced market exit after holding a position for $N$ consecutive Dollar Bars (e.g. 15 bars). Executed with taker fee and slippage.
+2. **Triple Barrier Exits** (all are market orders: taker fee plus slippage against the position):
+   - **Stop Loss**: Triggered when the bar breaches the stop level. Fills at the stop or, if the bar opened beyond it (a gap), at the open, minus slippage.
+   - **Take Profit**: Triggered when the bar touches the target (`TAKE_PROFIT_MARKET` live). Fills at the target or, on a favorable gap, at the open, minus slippage. When one bar touches both barriers the stop wins.
+   - **Time Barrier**: Forced market exit after holding a position for $N$ consecutive Dollar Bars (e.g. 15 bars; the fill bar counts as the first). Executed at the bar close with taker fee and slippage.
 
 3. **Mark-to-Market Telemetry**:
    - On every incoming trade tick, if a position is active, the session computes:

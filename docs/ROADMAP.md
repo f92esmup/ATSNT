@@ -90,7 +90,8 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] Live sizing, drawdown limit and leverage cap come from the deployment artifact, as in the simulator.
 - [x] Live daily drawdown breaker uses the per-UTC-day peak, as in the simulator.
 - [x] Live PnL reports the commissions Binance charged instead of an estimate.
-- [ ] Known gaps, not yet modeled by the simulator: market-order entries with latency and tape-based slippage (entries fill at the signal bar close today), taker fee and slippage on take-profit exits, mark-price stop triggers, bid/ask spread, perpetual funding, liquidation, and live warm-up of rolling strategy windows.
+- [x] Bar-level engine: entries are market orders that fill at the next bar's open, the strategy sees every bar, TP/SL exits are taker orders with slippage and gap-aware fills.
+- [ ] Known gaps, not yet modeled by the simulator: tick-level fills with latency and tape-based slippage, mark-price stop triggers, bid/ask spread, perpetual funding, liquidation, and live warm-up of rolling strategy windows.
 - [ ] Venue ports (`ExecutionVenue`, `Clock`, `MarketData`) so simulation, paper and live share one session core.
 - [ ] Single strategy registry and a generic contract suite for new strategies.
 

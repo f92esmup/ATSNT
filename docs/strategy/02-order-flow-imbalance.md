@@ -144,4 +144,4 @@ flowchart TD
 2. **Circuit Breaker Rollover**:
    Drawdown is evaluated against session peak equity and resets every calendar day at **00:00:00 UTC**, preserving multi-month backtesting and long-term production execution without premature permanent halts.
 3. **Execution Context Parity**:
-   Every backtest and HPO trial evaluates against realistic maker fees ($0.02\%$), taker fees ($0.05\%$), and slippage penalties ($0.05\%$).
+   Every backtest and HPO trial evaluates against realistic taker fees ($0.05\%$) and slippage penalties ($0.05\%$): entries and barrier exits are market orders.

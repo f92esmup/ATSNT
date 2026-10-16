@@ -293,81 +293,46 @@ impl PaperTradingSession {
         if let Some(bar) = self.aggregator.process_trade(trade) {
             events.push(PaperTradingEvent::BarFormed(bar.clone()));
 
-            let had_pos = self.engine.active_position().cloned();
-            let had_intent = self.engine.active_intent().cloned();
-            let next_bars_held = self.engine.bars_held() + 1;
+            let pending_before = self.engine.pending_intent().cloned();
+            let trades_before = self.engine.closed_trades().len();
 
             self.engine.process_bar(&mut self.strategy, &bar);
 
-            // Check if active position closed
-            if let (Some(pos), Some(intent)) = (had_pos, had_intent) {
-                if self.engine.active_position().is_none() {
-                    let exit_reason = match pos.side {
-                        PositionSide::Long => {
-                            if bar.low <= intent.stop_loss {
-                                "StopLoss"
-                            } else if bar.high >= intent.take_profit {
-                                "TakeProfit"
-                            } else if next_bars_held >= intent.max_bars_hold {
-                                "TimeBarrier"
-                            } else {
-                                "Unknown"
-                            }
-                        }
-                        PositionSide::Short => {
-                            if bar.high >= intent.stop_loss {
-                                "StopLoss"
-                            } else if bar.low <= intent.take_profit {
-                                "TakeProfit"
-                            } else if next_bars_held >= intent.max_bars_hold {
-                                "TimeBarrier"
-                            } else {
-                                "Unknown"
-                            }
-                        }
-                    };
+            let new_trades: Vec<ClosedTrade> =
+                self.engine.closed_trades()[trades_before..].to_vec();
 
-                    if let Some(closed_trade) = self.engine.closed_trades().last() {
-                        // The monthly kill-switch exits at market, not through a barrier.
-                        let exit_reason = if closed_trade.exit_reason == "MonthlyCircuitBreaker" {
-                            "MonthlyCircuitBreaker"
-                        } else {
-                            exit_reason
-                        };
-                        let exit_price = if pos.quantity > Decimal::ZERO {
-                            match pos.side {
-                                PositionSide::Long => {
-                                    pos.entry_price + (closed_trade.pnl_gross / pos.quantity)
-                                }
-                                PositionSide::Short => {
-                                    pos.entry_price - (closed_trade.pnl_gross / pos.quantity)
-                                }
-                            }
-                        } else {
-                            bar.close
-                        };
-
-                        events.push(PaperTradingEvent::PositionClosed {
-                            exit_reason: exit_reason.to_string(),
-                            exit_price,
-                            net_pnl: closed_trade.pnl_net,
-                            total_equity: self.engine.cash_equity(),
-                        });
-                    }
-                }
-            } else if self.engine.active_position().is_some() {
-                // A new position opened
-                if let (Some(pos), Some(intent)) =
-                    (self.engine.active_position(), self.engine.active_intent())
-                {
-                    events.push(PaperTradingEvent::SignalGenerated(intent.clone()));
+            // A market order submitted on the previous bar fills at this bar's open.
+            if let Some(intent) = &pending_before {
+                let opened = match (self.engine.active_position(), new_trades.first()) {
+                    (Some(pos), _) => Some((pos.side, pos.entry_price, pos.quantity)),
+                    (None, Some(trade)) => Some((trade.side, trade.entry_price, trade.quantity)),
+                    // Dropped: the monthly breaker halted the session before the fill.
+                    (None, None) => None,
+                };
+                if let Some((side, entry_price, quantity)) = opened {
                     events.push(PaperTradingEvent::PositionOpened {
-                        side: pos.side,
-                        entry_price: pos.entry_price,
-                        quantity: pos.quantity,
+                        side,
+                        entry_price,
+                        quantity,
                         stop_loss: intent.stop_loss,
                         take_profit: intent.take_profit,
                     });
+                }
+            }
+
+            for trade in &new_trades {
+                events.push(PaperTradingEvent::PositionClosed {
+                    exit_reason: trade.exit_reason.clone(),
+                    exit_price: trade.exit_price,
+                    net_pnl: trade.pnl_net,
+                    total_equity: self.engine.cash_equity(),
+                });
+            }
+
+            // A signal was accepted: its market order waits for the next bar's open.
+            if pending_before.is_none() {
+                if let Some(intent) = self.engine.pending_intent() {
+                    events.push(PaperTradingEvent::SignalGenerated(intent.clone()));
                 }
             }
         }
@@ -650,15 +615,17 @@ mod tests {
         let plunge_trade = make_trade(5000, dec!(90), dec!(1.5), Side::Sell);
         let plunge_events = session.process_trade(&plunge_trade);
 
-        assert!(session.active_position().is_some());
-        let pos = session.active_position().unwrap();
-        assert_eq!(pos.side, PositionSide::Long);
-
-        // Verify SignalGenerated and PositionOpened events were emitted
+        // The signal is accepted, but the market order only fills on the next bar's open.
+        assert!(session.active_position().is_none());
         assert!(plunge_events
             .iter()
             .any(|e| matches!(e, PaperTradingEvent::SignalGenerated(_))));
-        assert!(plunge_events
+
+        let fill_events = session.process_trade(&make_trade(5200, dec!(90), dec!(1.5), Side::Buy));
+        assert!(session.active_position().is_some());
+        let pos = session.active_position().unwrap();
+        assert_eq!(pos.side, PositionSide::Long);
+        assert!(fill_events
             .iter()
             .any(|e| matches!(e, PaperTradingEvent::PositionOpened { .. })));
 
@@ -737,8 +704,10 @@ mod tests {
             session.process_trade(&make_trade(ts, *p, dec!(1.0), Side::Buy));
         }
 
-        // Long entry on dip
+        // Long signal on dip; the order fills on the next bar's open
         session.process_trade(&make_trade(5000, dec!(90), dec!(1.5), Side::Sell));
+        assert!(session.active_position().is_none());
+        session.process_trade(&make_trade(5500, dec!(90), dec!(1.5), Side::Buy));
         assert!(session.active_position().is_some());
 
         // Price crashes further to 70 -> Stop Loss
@@ -790,6 +759,7 @@ mod tests {
             session.process_trade(&make_trade((i as i64 + 1) * 1000, *p, dec!(1.0), Side::Buy));
         }
         session.process_trade(&make_trade(5000, dec!(90), dec!(1.5), Side::Sell));
+        session.process_trade(&make_trade(5500, dec!(90), dec!(1.5), Side::Buy));
         assert!(session.active_position().is_some());
 
         let crash_events =
@@ -843,11 +813,11 @@ mod tests {
             session.process_trade(&make_trade(ts, *p, dec!(1.0), Side::Buy));
         }
 
-        // Enter Long
+        // Long signal: the order fills at the next bar's open
         session.process_trade(&make_trade(5000, dec!(90), dec!(1.5), Side::Sell));
-        assert!(session.active_position().is_some());
+        assert!(session.active_position().is_none());
 
-        // Bar 1 of holding: price stays near 90
+        // Bar 1 of holding (the fill bar): price stays near 90
         session.process_trade(&make_trade(6000, dec!(90.1), dec!(1.2), Side::Buy));
         assert!(session.active_position().is_some());
         assert_eq!(session.bars_held(), 1);
@@ -893,8 +863,9 @@ mod tests {
             session.process_trade(&make_trade(ts, *p, dec!(1.0), Side::Buy));
         }
 
-        // Enter Long
+        // Long signal, then the fill bar
         session.process_trade(&make_trade(5000, dec!(90), dec!(1.5), Side::Sell));
+        session.process_trade(&make_trade(5500, dec!(90), dec!(1.5), Side::Buy));
         assert!(session.active_position().is_some());
 
         // Terminate session with mark price of 95
@@ -954,9 +925,16 @@ mod tests {
         config.strategy.z_stop_threshold = dec!(3);
         config.strategy.time_barrier_bars = 10;
         let (mut owner, input) = PaperSessionOwner::new(config, None, events).unwrap();
-        for (i, price) in [dec!(100), dec!(101), dec!(99), dec!(100), dec!(90)]
-            .into_iter()
-            .enumerate()
+        for (i, price) in [
+            dec!(100),
+            dec!(101),
+            dec!(99),
+            dec!(100),
+            dec!(90),
+            dec!(90),
+        ]
+        .into_iter()
+        .enumerate()
         {
             owner.session.process_trade(
                 &Trade::new((i as i64 + 1) * 1000, price, dec!(1.5), Side::Buy).unwrap(),
