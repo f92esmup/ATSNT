@@ -104,6 +104,8 @@ pub struct ExitManager {
     symbol: String,
     position: Option<TrackedPosition>,
     cleanup_pending: bool,
+    /// Protection failed and the emergency close failed too: retried on every bar.
+    unprotected: bool,
     halt: HaltState,
 }
 
@@ -114,6 +116,7 @@ impl ExitManager {
             symbol: symbol.into(),
             position: None,
             cleanup_pending: false,
+            unprotected: false,
             halt: HaltState::Running,
         }
     }
@@ -160,11 +163,15 @@ impl ExitManager {
         match self.flatten(gateway).await {
             Ok(()) => {
                 self.position = None;
+                self.unprotected = false;
                 ExitEvent::UnprotectedEntryClosed { reason: last_error }
             }
-            Err(close_error) => ExitEvent::UnprotectedEntryCloseFailed {
-                reason: format!("{last_error}; close failed: {close_error}"),
-            },
+            Err(close_error) => {
+                self.unprotected = true;
+                ExitEvent::UnprotectedEntryCloseFailed {
+                    reason: format!("{last_error}; close failed: {close_error}"),
+                }
+            }
         }
     }
 
@@ -180,6 +187,19 @@ impl ExitManager {
 
     /// A bar closed: retry pending cleanup and enforce the time barrier.
     pub async fn on_bar_closed<G: ExitGateway>(&mut self, gateway: &G) -> Option<ExitEvent> {
+        if self.unprotected {
+            // A naked position is retried every bar, not only at the time barrier.
+            return Some(match self.flatten(gateway).await {
+                Ok(()) => {
+                    self.position = None;
+                    self.unprotected = false;
+                    ExitEvent::UnprotectedEntryClosed {
+                        reason: "retried close succeeded".to_string(),
+                    }
+                }
+                Err(reason) => ExitEvent::UnprotectedEntryCloseFailed { reason },
+            });
+        }
         if self.cleanup_pending {
             return Some(self.try_cleanup(gateway).await);
         }
@@ -355,6 +375,26 @@ mod tests {
             ExitEvent::UnprotectedEntryCloseFailed { .. }
         ));
         assert!(!manager.can_open());
+    }
+
+    #[tokio::test]
+    async fn a_naked_position_is_retried_on_every_bar_until_closed() {
+        let gateway = MockGateway::default();
+        *gateway.place.borrow_mut() = VecDeque::from(vec![Err("place".to_string()); MAX_ATTEMPTS]);
+        *gateway.close.borrow_mut() = VecDeque::from(vec![Err("close".to_string()); MAX_ATTEMPTS]);
+        let mut manager = ExitManager::new("BTCUSDT");
+        manager
+            .on_entry_filled(&gateway, Side::Buy, dec!(90), dec!(110), 1_000)
+            .await;
+
+        // The exchange recovers: the very next bar closes it, long before the time barrier.
+        let event = manager.on_bar_closed(&gateway).await;
+
+        assert!(matches!(
+            event,
+            Some(ExitEvent::UnprotectedEntryClosed { .. })
+        ));
+        assert!(manager.can_open());
     }
 
     #[tokio::test]

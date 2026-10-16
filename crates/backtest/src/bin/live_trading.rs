@@ -811,7 +811,7 @@ async fn main() -> Result<()> {
 
                                 // Check if we already have an active open position
                                 if monthly_guard.is_halted() || exit_manager.halt_state() != HaltState::Running {
-                                    println!("[RISK] Signal skipped: monthly circuit breaker is active.");
+                                    println!("[RISK] Signal skipped: trading is halted (monthly circuit breaker or emergency halt).");
                                 } else if !exit_manager.can_open() {
                                     println!("[RISK] Signal skipped: exits or cleanup still pending.");
                                 } else if !position_open {
@@ -906,7 +906,7 @@ async fn announce_exit_event(telegram: &Option<TelegramNotifier>, symbol: &str, 
         ExitEvent::Protected => (false, "Exchange-held stop loss and take profit are live".to_string()),
         ExitEvent::CleanedUp => (false, "Leftover orders cancelled after the exit".to_string()),
         ExitEvent::TimeBarrierClosed => (false, "Time barrier reached: position closed at market".to_string()),
-        ExitEvent::Halted => (false, "Monthly halt complete: position flat, orders cancelled".to_string()),
+        ExitEvent::Halted => (false, "Emergency halt complete: position flat, orders cancelled, no new entries until restart".to_string()),
         ExitEvent::UnprotectedEntryClosed { reason } => (
             true,
             format!("Protective orders failed ({reason}); position closed at market"),

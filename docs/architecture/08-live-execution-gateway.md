@@ -112,7 +112,7 @@ The live session keeps its exits on the exchange so they survive a crash of the 
   - Monthly kill-switch (`MonthlyGuard`): `Running -> Halting -> Halted`. The flatten sequence is close, cancel, then re-read the position to confirm flat (a pending entry that fills in between is closed too). It reports `Halted` only after the exchange confirms a flat position; otherwise it stays `Halting`, alerts and retries every 5 s.
 - The private stream accepts `ALGO_UPDATE` events by event time only; the resulting fills arrive as regular `ORDER_TRADE_UPDATE` events.
 
-Known limits: protection starts after the entry is fully `FILLED` (partial fills are not protected until then), an entry LIMIT order that never fills is not cancelled automatically, and the `ALGO_UPDATE` payload and the exact trigger/fill event sequence were not verified against the exchange.
+Known limits: there is no reconciliation on restart (SL/TP stay on the exchange, but a new process has no tracker or time barrier and could open another position, so check the account before restarting); a fill without its order intent triggers an emergency halt that lasts until restart; protection starts after the entry is fully `FILLED` (partial fills are not protected until then), an entry LIMIT order that never fills is not cancelled automatically, and the `ALGO_UPDATE` payload and the exact trigger/fill event sequence were not verified against the exchange.
 
 **Testnet validation runbook (required before any production use)**, with explicit authorization to operate against `--testnet`:
 1. Open a minimal long and a minimal short; confirm two algo orders appear in `GET /fapi/v1/openAlgoOrders` with `closePosition=true`.
