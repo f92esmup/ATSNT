@@ -16,7 +16,7 @@ Branch: `feat/startup-account-verification` (from `main`) | Delivery: single bra
 ## Tasks
 
 - [x] T1 — S1, S2, S4, S5 — inline — read-only verifier and report
-- [ ] T2 — S3 — inline — margin type fix with re-read
+- [x] T2 — S3 — inline — margin type fix with re-read
 - [ ] T3 — S2, S6, S7 — inline — wire the live bot (startup, re-verification, flags)
 - [ ] T4 — all — testnet harness subcommand, docs, independent verifier
 

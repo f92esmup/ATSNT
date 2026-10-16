@@ -88,7 +88,7 @@ impl BinanceGateway {
         Ok(())
     }
 
-    async fn send_signed_futures(
+    pub(super) async fn send_signed_futures(
         &self,
         method: reqwest::Method,
         path: &str,

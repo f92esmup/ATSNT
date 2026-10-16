@@ -349,14 +349,31 @@ impl BinanceGateway {
         })
     }
 
+    /// Sets the symbol margin type to `ISOLATED`; "already isolated" (`-4046`) is success.
+    async fn set_isolated_margin(&self, symbol: &str) -> Result<(), GatewayError> {
+        match self
+            .send_signed_futures(
+                reqwest::Method::POST,
+                "/fapi/v1/marginType",
+                &format!("symbol={symbol}&marginType=ISOLATED"),
+            )
+            .await
+        {
+            Ok(_) | Err(GatewayError::BinanceApi { code: -4046, .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Verifies the account against the profile the strategy needs and reports every finding.
     ///
-    /// `allow_exposure` is for periodic checks while a position or order may legitimately
-    /// exist. Nothing is ever changed in that mode.
+    /// With `auto_fix`, the only change made is the symbol margin type to `ISOLATED`, and only
+    /// when the account is flat with no orders; the result is re-read before it is reported as
+    /// fixed. `allow_exposure` is for periodic checks while a position or order may legitimately
+    /// exist: nothing is ever changed in that mode.
     pub async fn verify_account(
         &self,
         symbol: &str,
-        _auto_fix: bool,
+        auto_fix: bool,
         allow_exposure: bool,
     ) -> Result<AccountReport, GatewayError> {
         if self.config.spot {
@@ -369,8 +386,44 @@ impl BinanceGateway {
                 "symbol must contain only ASCII letters and digits".to_string(),
             ));
         }
+        let policy = &self.config.risk_policy;
         let state = self.read_account_state(symbol).await?;
-        let findings = analyze(&state, symbol, &self.config.risk_policy, allow_exposure)?;
+        let mut findings = analyze(&state, symbol, policy, allow_exposure)?;
+
+        let fixable = findings.iter().find_map(|finding| match &finding.status {
+            FindingStatus::Blocking { reason, .. }
+                if finding.fix == Some(AccountFix::SetIsolatedMargin) =>
+            {
+                Some(reason.trim_start_matches("margin type is ").to_string())
+            }
+            _ => None,
+        });
+        let (has_position, has_orders) = state.exposure(symbol)?;
+        if let (true, false, false, false, Some(previous)) =
+            (auto_fix, allow_exposure, has_position, has_orders, fixable)
+        {
+            match self.set_isolated_margin(symbol).await {
+                Ok(()) => {
+                    let after = self.read_account_state(symbol).await?;
+                    findings = analyze(&after, symbol, policy, allow_exposure)?;
+                    for finding in findings.iter_mut().filter(|f| f.check == "margin type") {
+                        if matches!(finding.status, FindingStatus::Ok { .. }) {
+                            finding.status = FindingStatus::Fixed {
+                                from: previous.clone(),
+                                to: "ISOLATED".to_string(),
+                            };
+                        }
+                    }
+                }
+                Err(error) => {
+                    for finding in findings.iter_mut().filter(|f| f.check == "margin type") {
+                        if let FindingStatus::Blocking { reason, .. } = &mut finding.status {
+                            *reason = format!("{reason}; the exchange refused the change: {error}");
+                        }
+                    }
+                }
+            }
+        }
         Ok(AccountReport {
             symbol: symbol.to_string(),
             findings,
@@ -551,5 +604,213 @@ mod tests {
         assert_eq!(blocked.blocking().len(), 1);
         assert!(blocked.render().contains("[BLOCKING] position mode"));
         assert!(blocked.render().contains("To fix:"));
+    }
+
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    type Handler = Arc<dyn Fn(&str) -> (u16, String) + Send + Sync>;
+
+    async fn spawn_dynamic(handler: Handler) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut bytes = Vec::new();
+                let mut chunk = [0u8; 2048];
+                while !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => bytes.extend_from_slice(&chunk[..count]),
+                    }
+                }
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                let line = text.lines().next().unwrap_or_default().to_string();
+                captured.lock().unwrap().push(line.clone());
+                let (status, body) = handler(&line);
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (format!("http://{address}"), requests)
+    }
+
+    /// Mock exchange whose symbol margin type changes after a successful `marginType` POST.
+    struct MockExchange {
+        margin: Mutex<&'static str>,
+        position_amt: &'static str,
+        post_result: (u16, &'static str),
+        applies_post: bool,
+    }
+
+    impl MockExchange {
+        fn respond(&self, line: &str) -> (u16, String) {
+            let state = good_state();
+            let json = |value: &serde_json::Value| (200, value.to_string());
+            if line.starts_with("POST /fapi/v1/marginType") {
+                if self.post_result.0 == 200 && self.applies_post {
+                    *self.margin.lock().unwrap() = "ISOLATED";
+                }
+                return (self.post_result.0, self.post_result.1.to_string());
+            }
+            if line.starts_with("GET /fapi/v1/multiAssetsMargin") {
+                return (200, r#"{"multiAssetsMargin":false}"#.to_string());
+            }
+            if line.starts_with("GET /fapi/v1/positionSide/dual") {
+                return (200, r#"{"dualSidePosition":false}"#.to_string());
+            }
+            if line.starts_with("GET /fapi/v3/account") {
+                return json(&state.account);
+            }
+            if line.starts_with("GET /fapi/v3/positionRisk") {
+                let row = serde_json::json!([{"symbol":"BTCUSDT","positionSide":"BOTH","positionAmt":self.position_amt}]);
+                return json(&row);
+            }
+            if line.starts_with("GET /fapi/v1/openOrders")
+                || line.starts_with("GET /fapi/v1/openAlgoOrders")
+            {
+                return (200, "[]".to_string());
+            }
+            if line.starts_with("GET /fapi/v1/leverageBracket") {
+                return json(&state.brackets);
+            }
+            if line.starts_with("GET /fapi/v1/symbolConfig") {
+                let margin = *self.margin.lock().unwrap();
+                let config = serde_json::json!([{
+                    "symbol":"BTCUSDT","marginType":margin,"isAutoAddMargin":"false",
+                    "leverage":20,"maxNotionalValue":"1000000"
+                }]);
+                return json(&config);
+            }
+            (404, r#"{"code":-1,"msg":"unrouted"}"#.to_string())
+        }
+    }
+
+    async fn verify_against(
+        exchange: MockExchange,
+        auto_fix: bool,
+        allow_exposure: bool,
+    ) -> (AccountReport, Vec<String>) {
+        let exchange = Arc::new(exchange);
+        let handler_exchange = Arc::clone(&exchange);
+        let (url, requests) =
+            spawn_dynamic(Arc::new(move |line| handler_exchange.respond(line))).await;
+        let mut gateway = BinanceGateway::new(BinanceGatewayConfig {
+            api_key: "k".into(),
+            secret_key: "s".into(),
+            spot: false,
+            ..Default::default()
+        })
+        .unwrap();
+        gateway.base_url = url;
+        let report = gateway
+            .verify_account("BTCUSDT", auto_fix, allow_exposure)
+            .await
+            .unwrap();
+        let log = requests.lock().unwrap().clone();
+        (report, log)
+    }
+
+    fn exchange(margin: &'static str) -> MockExchange {
+        MockExchange {
+            margin: Mutex::new(margin),
+            position_amt: "0",
+            post_result: (200, r#"{"code":200,"msg":"success"}"#),
+            applies_post: true,
+        }
+    }
+
+    fn posts(log: &[String]) -> usize {
+        log.iter().filter(|l| l.starts_with("POST")).count()
+    }
+
+    #[tokio::test]
+    async fn a_matching_account_is_ready_with_reads_only() {
+        let (report, log) = verify_against(exchange("ISOLATED"), true, false).await;
+
+        assert!(report.is_ready(), "{}", report.render());
+        assert_eq!(posts(&log), 0);
+        assert_eq!(log.len(), 8);
+    }
+
+    #[tokio::test]
+    async fn cross_margin_on_a_flat_account_is_fixed_and_confirmed_by_a_re_read() {
+        let (report, log) = verify_against(exchange("CROSSED"), true, false).await;
+
+        assert!(report.is_ready(), "{}", report.render());
+        assert_eq!(posts(&log), 1);
+        assert!(log.iter().any(|l| l.contains("marginType=ISOLATED")));
+        let margin = report
+            .findings
+            .iter()
+            .find(|f| f.check == "margin type")
+            .unwrap();
+        assert_eq!(
+            margin.status,
+            FindingStatus::Fixed {
+                from: "CROSSED".to_string(),
+                to: "ISOLATED".to_string()
+            }
+        );
+        assert_eq!(log.len(), 17, "8 reads, 1 write, 8 re-reads");
+    }
+
+    #[tokio::test]
+    async fn no_auto_fix_reports_cross_margin_without_changing_anything() {
+        let (report, log) = verify_against(exchange("CROSSED"), false, false).await;
+
+        assert!(!report.is_ready());
+        assert_eq!(posts(&log), 0);
+    }
+
+    #[tokio::test]
+    async fn an_open_position_or_periodic_mode_never_changes_the_account() {
+        let mut with_position = exchange("CROSSED");
+        with_position.position_amt = "0.01";
+        let (report, log) = verify_against(with_position, true, false).await;
+        assert!(!report.is_ready());
+        assert_eq!(posts(&log), 0, "a position forbids any change");
+
+        let (report, log) = verify_against(exchange("CROSSED"), true, true).await;
+        assert!(!report.is_ready());
+        assert_eq!(posts(&log), 0, "periodic checks are read-only");
+    }
+
+    #[tokio::test]
+    async fn a_refused_change_stays_blocking_and_says_why() {
+        let mut refused = exchange("CROSSED");
+        refused.post_result = (
+            400,
+            r#"{"code":-4047,"msg":"Margin type cannot be changed if there exists open orders."}"#,
+        );
+
+        let (report, log) = verify_against(refused, true, false).await;
+
+        assert!(!report.is_ready());
+        assert_eq!(posts(&log), 1);
+        assert!(report.render().contains("the exchange refused the change"));
+    }
+
+    #[tokio::test]
+    async fn success_is_never_assumed_without_the_re_read_agreeing() {
+        // The exchange answers "no need to change" (-4046) but still reports CROSSED.
+        let mut liar = exchange("CROSSED");
+        liar.post_result = (
+            400,
+            r#"{"code":-4046,"msg":"No need to change margin type."}"#,
+        );
+        liar.applies_post = false;
+
+        let (report, _) = verify_against(liar, true, false).await;
+
+        assert!(!report.is_ready(), "{}", report.render());
     }
 }
