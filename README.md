@@ -120,14 +120,14 @@ The same pipeline runs on a disposable Cloud Batch VM (`n2-highcpu-64` Spot by d
 
 A dollar bar closes when its traded notional reaches the threshold, so the threshold fixes how long a bar lasts and therefore what the strategy's bar-count parameters mean in clock time. Averages measured on BTCUSDT (September 2026, about $344B traded, i.e. 6.87 M bars at $50k); real bar duration varies with market activity:
 
-| `--dollar-bar` | Avg. bar | CUSUM window (8-20 bars) | Max. holding (6-20 bars) | Style |
+| `--dollar-bar` | Avg. bar | CUSUM window (8-20 bars) | Max. holding (fixed 100 bars) | Style |
 |---|---|---|---|---|
-| `50000` | ~0.4 s | 3-8 s | seconds | noise, ~7 M bars/month, days of compute |
-| `1000000` | ~7.5 s | 1-2.5 min | 45 s-2.5 min | scalping |
-| **`10000000`** | **~75 s** | **10-25 min** | **8-25 min** | **intraday / day trading (recommended)** |
-| `25000000` | ~3 min | 25-60 min | 18-60 min | slower day trading |
+| `50000` | ~0.4 s | 3-8 s | ~40 s | noise, ~7 M bars/month, days of compute |
+| `1000000` | ~7.5 s | 1-2.5 min | ~12 min | scalping |
+| **`10000000`** | **~75 s** | **10-25 min** | **~2 h** | **intraday / day trading (recommended)** |
+| `25000000` | ~3 min | 25-60 min | ~5 h | slower day trading |
 
-The default CUSUM search space has 720 combinations (5 x 4 x 4 x 3 x 3); `--candidates 120` evaluates a seeded random sample of 120 of them (a multiple of the 30 vCPU, so Rayon gives each thread four candidates), which is enough to decide whether the strategy produces trades at that scale. Search time grows linearly with bars x candidates x months, while fetching and VM start-up are fixed costs.
+The default CUSUM search space has 1372 combinations (7 x 7 x 7 x 4 x 1; the time barrier is fixed at 100 bars, about 2 h at `--dollar-bar 10000000`, so trades close by take profit or stop loss rather than by the clock); `--candidates 120` evaluates a seeded random sample of 120 of them (about 9 %, and a multiple of the 30 vCPU, so Rayon gives each thread four candidates), which is enough to decide whether the strategy produces trades at that scale. Search time grows linearly with bars x candidates x months, while fetching and VM start-up are fixed costs.
 
 ```bash
 ./scripts/gcp/run_ephemeral_batch_hpo.sh \
@@ -332,7 +332,7 @@ cargo run -p adapters --bin live_gateway -- \
 #### Pre-Trade Risk Policy & Quantitative Safety Guarantees
 - **Exact Slippage Accounting**: In 1:1 realistic simulation, slippage is implicitly absorbed into the fill and exit prices (`pnl_gross`). Cash equity satisfies the exact mathematical identity $\text{Cash} = \text{Initial Capital} + \sum \text{Net PnL}$ without double deductions.
 - **Circuit Breaker with Daily UTC Reset**: Trading automatically halts if daily account drawdown breaches `max_daily_drawdown_pct` (default: 5% in live, configurable). The watermark and freeze reset automatically at `00:00:00 UTC`, supporting uninterrupted multi-month backtesting.
-- **Monthly Kill-Switch**: If equity loses `max_monthly_drawdown_pct` (default: 15%) versus the equity at the start of the UTC month, the simulator closes any open position at market (reason `MonthlyCircuitBreaker`) and halts for the rest of the run; metrics report `halted: true`. Paper trading emits `CircuitBreakerTripped { scope: "monthly", drawdown_pct }`. The live loop blocks new orders and alerts via Telegram, but does not liquidate positions automatically.
+- **Monthly Kill-Switch**: If equity loses `max_monthly_drawdown_pct` (default: 15%) versus the equity at the start of the UTC month, the simulator closes any open position at market (reason `MonthlyCircuitBreaker`) and halts for the rest of the run; metrics report `halted: true`. Paper trading emits `CircuitBreakerTripped { scope: "monthly", drawdown_pct }`. The live loop blocks new orders and alerts via Telegram, but does not liquidate positions automatically, and it measures the wallet balance (realized PnL only, no unrealized). `halted` is part of the metrics JSON but is not a BigQuery column.
 - **Binance Execution Parity**: Sizing caps the position at `max_leverage` (default: 20x, a self-imposed risk cap), floors the quantity to `quantity_step_size` (default: 0.001) and rejects orders below `min_order_quantity` or `min_order_notional` (`OrderBelowMinLotSize` / `OrderBelowMinNotional`). The live gateway overrides these with the symbol's real `LOT_SIZE`/`MIN_NOTIONAL` filters (Spot is sized at 1x). Configs from older artifacts load with these defaults.
 - **Microstructure Friction Filter**: Strategies enforce `min_take_profit_pct` (default: 25-35 bps), rejecting trades where price displacement cannot clear round-trip exchange fees and latency slippage.
 - **Order Size Ceiling**: Single order notional value cannot exceed `max_order_notional` (default: $10,000 USDT).
