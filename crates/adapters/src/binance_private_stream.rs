@@ -424,6 +424,7 @@ fn private_event_time_ms(event: &BinancePrivateEvent) -> u64 {
         BinancePrivateEvent::FuturesAccountUpdate(update) => update.event_time_ms,
         BinancePrivateEvent::FuturesOrderTradeUpdate(update) => update.event_time_ms,
         BinancePrivateEvent::FuturesAlgoUpdate { event_time_ms } => *event_time_ms,
+        BinancePrivateEvent::FuturesTradeLite { event_time_ms } => *event_time_ms,
         BinancePrivateEvent::FuturesListenKeyExpired { event_time_ms } => *event_time_ms,
     }
 }
@@ -534,6 +535,9 @@ pub enum BinancePrivateEvent {
     /// A conditional (algo) order was created or changed status. Only the event time is read:
     /// the resulting fills arrive as `FuturesOrderTradeUpdate`, so the payload is not retained.
     FuturesAlgoUpdate { event_time_ms: u64 },
+    /// Lightweight duplicate of a fill that Binance pushes next to `ORDER_TRADE_UPDATE`. Fills
+    /// are read from the latter, so only the event time is kept.
+    FuturesTradeLite { event_time_ms: u64 },
     /// The listen key expired; the caller must reconcile account state.
     FuturesListenKeyExpired { event_time_ms: u64 },
 }
@@ -712,6 +716,9 @@ pub fn parse_private_user_event(
         }
         "ORDER_TRADE_UPDATE" => parse_futures_order_trade_update(value)
             .map(BinancePrivateEvent::FuturesOrderTradeUpdate),
+        "TRADE_LITE" => Ok(BinancePrivateEvent::FuturesTradeLite {
+            event_time_ms: required_u64(value, "E")?,
+        }),
         "ALGO_UPDATE" => Ok(BinancePrivateEvent::FuturesAlgoUpdate {
             event_time_ms: required_u64(value, "E")?,
         }),
@@ -998,6 +1005,53 @@ mod tests {
     fn futures_order_trade_update_rejects_unsupported_hedge_position_side() {
         let event = r#"{"e":"ORDER_TRADE_UPDATE","E":1700000000004,"T":1700000000003,"o":{"s":"BTCUSDT","c":"client-1","S":"BUY","X":"PARTIALLY_FILLED","i":123,"l":"0.002","L":"42000.5","z":"0.002","t":456,"ps":"LONG"}}"#;
         assert!(parse_private_user_event(event).is_err());
+    }
+
+    #[test]
+    fn real_testnet_payloads_are_understood_by_the_futures_parser() {
+        let algo = parse_private_user_event(include_str!(
+            "../tests/fixtures/binance_private_events/real_testnet_algo_update.json"
+        ))
+        .expect("real ALGO_UPDATE must not break the stream");
+        assert_eq!(
+            algo,
+            BinancePrivateEvent::FuturesAlgoUpdate {
+                event_time_ms: 1_792_162_527_273
+            }
+        );
+
+        let lite = parse_private_user_event(include_str!(
+            "../tests/fixtures/binance_private_events/real_testnet_trade_lite.json"
+        ))
+        .expect("real TRADE_LITE must not break the stream");
+        assert_eq!(
+            lite,
+            BinancePrivateEvent::FuturesTradeLite {
+                event_time_ms: 1_792_162_524_142
+            }
+        );
+
+        for name in [
+            include_str!("../tests/fixtures/binance_private_events/real_testnet_order_new.json"),
+            include_str!(
+                "../tests/fixtures/binance_private_events/real_testnet_order_partial.json"
+            ),
+            include_str!("../tests/fixtures/binance_private_events/real_testnet_order_filled.json"),
+        ] {
+            assert!(matches!(
+                parse_private_user_event(name),
+                Ok(BinancePrivateEvent::FuturesOrderTradeUpdate(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn cross_margin_account_updates_are_refused_by_design() {
+        // The supported profile is isolated, one-way, USDT-only: a real cross-margin update
+        // must stay an explicit reconciliation error rather than be silently accepted.
+        let real_cross =
+            include_str!("../tests/fixtures/binance_private_events/real_testnet_account.json");
+        assert!(parse_private_user_event(real_cross).is_err());
     }
 
     #[test]

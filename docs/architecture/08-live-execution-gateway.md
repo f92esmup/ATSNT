@@ -112,14 +112,17 @@ The live session keeps its exits on the exchange so they survive a crash of the 
   - Monthly kill-switch (`MonthlyGuard`): `Running -> Halting -> Halted`. The flatten sequence is close, cancel, then re-read the position to confirm flat (a pending entry that fills in between is closed too). It reports `Halted` only after the exchange confirms a flat position; otherwise it stays `Halting`, alerts and retries every 5 s.
 - The private stream accepts `ALGO_UPDATE` events by event time only; the resulting fills arrive as regular `ORDER_TRADE_UPDATE` events.
 
-Known limits: there is no reconciliation on restart (SL/TP stay on the exchange, but a new process has no tracker or time barrier and could open another position, so check the account before restarting); a fill without its order intent triggers an emergency halt that lasts until restart; protection starts after the entry is fully `FILLED` (partial fills are not protected until then), an entry LIMIT order that never fills is not cancelled automatically, and the `ALGO_UPDATE` payload and the exact trigger/fill event sequence were not verified against the exchange.
+Known limits: there is no reconciliation on restart (SL/TP stay on the exchange, but a new process has no tracker or time barrier and could open another position, so check the account before restarting); a fill without its order intent triggers an emergency halt that lasts until restart; protection starts only after the entry is fully `FILLED`, so a partial fill that is then cancelled stays unprotected; an entry LIMIT order that never fills is not cancelled automatically; and an actual SL/TP trigger fill (as opposed to the bot's own market close) has not been observed on the exchange.
 
-**Testnet validation runbook (required before any production use)**, with explicit authorization to operate against `--testnet`:
-1. Open a minimal long and a minimal short; confirm two algo orders appear in `GET /fapi/v1/openAlgoOrders` with `closePosition=true`.
-2. Let the stop loss trigger: confirm the position is flat and `openAlgoOrders` is empty afterwards (no leftover take profit).
-3. Kill the bot process while a position is open: confirm the exchange still closes it at SL/TP.
-4. Force `max_monthly_drawdown_pct` to a tiny value: confirm `Halted` is reported only after `positionRisk` shows zero.
-5. Confirm the private stream does not reconnect when `ALGO_UPDATE` events arrive.
+**Testnet validation (executed 2026-10-16 on Binance USD-M testnet with `testnet_exit_check`)**: 19/19 checks passed against the real exchange.
+- SL and TP are accepted as `closePosition=true` algo orders (2 pending after protection); the time-barrier close leaves nothing behind; cleanup after a close leaves no algo orders; the emergency halt reports `Halted` only with `positionAmt = 0` and zero orders; a stop that would trigger immediately is rejected with `-2021` and the position is closed rather than left naked.
+- Crash survival: after the process exited with no cleanup, the position and both algo orders were still on the exchange.
+- `closePosition` algo orders switch to `EXPIRED` by themselves once the account is flat, so the explicit cancel is a safety net.
+- Real events observed: `ALGO_UPDATE` (statuses `NEW` and `EXPIRED`, with `E`), `TRADE_LITE` and `ORDER_TRADE_UPDATE`. `TRADE_LITE` was unknown to the parser and **closed the stream at the first fill** before this fix; it is now an explicit ignorable event. Real payloads are kept as fixtures in `crates/adapters/tests/fixtures/binance_private_events/real_testnet_*.json`.
+- `/fapi/v3/account` does not return `canTrade`; the entry preflight used to reject every account for that reason and now rejects only when the field is present and false.
+- The default testnet account is cross-margin and holds non-USDT collateral. The entry preflight and the private-stream parser refuse that profile **by design** (isolated, one-way, USDT-only). The harness therefore opens its own `MARKET` entries and tests the exits through the real gateway and `ExitManager`. A real bot run needs an isolated, USDT-only account.
+
+Harness: `GCP_PROJECT_ID=<project> cargo run -p backtest --bin testnet_exit_check -- scenario|leave-open|inspect|cleanup|capture-events`. It only targets testnet.
 
 ### 3.4 User Data Stream Listener (`BinanceUserDataStream`)
 - Located at [`crates/adapters/src/binance_user_stream.rs`](../../crates/adapters/src/binance_user_stream.rs).

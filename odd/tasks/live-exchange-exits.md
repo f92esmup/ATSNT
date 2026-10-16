@@ -10,7 +10,9 @@ Branch: `feat/live-exchange-exits` (from `main` + A/B branch commits) | Delivery
 - **S3 — Cancel on exit.** When the position is closed by any exit fill, the remaining protective and entry orders are cancelled (Binance Futures has no OCO).
 - **S4 — Time barrier.** Not expressible on the exchange: the bot closes at market after `max_bars_hold` bars. Documented limit: only this barrier depends on the process being alive.
 - **S5 — Monthly emergency close.** On `MonthlyGuard` trip: cancel all orders, close the position with a `MARKET` `reduceOnly` order, bounded retries, state `Running -> Halting -> Halted`; failure leaves `Halting` with a critical alert, never a false `Halted`.
-- **S6 — Testnet only until approved.** No call against Binance (testnet or production) is made without explicit user authorization.
+- **S6 — Testnet only until approved.** No call against Binance (testnet or production) is made without explicit user authorization. User authorized the testnet run (L3-L5); production was never touched.
+
+- **S7 — Verified on testnet.** `testnet_exit_check scenario` passes 19/19 against Binance USD-M testnet; crash survival confirmed with `leave-open`. Findings fixed on the way: `TRADE_LITE` closed the private stream, and `canTrade` is absent from `/fapi/v3/account`.
 
 ## Tasks
 
@@ -23,3 +25,5 @@ Branch: `feat/live-exchange-exits` (from `main` + A/B branch commits) | Delivery
 
 - L1 (2026-10-16): "Las salidas en live se gestionan por el exchange para que asi sobreviva. Adelante con los cambios".
 - L2: Binance docs (New Algo Order, developers.binance.com): conditional types moved to `/fapi/v1/algoOrder`; `closePosition` cannot be combined with `quantity` or `reduceOnly`. The preflight already reads `/fapi/v1/openAlgoOrders` and rejects when conditional orders exist, so cleanup after every exit is mandatory.
+- L3 (2026-10-16): "Si, realiza la ejecución". Credentials: env vars, else GCP `mi-facturador-bot03`. L4: "Es el único proyecto existente en mi cuenta. Úsalo" (that project returned permission denied; the active gcloud project was `mi-facturador-bot-01`). L5: "Si" to using `mi-facturador-bot-01`.
+- L6: Testnet run: 19/19 checks passed; crash survival confirmed. Fixed `TRADE_LITE` closing the private stream and the missing `canTrade` in `/fapi/v3/account`; real payloads kept as fixtures.

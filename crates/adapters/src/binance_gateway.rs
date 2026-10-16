@@ -2028,7 +2028,10 @@ fn parse_futures_preflight_snapshot(
         now_ms,
     } = input;
 
-    if !required_futures_bool(account, "canTrade", "futures account")? {
+    // `/fapi/v3/account` does not return `canTrade`: reject only when it is present and false.
+    if account.get("canTrade").is_some()
+        && !required_futures_bool(account, "canTrade", "futures account")?
+    {
         return Err(GatewayError::FuturesPreflight(
             "futures account is not enabled for trading".to_string(),
         ));
@@ -3419,6 +3422,28 @@ mod tests {
         assert!(requests
             .iter()
             .any(|request| request.starts_with("POST /fapi/v1/order?")));
+    }
+
+    #[tokio::test]
+    async fn futures_preflight_accepts_an_account_response_without_can_trade() {
+        let mut responses = valid_futures_responses(current_unix_time_ms().unwrap());
+        responses.insert(
+            "/fapi/v3/account",
+            r#"{"availableBalance":"500.4","assets":[{"asset":"USDT","availableBalance":"500.4","walletBalance":"500.4"}]}"#.to_string(),
+        );
+        let (base_url, requests, server) = spawn_futures_mock_server(responses);
+        let mut gateway = BinanceGateway::new(BinanceGatewayConfig {
+            spot: false,
+            ..Default::default()
+        })
+        .unwrap();
+        gateway.base_url = base_url;
+
+        let result = gateway.fetch_futures_preflight_snapshot("BTCUSDT").await;
+
+        server.join().unwrap();
+        drop(requests);
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]
