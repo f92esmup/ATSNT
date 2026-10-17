@@ -459,7 +459,9 @@ impl BacktestEngine {
                 else if bar.high >= intent.take_profit {
                     let reference = intent.take_profit.max(bar.open);
                     let fill_price = reference - reference * pct;
-                    let slippage = (intent.take_profit - fill_price).max(Decimal::ZERO);
+                    // A target never gaps against the order: the slippage is what the market
+                    // sell pays on the reference, even when the fill still beats the trigger.
+                    let slippage = reference * pct;
                     exit_fill = Some((fill_price, slippage, true, "TakeProfit"));
                 }
                 // Time barrier reached
@@ -481,7 +483,7 @@ impl BacktestEngine {
                 else if bar.low <= intent.take_profit {
                     let reference = intent.take_profit.min(bar.open);
                     let fill_price = reference + reference * pct;
-                    let slippage = (fill_price - intent.take_profit).max(Decimal::ZERO);
+                    let slippage = reference * pct;
                     exit_fill = Some((fill_price, slippage, true, "TakeProfit"));
                 }
                 // Time barrier reached
@@ -561,11 +563,13 @@ impl BacktestEngine {
         };
         // Slippage is already embedded in fill_price; do not deduct from cash equity here
         self.equity -= entry_fee;
-        // Reported slippage is the adverse distance from the signal price, gap included.
-        let adverse_per_unit = match intent.side {
-            Side::Buy => (fill_price - intent.price).max(Decimal::ZERO),
-            Side::Sell => (intent.price - fill_price).max(Decimal::ZERO),
-        };
+        // Reported slippage is what the order paid: the slippage on the open plus the adverse
+        // part of the gap from the signal price. A gap in favor does not cancel the slippage.
+        let adverse_per_unit = slip
+            + match intent.side {
+                Side::Buy => (bar.open - intent.price).max(Decimal::ZERO),
+                Side::Sell => (intent.price - bar.open).max(Decimal::ZERO),
+            };
 
         let pos_side = match intent.side {
             Side::Buy => PositionSide::Long,
@@ -1739,5 +1743,53 @@ mod tests {
         // the entry fee exceeds the 400 balance.
         assert!(engine.active_position().is_none());
         assert_eq!(engine.cash_equity(), dec!(400));
+    }
+
+    #[test]
+    fn slippage_paid_on_a_favorable_target_gap_is_still_reported() {
+        let mut engine = realistic_engine();
+        let mut strategy = Scripted::new(vec![long_intent(50), None, None]);
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(2000, dec!(100), dec!(101), dec!(99), dec!(100)),
+        );
+
+        // The target (110) gaps in favor to an open of 120; the market sell pays 1% of that open.
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(3000, dec!(120), dec!(121), dec!(119), dec!(120)),
+        );
+
+        let (_, trades) = engine.finish_with_trades(None);
+        // Entry: filled at 101 for a signal at 100 (1 x 20); exit: 1.2 x 20.
+        assert_eq!(trades[0].slippage_paid, dec!(44));
+    }
+
+    #[test]
+    fn slippage_paid_on_an_entry_that_gaps_in_favor_is_still_reported() {
+        let mut engine = realistic_engine();
+        let mut strategy = Scripted::new(vec![long_intent(50), None, None]);
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+
+        // The next open is 98, better than the signal at 100, but the order still pays 1% of it.
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(2000, dec!(98), dec!(99), dec!(97), dec!(98)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(3000, dec!(99), dec!(112), dec!(98), dec!(111)),
+        );
+
+        let (_, trades) = engine.finish_with_trades(None);
+        // Entry 0.98 x 20; exit: the target at 110 sold 1.1 below, x 20.
+        assert_eq!(trades[0].slippage_paid, dec!(41.6));
     }
 }

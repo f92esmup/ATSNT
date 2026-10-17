@@ -24,10 +24,10 @@ impl AlertThrottle {
 
     /// Whether an alert may be sent at `now_ms`; when it may, the interval restarts.
     pub fn allow(&self, now_ms: i64) -> bool {
-        let due = self
-            .last_sent_ms
-            .get()
-            .is_none_or(|last| now_ms - last >= self.interval_ms);
+        let due = match self.last_sent_ms.get() {
+            None => true,
+            Some(last) => now_ms - last >= self.interval_ms,
+        };
         if due {
             self.last_sent_ms.set(Some(now_ms));
         }
