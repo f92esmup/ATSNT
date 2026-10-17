@@ -5,6 +5,7 @@
 //! tick-level simulated venue,
 //! and broadcasting real-time lifecycle events ([`PaperTradingEvent`]) over Tokio channels.
 
+use domain::futures::FundingSchedule;
 use domain::{DollarBar, PositionSide, Side, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -16,7 +17,9 @@ use crate::config::BacktestConfig;
 use crate::error::BacktestError;
 use crate::metrics::{BacktestMetrics, ClosedTrade};
 use crate::session::SessionEvent;
-use crate::tick_simulation::{TickSimulation, TickSimulationConfig};
+use crate::tick_simulation::{
+    TickSimulation, TickSimulationConfig, DEFAULT_FUNDING_RATE, DEFAULT_MAINTENANCE_MARGIN_RATE,
+};
 
 /// Real-time lifecycle events emitted during paper trading execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +137,10 @@ fn default_latency_ms() -> i64 {
     100
 }
 
+fn default_funding_rate() -> Decimal {
+    DEFAULT_FUNDING_RATE
+}
+
 /// Configuration settings for initializing a [`PaperTradingSession`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaperTradingConfig {
@@ -149,6 +156,9 @@ pub struct PaperTradingConfig {
     /// measured against live fills).
     #[serde(default = "default_latency_ms")]
     pub latency_ms: i64,
+    /// Funding rate charged to an open position at every eight-hour settlement.
+    #[serde(default = "default_funding_rate")]
+    pub funding_rate: Decimal,
 }
 
 impl Default for PaperTradingConfig {
@@ -159,6 +169,7 @@ impl Default for PaperTradingConfig {
             strategy: DollarBarsCusumConfig::default(),
             channel_capacity: 10_000,
             latency_ms: default_latency_ms(),
+            funding_rate: default_funding_rate(),
         }
     }
 }
@@ -175,6 +186,7 @@ impl PaperTradingConfig {
             strategy: artifact.spec.strategy_config.clone(),
             channel_capacity: 10_000,
             latency_ms: default_latency_ms(),
+            funding_rate: default_funding_rate(),
         }
     }
 }
@@ -226,6 +238,8 @@ impl PaperTradingSession {
                 symbol: "PAPER".to_string(),
                 dollar_bar_threshold: config.dollar_bar_threshold,
                 latency_ms: config.latency_ms,
+                funding: FundingSchedule::constant(config.funding_rate),
+                maintenance_margin_rate: DEFAULT_MAINTENANCE_MARGIN_RATE,
             },
             strategy,
         )

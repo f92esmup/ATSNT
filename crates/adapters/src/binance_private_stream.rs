@@ -631,6 +631,8 @@ impl From<&FuturesOrderTradeUpdate> for ports::ExecutionReport {
             ),
             commission: update.commission,
             commission_asset: update.commission_asset.clone(),
+            // Forced closes carry the `autoclose-` client order id prefix.
+            liquidation: update.client_order_id.starts_with("autoclose-"),
         }
     }
 }

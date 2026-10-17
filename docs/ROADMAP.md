@@ -92,8 +92,9 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] Live PnL reports the commissions Binance charged instead of an estimate.
 - [x] Bar-level engine: entries are market orders that fill at the next bar's open, the strategy sees every bar, TP/SL exits are taker orders with slippage and gap-aware fills.
 - [x] Paper trading runs the live `TradingSession` on the tick-level `SimulatedVenue`.
+- [x] Perpetual funding at every settlement and isolated-margin liquidation in the tick-level venue (shared rules in `domain::futures`).
 - [x] Tick-level `SimulatedVenue` (`--fill-model tick`): order latency, tape-walk market fills and tape-armed conditional exits, driven through the live `TradingSession`; used to validate finalists, while the bar-level engine stays the optimizer loop.
-- [ ] Known gaps, not yet modeled by the simulator: real mark-price stop triggers (last trade price is the proxy), bid/ask spread, perpetual funding, liquidation, and live warm-up of rolling strategy windows.
+- [ ] Known gaps, not yet modeled by the simulator: real mark-price stop triggers (last trade price is the proxy), bid/ask spread, notional-bracket maintenance margins, and live warm-up of rolling strategy windows.
 - [ ] Venue ports (`ExecutionVenue`, `Clock`, `MarketData`) so simulation, paper and live share one session core.
 - [ ] Single strategy registry and a generic contract suite for new strategies.
 

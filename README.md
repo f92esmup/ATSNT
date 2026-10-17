@@ -196,6 +196,8 @@ cargo run --release -p backtest -- --data data/historical/BTCUSDT/BTCUSDT-aggTra
 - Orders reach the market after `--latency-ms` (an assumption until measured against live fills).
 - Market orders walk the tape: they consume only same-side aggressor prints after arrival and pay each print's price.
 - Stop-loss and take-profit are conditional market orders armed by the tape (last trade price stands in for the mark price, since `aggTrades` carries none).
+- Perpetual funding is charged at every 00:00/08:00/16:00 UTC settlement to the position held then (`--funding-rate`, default 0.01%, or recorded rates from `--funding-file`, the JSON that `GET /fapi/v1/fundingRate` returns), and it is part of the trade's net PnL.
+- Isolated margin is modelled: the venue picks the lowest leverage the balance supports (as the live gateway does), and a position that reaches its liquidation price is closed at the bankruptcy price (exit reason `Liquidation`), losing exactly its margin. Maintenance margin uses one flat 0.4% rate instead of the exchange's notional brackets.
 - Replaying tens of millions of ticks is slow, so use it on finalists, not inside the search. `--gcp-bigquery` is rejected with this model until the run model tags the fill model.
 
 ---

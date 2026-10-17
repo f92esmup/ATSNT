@@ -4,9 +4,61 @@
 //! Pure functions over `Decimal`, so the simulators and the live runner price the same events
 //! with the same formulas.
 
+use std::collections::BTreeMap;
+
 use rust_decimal::Decimal;
 
 use crate::trade::Side;
+
+/// How far from a nominal settlement instant a recorded funding time may sit and still be that
+/// settlement (the exchange stamps its records a few milliseconds late).
+const SETTLEMENT_TOLERANCE_MS: i64 = 60_000;
+
+/// Funding rate per settlement: recorded rates where known, a default elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FundingSchedule {
+    interval_ms: i64,
+    default_rate: Decimal,
+    recorded: BTreeMap<i64, Decimal>,
+}
+
+impl FundingSchedule {
+    /// A schedule that charges `default_rate` at every settlement of the standard interval.
+    pub fn constant(default_rate: Decimal) -> Self {
+        Self {
+            interval_ms: FUNDING_INTERVAL_MS,
+            default_rate,
+            recorded: BTreeMap::new(),
+        }
+    }
+
+    /// Adds recorded `(funding_time_ms, rate)` points, replacing the default around them.
+    pub fn with_recorded(mut self, points: impl IntoIterator<Item = (i64, Decimal)>) -> Self {
+        self.recorded.extend(points);
+        self
+    }
+
+    /// Milliseconds between settlements.
+    pub fn interval_ms(&self) -> i64 {
+        self.interval_ms
+    }
+
+    /// Settlement instants in `(after_ms, up_to_ms]`.
+    pub fn settlements(&self, after_ms: i64, up_to_ms: i64) -> Vec<i64> {
+        funding_settlements(self.interval_ms, after_ms, up_to_ms)
+    }
+
+    /// Rate charged at the settlement `settlement_ms`: the recorded rate stamped within a
+    /// minute of it, else the default.
+    pub fn rate_at(&self, settlement_ms: i64) -> Decimal {
+        self.recorded
+            .range(
+                settlement_ms - SETTLEMENT_TOLERANCE_MS..=settlement_ms + SETTLEMENT_TOLERANCE_MS,
+            )
+            .next()
+            .map_or(self.default_rate, |(_, rate)| *rate)
+    }
+}
 
 /// Milliseconds between funding settlements of an eight-hour perpetual (00:00, 08:00 and 16:00
 /// UTC), the schedule of Binance USD-M BTC and most majors.
@@ -126,6 +178,19 @@ mod tests {
         assert!(funding_settlements(FUNDING_INTERVAL_MS, 10, 5).is_empty());
         assert!(funding_settlements(0, 0, 100).is_empty());
         assert!(funding_settlements(-1, 0, 100).is_empty());
+    }
+
+    #[test]
+    fn a_schedule_uses_the_recorded_rate_near_a_settlement_and_the_default_elsewhere() {
+        let at = 3 * FUNDING_INTERVAL_MS;
+        let schedule = FundingSchedule::constant(dec!(0.0001))
+            // The exchange stamps its record a few milliseconds after the nominal instant.
+            .with_recorded([(at + 5, dec!(-0.0003))]);
+
+        assert_eq!(schedule.rate_at(at), dec!(-0.0003));
+        assert_eq!(schedule.rate_at(at + FUNDING_INTERVAL_MS), dec!(0.0001));
+        assert_eq!(schedule.settlements(at - 1, at), vec![at]);
+        assert_eq!(schedule.interval_ms(), FUNDING_INTERVAL_MS);
     }
 
     #[test]

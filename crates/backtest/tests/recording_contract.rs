@@ -29,6 +29,7 @@ fn closed_trade() -> ClosedTrade {
         side: PositionSide::Long,
         pnl_gross: dec!(20),
         fees_paid: dec!(1),
+        funding_paid: dec!(0),
         slippage_paid: dec!(0.5),
         pnl_net: dec!(18.5),
         return_pct: dec!(0.0925),

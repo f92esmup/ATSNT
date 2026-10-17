@@ -133,6 +133,7 @@ pub struct TradingSession<S: Strategy> {
     closed_trades: Vec<ClosedTrade>,
     last_halt_attempt_ms: Option<i64>,
     exit_hint: Option<&'static str>,
+    funding: Decimal,
 }
 
 impl<S: Strategy> TradingSession<S> {
@@ -152,6 +153,7 @@ impl<S: Strategy> TradingSession<S> {
             closed_trades: Vec::new(),
             last_halt_attempt_ms: None,
             exit_hint: None,
+            funding: Decimal::ZERO,
         }
     }
 
@@ -181,6 +183,15 @@ impl<S: Strategy> TradingSession<S> {
     pub fn on_wallet_balance(&mut self, equity: Decimal) {
         self.wallet = equity;
         self.excursion.observe_cash(equity);
+    }
+
+    /// Records a funding payment settled by the venue (positive when paid, negative when
+    /// received). It is charged to the open position's trade; funding that settles while flat
+    /// belongs to no trade and is ignored.
+    pub fn on_funding(&mut self, amount: Decimal) {
+        if matches!(self.phase, Phase::Open { .. }) {
+            self.funding += amount;
+        }
     }
 
     /// Whether the account still matches the strategy profile; signals are skipped while not.
@@ -307,6 +318,9 @@ impl<S: Strategy> TradingSession<S> {
                 mut exit_fills,
             } => {
                 exit_fills.add(report);
+                if report.liquidation {
+                    self.exit_hint = Some("Liquidation");
+                }
                 if report.order_filled && exit_fills.quantity > Decimal::ZERO {
                     let closed = ClosedPosition {
                         intent,
@@ -455,7 +469,8 @@ impl<S: Strategy> TradingSession<S> {
         let fees = self.fees.take().unwrap_or(
             (entry_price * quantity + exit_price * quantity) * self.config.fallback_fee_pct,
         );
-        let net = gross - fees;
+        let funding = std::mem::take(&mut self.funding);
+        let net = gross - fees - funding;
         let return_pct = if entry_price > Decimal::ZERO && quantity > Decimal::ZERO {
             net / (entry_price * quantity)
         } else {
@@ -488,6 +503,7 @@ impl<S: Strategy> TradingSession<S> {
             },
             pnl_gross: gross,
             fees_paid: fees,
+            funding_paid: funding,
             slippage_paid: slippage,
             pnl_net: net,
             return_pct,
@@ -724,6 +740,7 @@ mod tests {
             order_closed: order_filled,
             commission,
             commission_asset: Some("USDT".to_string()),
+            liquidation: false,
         }
     }
 
@@ -738,6 +755,7 @@ mod tests {
             order_closed: true,
             commission: Decimal::ZERO,
             commission_asset: None,
+            liquidation: false,
         }
     }
 
@@ -1136,5 +1154,98 @@ mod tests {
             infer_exit_reason(Side::Buy, dec!(101), &long),
             "ExchangeClose"
         );
+    }
+
+    fn closed_trade(events: &[SessionEvent]) -> ClosedTrade {
+        events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::PositionClosed(trade) => Some(trade.as_ref().clone()),
+                _ => None,
+            })
+            .expect("the exit fill should close the trade")
+    }
+
+    #[tokio::test]
+    async fn funding_paid_while_open_is_charged_to_the_trade() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent()]);
+        open_long(&mut session, &venue).await;
+
+        session.on_funding(dec!(0.4));
+        session.on_funding(dec!(-0.1));
+        let events = session
+            .on_execution(
+                &venue,
+                &fill(
+                    Side::Sell,
+                    dec!(1),
+                    dec!(110),
+                    true,
+                    JAN_1 + 90_000,
+                    dec!(0.05),
+                ),
+            )
+            .await;
+
+        let trade = closed_trade(&events);
+        assert_eq!(trade.funding_paid, dec!(0.3));
+        assert_eq!(trade.pnl_gross, dec!(10));
+        assert_eq!(trade.pnl_net, dec!(10) - dec!(0.10) - dec!(0.3));
+    }
+
+    #[tokio::test]
+    async fn funding_does_not_leak_into_the_next_trade() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent(), long_intent()]);
+        open_long(&mut session, &venue).await;
+        session.on_funding(dec!(0.4));
+        session
+            .on_execution(
+                &venue,
+                &fill(
+                    Side::Sell,
+                    dec!(1),
+                    dec!(110),
+                    true,
+                    JAN_1 + 90_000,
+                    dec!(0.05),
+                ),
+            )
+            .await;
+
+        // Funding that arrives while flat belongs to no trade.
+        session.on_funding(dec!(5));
+        open_long(&mut session, &venue).await;
+        let events = session
+            .on_execution(
+                &venue,
+                &fill(
+                    Side::Sell,
+                    dec!(1),
+                    dec!(110),
+                    true,
+                    JAN_1 + 190_000,
+                    dec!(0.05),
+                ),
+            )
+            .await;
+
+        assert_eq!(closed_trade(&events).funding_paid, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn a_liquidation_fill_closes_the_trade_as_liquidated() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent()]);
+        open_long(&mut session, &venue).await;
+        let mut report = fill(Side::Sell, dec!(1), dec!(80), true, JAN_1 + 90_000, dec!(0));
+        report.liquidation = true;
+
+        let events = session.on_execution(&venue, &report).await;
+
+        let trade = closed_trade(&events);
+        assert_eq!(trade.exit_reason, "Liquidation");
+        assert_eq!(trade.exit_price, dec!(80));
     }
 }

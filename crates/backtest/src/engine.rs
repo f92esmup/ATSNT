@@ -521,6 +521,7 @@ impl BacktestEngine {
             side: pos.side,
             pnl_gross,
             fees_paid: total_fees,
+            funding_paid: Decimal::ZERO,
             slippage_paid: total_slippage,
             pnl_net,
             return_pct,

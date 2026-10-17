@@ -39,6 +39,8 @@ pub struct ExecutionReport {
     pub commission: Decimal,
     /// Asset the commission was charged in.
     pub commission_asset: Option<String>,
+    /// `true` when the exchange's liquidation engine produced this execution, not the session.
+    pub liquidation: bool,
 }
 
 /// Everything a trading session needs from an execution venue.

@@ -60,6 +60,11 @@ struct Args {
     #[arg(long, default_value_t = 100)]
     latency_ms: i64,
 
+    /// Funding rate charged to an open position at every eight-hour settlement (the 0.01%
+    /// baseline unless overridden)
+    #[arg(long, default_value = "0.0001")]
+    funding_rate: Decimal,
+
     /// Record the session run (lifecycle, closed trades with equity events, final metrics) to Google Cloud BigQuery
     #[arg(long, default_value_t = false)]
     gcp_bigquery: bool,
@@ -257,6 +262,7 @@ async fn main() -> Result<()> {
         strategy: strat_config.clone(),
         channel_capacity: 10_000,
         latency_ms: args.latency_ms,
+        funding_rate: args.funding_rate,
     };
 
     let mut session = PaperTradingSession::new(paper_config)
@@ -763,6 +769,7 @@ mod tests {
             side: PositionSide::Long,
             pnl_gross: dec!(1),
             fees_paid: dec!(0.1),
+            funding_paid: dec!(0),
             slippage_paid: dec!(0),
             pnl_net: dec!(0.9),
             return_pct: dec!(0.009),

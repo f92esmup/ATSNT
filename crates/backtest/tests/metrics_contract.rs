@@ -19,6 +19,7 @@ fn trade(
         side: PositionSide::Long,
         pnl_gross,
         fees_paid: fees,
+        funding_paid: Decimal::ZERO,
         slippage_paid: Decimal::ZERO,
         pnl_net: pnl_gross - fees,
         return_pct: (pnl_gross - fees) / dec!(100),

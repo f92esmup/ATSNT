@@ -48,5 +48,8 @@ pub use recording::{
 };
 pub use run::{RunId, RunSpec, RunType};
 pub use sinks::{artifact_object_name, artifact_run_suffix, SinkFailures, StrictSinkError};
-pub use tick_simulation::{TickSimulation, TickSimulationConfig, TickSimulationError, TickStep};
+pub use tick_simulation::{
+    TickSimulation, TickSimulationConfig, TickSimulationError, TickStep, DEFAULT_FUNDING_RATE,
+    DEFAULT_MAINTENANCE_MARGIN_RATE,
+};
 pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};

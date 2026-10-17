@@ -8,9 +8,10 @@ use anyhow::{Context, Result};
 use backtest::{
     now_unix_ms, record_backtest, record_monte_carlo, BacktestConfig, BacktestEngine, DataWindow,
     MonteCarloConfig, MonteCarloSimulator, RunContext, RunSpec, RunType, SamplingConfig,
-    SinkFailures, TickSimulation, TickSimulationConfig,
+    SinkFailures, TickSimulation, TickSimulationConfig, DEFAULT_MAINTENANCE_MARGIN_RATE,
 };
 use clap::Parser;
+use domain::futures::FundingSchedule;
 use domain::DollarBarAggregator;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -73,6 +74,16 @@ struct Args {
     /// until measured against live fills)
     #[arg(long, default_value_t = 100)]
     latency_ms: i64,
+
+    /// Funding rate per eight-hour settlement with `--fill-model tick`, used where
+    /// `--funding-file` has no record (0.01% is the exchange's calm-market baseline)
+    #[arg(long, default_value = "0.0001")]
+    funding_rate: Decimal,
+
+    /// Funding history JSON in the `GET /fapi/v1/fundingRate` format, charged at the settlements
+    /// it covers with `--fill-model tick`
+    #[arg(long)]
+    funding_file: Option<PathBuf>,
 
     /// Enable post-backtest Discrete Event Monte Carlo Stress-Testing
     #[arg(long, default_value_t = false)]
@@ -445,12 +456,22 @@ async fn main() -> Result<()> {
                 "[*] Fill model: tick-level venue, {} ms order latency, tape-walk market fills",
                 args.latency_ms
             );
+            let funding = match &args.funding_file {
+                Some(path) => {
+                    let history = std::fs::read_to_string(path)
+                        .with_context(|| format!("Failed to read {}", path.display()))?;
+                    adapters::funding_schedule_from_history(&history, args.funding_rate)?
+                }
+                None => FundingSchedule::constant(args.funding_rate),
+            };
             let mut simulation = TickSimulation::new(
                 TickSimulationConfig {
                     backtest: engine_config,
                     symbol: symbol.clone(),
                     dollar_bar_threshold: effective_dollar_bar,
                     latency_ms: args.latency_ms,
+                    funding,
+                    maintenance_margin_rate: DEFAULT_MAINTENANCE_MARGIN_RATE,
                 },
                 strategy,
             )?;

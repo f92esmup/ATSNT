@@ -10,6 +10,7 @@
 //! and is not counted in the metrics, unlike the bar engine, which marks it out.
 
 use adapters::{SimulatedVenue, SimulatedVenueConfig};
+use domain::futures::FundingSchedule;
 use domain::{DollarBar, DollarBarAggregator, DomainError, RiskError, Side, Trade};
 use rust_decimal::Decimal;
 use strategies::Strategy;
@@ -17,6 +18,13 @@ use strategies::Strategy;
 use crate::config::BacktestConfig;
 use crate::metrics::{BacktestMetrics, ClosedTrade};
 use crate::session::{SessionConfig, SessionEvent, TradingSession};
+
+/// Funding rate per settlement when none is recorded: the 0.01% interest component Binance
+/// charges a perpetual in calm markets.
+pub const DEFAULT_FUNDING_RATE: Decimal = Decimal::from_parts(1, 0, 0, false, 4);
+
+/// Maintenance margin rate of the first Binance BTCUSDT notional bracket.
+pub const DEFAULT_MAINTENANCE_MARGIN_RATE: Decimal = Decimal::from_parts(4, 0, 0, false, 3);
 
 /// Milliseconds between emergency-close attempts while halting.
 const HALT_RETRY_MS: i64 = 5_000;
@@ -32,6 +40,10 @@ pub struct TickSimulationConfig {
     pub dollar_bar_threshold: Decimal,
     /// Milliseconds an order takes to reach the market.
     pub latency_ms: i64,
+    /// Funding rates charged at each settlement.
+    pub funding: FundingSchedule,
+    /// Maintenance margin as a fraction of notional.
+    pub maintenance_margin_rate: Decimal,
 }
 
 /// Why a tick simulation could not be built.
@@ -74,6 +86,8 @@ impl<S: Strategy> TickSimulation<S> {
             latency_ms: config.latency_ms,
             risk_per_trade_pct: backtest.risk_per_trade_pct,
             risk_policy: backtest.risk_policy()?,
+            funding: config.funding.clone(),
+            maintenance_margin_rate: config.maintenance_margin_rate,
         });
         let session = TradingSession::new(
             SessionConfig {
@@ -104,7 +118,16 @@ impl<S: Strategy> TickSimulation<S> {
     pub async fn on_trade(&mut self, trade: &Trade) -> TickStep {
         self.ticks += 1;
         let mut events = Vec::new();
-        for report in self.venue.on_trade(trade) {
+        let reports = self.venue.on_trade(trade);
+        // Funding settled before the print traded, on the position held until then.
+        let funding = self.venue.take_funding();
+        for payment in &funding {
+            self.session.on_funding(payment.amount);
+        }
+        if !funding.is_empty() {
+            self.session.on_wallet_balance(self.venue.wallet_balance());
+        }
+        for report in reports {
             events.extend(self.session.on_execution(&self.venue, &report).await);
             self.session.on_wallet_balance(self.venue.wallet_balance());
         }
@@ -219,6 +242,8 @@ mod tests {
             symbol: "BTCUSDT".to_string(),
             dollar_bar_threshold: dec!(2000),
             latency_ms: 0,
+            funding: FundingSchedule::constant(dec!(0.0001)),
+            maintenance_margin_rate: dec!(0.004),
         };
         TickSimulation::new(
             config,
@@ -364,6 +389,8 @@ mod tests {
             symbol: "BTCUSDT".to_string(),
             dollar_bar_threshold: Decimal::ZERO,
             latency_ms: 0,
+            funding: FundingSchedule::constant(Decimal::ZERO),
+            maintenance_margin_rate: dec!(0.004),
         };
 
         let result = TickSimulation::new(
@@ -374,5 +401,58 @@ mod tests {
         );
 
         assert!(matches!(result, Err(TickSimulationError::Threshold(_))));
+    }
+
+    const SETTLEMENT: i64 = domain::futures::FUNDING_INTERVAL_MS * 10;
+
+    #[tokio::test]
+    async fn funding_paid_while_a_position_is_open_is_part_of_its_trade() {
+        let mut simulation = simulation(vec![long_signal()]);
+        let base = SETTLEMENT - 10_000;
+        let ticks = [
+            print(base, dec!(100), dec!(10), Side::Sell),
+            print(base + 1, dec!(100), dec!(10), Side::Sell),
+            print(base + 2, dec!(100.2), dec!(10), Side::Buy),
+            // The settlement passes while the long is open.
+            print(SETTLEMENT + 1_000, dec!(100.4), dec!(10), Side::Buy),
+            print(SETTLEMENT + 2_000, dec!(104), dec!(1), Side::Buy),
+            print(SETTLEMENT + 2_001, dec!(103.9), dec!(10), Side::Sell),
+        ];
+
+        replay(&mut simulation, &ticks).await;
+
+        let wallet = simulation.wallet_balance();
+        let (_, trades) = simulation.finish();
+        assert_eq!(trades.len(), 1);
+        // 5 units at the last price before the settlement (100.2) with a 0.01% rate.
+        assert_eq!(trades[0].funding_paid, dec!(0.0501));
+        assert_eq!(
+            trades[0].pnl_net,
+            trades[0].pnl_gross - trades[0].fees_paid - dec!(0.0501)
+        );
+        assert_eq!(wallet, dec!(1000) + trades[0].pnl_net);
+    }
+
+    #[tokio::test]
+    async fn a_liquidation_closes_the_trade_as_liquidated_and_loses_the_margin() {
+        let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.9), dec!(104), 5).unwrap();
+        let mut simulation = simulation(vec![Some(intent)]);
+        let ticks = [
+            print(1_000, dec!(100), dec!(10), Side::Sell),
+            print(1_001, dec!(100), dec!(10), Side::Sell),
+            print(1_002, dec!(100), dec!(500), Side::Buy),
+            // The mark falls through the liquidation price before any stop could trade.
+            print(1_003, dec!(91), dec!(1), Side::Sell),
+        ];
+
+        replay(&mut simulation, &ticks).await;
+
+        let wallet = simulation.wallet_balance();
+        let (metrics, trades) = simulation.finish();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].exit_reason, "Liquidation");
+        assert_eq!(metrics.exit_reason_counts.get("Liquidation"), Some(&1));
+        assert_eq!(wallet, dec!(1000) + trades[0].pnl_net);
+        assert!(trades[0].pnl_net < dec!(-900));
     }
 }

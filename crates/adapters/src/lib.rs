@@ -2,6 +2,7 @@ pub mod analytics;
 pub mod binance_auth;
 pub mod binance_csv;
 pub mod binance_fetcher;
+pub mod binance_funding;
 pub mod binance_gateway;
 pub mod binance_parquet;
 pub mod binance_private_stream;
@@ -20,6 +21,7 @@ pub use analytics::{
 pub use binance_auth::BinanceAuth;
 pub use binance_csv::BinanceCsvReader;
 pub use binance_fetcher::{BinanceDataFetcher, FetchParams, FetchSummary};
+pub use binance_funding::{funding_schedule_from_history, parse_funding_history};
 pub use binance_gateway::{
     AccountFix, AccountReport, BinanceGateway, BinanceGatewayConfig, ExitKind, Finding,
     FindingStatus, GatewayError, OrderExecutionReport, PositionClosureReport, ProtectiveExitReport,

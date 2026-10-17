@@ -16,6 +16,10 @@ pub struct ClosedTrade {
     pub side: PositionSide,
     pub pnl_gross: Decimal,
     pub fees_paid: Decimal,
+    /// Perpetual funding paid while the position was open (negative when received); already
+    /// deducted from `pnl_net`.
+    #[serde(default)]
+    pub funding_paid: Decimal,
     pub slippage_paid: Decimal,
     pub pnl_net: Decimal,
     pub return_pct: Decimal,
