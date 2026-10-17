@@ -5,7 +5,8 @@ engine reads them and nothing else: the engine ships no dashboard (the Looker St
 in-process web workspace were retired). **This document is canonical.** Consumers pin a copy of the
 columns they read and verify it at run time.
 
-Contract version: **1** (119 columns pinned by the first consumer). Source of truth for the DDL:
+Contract version: **2** (2026-10-18; version 1 had 119 columns pinned by the first consumer, see
+section 8 for what changed). Source of truth for the DDL:
 `scripts/gcp/bigquery_schema.sql`. Consumer-requested ETL changes are listed in section 7.
 
 ## 1. Rules of change
@@ -40,7 +41,7 @@ Contract version: **1** (119 columns pinned by the first consumer). Source of tr
 | `v_trades` | one row per closed trade | `trough_equity`/`peak_equity` are the equity extremes while the trade was open (MAE/MFE). |
 | `v_equity` | one row per equity event | Four events per trade. `running_peak` starts at `initial_capital`. |
 | `v_series` | one row per series point | Monte Carlo curves are keyed by **the Monte Carlo run's own `run_id`**, series `mc_equity`, `event` = curve name (`Realized`, `Quantile_0.05` ... `Worst_Stress_1`, `Best_Ceiling_1`), `x` = trade ordinal. |
-| `v_hpo_trials` | one row per optimisation trial | `hpo_run_id` is the parent optimisation run; `rank` is 1-based. |
+| `v_hpo_trials` | one row per optimisation trial | `hpo_run_id` is the parent optimisation run; `rank` is 1-based. Eligible trials rank first. `eligible` is TRUE when every fold reached the minimum of closed trades; `min_fold_trades` is the fewest trades in any fold. `fitness` is the mean OOS Sortino times `stability_score` (0 for ineligible trials). `dsr_p_value` is the Deflated Sharpe p-value of the per-trade OOS Sharpe `oos_sharpe` (see docs/architecture/04-hpo-and-walk-forward.md). |
 | `v_hpo_folds` | one row per trial, fold and sample | `sample` is `is` or `oos`. |
 | `v_monte_carlo` | one row per Monte Carlo run | `backtest_run_id` links to the backtest it stresses. |
 
@@ -56,8 +57,19 @@ Relations that must hold (checked by the first consumer on every run it shows):
 4. `max_drawdown_pct` = max of the trades' `max_drawdown_pct` (declared in the DDL).
 5. `exit_equity` of the last trade = `initial_capital + net_profit`.
 
-Values that are not measurements (flagged by the first consumer, see gaps G5 and G6): `sortino_ratio`
-and `profit_factor` equal to exactly `100`; a drawdown above `1` (100 %).
+Values that are not measurements (flagged by the first consumer, see gap G6): a drawdown above `1`
+(100 %). Since version 2, `sortino_ratio` and `profit_factor` are NULL where they are undefined
+instead of a `100` cap (G5); rows written before 2026-10-18 still carry the cap.
+
+Formulas (version 2):
+- `sortino_ratio` is per trade. The return of a trade is `r = net_pnl / equity at entry`, and
+  `sortino_ratio = mean(r) / sqrt(sum(min(r, 0)^2) / N)` over all N trades of the scope. It is NULL
+  without trades or without a losing trade. Typical values are fractions (about -0.5 to 0.5), not
+  annualised figures.
+- `profit_factor = gross_profit / gross_loss`; NULL without a losing trade.
+- `rejected_orders` (JSON, `run_metrics`, through `v_runs` and `v_hpo_folds`) counts the signals the
+  risk policy did not turn into orders, per reason (`OrderSizeExceeded`, `OrderBelowMinLotSize`,
+  `DailyHalt`, ...). It is NULL when nothing was rejected.
 
 ## 4. Required columns
 
@@ -111,9 +123,9 @@ Priority: **High** blocks a decision the consumer is meant to support, **Medium*
 |---|---|---|---|---|---|
 | G1 | High | A paper or live run does not record which backtest justified it. `parent_run_id` only links `hpo -> hpo_trial` and `backtest -> monte_carlo`. | The most valuable check is "is the live run behaving inside the Monte Carlo band of its baseline?". Guessing the baseline from parameters could silently pair the wrong runs. | Add `baseline_run_id STRING` to `runs` and expose it in `v_runs`; `paper_trading` and `live_trading` take `--baseline-run-id <backtest run id>` (validated as a UUID v7). The Monte Carlo run of that backtest is the one whose `parent_run_id` is the baseline. Rows written without the flag leave the column NULL. | Closed in the engine; deployed datasets need `bigquery_schema.sql` re-run (it adds the column and refreshes `v_runs`). |
 | G2 | High | The currency of `initial_capital`, `net_profit`, fees and equity is not recorded (only implied by `symbol`, e.g. `BTCUSDT`). | Without it a figure cannot be shown with its unit, and runs of different quote assets cannot be told apart. | Add `quote_currency STRING` (`USDT`, ...) to `runs`/`v_runs`. | Open |
-| G3 | Medium | The deployed `v_runs` has no `halted` column, although the DDL declares it (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS halted`). | The monthly kill switch is key to judge a run: a run stopped by the kill switch is not comparable to one that ran to the end. | Re-run the DDL setup so the deployed dataset matches the DDL; Consumers then add `halted` to their pin. | Open |
+| G3 | Medium | The deployed `v_runs` has no `halted` column, although the DDL declares it (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS halted`). | The monthly kill switch is key to judge a run: a run stopped by the kill switch is not comparable to one that ran to the end. | Re-run the DDL setup so the deployed dataset matches the DDL; Consumers then add `halted` to their pin. | Closed: the DDL was re-run on the deployed dataset on 2026-10-18. |
 | G4 | Medium | Metrics are written only when a run completes, so a running run (the paper run) has no `total_trades`, `net_profit`, Sortino... | The runs that matter most for ongoing decisions (paper/live) have no scorecards until they end. | Write interim `full` metrics periodically for running runs. Until then consumers derive what they can from `v_trades`. | Open |
-| G5 | Medium | `sortino_ratio` and `profit_factor` use `100` as a cap (5-trade backtest: both exactly `100`); `sortino_ratio` also reaches `-345.83` on the ruined run. | A cap looks like an excellent measurement. | Return NULL (or add `sortino_saturated BOOL`) when the ratio is undefined; document the formula and its bounds. | Open |
+| G5 | Medium | `sortino_ratio` and `profit_factor` use `100` as a cap (5-trade backtest: both exactly `100`); `sortino_ratio` also reaches `-345.83` on the ruined run. | A cap looks like an excellent measurement. | Return NULL (or add `sortino_saturated BOOL`) when the ratio is undefined; document the formula and its bounds. | Closed in version 2: NULL when undefined; formulas in section 3. |
 | G6 | Medium | Monte Carlo reports `p95_max_drawdown_pct = 1.2636` (126 %) for the ruined backtest. | A drawdown above 100 % of equity is not a physical quantity for a long-only account. | Clarify the simulation (leverage? negative equity?) or clamp at 1 and report ruin separately. | Open |
 | G7 | Medium | No benchmark series (buy and hold of the symbol over the run period). | "Does the strategy beat holding?" cannot be answered. | A view `v_benchmark(run_id, ts, value)` or the price series of the run period. | Open |
 | G8 | Medium | Walk-forward detail is thin: only Sortino-level metrics per fold; no fold date windows; no per-trial out-of-sample returns. | The probability of backtest overfitting (PBO/CSCV) needs per-trial return series; fold windows are needed to read degradation over time. | Expose `train_start/train_end/test_start/test_end` per fold, and OOS returns (or per-fold trade returns) per trial. | Open |
@@ -123,5 +135,11 @@ Priority: **High** blocks a decision the consumer is meant to support, **Medium*
 | G12 | Low | `net_profit` and `total_slippage` differ from the sums of the trades by a few units of the ninth decimal (1,145 trades: 4e-9 on net profit; 3 trades: 1e-9 on slippage). | Information only; the first consumer tolerates one unit per trade and shows the difference. | Document which side is computed in which precision. | Open |
 | G13 | Low | `execution_context` JSON carries `risk_per_trade_pct` and `max_daily_drawdown_pct`; they are not flattened in `v_runs`. | None: the first consumer parses the JSON. | No action. | Closed |
 | G14 | Medium | Units are inconsistent: `probability_of_ruin_pct` is 0-100 (a certain ruin stores `100`) while every other `*_pct` column is a fraction (`0.3` is 30 %, `ruin_threshold_pct` included). | A reader of the raw views, or a future consumer, can mistake 100 for 10,000 %. The first consumer special-cases it. | Store `probability_of_ruin_pct` as a fraction like the rest, or rename it to say its unit. | Open |
-| G15 | Medium | HPO trial and fold data may be degenerate without saying so: an optimisation with no trades (60 trials, all `0`, DSR p = 1) looks like any other. | A consumer would present zeros as results: it can read "0 of N viable" but cannot tell "no trades" from "all lost". | Record the number of trades per trial and a status (`no_trades`, `completed`) on the optimisation run. | Open |
+| G15 | Medium | HPO trial and fold data may be degenerate without saying so: an optimisation with no trades (60 trials, all `0`, DSR p = 1) looks like any other. | A consumer would present zeros as results: it can read "0 of N viable" but cannot tell "no trades" from "all lost". | Record the number of trades per trial and a status (`no_trades`, `completed`) on the optimisation run. | Closed: `v_hpo_trials` has `total_oos_trades`, `min_fold_trades` and `eligible`; an optimisation without an eligible trial is recorded as `completed` with every trial `eligible = FALSE`, and the pipeline deploys no winner. |
 
+## 8. Version history
+
+| Version | Date | Change | Breaking for |
+|---|---|---|---|
+| 2 | 2026-10-18 | `sortino_ratio` is per trade on entry equity and NULL when undefined; `profit_factor` is NULL without losses (both were capped at `100`). HPO `fitness` uses the OOS Sortino and the plateau stability; `dsr_p_value` is a real Deflated Sharpe p-value. New columns: `run_metrics.rejected_orders` (JSON), `v_hpo_trials.min_fold_trades`, `eligible`, `oos_sharpe`. | Consumers that read `sortino_ratio`, `profit_factor`, `fitness`, `stability_score` or `dsr_p_value` as comparable to version 1 rows: compare only rows recorded since 2026-10-18. |
+| 1 | 2026-10 | First pinned contract. | - |
