@@ -226,6 +226,12 @@ if [ -n "${MONTH}" ]; then
     MONTH_PADDED="$(printf "%02d" "$((10#${MONTH}))")"
 fi
 
+# The execution context only feeds the HPO stage; with --skip-hpo it would be ignored silently.
+if [ "${SKIP_HPO}" = "true" ] && [ -n "${EXECUTION_CONTEXT}" ]; then
+    echo "[ERROR] --execution-context has no effect with --skip-hpo (the backtest adopts the context of the existing --config artifact)"
+    exit 1
+fi
+
 # Set dynamic default paths (month-scoped when --month is given so runs never overwrite each other)
 PERIOD="${YEAR}${MONTH_PADDED:+_${MONTH_PADDED}}"
 

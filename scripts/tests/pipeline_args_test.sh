@@ -122,6 +122,9 @@ touch "${WORK_DIR}/winner.json"
 run --skip-fetch --skip-hpo --config "${WORK_DIR}/winner.json"
 check "skip-hpo: existing config used by backtest" '! has "/run_hpo " && [[ "$(line_with "backtest --data")" == *"--config ${WORK_DIR}/winner.json"* ]]'
 
+run --skip-fetch --skip-hpo --execution-context configs/execution_real_500eur.json --config "${WORK_DIR}/winner.json"
+check "skip-hpo: an execution context is refused, not silently ignored" '[ "${STATUS}" -ne 0 ] && has "--execution-context" && has "--skip-hpo"'
+
 run --skip-fetch --detach
 check "detach: dry-run takes precedence (nothing dispatched)" '[ "${STATUS}" -eq 0 ] && ! has "Process dispatched"'
 
