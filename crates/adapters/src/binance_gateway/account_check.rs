@@ -11,6 +11,9 @@ use super::*;
 pub enum FindingStatus {
     /// The account already matches; `detail` says what was observed.
     Ok { detail: String },
+    /// The account does not match the strict profile, but the operator explicitly accepted that
+    /// on testnet; it does not stop the bot.
+    Warning { detail: String },
     /// The account did not match and the bot changed it (confirmed by a re-read).
     Fixed { from: String, to: String },
     /// The account does not match and the bot cannot or must not fix it.
@@ -92,6 +95,9 @@ impl AccountReport {
                 FindingStatus::Ok { detail } => {
                     text.push_str(&format!("  [OK]       {}: {detail}\n", finding.check));
                 }
+                FindingStatus::Warning { detail } => {
+                    text.push_str(&format!("  [WARNING]  {}: {detail}\n", finding.check));
+                }
                 FindingStatus::Fixed { from, to } => {
                     text.push_str(&format!("  [FIXED]    {}: {from} -> {to}\n", finding.check));
                 }
@@ -152,6 +158,7 @@ pub(super) fn analyze(
     symbol: &str,
     policy: &RiskPolicy,
     allow_exposure: bool,
+    tolerate_foreign_collateral: bool,
 ) -> Result<Vec<Finding>, GatewayError> {
     let mut findings = Vec::new();
 
@@ -189,6 +196,17 @@ pub(super) fn analyze(
     }
     findings.push(if foreign.is_empty() {
         Finding::ok("collateral", "USDT only")
+    } else if tolerate_foreign_collateral {
+        Finding {
+            check: "collateral",
+            status: FindingStatus::Warning {
+                detail: format!(
+                    "non-USDT balances in the Futures wallet ({}) accepted by --allow-foreign-collateral (testnet only); in single-asset mode they are not margin for USDT contracts",
+                    foreign.join(", ")
+                ),
+            },
+            fix: None,
+        }
     } else {
         Finding::blocking(
             "collateral",
@@ -388,7 +406,8 @@ impl BinanceGateway {
         }
         let policy = &self.config.risk_policy;
         let state = self.read_account_state(symbol).await?;
-        let mut findings = analyze(&state, symbol, policy, allow_exposure)?;
+        let tolerate = self.config.allow_foreign_collateral;
+        let mut findings = analyze(&state, symbol, policy, allow_exposure, tolerate)?;
 
         let fixable = findings.iter().find_map(|finding| match &finding.status {
             FindingStatus::Blocking { reason, .. }
@@ -405,7 +424,7 @@ impl BinanceGateway {
             match self.set_isolated_margin(symbol).await {
                 Ok(()) => {
                     let after = self.read_account_state(symbol).await?;
-                    findings = analyze(&after, symbol, policy, allow_exposure)?;
+                    findings = analyze(&after, symbol, policy, allow_exposure, tolerate)?;
                     for finding in findings.iter_mut().filter(|f| f.check == "margin type") {
                         if matches!(finding.status, FindingStatus::Ok { .. }) {
                             finding.status = FindingStatus::Fixed {
@@ -465,7 +484,18 @@ mod tests {
     }
 
     fn run(state: &RawAccountState, allow_exposure: bool) -> Vec<Finding> {
-        analyze(state, "BTCUSDT", &RiskPolicy::default(), allow_exposure).unwrap()
+        analyze(
+            state,
+            "BTCUSDT",
+            &RiskPolicy::default(),
+            allow_exposure,
+            false,
+        )
+        .unwrap()
+    }
+
+    fn run_tolerating_foreign_collateral(state: &RawAccountState) -> Vec<Finding> {
+        analyze(state, "BTCUSDT", &RiskPolicy::default(), false, true).unwrap()
     }
 
     fn blocking_checks(findings: &[Finding]) -> Vec<&'static str> {
@@ -517,6 +547,53 @@ mod tests {
             }
             other => panic!("expected blocking, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tolerated_foreign_collateral_is_a_warning_that_still_names_the_assets() {
+        let mut state = good_state();
+        state.account["assets"] = json!([
+            {"asset": "USDT", "walletBalance": "5000", "availableBalance": "5000"},
+            {"asset": "BTC", "walletBalance": "0.01", "availableBalance": "0.01"},
+            {"asset": "USDC", "walletBalance": "5000", "availableBalance": "5000"}
+        ]);
+
+        let findings = run_tolerating_foreign_collateral(&state);
+
+        let collateral = findings.iter().find(|f| f.check == "collateral").unwrap();
+        match &collateral.status {
+            FindingStatus::Warning { detail } => {
+                assert!(
+                    detail.contains("BTC") && detail.contains("USDC"),
+                    "{detail}"
+                );
+            }
+            other => panic!("expected a warning, got {other:?}"),
+        }
+        assert!(blocking_checks(&findings).is_empty(), "{findings:?}");
+        // Every other rule stays in force: a hedge-mode account is still refused.
+        let mut hedge = state;
+        hedge.dual_side = true;
+        assert_eq!(
+            blocking_checks(&run_tolerating_foreign_collateral(&hedge)),
+            vec!["position mode"]
+        );
+    }
+
+    #[test]
+    fn a_warning_does_not_make_the_report_unready_but_it_is_rendered() {
+        let mut state = good_state();
+        state.account["assets"] = json!([
+            {"asset": "USDT", "walletBalance": "5000", "availableBalance": "5000"},
+            {"asset": "BTC", "walletBalance": "0.01", "availableBalance": "0.01"}
+        ]);
+        let report = AccountReport {
+            symbol: "BTCUSDT".to_string(),
+            findings: run_tolerating_foreign_collateral(&state),
+        };
+
+        assert!(report.is_ready());
+        assert!(report.render().contains("[WARNING]"));
     }
 
     #[test]

@@ -112,6 +112,13 @@ struct Args {
     /// Verify the account profile but never change it: any mismatch stops the bot.
     #[arg(long, default_value_t = false)]
     no_auto_fix: bool,
+
+    /// TESTNET ONLY: accept non-USDT balances (BTC, USDC) in the Futures wallet, which Binance
+    /// credits to every testnet account and which cannot be removed. They are reported as a
+    /// warning; in single-asset mode they are not margin for USDT contracts. Refused with
+    /// --production: a real account holding foreign collateral must be fixed, not tolerated.
+    #[arg(long, default_value_t = false)]
+    allow_foreign_collateral: bool,
 }
 
 /// Seconds between account profile re-verifications while the bot runs.
@@ -124,6 +131,16 @@ fn validate_strategy_market(strategy: &impl Strategy, market: MarketType) -> Res
             strategy.name(),
             market,
             strategy.compatible_market_types()
+        );
+    }
+    Ok(())
+}
+
+/// The foreign-collateral tolerance exists for the default testnet account only.
+fn validate_collateral_tolerance(is_testnet: bool, allow_foreign_collateral: bool) -> Result<()> {
+    if allow_foreign_collateral && !is_testnet {
+        anyhow::bail!(
+            "--allow-foreign-collateral is only available on testnet; fix the production account instead (transfer the non-USDT assets out of the Futures wallet)"
         );
     }
     Ok(())
@@ -144,6 +161,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let started_at_ms = now_unix_ms();
     let is_testnet = if args.production { false } else { args.testnet };
+    validate_collateral_tolerance(is_testnet, args.allow_foreign_collateral)?;
     let symbol_upper = args.symbol.to_ascii_uppercase();
 
     let secret_manager = GcpSecretManager::from_env();
@@ -318,6 +336,7 @@ async fn main() -> Result<()> {
         recv_window_ms: 5000,
         risk_policy,
         risk_per_trade_pct,
+        allow_foreign_collateral: args.allow_foreign_collateral,
     };
     let gateway = Arc::new(BinanceGateway::new(gateway_config)?);
 
@@ -384,10 +403,20 @@ async fn main() -> Result<()> {
         .create_listen_key()
         .await
         .with_context(|| "Failed to acquire USD-M listenKey")?;
-    let mut user_stream =
-        BinancePrivateUserDataStream::connect_futures(listen_key, is_testnet, gateway.clone())
-            .await
-            .with_context(|| "Failed to connect to Binance Private User Data Stream")?;
+    let mut user_stream = if args.allow_foreign_collateral {
+        println!(
+            "[WARNING] --allow-foreign-collateral: non-USDT balances in the Futures wallet are tolerated (testnet only)."
+        );
+        BinancePrivateUserDataStream::connect_futures_tolerating_foreign_collateral(
+            listen_key,
+            is_testnet,
+            gateway.clone(),
+        )
+        .await
+    } else {
+        BinancePrivateUserDataStream::connect_futures(listen_key, is_testnet, gateway.clone()).await
+    }
+    .with_context(|| "Failed to connect to Binance Private User Data Stream")?;
 
     // 5. Connect Public Market Stream
     // The public feed must be the market the account trades: testnet and production differ.
@@ -1077,5 +1106,22 @@ async fn record_lifecycle<R: RunRecorder>(
             "[WARN] Failed to record live run status {}: {e}",
             status.as_str()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_collateral_tolerance;
+
+    #[test]
+    fn the_foreign_collateral_tolerance_is_refused_outside_testnet() {
+        assert!(validate_collateral_tolerance(false, true).is_err());
+    }
+
+    #[test]
+    fn the_foreign_collateral_tolerance_is_allowed_on_testnet_and_off_by_default() {
+        assert!(validate_collateral_tolerance(true, true).is_ok());
+        assert!(validate_collateral_tolerance(true, false).is_ok());
+        assert!(validate_collateral_tolerance(false, false).is_ok());
     }
 }

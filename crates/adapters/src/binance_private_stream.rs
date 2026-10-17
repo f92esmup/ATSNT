@@ -117,6 +117,26 @@ impl BinancePrivateUserDataStream {
         .await
     }
 
+    /// Like [`Self::connect_futures`], but account updates that list a non-USDT wallet balance
+    /// are accepted instead of failing the stream. Testnet only: the default testnet account
+    /// holds BTC and USDC that cannot be removed. Any other environment is refused.
+    pub async fn connect_futures_tolerating_foreign_collateral(
+        listen_key: String,
+        testnet: bool,
+        renewer: Arc<dyn ListenKeyRenewer>,
+    ) -> Result<Self, BinancePrivateStreamError> {
+        if !testnet || listen_key.is_empty() {
+            return Err(BinancePrivateStreamError::InvalidConfiguration);
+        }
+        let endpoint = format!("{FUTURES_USER_STREAM_TESTNET}{listen_key}");
+        let websocket = connect_private_socket(&endpoint).await?;
+        Ok(Self::spawn_reader(
+            websocket,
+            Some((listen_key, renewer, FuturesRenewalPolicy::default())),
+            true,
+        ))
+    }
+
     async fn connect_futures_with_endpoint(
         endpoint: &str,
         listen_key: String,
@@ -130,6 +150,7 @@ impl BinancePrivateUserDataStream {
         Ok(Self::spawn_reader(
             websocket,
             Some((listen_key, renewer, policy)),
+            false,
         ))
     }
 
@@ -171,12 +192,13 @@ impl BinancePrivateUserDataStream {
         if !accepted {
             return Err(BinancePrivateStreamError::SpotSubscriptionRejected);
         }
-        Ok(Self::spawn_reader(websocket, None))
+        Ok(Self::spawn_reader(websocket, None, false))
     }
 
     fn spawn_reader(
         websocket: PrivateWebSocket,
         renewal: Option<(String, Arc<dyn ListenKeyRenewer>, FuturesRenewalPolicy)>,
+        tolerate_foreign_collateral: bool,
     ) -> Self {
         let (event_tx, receiver) = mpsc::channel(USER_STREAM_CHANNEL_CAPACITY);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -185,6 +207,7 @@ impl BinancePrivateUserDataStream {
             event_tx,
             shutdown_rx,
             renewal,
+            tolerate_foreign_collateral,
         ));
         Self {
             receiver,
@@ -246,6 +269,7 @@ async fn run_private_reader(
     event_tx: mpsc::Sender<Result<BinancePrivateEvent, BinancePrivateStreamError>>,
     mut shutdown_rx: oneshot::Receiver<()>,
     renewal: Option<(String, Arc<dyn ListenKeyRenewer>, FuturesRenewalPolicy)>,
+    tolerate_foreign_collateral: bool,
 ) -> Result<(), BinancePrivateStreamError> {
     let mut renewal_interval = renewal.as_ref().map(|(_, _, policy)| {
         tokio::time::interval_at(
@@ -300,7 +324,7 @@ async fn run_private_reader(
             message = websocket.next() => {
                 match message {
                     Some(Ok(Message::Text(text))) => {
-                        let parsed = parse_private_user_event(text.as_ref()).and_then(|event| {
+                        let parsed = parse_private_user_event_with(text.as_ref(), tolerate_foreign_collateral).and_then(|event| {
                             let event_time_ms = private_event_time_ms(&event);
                             if let Some(previous_time_ms) = last_event_time_ms {
                                 if event_time_ms < previous_time_ms {
@@ -689,6 +713,15 @@ fn build_spot_subscription_request(
 pub fn parse_private_user_event(
     json_str: &str,
 ) -> Result<BinancePrivateEvent, BinancePrivateStreamError> {
+    parse_private_user_event_with(json_str, false)
+}
+
+/// Like [`parse_private_user_event`]; with `tolerate_foreign_collateral` a futures account update
+/// may list a non-USDT wallet balance (testnet accounts hold BTC and USDC by default).
+pub fn parse_private_user_event_with(
+    json_str: &str,
+    tolerate_foreign_collateral: bool,
+) -> Result<BinancePrivateEvent, BinancePrivateStreamError> {
     let root: Value = serde_json::from_str(json_str)
         .map_err(|_| BinancePrivateStreamError::EventReconciliationRequired)?;
     let value = match (root.get("subscriptionId"), root.get("event")) {
@@ -736,9 +769,8 @@ pub fn parse_private_user_event(
             event_time_ms: required_u64(value, "E")?,
             update: parse_spot_execution_report(value)?,
         }),
-        "ACCOUNT_UPDATE" => {
-            parse_futures_account_update(value).map(BinancePrivateEvent::FuturesAccountUpdate)
-        }
+        "ACCOUNT_UPDATE" => parse_futures_account_update(value, tolerate_foreign_collateral)
+            .map(BinancePrivateEvent::FuturesAccountUpdate),
         "ORDER_TRADE_UPDATE" => parse_futures_order_trade_update(value)
             .map(BinancePrivateEvent::FuturesOrderTradeUpdate),
         "TRADE_LITE" => Ok(BinancePrivateEvent::FuturesTradeLite {
@@ -799,6 +831,7 @@ fn parse_spot_execution_report(
 
 fn parse_futures_account_update(
     value: &Value,
+    tolerate_foreign_collateral: bool,
 ) -> Result<FuturesAccountUpdate, BinancePrivateStreamError> {
     let account = value
         .get("a")
@@ -815,7 +848,10 @@ fn parse_futures_account_update(
                 cross_wallet_balance: required_decimal(row, "cw")?,
                 balance_change: required_decimal(row, "bc")?,
             };
-            if balance.asset != "USDT" && balance.wallet_balance != Decimal::ZERO {
+            if !tolerate_foreign_collateral
+                && balance.asset != "USDT"
+                && balance.wallet_balance != Decimal::ZERO
+            {
                 return Err(BinancePrivateStreamError::EventReconciliationRequired);
             }
             Ok(balance)
@@ -1093,6 +1129,36 @@ mod tests {
     }
 
     #[test]
+    fn a_foreign_wallet_balance_in_an_account_update_needs_the_explicit_testnet_tolerance() {
+        let event = r#"{"e":"ACCOUNT_UPDATE","E":1700000000003,"T":1700000000000,"a":{"m":"ORDER","B":[{"a":"USDT","wb":"50.0","cw":"48.0","bc":"-2.0"},{"a":"BTC","wb":"0.01","cw":"0.01","bc":"0"}],"P":[]}}"#;
+
+        assert!(parse_private_user_event(event).is_err());
+        match parse_private_user_event_with(event, true).expect("tolerated on testnet") {
+            BinancePrivateEvent::FuturesAccountUpdate(update) => {
+                assert_eq!(update.balances.len(), 2);
+            }
+            other => panic!("expected an account update, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tolerating_foreign_collateral_is_refused_outside_testnet() {
+        let renewer: Arc<dyn ListenKeyRenewer> = Arc::new(RecordingRenewer::default());
+
+        let result = BinancePrivateUserDataStream::connect_futures_tolerating_foreign_collateral(
+            "key".to_string(),
+            false,
+            renewer,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(BinancePrivateStreamError::InvalidConfiguration)
+        ));
+    }
+
+    #[test]
     fn futures_order_trade_update_without_commission_fields_reports_zero_commission() {
         // Binance omits `n`/`N` on events that charge nothing (e.g. order acknowledgements).
         let event = r#"{"e":"ORDER_TRADE_UPDATE","E":1700000000004,"T":1700000000003,"o":{"s":"BTCUSDT","c":"client-1","S":"BUY","X":"NEW","i":123,"l":"0","L":"0","z":"0","t":-1,"ps":"BOTH"}}"#;
@@ -1347,6 +1413,7 @@ mod tests {
         server.await.expect("local server task joins");
     }
 
+    #[derive(Default)]
     struct RecordingRenewer {
         close_count: AtomicUsize,
         renew_count: AtomicUsize,

@@ -126,6 +126,11 @@ pub struct BinanceGatewayConfig {
     pub risk_policy: RiskPolicy,
     /// Fixed fractional equity risked per trade (e.g. 0.01 = 1%), shared with the simulator.
     pub risk_per_trade_pct: Decimal,
+    /// Accept non-USDT balances in the Futures wallet instead of refusing the account. Only
+    /// allowed on testnet, where Binance credits every account with BTC and USDC that cannot be
+    /// removed; [`BinanceGateway::new`] refuses it anywhere else.
+    #[serde(default)]
+    pub allow_foreign_collateral: bool,
 }
 
 impl Default for BinanceGatewayConfig {
@@ -138,6 +143,7 @@ impl Default for BinanceGatewayConfig {
             recv_window_ms: 5000,
             risk_policy: RiskPolicy::default(),
             risk_per_trade_pct: Decimal::new(1, 2),
+            allow_foreign_collateral: false,
         }
     }
 }
@@ -340,6 +346,14 @@ pub struct BinanceGateway {
 impl BinanceGateway {
     /// Initializes a new [`BinanceGateway`].
     pub fn new(config: BinanceGatewayConfig) -> Result<Self, GatewayError> {
+        // The tolerance exists for the default testnet account only; a real account that holds
+        // foreign collateral must be fixed, not tolerated.
+        if config.allow_foreign_collateral && (!config.testnet || config.spot) {
+            return Err(GatewayError::Config(
+                "allow_foreign_collateral is only available for USD-M futures on testnet"
+                    .to_string(),
+            ));
+        }
         let auth = BinanceAuth::new(&config.api_key, &config.secret_key);
 
         let base_url = if config.spot {
@@ -789,6 +803,7 @@ impl BinanceGateway {
             commission: &commission,
             symbol_config: &symbol_config,
             now_ms,
+            allow_foreign_collateral: self.config.allow_foreign_collateral,
         })
     }
 
@@ -2033,6 +2048,7 @@ struct FuturesPreflightInput<'a> {
     commission: &'a serde_json::Value,
     symbol_config: &'a serde_json::Value,
     now_ms: u64,
+    allow_foreign_collateral: bool,
 }
 
 fn parse_futures_preflight_snapshot(
@@ -2051,6 +2067,7 @@ fn parse_futures_preflight_snapshot(
         commission,
         symbol_config,
         now_ms,
+        allow_foreign_collateral,
     } = input;
 
     // `/fapi/v3/account` does not return `canTrade`: reject only when it is present and false.
@@ -2086,7 +2103,8 @@ fn parse_futures_preflight_snapshot(
         ));
     }
     for asset in assets {
-        if asset.get("asset").and_then(|value| value.as_str()) != Some("USDT")
+        if !allow_foreign_collateral
+            && asset.get("asset").and_then(|value| value.as_str()) != Some("USDT")
             && futures_decimal_field(asset, "walletBalance", "futures account asset")?
                 != Decimal::ZERO
         {
@@ -3028,6 +3046,77 @@ mod tests {
         assert!(requests
             .iter()
             .any(|request| request.starts_with("POST /fapi/v1/order?")));
+    }
+
+    fn account_with_foreign_collateral() -> String {
+        r#"{"canTrade":true,"availableBalance":"500.4","assets":[{"asset":"USDT","availableBalance":"500.4","walletBalance":"500.4"},{"asset":"BTC","availableBalance":"0.01","walletBalance":"0.01"},{"asset":"USDC","availableBalance":"5000","walletBalance":"5000"}]}"#.to_string()
+    }
+
+    #[tokio::test]
+    async fn foreign_collateral_is_refused_by_default_when_placing_an_order() {
+        let mut responses = valid_futures_responses(current_unix_time_ms().unwrap());
+        responses.insert("/fapi/v3/account", account_with_foreign_collateral());
+        let (base_url, _requests, server) = spawn_futures_mock_server(responses);
+        let gateway = futures_submission_test_gateway(base_url);
+
+        let result = submit_futures_test_order(&gateway).await;
+        server.join().unwrap();
+
+        assert!(
+            matches!(&result, Err(GatewayError::FuturesPreflight(reason)) if reason.contains("non-USDT")),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_collateral_is_accepted_only_with_the_explicit_testnet_tolerance() {
+        let mut responses = valid_futures_responses(current_unix_time_ms().unwrap());
+        responses.insert("/fapi/v3/account", account_with_foreign_collateral());
+        let (base_url, requests, server) = spawn_futures_mock_server(responses);
+        let mut gateway = BinanceGateway::new(BinanceGatewayConfig {
+            spot: false,
+            testnet: true,
+            allow_foreign_collateral: true,
+            ..Default::default()
+        })
+        .unwrap();
+        gateway.base_url = base_url;
+
+        let result = submit_futures_test_order(&gateway).await;
+        server.join().unwrap();
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.starts_with("POST /fapi/v1/order?")));
+    }
+
+    #[test]
+    fn the_tolerance_cannot_be_enabled_outside_testnet_or_on_spot() {
+        let production = BinanceGateway::new(BinanceGatewayConfig {
+            spot: false,
+            testnet: false,
+            allow_foreign_collateral: true,
+            ..Default::default()
+        });
+        let spot = BinanceGateway::new(BinanceGatewayConfig {
+            spot: true,
+            testnet: true,
+            allow_foreign_collateral: true,
+            ..Default::default()
+        });
+        let testnet_futures = BinanceGateway::new(BinanceGatewayConfig {
+            spot: false,
+            testnet: true,
+            allow_foreign_collateral: true,
+            ..Default::default()
+        });
+
+        assert!(matches!(production, Err(GatewayError::Config(_))));
+        assert!(matches!(spot, Err(GatewayError::Config(_))));
+        assert!(testnet_futures.is_ok());
     }
 
     #[tokio::test]

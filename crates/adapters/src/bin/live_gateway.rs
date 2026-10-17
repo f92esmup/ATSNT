@@ -96,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
         recv_window_ms: 5000,
         risk_policy: domain::RiskPolicy::default(),
         risk_per_trade_pct: rust_decimal::Decimal::new(1, 2),
+        allow_foreign_collateral: false,
     };
 
     let gateway = Arc::new(BinanceGateway::new(config)?);
