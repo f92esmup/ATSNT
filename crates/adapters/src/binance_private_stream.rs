@@ -325,13 +325,7 @@ async fn run_private_reader(
                 match message {
                     Some(Ok(Message::Text(text))) => {
                         let parsed = parse_private_user_event_with(text.as_ref(), tolerate_foreign_collateral).and_then(|event| {
-                            let event_time_ms = private_event_time_ms(&event);
-                            if let Some(previous_time_ms) = last_event_time_ms {
-                                if event_time_ms < previous_time_ms {
-                                    return Err(BinancePrivateStreamError::EventReconciliationRequired);
-                                }
-                            }
-                            last_event_time_ms = Some(event_time_ms);
+                            check_event_order(&mut last_event_time_ms, &event)?;
                             Ok(event)
                         });
                         let invalid = parsed.is_err();
@@ -437,6 +431,30 @@ async fn run_private_reader(
     if let Some(error) = terminal_error {
         return Err(error);
     }
+    Ok(())
+}
+
+/// Rejects a state-bearing event that is stamped earlier than the previous one.
+///
+/// Binance does not order `E` across event kinds: on testnet an `ALGO_UPDATE` was observed one
+/// millisecond before the `ORDER_TRADE_UPDATE` that preceded it. Notification-only events carry
+/// no state, so they neither fail the check nor move the clock.
+fn check_event_order(
+    last_event_time_ms: &mut Option<u64>,
+    event: &BinancePrivateEvent,
+) -> Result<(), BinancePrivateStreamError> {
+    if matches!(
+        event,
+        BinancePrivateEvent::FuturesAlgoUpdate { .. }
+            | BinancePrivateEvent::FuturesTradeLite { .. }
+    ) {
+        return Ok(());
+    }
+    let event_time_ms = private_event_time_ms(event);
+    if last_event_time_ms.is_some_and(|previous| event_time_ms < previous) {
+        return Err(BinancePrivateStreamError::EventReconciliationRequired);
+    }
+    *last_event_time_ms = Some(event_time_ms);
     Ok(())
 }
 
@@ -1411,6 +1429,46 @@ mod tests {
         );
         stream.shutdown().await.expect("reader task joins cleanly");
         server.await.expect("local server task joins");
+    }
+
+    #[test]
+    fn a_notification_only_event_may_carry_an_earlier_time_than_the_last_state_event() {
+        // Real testnet sequence: the `ALGO_UPDATE` of a triggered take profit arrived stamped one
+        // millisecond before the `ORDER_TRADE_UPDATE` that preceded it.
+        let order = parse_private_user_event(
+            r#"{"e":"ORDER_TRADE_UPDATE","E":1792256698064,"T":1792256698064,"o":{"s":"BTCUSDT","c":"c1","S":"BUY","X":"NEW","i":1,"l":"0","L":"0","z":"0","t":-1,"ps":"BOTH"}}"#,
+        )
+        .expect("order update parses");
+        let algo = parse_private_user_event(
+            r#"{"e":"ALGO_UPDATE","E":1792256698063,"T":1792256698063,"o":{"X":"TRIGGERING"}}"#,
+        )
+        .expect("algo update parses");
+        let mut last = None;
+        assert_eq!(check_event_order(&mut last, &order), Ok(()));
+        assert_eq!(check_event_order(&mut last, &algo), Ok(()));
+        assert_eq!(
+            last,
+            Some(1792256698064),
+            "a notification must not move the clock"
+        );
+    }
+
+    #[test]
+    fn a_state_event_that_goes_back_in_time_still_requires_reconciliation() {
+        let later = parse_private_user_event(
+            r#"{"e":"ORDER_TRADE_UPDATE","E":2000,"T":2000,"o":{"s":"BTCUSDT","c":"c1","S":"BUY","X":"NEW","i":1,"l":"0","L":"0","z":"0","t":-1,"ps":"BOTH"}}"#,
+        )
+        .expect("order update parses");
+        let earlier = parse_private_user_event(
+            r#"{"e":"ORDER_TRADE_UPDATE","E":1000,"T":1000,"o":{"s":"BTCUSDT","c":"c1","S":"BUY","X":"NEW","i":1,"l":"0","L":"0","z":"0","t":-1,"ps":"BOTH"}}"#,
+        )
+        .expect("order update parses");
+        let mut last = None;
+        assert_eq!(check_event_order(&mut last, &later), Ok(()));
+        assert_eq!(
+            check_event_order(&mut last, &earlier),
+            Err(BinancePrivateStreamError::EventReconciliationRequired)
+        );
     }
 
     #[derive(Default)]
