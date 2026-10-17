@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use backtest::{
     now_unix_ms, record_backtest, record_monte_carlo, BacktestConfig, BacktestEngine, DataWindow,
     MonteCarloConfig, MonteCarloSimulator, RunContext, RunSpec, RunType, SamplingConfig,
-    SinkFailures,
+    SinkFailures, TickSimulation, TickSimulationConfig,
 };
 use clap::Parser;
 use domain::DollarBarAggregator;
@@ -18,6 +18,15 @@ use strategies::{
     DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType, OptimizableStrategy,
     OrderFlowImbalanceConfig, OrderFlowImbalanceStrategy, Strategy,
 };
+
+/// How simulated orders are filled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum FillModel {
+    /// Bar-level fills through `BacktestEngine`.
+    Bar,
+    /// Tick-level fills through `TickSimulation`.
+    Tick,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -53,6 +62,17 @@ struct Args {
     /// Optional override for risk percentage per trade (e.g. 0.01 for 1.0%)
     #[arg(long)]
     risk_per_trade: Option<Decimal>,
+
+    /// Fill model: "bar" fills at bar granularity (fast, used by the optimizer); "tick" replays
+    /// every trade through the live trading session on a simulated venue with order latency and
+    /// tape-walk market fills (slow, for validating finalists)
+    #[arg(long, value_enum, default_value_t = FillModel::Bar)]
+    fill_model: FillModel,
+
+    /// Milliseconds an order takes to reach the market with `--fill-model tick` (an assumption
+    /// until measured against live fills)
+    #[arg(long, default_value_t = 100)]
+    latency_ms: i64,
 
     /// Enable post-backtest Discrete Event Monte Carlo Stress-Testing
     #[arg(long, default_value_t = false)]
@@ -365,50 +385,97 @@ async fn main() -> Result<()> {
         engine_config.risk_per_trade_pct = risk;
     }
     engine_config.validate()?;
-    let mut engine = BacktestEngine::new(engine_config);
+    if args.fill_model == FillModel::Tick && args.gcp_bigquery {
+        anyhow::bail!(
+            "--gcp-bigquery cannot record tick-level runs yet: the run model does not tag the fill model, so they would be indistinguishable from bar-level runs"
+        );
+    }
+    let symbol = art_symbol.unwrap_or_else(|| {
+        args.data
+            .file_name()
+            .and_then(|f| f.to_str())
+            .and_then(|s| s.split('-').next())
+            .unwrap_or("BTCUSDT")
+            .to_uppercase()
+    });
 
-    println!("[*] Initial Capital: ${}", engine.cash_equity());
+    println!("[*] Initial Capital: ${}", engine_config.initial_capital);
     println!("[*] Replaying discrete market trade ticks...\n");
 
     let mut total_trades_processed = 0usize;
     let mut total_bars_emitted = 0usize;
-    let mut last_price = Decimal::ZERO;
     let mut data_window = DataWindow {
         source: Some(args.data.display().to_string()),
         ..DataWindow::default()
     };
 
     let replay_start = Instant::now();
-    while let Some(trade) = stream.next_trade()? {
-        total_trades_processed += 1;
-        last_price = trade.price;
-        data_window.start_ms.get_or_insert(trade.timestamp);
-        data_window.end_ms = Some(trade.timestamp);
+    let (metrics, closed_trades) = match args.fill_model {
+        FillModel::Bar => {
+            let mut engine = BacktestEngine::new(engine_config);
+            let mut last_price = Decimal::ZERO;
+            while let Some(trade) = stream.next_trade()? {
+                total_trades_processed += 1;
+                last_price = trade.price;
+                data_window.start_ms.get_or_insert(trade.timestamp);
+                data_window.end_ms = Some(trade.timestamp);
 
-        if let Some(bar) = aggregator.process_trade(&trade) {
-            total_bars_emitted += 1;
-            if total_bars_emitted <= 5 || total_bars_emitted % 250_000 == 0 {
-                println!(
-                    "  [DollarBar #{:07}] Close: ${:.2} | Vol: {:.2} BTC | Notional: ${:.2}",
-                    total_bars_emitted, bar.close, bar.volume, bar.dollar_volume
-                );
+                if let Some(bar) = aggregator.process_trade(&trade) {
+                    total_bars_emitted += 1;
+                    if total_bars_emitted <= 5 || total_bars_emitted % 250_000 == 0 {
+                        println!(
+                            "  [DollarBar #{:07}] Close: ${:.2} | Vol: {:.2} BTC | Notional: ${:.2}",
+                            total_bars_emitted, bar.close, bar.volume, bar.dollar_volume
+                        );
+                    }
+                    engine.process_bar(&mut strategy, &bar);
+                    if engine.is_halted() {
+                        println!(
+                            "\n[!] Monthly circuit breaker tripped: simulation halted early, remaining market data skipped."
+                        );
+                        break;
+                    }
+                }
             }
-            engine.process_bar(&mut strategy, &bar);
-            if engine.is_halted() {
-                println!(
-                    "\n[!] Monthly circuit breaker tripped: simulation halted early, remaining market data skipped."
-                );
-                break;
-            }
+            let mark = (last_price > Decimal::ZERO).then_some(last_price);
+            engine.finish_with_trades(mark)
         }
-    }
-
-    let mark = if last_price > Decimal::ZERO {
-        Some(last_price)
-    } else {
-        None
+        FillModel::Tick => {
+            println!(
+                "[*] Fill model: tick-level venue, {} ms order latency, tape-walk market fills",
+                args.latency_ms
+            );
+            let mut simulation = TickSimulation::new(
+                TickSimulationConfig {
+                    backtest: engine_config,
+                    symbol: symbol.clone(),
+                    dollar_bar_threshold: effective_dollar_bar,
+                    latency_ms: args.latency_ms,
+                },
+                strategy,
+            )?;
+            while let Some(trade) = stream.next_trade()? {
+                data_window.start_ms.get_or_insert(trade.timestamp);
+                data_window.end_ms = Some(trade.timestamp);
+                simulation.on_trade(&trade).await;
+                if simulation.is_halted() {
+                    println!(
+                        "\n[!] Monthly circuit breaker tripped: simulation halted early, remaining market data skipped."
+                    );
+                    break;
+                }
+            }
+            total_trades_processed =
+                usize::try_from(simulation.ticks_processed()).unwrap_or(usize::MAX);
+            total_bars_emitted = usize::try_from(simulation.bars_processed()).unwrap_or(usize::MAX);
+            if let Some((side, quantity, entry)) = simulation.open_position() {
+                println!(
+                    "[!] A {side:?} position of {quantity} @ {entry} was still open when the data ended; it is not part of the metrics."
+                );
+            }
+            simulation.finish()
+        }
     };
-    let (metrics, closed_trades) = engine.finish_with_trades(mark);
 
     print_phase_timing("replay", replay_start);
 
@@ -469,14 +536,6 @@ async fn main() -> Result<()> {
         println!("------------------------------------------------------------");
     }
 
-    let symbol = art_symbol.unwrap_or_else(|| {
-        args.data
-            .file_name()
-            .and_then(|f| f.to_str())
-            .and_then(|s| s.split('-').next())
-            .unwrap_or("BTCUSDT")
-            .to_uppercase()
-    });
     let run_spec = RunSpec {
         strategy_id: strat_id,
         symbol,

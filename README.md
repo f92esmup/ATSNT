@@ -187,6 +187,19 @@ cargo run -p backtest -- --data data/historical/BTCUSDT/BTCUSDT-aggTrades-2024-0
 
 ---
 
+### Step 2b: Validate a Finalist at Tick Level
+The default `--fill-model bar` fills at bar granularity and is what the optimizer uses. To validate a finalist, replay every trade through the same trading session that runs live, on a simulated venue:
+
+```bash
+cargo run --release -p backtest -- --data data/historical/BTCUSDT/BTCUSDT-aggTrades-2024-01-01.parquet --config configs/hpo_results.json --fill-model tick --latency-ms 100
+```
+- Orders reach the market after `--latency-ms` (an assumption until measured against live fills).
+- Market orders walk the tape: they consume only same-side aggressor prints after arrival and pay each print's price.
+- Stop-loss and take-profit are conditional market orders armed by the tape (last trade price stands in for the mark price, since `aggTrades` carries none).
+- Replaying tens of millions of ticks is slow, so use it on finalists, not inside the search. `--gcp-bigquery` is rejected with this model until the run model tags the fill model.
+
+---
+
 ### Step 3: Run Monte Carlo Stress Simulation
 Audit backtest trade sequences to test drawdown probability distributions and ruin risk:
 
