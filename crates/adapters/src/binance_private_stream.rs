@@ -718,7 +718,7 @@ pub fn parse_private_user_event(
 
 /// Like [`parse_private_user_event`]; with `tolerate_foreign_collateral` a futures account update
 /// may list a non-USDT wallet balance (testnet accounts hold BTC and USDC by default).
-pub fn parse_private_user_event_with(
+pub(crate) fn parse_private_user_event_with(
     json_str: &str,
     tolerate_foreign_collateral: bool,
 ) -> Result<BinancePrivateEvent, BinancePrivateStreamError> {
