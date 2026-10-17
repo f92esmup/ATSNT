@@ -191,6 +191,9 @@ struct FuturesPreflightSnapshot {
     has_position: bool,
     has_open_orders: bool,
     mark_time_ms: u64,
+    /// Local wall-clock time at which the mark price response was received. The mark's age is
+    /// judged then; the time since is bounded by the snapshot age guard.
+    mark_received_ms: u64,
     rules: FuturesSymbolRules,
     leverage_brackets: Vec<FuturesLeverageBracket>,
     taker_commission_rate: Decimal,
@@ -586,7 +589,7 @@ impl BinanceGateway {
         let url = format!("{}/fapi/v1/order?{signed_query}", self.base_url);
 
         validate_futures_snapshot_age(&snapshot.observed_at, std::time::Instant::now())?;
-        validate_futures_mark_timestamp(snapshot.mark_time_ms, current_unix_time_ms()?)?;
+        validate_futures_mark_timestamp(snapshot.mark_time_ms, snapshot.mark_received_ms)?;
 
         lease.mark_dispatching(order.clone())?;
         let sent_at_ms = current_unix_time_ms()? as i64;
@@ -760,7 +763,10 @@ impl BinanceGateway {
             self.get_observed_binance_json(&orders_path),
             self.get_observed_binance_json(&algo_orders_path),
             self.get_binance_json(&exchange_info_path),
-            self.get_observed_binance_json(&mark_price_path),
+            async {
+                let (body, observed_at) = self.get_observed_binance_json(&mark_price_path).await?;
+                Ok::<_, GatewayError>((body, observed_at, current_unix_time_ms()?))
+            },
             self.get_binance_json(&bracket_path),
             self.get_binance_json(&commission_path),
             self.get_binance_json(&symbol_config_path),
@@ -777,12 +783,6 @@ impl BinanceGateway {
             ));
         }
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| {
-                GatewayError::FuturesPreflight("system clock is before the Unix epoch".to_string())
-            })?
-            .as_millis() as u64;
         let observed_at = [
             account.1,
             positions.1,
@@ -802,7 +802,7 @@ impl BinanceGateway {
             leverage_brackets: &leverage_brackets,
             commission: &commission,
             symbol_config: &symbol_config,
-            now_ms,
+            mark_received_ms: mark_price.2,
             allow_foreign_collateral: self.config.allow_foreign_collateral,
         })
     }
@@ -2047,7 +2047,7 @@ struct FuturesPreflightInput<'a> {
     leverage_brackets: &'a serde_json::Value,
     commission: &'a serde_json::Value,
     symbol_config: &'a serde_json::Value,
-    now_ms: u64,
+    mark_received_ms: u64,
     allow_foreign_collateral: bool,
 }
 
@@ -2066,7 +2066,7 @@ fn parse_futures_preflight_snapshot(
         leverage_brackets,
         commission,
         symbol_config,
-        now_ms,
+        mark_received_ms,
         allow_foreign_collateral,
     } = input;
 
@@ -2210,7 +2210,7 @@ fn parse_futures_preflight_snapshot(
             "mark price must be positive".to_string(),
         ));
     }
-    validate_futures_mark_timestamp(mark_time_ms, now_ms)?;
+    validate_futures_mark_timestamp(mark_time_ms, mark_received_ms)?;
 
     let brackets = parse_futures_leverage_brackets(leverage_brackets, symbol)?;
     let commission_symbol = required_futures_string(commission, "symbol", "commission")?;
@@ -2264,6 +2264,7 @@ fn parse_futures_preflight_snapshot(
         has_position,
         has_open_orders: !orders.is_empty(),
         mark_time_ms,
+        mark_received_ms,
         rules: parse_futures_symbol_rules(exchange_info, symbol)?,
         leverage_brackets: brackets,
         taker_commission_rate: maker_rate.max(taker_rate),
@@ -2317,9 +2318,11 @@ fn validate_futures_snapshot_age(
 
 fn validate_futures_mark_timestamp(mark_time_ms: u64, now_ms: u64) -> Result<(), GatewayError> {
     if mark_time_ms > now_ms || now_ms - mark_time_ms > 2_000 {
-        return Err(GatewayError::FuturesPreflight(
-            "mark-price exchange timestamp is stale or in the future".to_string(),
-        ));
+        // Positive: how old the mark price is; negative: how far ahead of the local clock.
+        let age_ms = i128::from(now_ms) - i128::from(mark_time_ms);
+        return Err(GatewayError::FuturesPreflight(format!(
+            "mark-price exchange timestamp is stale or in the future (age {age_ms} ms when received, limit 2000 ms)"
+        )));
     }
     Ok(())
 }
@@ -3742,6 +3745,57 @@ mod tests {
             .unwrap()
             .iter()
             .any(|request| request.starts_with("POST /fapi/v1/order")));
+    }
+
+    fn preflight_snapshot_with_mark_receipt(
+        mark_time_ms: u64,
+        mark_received_ms: u64,
+    ) -> Result<FuturesPreflightSnapshot, GatewayError> {
+        let responses = valid_futures_responses(mark_time_ms);
+        let json = |path: &str| -> serde_json::Value {
+            serde_json::from_str(&responses[path]).expect("valid fixture JSON")
+        };
+        let observed = std::time::Instant::now();
+        parse_futures_preflight_snapshot(FuturesPreflightInput {
+            symbol: "BTCUSDT",
+            observed_at: [observed; 5],
+            account: &json("/fapi/v3/account"),
+            positions: &json("/fapi/v3/positionRisk"),
+            open_orders: &json("/fapi/v1/openOrders"),
+            algo_orders: &json("/fapi/v1/openAlgoOrders"),
+            exchange_info: &json("/fapi/v1/exchangeInfo"),
+            mark: &json("/fapi/v1/premiumIndex"),
+            leverage_brackets: &json("/fapi/v1/leverageBracket"),
+            commission: &json("/fapi/v1/commissionRate"),
+            symbol_config: &json("/fapi/v1/symbolConfig"),
+            mark_received_ms,
+            allow_foreign_collateral: false,
+        })
+    }
+
+    #[test]
+    fn the_mark_price_age_is_judged_when_it_was_received_not_when_the_slowest_call_returned() {
+        let mark_time = 1_700_000_000_000;
+
+        // Received 1.5 s after its exchange timestamp; the slowest preflight call returned 3.5 s
+        // after it. The snapshot age guard bounds that wait separately, so this is accepted.
+        let snapshot = preflight_snapshot_with_mark_receipt(mark_time, mark_time + 1_500);
+
+        assert!(snapshot.is_ok(), "{snapshot:?}");
+        assert_eq!(snapshot.unwrap().mark_received_ms, mark_time + 1_500);
+    }
+
+    #[test]
+    fn a_mark_price_already_stale_or_ahead_when_received_is_rejected() {
+        let mark_time = 1_700_000_000_000;
+
+        let stale = preflight_snapshot_with_mark_receipt(mark_time, mark_time + 2_001);
+        let ahead = preflight_snapshot_with_mark_receipt(mark_time, mark_time - 1);
+
+        assert!(
+            matches!(stale, Err(GatewayError::FuturesPreflight(reason)) if reason.contains("stale"))
+        );
+        assert!(ahead.is_err());
     }
 
     #[tokio::test]
