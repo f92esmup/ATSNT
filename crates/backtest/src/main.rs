@@ -351,7 +351,10 @@ async fn main() -> Result<()> {
         " Win Rate:                  {:.2}%",
         metrics.win_rate * dec!(100)
     );
-    println!(" Profit Factor:             {:.2}", metrics.profit_factor);
+    println!(
+        " Profit Factor:             {}",
+        backtest::format_ratio(metrics.profit_factor)
+    );
     println!(" Payoff Ratio:              {:.2}", metrics.payoff_ratio);
     println!(
         " Mathematical Expectancy:   ${:.2} per trade",
@@ -371,7 +374,14 @@ async fn main() -> Result<()> {
         " Max Drawdown (%):          {:.2}%",
         metrics.max_drawdown_pct * dec!(100)
     );
-    println!(" Sortino Ratio:             {:.2}", metrics.sortino_ratio);
+    println!(
+        " Sortino Ratio (per trade): {}",
+        backtest::format_ratio(metrics.sortino_ratio)
+    );
+    println!(
+        " Rejected Signals:          {}",
+        backtest::format_rejections(&metrics.rejected_orders)
+    );
     println!("============================================================");
 
     if !closed_trades.is_empty() {

@@ -34,15 +34,19 @@ pub use engine::BacktestEngine;
 pub use error::BacktestError;
 pub use excursion::ExcursionTracker;
 pub use live_exits::{ExitEvent, ExitGateway, ExitManager, HaltState};
-pub use metrics::{BacktestMetrics, ClosedTrade, TradeExcursion};
+pub use metrics::{
+    format_ratio, format_rejections, sortino_ratio, trade_returns, BacktestMetrics, ClosedTrade,
+    TradeExcursion,
+};
 pub use monte_carlo::{
     FanChartTrajectory, MonteCarloConfig, MonteCarloMetrics, MonteCarloReport, MonteCarloSimulator,
     ResampleMethod,
 };
 pub use monthly_guard::{marked_equity, utc_month_key, MonthlyGuard};
 pub use optimization::{
-    calculate_dsr, calculate_parameter_stability, run_backtest_slice, CandidateEvaluation,
-    FoldMetrics, ParameterSpace, WalkForwardOptimizer,
+    calculate_parameter_stability, deflated_sharpe_p_value, expected_max_sharpe, plateau_stability,
+    run_backtest_slice, run_backtest_slice_with_trades, CandidateEvaluation, FoldMetrics,
+    ParameterSpace, ReturnMoments, WalkForwardOptimizer, DEFAULT_MIN_TRADES_PER_FOLD,
 };
 pub use paper::{
     PaperSessionOwner, PaperSessionRuntime, PaperTradingConfig, PaperTradingEvent,

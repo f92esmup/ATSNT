@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use domain::futures;
 use domain::{DollarBar, Position, PositionSide, RiskPolicy, Side};
 use rust_decimal::prelude::ToPrimitive;
@@ -59,6 +61,8 @@ pub struct BacktestEngine {
     monthly_open_equity: Decimal,
     monthly_trip_drawdown_pct: Option<Decimal>,
     halted: bool,
+    /// Signals that did not become orders, per reason (see `BacktestMetrics::rejected_orders`).
+    rejected_orders: BTreeMap<String, usize>,
 }
 
 impl BacktestEngine {
@@ -95,6 +99,7 @@ impl BacktestEngine {
             monthly_open_equity: initial,
             monthly_trip_drawdown_pct: None,
             halted: false,
+            rejected_orders: BTreeMap::new(),
         }
     }
 
@@ -511,27 +516,31 @@ impl BacktestEngine {
     fn submit_entry(&mut self, intent: domain::OrderIntent, mark_price: Decimal) {
         // If daily circuit breaker is tripped, halt trading for the remainder of today
         if self.daily_circuit_breaker_tripped {
+            self.count_rejection("DailyHalt");
             return;
         }
 
-        let Ok(current_daily_drawdown_pct) = self.current_daily_drawdown_pct_at(mark_price) else {
-            return;
-        };
-        let Ok(risk_policy) = self.config.risk_policy() else {
-            return;
-        };
-        let mark_to_market_equity = self.total_equity(mark_price);
-        let Ok(quantity) = risk_policy.size_order(
-            &intent,
-            intent.price,
-            mark_to_market_equity,
-            self.config.risk_per_trade_pct,
-            Decimal::ZERO,
-            current_daily_drawdown_pct,
-        ) else {
-            return;
-        };
-        self.pending_entry = Some(PendingEntry { intent, quantity });
+        let sized = self
+            .current_daily_drawdown_pct_at(mark_price)
+            .and_then(|drawdown| {
+                let risk_policy = self.config.risk_policy()?;
+                risk_policy.size_order(
+                    &intent,
+                    intent.price,
+                    self.total_equity(mark_price),
+                    self.config.risk_per_trade_pct,
+                    Decimal::ZERO,
+                    drawdown,
+                )
+            });
+        match sized {
+            Ok(quantity) => self.pending_entry = Some(PendingEntry { intent, quantity }),
+            Err(error) => self.count_rejection(error.kind()),
+        }
+    }
+
+    fn count_rejection(&mut self, reason: &str) {
+        *self.rejected_orders.entry(reason.to_string()).or_insert(0) += 1;
     }
 
     /// Fills a pending market order at the bar's open plus adverse slippage.
@@ -697,6 +706,7 @@ impl BacktestEngine {
             self.max_drawdown_pct,
         );
         metrics.halted = self.halted;
+        metrics.rejected_orders = self.rejected_orders;
         (metrics, self.closed_trades)
     }
 
@@ -773,6 +783,31 @@ mod tests {
         close: Decimal,
     ) -> DollarBar {
         create_test_bar(time, open, high, low, close)
+    }
+
+    #[test]
+    fn a_signal_the_risk_policy_rejects_is_counted_by_reason() {
+        // Sized at 10_000 * 1% / (100 - 95) = 20 units = 2_000 notional, over the 1_000 cap.
+        let mut engine = BacktestEngine::new(BacktestConfig {
+            max_order_notional: Some(dec!(1000)),
+            ..realistic_engine().config
+        });
+        let mut strategy = Scripted::new(vec![long_intent(50), long_intent(50), None]);
+
+        for t in [1000, 2000, 3000] {
+            engine.process_bar(
+                &mut strategy,
+                &ohlc_bar(t, dec!(100), dec!(100), dec!(100), dec!(100)),
+            );
+        }
+
+        assert!(engine.active_position().is_none());
+        let metrics = engine.finish(Some(dec!(100)));
+        assert_eq!(metrics.total_trades, 0);
+        assert_eq!(
+            metrics.rejected_orders,
+            std::collections::BTreeMap::from([("OrderSizeExceeded".to_string(), 2)])
+        );
     }
 
     #[test]
@@ -1040,7 +1075,8 @@ mod tests {
         assert_eq!(metrics.winning_trades, 1);
         assert!(metrics.net_profit > Decimal::ZERO);
         assert!(metrics.total_fees > Decimal::ZERO);
-        assert!(metrics.profit_factor > dec!(1.0));
+        // A lone winner has no gross loss: the profit factor is undefined, not capped.
+        assert_eq!(metrics.profit_factor, None);
     }
 
     #[test]

@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS `atsnt_bi.run_metrics` (
     avg_mfe_pct NUMERIC,
     exit_reason_counts JSON,            -- {"TakeProfit": 12, "StopLoss": 5, ...}
     halted BOOL,                        -- TRUE when the monthly kill-switch stopped the run; NULL otherwise
+    rejected_orders JSON,               -- {"OrderSizeExceeded": 3, "DailyHalt": 1}; NULL when none
     extras JSON                         -- dsr_p_value, stability_score, probability_of_ruin_pct, ...
 )
 CLUSTER BY run_type, run_id
@@ -87,6 +88,8 @@ OPTIONS (description = "Performance metrics per run and evaluation scope; run-ty
 
 -- Datasets created before the monthly kill-switch need the `halted` column (idempotent).
 ALTER TABLE `atsnt_bi.run_metrics` ADD COLUMN IF NOT EXISTS halted BOOL;
+-- Datasets created before rejected signals were counted need `rejected_orders` (idempotent).
+ALTER TABLE `atsnt_bi.run_metrics` ADD COLUMN IF NOT EXISTS rejected_orders JSON;
 
 -- -----------------------------------------------------------------------------
 -- 3. Table: `trades` (closed trades with equity excursion)

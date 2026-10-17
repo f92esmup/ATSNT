@@ -109,12 +109,25 @@ fn run_hpo(data: &Path, config: &Path, server: &FailingServer, strict: bool) -> 
     run_hpo_with(data, config, server, strict, true)
 }
 
+/// The fixture is too short for the default minimum of trades per fold; these checks are
+/// about the sinks, so every candidate may win.
 fn run_hpo_with(
     data: &Path,
     config: &Path,
     server: &FailingServer,
     strict: bool,
     bigquery: bool,
+) -> Output {
+    run_hpo_requiring(data, config, server, strict, bigquery, 0)
+}
+
+fn run_hpo_requiring(
+    data: &Path,
+    config: &Path,
+    server: &FailingServer,
+    strict: bool,
+    bigquery: bool,
+    min_trades_per_fold: usize,
 ) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_run_hpo"));
     cmd.arg("--data")
@@ -133,6 +146,8 @@ fn run_hpo_with(
             "--gcs-upload",
             "--artifact-suffix",
             "job-42",
+            "--min-trades-per-fold",
+            &min_trades_per_fold.to_string(),
         ]);
     if bigquery {
         cmd.arg("--gcp-bigquery");
@@ -230,4 +245,27 @@ fn run_hpo_strict_retry_keeps_existing_artifact() {
         .requests()
         .iter()
         .any(|r| r.contains("name=artifacts/hpo_btcusdt_2026_01-job-42.json&ifGenerationMatch=0")));
+}
+
+#[test]
+fn run_hpo_without_an_eligible_candidate_fails_without_writing_or_uploading_a_winner() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data = write_fixture(dir.path());
+    let config = dir.path().join("hpo_btcusdt_2026_01.json");
+    let server = FailingServer::start();
+
+    let out = run_hpo_requiring(&data, &config, &server, true, false, 1_000_000);
+
+    let stdout = text(&out.stdout);
+    assert!(!out.status.success(), "stdout: {stdout}");
+    assert!(stdout.contains("0 of 2 candidates reached 1000000 closed trades in every fold"));
+    assert!(text(&out.stderr).contains("no candidate reached 1000000 closed trades"));
+    assert!(
+        !config.exists(),
+        "no artifact may be written without a winner"
+    );
+    assert!(!server
+        .requests()
+        .iter()
+        .any(|r| r.contains("name=artifacts/")));
 }

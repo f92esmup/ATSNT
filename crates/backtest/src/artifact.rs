@@ -33,13 +33,22 @@ pub struct HpoScorecard {
     pub mean_is_sortino: Decimal,
     /// Mean Out-of-Sample Sortino Ratio across all validation folds.
     pub mean_oos_sortino: Decimal,
-    /// Mean Out-of-Sample Profit Factor.
-    pub mean_oos_profit_factor: Decimal,
-    /// Parameter stability score [0.0 .. 1.0] penalizing fragile peaks.
+    /// Out-of-Sample profit factor pooled over all folds; `None` without out-of-sample losses.
+    pub mean_oos_profit_factor: Option<Decimal>,
+    /// Per-trade Sharpe ratio of all out-of-sample trades.
+    #[serde(default)]
+    pub oos_sharpe: Option<Decimal>,
+    /// Total out-of-sample trades across all folds.
+    #[serde(default)]
+    pub total_oos_trades: usize,
+    /// Fewest closed trades in any in-sample or out-of-sample fold.
+    #[serde(default)]
+    pub min_fold_trades: usize,
+    /// Share of the performance the grid neighbours keep [0.0 .. 1.0].
     pub stability_score: Decimal,
-    /// Composite fitness score: `max(0, mean_is_sortino) * stability_score`.
+    /// Composite fitness score: `max(0, mean_oos_sortino) * stability_score`.
     pub fitness: Decimal,
-    /// Deflated Sharpe Ratio p-value (AFML Ch. 14).
+    /// Deflated Sharpe Ratio p-value (Bailey and Lopez de Prado, 2014).
     pub dsr_p_value: Decimal,
     /// Whether the configuration passed the statistical significance threshold (p < 0.05).
     pub is_statistically_significant: bool,
@@ -200,7 +209,10 @@ mod tests {
             hpo_scorecard: Some(HpoScorecard {
                 mean_is_sortino: dec!(2.45),
                 mean_oos_sortino: dec!(2.10),
-                mean_oos_profit_factor: dec!(1.80),
+                mean_oos_profit_factor: Some(dec!(1.80)),
+                oos_sharpe: None,
+                total_oos_trades: 0,
+                min_fold_trades: 0,
                 stability_score: dec!(0.92),
                 fitness: dec!(2.25),
                 dsr_p_value: dec!(0.012),

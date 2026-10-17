@@ -44,6 +44,20 @@ pub enum RiskError {
     },
 }
 
+impl RiskError {
+    /// Stable name of the variant, used to count rejections without their values.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::CircuitBreakerTriggered { .. } => "CircuitBreakerTriggered",
+            Self::OrderSizeExceeded { .. } => "OrderSizeExceeded",
+            Self::PositionLimitExceeded { .. } => "PositionLimitExceeded",
+            Self::InvalidParameters(_) => "InvalidParameters",
+            Self::OrderBelowMinLotSize { .. } => "OrderBelowMinLotSize",
+            Self::OrderBelowMinNotional { .. } => "OrderBelowMinNotional",
+        }
+    }
+}
+
 fn default_max_leverage() -> Decimal {
     Decimal::new(20, 0)
 }

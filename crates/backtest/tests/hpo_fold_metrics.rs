@@ -62,7 +62,7 @@ fn each_candidate_keeps_full_in_and_out_of_sample_metrics_per_fold() {
         let mean_is = eval
             .fold_metrics
             .iter()
-            .map(|f| f.in_sample.sortino_ratio)
+            .map(|f| f.in_sample.sortino_ratio.unwrap_or_default())
             .sum::<rust_decimal::Decimal>()
             / rust_decimal::Decimal::from(folds.len());
         assert_eq!(mean_is, eval.mean_is_sortino);

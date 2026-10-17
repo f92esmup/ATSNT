@@ -124,6 +124,10 @@ pub struct RunMetricsRow {
     /// of runs that never halted do not depend on the column existing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub halted: Option<bool>,
+    /// JSON object: rejection reason -> signals the risk policy did not turn into orders.
+    /// Omitted (NULL) when nothing was rejected, so such rows do not depend on the column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejected_orders: Option<String>,
     /// JSON object: run-type specific values (DSR, stability, ruin probability, ...).
     pub extras: Option<String>,
 }
@@ -163,6 +167,7 @@ impl RunMetricsRow {
             avg_mfe_pct: None,
             exit_reason_counts: None,
             halted: None,
+            rejected_orders: None,
             extras: Some(extras.into()),
         }
     }

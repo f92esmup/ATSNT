@@ -103,12 +103,16 @@ pub struct BacktestMetrics {
     pub net_profit: Decimal,
     pub total_fees: Decimal,
     pub total_slippage: Decimal,
-    pub profit_factor: Decimal,
+    /// Gross profit over gross loss; `None` without losing trades (undefined, not infinite).
+    pub profit_factor: Option<Decimal>,
     pub payoff_ratio: Decimal,
     pub mathematical_expectancy: Decimal,
     pub max_drawdown_amount: Decimal,
     pub max_drawdown_pct: Decimal,
-    pub sortino_ratio: Decimal,
+    /// Per-trade Sortino ratio: the mean trade return on entry equity over the downside
+    /// deviation `sqrt(sum(min(r, 0)^2) / N)` of all N trades (see [`sortino_ratio`]).
+    /// `None` without trades or without downside, where the ratio is undefined.
+    pub sortino_ratio: Option<Decimal>,
     /// Share of gross profit (sum of positive pre-fee PnL) consumed by fees.
     #[serde(default)]
     pub fee_drag_pct: Decimal,
@@ -127,6 +131,10 @@ pub struct BacktestMetrics {
     /// True when the monthly kill-switch stopped the run before the data ended.
     #[serde(default)]
     pub halted: bool,
+    /// Signals the engine did not turn into orders, per reason (a `RiskError` variant such as
+    /// "OrderSizeExceeded", or "DailyHalt" while the daily circuit breaker is tripped).
+    #[serde(default)]
+    pub rejected_orders: BTreeMap<String, usize>,
 }
 
 impl BacktestMetrics {
@@ -149,8 +157,6 @@ impl BacktestMetrics {
         let mut net_profit = Decimal::ZERO;
         let mut total_fees = Decimal::ZERO;
         let mut total_slippage = Decimal::ZERO;
-        let mut negative_returns_sq_sum = Decimal::ZERO;
-        let mut downside_count = 0;
         let mut positive_gross_pnl = Decimal::ZERO;
         let mut exit_reason_counts = BTreeMap::new();
         let mut holding_seconds_sum = Decimal::ZERO;
@@ -180,23 +186,13 @@ impl BacktestMetrics {
             } else if t.pnl_net < Decimal::ZERO {
                 losing_trades += 1;
                 gross_loss += t.pnl_net.abs();
-                negative_returns_sq_sum += t.return_pct * t.return_pct;
-                downside_count += 1;
             }
         }
 
         let n = Decimal::from(total_trades);
         let win_rate = Decimal::from(winning_trades) / n;
 
-        let profit_factor = if gross_loss == Decimal::ZERO {
-            if gross_profit > Decimal::ZERO {
-                Decimal::from(100) // Arbitrary ceiling for zero losses
-            } else {
-                Decimal::ZERO
-            }
-        } else {
-            gross_profit / gross_loss
-        };
+        let profit_factor = (gross_loss > Decimal::ZERO).then(|| gross_profit / gross_loss);
 
         let avg_win = if winning_trades > 0 {
             gross_profit / Decimal::from(winning_trades)
@@ -220,26 +216,7 @@ impl BacktestMetrics {
         let loss_rate = Decimal::from(losing_trades) / n;
         let mathematical_expectancy = (win_rate * avg_win) - (loss_rate * avg_loss);
 
-        // Sortino Ratio = Mean Return / Downside Deviation
-        let mean_return = if initial_capital > Decimal::ZERO {
-            net_profit / initial_capital
-        } else {
-            Decimal::ZERO
-        };
-
-        let sortino_ratio = if downside_count > 0 {
-            let downside_variance = negative_returns_sq_sum / Decimal::from(downside_count);
-            let downside_dev = downside_variance.sqrt().unwrap_or(Decimal::ZERO);
-            if downside_dev > Decimal::ZERO {
-                mean_return / downside_dev
-            } else {
-                Decimal::ZERO
-            }
-        } else if mean_return > Decimal::ZERO {
-            Decimal::from(100) // Positive returns with zero downside
-        } else {
-            Decimal::ZERO
-        };
+        let sortino_ratio = sortino_ratio(&trade_returns(initial_capital, trades));
 
         let fee_drag_pct = if positive_gross_pnl > Decimal::ZERO {
             total_fees / positive_gross_pnl
@@ -269,6 +246,7 @@ impl BacktestMetrics {
             avg_mae_pct: mae_pct_sum / n,
             avg_mfe_pct: mfe_pct_sum / n,
             halted: false,
+            rejected_orders: BTreeMap::new(),
         }
     }
 
@@ -283,18 +261,74 @@ impl BacktestMetrics {
             net_profit: Decimal::ZERO,
             total_fees: Decimal::ZERO,
             total_slippage: Decimal::ZERO,
-            profit_factor: Decimal::ZERO,
+            profit_factor: None,
             payoff_ratio: Decimal::ZERO,
             mathematical_expectancy: Decimal::ZERO,
             max_drawdown_amount: Decimal::ZERO,
             max_drawdown_pct: Decimal::ZERO,
-            sortino_ratio: Decimal::ZERO,
+            sortino_ratio: None,
             fee_drag_pct: Decimal::ZERO,
             exit_reason_counts: BTreeMap::new(),
             avg_holding_seconds: Decimal::ZERO,
             avg_mae_pct: Decimal::ZERO,
             avg_mfe_pct: Decimal::ZERO,
             halted: false,
+            rejected_orders: BTreeMap::new(),
         }
     }
+}
+
+/// Two-decimal rendering of a ratio for reports, `n/a` where it is undefined.
+pub fn format_ratio(ratio: Option<Decimal>) -> String {
+    ratio.map_or_else(|| "n/a".to_string(), |r| format!("{r:.2}"))
+}
+
+/// Report rendering of rejected signals, e.g. `OrderSizeExceeded=3, DailyHalt=1`, or `none`.
+pub fn format_rejections(rejected: &BTreeMap<String, usize>) -> String {
+    if rejected.is_empty() {
+        return "none".to_string();
+    }
+    rejected
+        .iter()
+        .map(|(reason, count)| format!("{reason}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Net return of each trade on the account equity it was opened with.
+///
+/// Sizing risks a fraction of equity, so this is the return the account experiences. A trade
+/// without a recorded equity path is measured on `initial_capital`.
+pub fn trade_returns(initial_capital: Decimal, trades: &[ClosedTrade]) -> Vec<Decimal> {
+    trades
+        .iter()
+        .filter_map(|t| {
+            let base = if t.excursion.entry_equity > Decimal::ZERO {
+                t.excursion.entry_equity
+            } else {
+                initial_capital
+            };
+            (base > Decimal::ZERO).then(|| t.pnl_net / base)
+        })
+        .collect()
+}
+
+/// Sortino ratio of a return series: `mean(r) / sqrt(sum(min(r, 0)^2) / N)`.
+///
+/// The downside deviation divides by all N returns (target return 0), so a series with few,
+/// small losses is not inflated. `None` for an empty series or one without downside: the
+/// ratio is undefined there, and a fixed cap would read as an excellent measurement.
+pub fn sortino_ratio(returns: &[Decimal]) -> Option<Decimal> {
+    if returns.is_empty() {
+        return None;
+    }
+    let n = Decimal::from(returns.len());
+    let mean = returns.iter().copied().sum::<Decimal>() / n;
+    let downside_sq_sum = returns
+        .iter()
+        .filter(|r| **r < Decimal::ZERO)
+        .map(|r| r * r)
+        .sum::<Decimal>();
+    let downside_dev = (downside_sq_sum / n).sqrt()?;
+    (downside_dev > Decimal::ZERO).then(|| mean / downside_dev)
 }

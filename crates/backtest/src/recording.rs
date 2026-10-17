@@ -174,18 +174,21 @@ impl RunContext {
             net_profit: Some(m.net_profit),
             total_fees: Some(m.total_fees),
             total_slippage: Some(m.total_slippage),
-            profit_factor: Some(m.profit_factor),
+            profit_factor: m.profit_factor,
             payoff_ratio: Some(m.payoff_ratio),
             mathematical_expectancy: Some(m.mathematical_expectancy),
             max_drawdown_amount: Some(m.max_drawdown_amount),
             max_drawdown_pct: Some(m.max_drawdown_pct),
-            sortino_ratio: Some(m.sortino_ratio),
+            sortino_ratio: m.sortino_ratio,
             fee_drag_pct: Some(m.fee_drag_pct),
             avg_holding_seconds: Some(m.avg_holding_seconds),
             avg_mae_pct: Some(m.avg_mae_pct),
             avg_mfe_pct: Some(m.avg_mfe_pct),
             exit_reason_counts: serde_json::to_string(&m.exit_reason_counts).ok(),
             halted: m.halted.then_some(true),
+            rejected_orders: (!m.rejected_orders.is_empty())
+                .then(|| serde_json::to_string(&m.rejected_orders).ok())
+                .flatten(),
             extras: extras.map(|v| v.to_string()),
         }
     }
@@ -423,6 +426,9 @@ pub async fn record_hpo<R: RunRecorder, S: Serialize, C: Serialize + Clone>(
             "mean_oos_sortino": eval.mean_oos_sortino,
             "mean_oos_profit_factor": eval.mean_oos_profit_factor,
             "total_oos_trades": eval.total_oos_trades,
+            "min_fold_trades": eval.min_fold_trades,
+            "eligible": eval.eligible,
+            "oos_sharpe": eval.oos_sharpe,
             "stability_score": eval.stability_score,
             "fitness": eval.fitness,
             "dsr_p_value": eval.dsr_p_value,

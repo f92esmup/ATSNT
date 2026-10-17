@@ -4,8 +4,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use adapters::{
-    AdapterError, BigQuerySink, BinanceCsvReader, BinanceParquetReader, GcsArtifactSink,
-    MarketDataStream,
+    BigQuerySink, BinanceCsvReader, BinanceParquetReader, GcsArtifactSink, MarketDataStream,
 };
 use anyhow::{Context, Result};
 use backtest::{
@@ -57,6 +56,11 @@ struct Args {
     /// Maximum parameter combinations to evaluate
     #[arg(short, long, default_value_t = 60)]
     candidates: usize,
+
+    /// Closed trades a candidate needs in every in-sample and out-of-sample fold to be
+    /// ranked; candidates below it are recorded but cannot win
+    #[arg(long, default_value_t = backtest::DEFAULT_MIN_TRADES_PER_FOLD)]
+    min_trades_per_fold: usize,
 
     /// Output path for winning configuration JSON
     #[arg(
@@ -310,9 +314,12 @@ where
     };
 
     let space_json = serde_json::to_value(&param_space)?;
-    let optimizer = WalkForwardOptimizer::<S>::new(engine_config, param_space);
+    let optimizer = WalkForwardOptimizer::<S>::new(engine_config, param_space)
+        .with_min_trades_per_fold(args.min_trades_per_fold);
     let evaluations = optimizer.run_optimization(bars, folds, args.candidates)?;
-    let winner = evaluations.first().cloned();
+    // Ranked eligible first: the first one is the winner only when it reached the minimum.
+    let winner = evaluations.first().filter(|e| e.eligible).cloned();
+    let eligible_count = evaluations.iter().filter(|e| e.eligible).count();
 
     let opt_duration = opt_start.elapsed().as_secs_f64();
     println!(
@@ -326,29 +333,41 @@ where
 
     // 4. Output Results and Reporting
     println!("\n============================================================");
-    println!(" TOP 5 CANDIDATES (Ranked by Stability-Penalized Fitness)   ");
+    println!(" TOP 5 CANDIDATES (eligible first, by OOS fitness)          ");
     println!("============================================================");
     println!(
-        "{:<4} | {:<25} | {:<7} | {:<7} | {:<6} | {:<7} | {:<6}",
-        "Rank", "Parameters", "IS Sort", "OOS Sort", "Stab.", "Fitness", "DSR Sig"
+        "      {} of {} candidates reached {} closed trades in every fold",
+        eligible_count,
+        evaluations.len(),
+        args.min_trades_per_fold
+    );
+    println!(
+        "{:<4} | {:<45} | {:>9} | {:>9} | {:>6} | {:>8} | {:>9} | {:>6} | {:>7}",
+        "Rank",
+        "Parameters",
+        "IS Sort",
+        "OOS Sort",
+        "Stab.",
+        "Fitness",
+        "OOS trds",
+        "MinFold",
+        "DSR p"
     );
     println!("------------------------------------------------------------");
 
     for (rank, eval) in evaluations.iter().take(5).enumerate() {
-        let p_str = format!("{}", eval.config);
         println!(
-            "#{:<3} | {:<25} | {:<7.2} | {:<7.2} | {:<6.2} | {:<7.2} | {}",
+            "#{:<3} | {:<45} | {:>9.4} | {:>9.4} | {:>6.2} | {:>8.4} | {:>9} | {:>6} | {:>7.4}{}",
             rank + 1,
-            p_str,
+            eval.config.to_string(),
             eval.mean_is_sortino,
             eval.mean_oos_sortino,
             eval.stability_score,
             eval.fitness,
-            if eval.is_statistically_significant {
-                "PASS"
-            } else {
-                "FAIL"
-            }
+            eval.total_oos_trades,
+            eval.min_fold_trades,
+            eval.dsr_p_value,
+            if eval.eligible { "" } else { "  (ineligible)" }
         );
     }
     println!("============================================================");
@@ -403,7 +422,19 @@ where
         print_phase_timing("record_bigquery", record_start);
     }
 
-    if let Some(winner) = &winner {
+    let Some(winner) = &winner else {
+        // The trials are recorded above; without an eligible one there is nothing to deploy,
+        // and an artifact here would carry a ratio measured on a handful of trades.
+        sinks.finish()?;
+        anyhow::bail!(
+            "no candidate reached {} closed trades in every in-sample and out-of-sample fold \
+             ({} evaluated): there is no measurable winner; widen the space, add data or lower \
+             --min-trades-per-fold",
+            args.min_trades_per_fold,
+            evaluations.len()
+        );
+    };
+    {
         println!("\n[WINNER] Selected Robust Parameter Configuration:");
         println!("  • Strategy:                  {}", S::id());
         println!("  • Configuration:             {}", winner.config);
@@ -419,13 +450,32 @@ where
             "  • Parameter Stability Score: {:.2}",
             winner.stability_score
         );
-        println!("  • Deflated Sharpe Ratio p:   {:.4}", winner.dsr_p_value);
+        println!(
+            "  • OOS trades / fewest per fold: {} / {}",
+            winner.total_oos_trades, winner.min_fold_trades
+        );
+        println!(
+            "  • OOS Sharpe per trade:      {}",
+            backtest::format_ratio(winner.oos_sharpe)
+        );
+        println!(
+            "  • Deflated Sharpe Ratio p:   {:.4} ({})",
+            winner.dsr_p_value,
+            if winner.is_statistically_significant {
+                "significant at 5%"
+            } else {
+                "not significant: the edge may be selection luck"
+            }
+        );
 
         // Serialize Winner to output_config as authoritative StrategyDeploymentArtifact
         let scorecard = HpoScorecard {
             mean_is_sortino: winner.mean_is_sortino,
             mean_oos_sortino: winner.mean_oos_sortino,
             mean_oos_profit_factor: winner.mean_oos_profit_factor,
+            oos_sharpe: winner.oos_sharpe,
+            total_oos_trades: winner.total_oos_trades,
+            min_fold_trades: winner.min_fold_trades,
             stability_score: winner.stability_score,
             fitness: winner.fitness,
             dsr_p_value: winner.dsr_p_value,
@@ -474,13 +524,6 @@ where
             sinks.record("upload Strategy Deployment Artifact", uploaded);
             print_phase_timing("upload_artifact", upload_start);
         }
-    } else if args.gcs_upload {
-        sinks.record(
-            "upload Strategy Deployment Artifact",
-            Err(AdapterError::General(
-                "no winning configuration was produced".to_string(),
-            )),
-        );
     }
 
     sinks.finish()?;
