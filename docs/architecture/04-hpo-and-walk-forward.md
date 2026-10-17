@@ -185,7 +185,17 @@ For unattended staging sweeps, the HPO engine is orchestrated automatically by [
 
 # Custom strategy with runtime parameter space override:
 ./scripts/run_production_pipeline.sh --strategy dollar_bars_cusum --param-space configs/custom_space.json
+
+# Simulate every trial with a real account's risk, drawdown, leverage and notional caps:
+./scripts/run_production_pipeline.sh --execution-context configs/execution_real_500eur.json --candidates 1500
 ```
+
+`--execution-context` feeds the HPO stage only; the winning artifact carries the same context into
+the backtest, paper and live runs, and the option is refused with `--skip-hpo`. The shipped search
+space (`configs/param_space_daytrading_cusum.json`) covers the window, the CUSUM multiplier, the entry
+and stop z-scores and the minimum take-profit floor (`min_take_profit_pcts`, the lever against fees);
+`time_barrier_bars` is fixed on purpose. See [Capital scaling](../capital-scaling.md) for how these
+values depend on the account size.
 
 1. **Purged Walk-Forward Folds**: Dynamically constructs rolling train/embargo/test folds across the in-memory Dollar Bar series.
 2. **Rayon Thread Pool**: Evaluates candidate parameter combinations concurrently across all physical CPU cores.
