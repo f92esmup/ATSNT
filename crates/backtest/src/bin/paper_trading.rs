@@ -223,6 +223,10 @@ async fn main() -> Result<()> {
     if let Some(rate) = args.funding_rate {
         backtest_config.funding_rate_pct = rate;
     }
+    println!(
+        "[*] {}",
+        backtest_config.describe_notional_caps(backtest_config.initial_capital)
+    );
     let paper_config = PaperTradingConfig {
         dollar_bar_threshold: effective_dollar_bar,
         backtest: backtest_config,

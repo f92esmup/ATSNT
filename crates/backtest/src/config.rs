@@ -69,6 +69,16 @@ pub struct BacktestConfig {
     /// Minimum order notional in quote currency (exchange MIN_NOTIONAL).
     #[serde(default = "default_min_order_notional")]
     pub min_order_notional: Decimal,
+    /// Largest notional, in USDT, of a single order. An absolute guardrail, deliberately not a
+    /// multiple of the equity: it is the last line against a sizing or balance-reading bug, so it
+    /// does not grow on its own. `None` keeps the policy default (10 000); production runs must
+    /// set it explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_order_notional: Option<Decimal>,
+    /// Largest notional, in USDT, of the whole position. `None` keeps the policy default
+    /// (50 000); production runs must set it explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_position_notional: Option<Decimal>,
     /// Perpetual funding rate charged to an open position at every eight-hour settlement
     /// (e.g. 0.0001 = 0.01%, the exchange's calm-market baseline). Positive: longs pay.
     #[serde(default = "default_funding_rate_pct")]
@@ -85,17 +95,50 @@ impl BacktestConfig {
     /// Notional caps keep the policy defaults; the drawdown limit, leverage cap and lot rules
     /// come from this configuration so both environments size and gate orders identically.
     pub fn risk_policy(&self) -> Result<domain::RiskPolicy, domain::RiskError> {
+        let (order_cap, position_cap) = self.effective_notional_caps();
+        domain::RiskPolicy::new(position_cap, order_cap, self.max_daily_drawdown_pct)?
+            .with_execution_rules(
+                self.max_leverage,
+                self.min_order_quantity,
+                self.quantity_step_size,
+                self.min_order_notional,
+            )
+    }
+
+    /// `(order, position)` notional caps in force: the configured ones, else the policy defaults.
+    pub fn effective_notional_caps(&self) -> (Decimal, Decimal) {
         let defaults = domain::RiskPolicy::default();
-        domain::RiskPolicy::new(
-            defaults.max_position_notional,
-            defaults.max_order_notional,
-            self.max_daily_drawdown_pct,
-        )?
-        .with_execution_rules(
-            self.max_leverage,
-            self.min_order_quantity,
-            self.quantity_step_size,
-            self.min_order_notional,
+        (
+            self.max_order_notional
+                .unwrap_or(defaults.max_order_notional),
+            self.max_position_notional
+                .unwrap_or(defaults.max_position_notional),
+        )
+    }
+
+    /// Whether both notional caps were chosen explicitly instead of left at the defaults.
+    pub fn has_explicit_notional_caps(&self) -> bool {
+        self.max_order_notional.is_some() && self.max_position_notional.is_some()
+    }
+
+    /// One line telling the operator what the caps mean for this equity, so a cap that is too
+    /// tight (or too loose) for the account shows at start-up.
+    pub fn describe_notional_caps(&self, equity: Decimal) -> String {
+        let (order, position) = self.effective_notional_caps();
+        let times = |cap: Decimal| {
+            if equity > Decimal::ZERO {
+                format!("{:.2}x", cap / equity)
+            } else {
+                "n/a".to_string()
+            }
+        };
+        format!(
+            "Notional caps: order {} USDT = {} of equity | position {} USDT = {} of equity | leverage cap {}x",
+            order.normalize(),
+            times(order),
+            position.normalize(),
+            times(position),
+            self.max_leverage.normalize()
         )
     }
 
@@ -112,6 +155,23 @@ impl BacktestConfig {
         };
         fraction("max_daily_drawdown_pct", self.max_daily_drawdown_pct)?;
         fraction("max_monthly_drawdown_pct", self.max_monthly_drawdown_pct)?;
+        for (name, cap) in [
+            ("max_order_notional", self.max_order_notional),
+            ("max_position_notional", self.max_position_notional),
+        ] {
+            if cap.is_some_and(|value| value <= Decimal::ZERO) {
+                return Err(crate::error::BacktestError::General(format!(
+                    "{name} must be positive, got {}",
+                    cap.unwrap_or_default()
+                )));
+            }
+        }
+        let (order_cap, position_cap) = self.effective_notional_caps();
+        if order_cap > position_cap {
+            return Err(crate::error::BacktestError::General(format!(
+                "max_order_notional ({order_cap}) cannot exceed max_position_notional ({position_cap})"
+            )));
+        }
         for (name, value) in [
             ("max_leverage", self.max_leverage),
             ("min_order_quantity", self.min_order_quantity),
@@ -150,6 +210,8 @@ impl Default for BacktestConfig {
             min_order_quantity: default_min_order_quantity(),
             quantity_step_size: default_quantity_step_size(),
             min_order_notional: default_min_order_notional(),
+            max_order_notional: None,
+            max_position_notional: None,
             funding_rate_pct: default_funding_rate_pct(),
             maintenance_margin_rate: default_maintenance_margin_rate(),
         }
@@ -214,5 +276,91 @@ mod tests {
             ..BacktestConfig::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn notional_caps_default_to_the_policy_defaults_and_old_artifacts_still_load() {
+        let defaults = domain::RiskPolicy::default();
+
+        let policy = BacktestConfig::default().risk_policy().unwrap();
+
+        assert_eq!(policy.max_order_notional, defaults.max_order_notional);
+        assert_eq!(policy.max_position_notional, defaults.max_position_notional);
+        let legacy = r#"{"initial_capital":"10000","maker_fee_pct":"0.0002","taker_fee_pct":"0.0005","slippage_pct":"0.0005","risk_per_trade_pct":"0.01","max_daily_drawdown_pct":"0.05"}"#;
+        let config: BacktestConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(config.max_order_notional, None);
+        assert_eq!(config.max_position_notional, None);
+    }
+
+    #[test]
+    fn explicit_notional_caps_reach_the_risk_policy_and_the_artifact_json() {
+        let config = BacktestConfig {
+            max_order_notional: Some(dec!(15_000)),
+            max_position_notional: Some(dec!(25_000)),
+            ..BacktestConfig::default()
+        };
+
+        let policy = config.risk_policy().unwrap();
+        let json = serde_json::to_string(&config).unwrap();
+
+        assert_eq!(policy.max_order_notional, dec!(15_000));
+        assert_eq!(policy.max_position_notional, dec!(25_000));
+        assert!(json.contains("max_order_notional") && json.contains("max_position_notional"));
+        // Unset caps are not written, so existing artifacts keep their exact form.
+        let unset = serde_json::to_string(&BacktestConfig::default()).unwrap();
+        assert!(!unset.contains("max_order_notional") && !unset.contains("max_position_notional"));
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_caps_and_an_order_cap_above_the_position_cap() {
+        let with = |order: Option<Decimal>, position: Option<Decimal>| BacktestConfig {
+            max_order_notional: order,
+            max_position_notional: position,
+            ..BacktestConfig::default()
+        };
+
+        assert!(with(Some(Decimal::ZERO), None).validate().is_err());
+        assert!(with(None, Some(dec!(-1))).validate().is_err());
+        assert!(
+            with(Some(dec!(60_000)), None).validate().is_err(),
+            "above the default position cap"
+        );
+        assert!(with(Some(dec!(30_000)), Some(dec!(20_000)))
+            .validate()
+            .is_err());
+        assert!(with(Some(dec!(15_000)), Some(dec!(25_000)))
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn the_caps_are_described_in_multiples_of_the_equity() {
+        let config = BacktestConfig {
+            max_order_notional: Some(dec!(15_000)),
+            max_position_notional: Some(dec!(25_000)),
+            ..BacktestConfig::default()
+        };
+
+        let text = config.describe_notional_caps(dec!(5_000));
+
+        assert!(text.contains("order 15000 USDT = 3.00x"), "{text}");
+        assert!(text.contains("position 25000 USDT = 5.00x"), "{text}");
+        assert!(text.contains("leverage cap 20x"), "{text}");
+    }
+
+    #[test]
+    fn notional_caps_are_explicit_only_when_both_are_set() {
+        assert!(!BacktestConfig::default().has_explicit_notional_caps());
+        assert!(!BacktestConfig {
+            max_order_notional: Some(dec!(15_000)),
+            ..BacktestConfig::default()
+        }
+        .has_explicit_notional_caps());
+        assert!(BacktestConfig {
+            max_order_notional: Some(dec!(15_000)),
+            max_position_notional: Some(dec!(25_000)),
+            ..BacktestConfig::default()
+        }
+        .has_explicit_notional_caps());
     }
 }

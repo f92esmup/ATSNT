@@ -219,6 +219,10 @@ async fn main() -> Result<()> {
         engine_config.taker_fee_pct,
         engine_config.slippage_pct
     );
+    println!(
+        "      {}",
+        engine_config.describe_notional_caps(engine_config.initial_capital)
+    );
 
     let run = HpoRun {
         args: &args,

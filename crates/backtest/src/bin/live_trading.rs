@@ -136,6 +136,20 @@ fn validate_strategy_market(strategy: &impl Strategy, market: MarketType) -> Res
     Ok(())
 }
 
+/// A real-money run must have chosen its notional caps: operating on the policy defaults, which
+/// know nothing about the account, is not a decision.
+fn require_explicit_notional_caps(
+    is_testnet: bool,
+    context: &backtest::BacktestConfig,
+) -> Result<()> {
+    if !is_testnet && !context.has_explicit_notional_caps() {
+        anyhow::bail!(
+            "production needs explicit notional caps: set max_order_notional and max_position_notional (USDT) in the artifact's execution_context"
+        );
+    }
+    Ok(())
+}
+
 /// The foreign-collateral tolerance exists for the default testnet account only.
 fn validate_collateral_tolerance(is_testnet: bool, allow_foreign_collateral: bool) -> Result<()> {
     if allow_foreign_collateral && !is_testnet {
@@ -254,6 +268,10 @@ async fn main() -> Result<()> {
     // The artifact is authoritative for sizing and risk limits so live gates orders exactly
     // like the simulation that selected the strategy; only `--risk-pct` may override it.
     let artifact_context = loaded.execution_context.unwrap_or_default();
+    require_explicit_notional_caps(is_testnet, &artifact_context)?;
+    artifact_context
+        .validate()
+        .with_context(|| "Invalid execution context")?;
     let risk_per_trade_pct = args.risk_pct.unwrap_or(artifact_context.risk_per_trade_pct);
     if risk_per_trade_pct <= Decimal::ZERO || risk_per_trade_pct > Decimal::ONE {
         anyhow::bail!("--risk-pct must be greater than 0 and at most 1, got {risk_per_trade_pct}");
@@ -396,6 +414,10 @@ async fn main() -> Result<()> {
             initial_balance
         }
     };
+    println!(
+        "[*] {}",
+        artifact_context.describe_notional_caps(effective_capital)
+    );
 
     // 4. Initialize Private User Data Stream
     println!("[*] Initializing Binance Private User Data Stream for live order updates...");
@@ -1111,7 +1133,8 @@ async fn record_lifecycle<R: RunRecorder>(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_collateral_tolerance;
+    use super::{require_explicit_notional_caps, validate_collateral_tolerance};
+    use rust_decimal_macros::dec;
 
     #[test]
     fn the_foreign_collateral_tolerance_is_refused_outside_testnet() {
@@ -1123,5 +1146,30 @@ mod tests {
         assert!(validate_collateral_tolerance(true, true).is_ok());
         assert!(validate_collateral_tolerance(true, false).is_ok());
         assert!(validate_collateral_tolerance(false, false).is_ok());
+    }
+
+    #[test]
+    fn production_refuses_to_run_on_default_notional_caps() {
+        let defaults = backtest::BacktestConfig::default();
+        let one_cap = backtest::BacktestConfig {
+            max_order_notional: Some(dec!(15_000)),
+            ..backtest::BacktestConfig::default()
+        };
+        let explicit = backtest::BacktestConfig {
+            max_order_notional: Some(dec!(15_000)),
+            max_position_notional: Some(dec!(25_000)),
+            ..backtest::BacktestConfig::default()
+        };
+
+        assert!(require_explicit_notional_caps(false, &defaults).is_err());
+        assert!(require_explicit_notional_caps(false, &one_cap).is_err());
+        assert!(require_explicit_notional_caps(false, &explicit).is_ok());
+    }
+
+    #[test]
+    fn testnet_may_use_the_default_notional_caps() {
+        let defaults = backtest::BacktestConfig::default();
+
+        assert!(require_explicit_notional_caps(true, &defaults).is_ok());
     }
 }

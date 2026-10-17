@@ -244,6 +244,10 @@ async fn main() -> Result<()> {
     });
 
     println!("[*] Initial Capital: ${}", engine_config.initial_capital);
+    println!(
+        "[*] {}",
+        engine_config.describe_notional_caps(engine_config.initial_capital)
+    );
     println!("[*] Replaying discrete market trade ticks...\n");
 
     let mut total_trades_processed = 0usize;
