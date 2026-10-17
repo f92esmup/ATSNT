@@ -530,7 +530,16 @@ fn infer_exit_reason(side: Side, exit_price: Decimal, intent: &OrderIntent) -> &
     } else if targeted {
         "TakeProfit"
     } else {
-        "ExchangeClose"
+        // Both exchange-held legs are market orders, so a fill can land on the inner side of
+        // its own trigger (a target filled a tick below, a stop that bounced above): the exit
+        // belongs to the nearer trigger.
+        let to_stop = (exit_price - intent.stop_loss).abs();
+        let to_target = (exit_price - intent.take_profit).abs();
+        match to_stop.cmp(&to_target) {
+            std::cmp::Ordering::Less => "StopLoss",
+            std::cmp::Ordering::Greater => "TakeProfit",
+            std::cmp::Ordering::Equal => "ExchangeClose",
+        }
     }
 }
 
@@ -1100,5 +1109,32 @@ mod tests {
 
         assert!(events.contains(&SessionEvent::Exit(ExitEvent::Halted)));
         assert!(venue.calls().contains(&"close".to_string()));
+    }
+
+    #[test]
+    fn an_exit_between_the_triggers_belongs_to_the_nearer_one() {
+        let long = OrderIntent::new(0, Side::Buy, dec!(100), dec!(98), dec!(104), 5).unwrap();
+        let short = OrderIntent::new(0, Side::Sell, dec!(100), dec!(102), dec!(96), 5).unwrap();
+
+        // A market target filled a tick below its trigger, and a stop that bounced above it.
+        assert_eq!(
+            infer_exit_reason(Side::Buy, dec!(103.9), &long),
+            "TakeProfit"
+        );
+        assert_eq!(infer_exit_reason(Side::Buy, dec!(98.2), &long), "StopLoss");
+        assert_eq!(
+            infer_exit_reason(Side::Sell, dec!(96.1), &short),
+            "TakeProfit"
+        );
+        assert_eq!(
+            infer_exit_reason(Side::Sell, dec!(101.8), &short),
+            "StopLoss"
+        );
+        // Beyond a trigger and exactly halfway keep their previous meaning.
+        assert_eq!(infer_exit_reason(Side::Buy, dec!(97), &long), "StopLoss");
+        assert_eq!(
+            infer_exit_reason(Side::Buy, dec!(101), &long),
+            "ExchangeClose"
+        );
     }
 }

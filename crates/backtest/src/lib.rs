@@ -15,6 +15,7 @@ pub mod recording;
 pub mod run;
 pub mod session;
 pub mod sinks;
+pub mod tick_simulation;
 pub mod walk_forward;
 
 pub use artifact::{
@@ -47,4 +48,5 @@ pub use recording::{
 };
 pub use run::{RunId, RunSpec, RunType};
 pub use sinks::{artifact_object_name, artifact_run_suffix, SinkFailures, StrictSinkError};
+pub use tick_simulation::{TickSimulation, TickSimulationConfig, TickSimulationError};
 pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};

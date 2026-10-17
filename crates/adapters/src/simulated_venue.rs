@@ -146,8 +146,11 @@ impl SimulatedVenue {
         let mut state = self.state.borrow_mut();
         state.clock_ms = trade.timestamp;
         state.last_price = Some(trade.price);
+        // Orders already at the market trade first; an exit armed by this print reaches the
+        // market after it, so the print that triggers a stop never fills it.
+        let reports = self.match_orders(&mut state, trade);
         self.arm_triggered_exits(&mut state, trade.price);
-        self.match_orders(&mut state, trade)
+        reports
     }
 
     /// Arms the closing market order of a leg the tape has crossed; the other leg is dropped.
@@ -556,6 +559,21 @@ mod tests {
         assert!(venue.position().is_none());
         // Entry 5 @ 100 and exit 5 @ 97.2: -14 gross, 0.5 + 0.486 in commissions.
         assert_eq!(venue.wallet_balance(), dec!(985.014));
+    }
+
+    #[tokio::test]
+    async fn the_print_that_arms_a_stop_does_not_fill_it() {
+        let venue = long_venue(0).await;
+        venue
+            .place_exits("BTCUSDT", Side::Buy, dec!(98), dec!(104))
+            .await
+            .unwrap();
+
+        let trigger = venue.on_trade(&print(2_000, dec!(97.9), dec!(10), Side::Sell));
+        let next = venue.on_trade(&print(2_001, dec!(97.6), dec!(10), Side::Sell));
+
+        assert!(trigger.is_empty());
+        assert_eq!(next[0].last_price, dec!(97.6));
     }
 
     #[tokio::test]
