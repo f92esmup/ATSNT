@@ -78,7 +78,9 @@ fn default_min_take_profit_pcts() -> Vec<Decimal> {
 impl Default for DollarBarsCusumSpace {
     fn default() -> Self {
         Self {
-            rolling_window_lens: vec![14, 18, 22, 26, 30, 35, 40],
+            // The rolling mean is the take-profit target, so its window spans intraday horizons
+            // (about 12 min to 3 h at 7 s per $1M bar).
+            rolling_window_lens: vec![100, 160, 250, 400, 650, 1000, 1600],
             cusum_vol_multipliers: vec![
                 dec!(0.8),
                 dec!(1.0),
@@ -414,6 +416,13 @@ mod tests {
 
         // At about 7 s per $1M bar (BTCUSDT 2026-01) these are 12 min, 35 min, 2 h and 4 h.
         assert_eq!(space.time_barrier_bars, vec![100, 300, 1000, 2000]);
+        // The rolling mean is the take-profit target: its window spans the same intraday
+        // horizons (about 12 min to 3 h). Windows of 14-40 bars (2-5 min) put the target
+        // closer than the minimum take-profit, and BTCUSDT 2026-01 produced almost no trades.
+        assert_eq!(
+            space.rolling_window_lens,
+            vec![100, 160, 250, 400, 650, 1000, 1600]
+        );
         let candidates = space.generate_candidates(usize::MAX);
         assert_eq!(candidates.len(), 7 * 7 * 7 * 6 * 4 * 5);
         for horizon in &space.time_barrier_bars {
@@ -487,23 +496,23 @@ mod tests {
     #[test]
     fn neighbors_step_every_parameter_to_its_adjacent_grid_values() {
         let space = DollarBarsCusumSpace::default();
-        let base = grid_config(22, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.005));
+        let base = grid_config(250, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.005));
 
         let neighbors = space.perturb_neighbors(&base);
 
         let expected = vec![
-            grid_config(18, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.005)),
-            grid_config(26, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.005)),
-            grid_config(22, dec!(1.0), dec!(1.9), dec!(3.5), 300, dec!(0.005)),
-            grid_config(22, dec!(1.5), dec!(1.9), dec!(3.5), 300, dec!(0.005)),
-            grid_config(22, dec!(1.2), dec!(1.7), dec!(3.5), 300, dec!(0.005)),
-            grid_config(22, dec!(1.2), dec!(2.1), dec!(3.5), 300, dec!(0.005)),
-            grid_config(22, dec!(1.2), dec!(1.9), dec!(3.0), 300, dec!(0.005)),
-            grid_config(22, dec!(1.2), dec!(1.9), dec!(4.0), 300, dec!(0.005)),
-            grid_config(22, dec!(1.2), dec!(1.9), dec!(3.5), 100, dec!(0.005)),
-            grid_config(22, dec!(1.2), dec!(1.9), dec!(3.5), 1000, dec!(0.005)),
-            grid_config(22, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.0035)),
-            grid_config(22, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.007)),
+            grid_config(160, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.005)),
+            grid_config(400, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.005)),
+            grid_config(250, dec!(1.0), dec!(1.9), dec!(3.5), 300, dec!(0.005)),
+            grid_config(250, dec!(1.5), dec!(1.9), dec!(3.5), 300, dec!(0.005)),
+            grid_config(250, dec!(1.2), dec!(1.7), dec!(3.5), 300, dec!(0.005)),
+            grid_config(250, dec!(1.2), dec!(2.1), dec!(3.5), 300, dec!(0.005)),
+            grid_config(250, dec!(1.2), dec!(1.9), dec!(3.0), 300, dec!(0.005)),
+            grid_config(250, dec!(1.2), dec!(1.9), dec!(4.0), 300, dec!(0.005)),
+            grid_config(250, dec!(1.2), dec!(1.9), dec!(3.5), 100, dec!(0.005)),
+            grid_config(250, dec!(1.2), dec!(1.9), dec!(3.5), 1000, dec!(0.005)),
+            grid_config(250, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.0035)),
+            grid_config(250, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.007)),
         ];
         assert_eq!(neighbors, expected);
     }
@@ -511,12 +520,12 @@ mod tests {
     #[test]
     fn neighbors_at_the_grid_edge_only_step_inwards() {
         let space = DollarBarsCusumSpace::default();
-        let base = grid_config(14, dec!(2.4), dec!(1.5), dec!(5.0), 100, dec!(0.01));
+        let base = grid_config(100, dec!(2.4), dec!(1.5), dec!(5.0), 100, dec!(0.01));
 
         let neighbors = space.perturb_neighbors(&base);
 
         assert_eq!(neighbors.len(), 6);
-        assert!(neighbors.iter().all(|n| n.rolling_window_len >= 14
+        assert!(neighbors.iter().all(|n| n.rolling_window_len >= 100
             && n.cusum_vol_multiplier <= dec!(2.4)
             && n.z_entry_threshold >= dec!(1.5)
             && n.z_stop_threshold <= dec!(5.0)
@@ -527,7 +536,10 @@ mod tests {
     #[test]
     fn an_off_grid_value_steps_to_the_nearest_grid_values_around_it() {
         let space = DollarBarsCusumSpace::default();
-        let base = DollarBarsCusumConfig::default(); // window 20 is between 18 and 22
+        let base = DollarBarsCusumConfig {
+            rolling_window_len: 300, // between 250 and 400
+            ..DollarBarsCusumConfig::default()
+        };
 
         let windows: Vec<usize> = space
             .perturb_neighbors(&base)
@@ -536,7 +548,7 @@ mod tests {
             .map(|n| n.rolling_window_len)
             .collect();
 
-        assert_eq!(windows, vec![18, 22]);
+        assert_eq!(windows, vec![250, 400]);
     }
 
     /// Bars that end in a drop to 90 with z = -1.71 against a window-4 mean of 97.5.

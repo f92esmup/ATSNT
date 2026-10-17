@@ -19,12 +19,15 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
   - The grants on the recreated tables are re-applied. User: "Sobre los permisos, debe haber una cuenta de servicio creada para ello. Porque no es la primera vez que lanzó el Job."
 - S9 Docs: the HPO guide, capital scaling, the BI contract and the GCP architecture describe the new behaviour. A local comparison on one month runs before the relaunch.
 
+- S10 (added under L4, "arregla todo con el objetivo de tener un resultado ... que tenga sentido"): the search space must be able to trade. Rolling windows span intraday horizons (100 to 1,600 $1M bars), and the rolling window update is O(1) so these windows stay affordable.
+
 ## Tasks
 
 - [x] T1 S8: batch orchestrator preflights and retry policy, tests and docs. Route: delegated writer (parallel unit, disjoint surface `scripts/gcp`, `scripts/tests/batch_job_test.sh`, `docs/architecture/10-gcp-cloud-architecture.md`); the parent re-applied the grants. Commit 496e374. batch_job_test 38 -> 48 passed (RED 9 then GREEN).
 - [x] T2 S1, S6: metrics (Sortino, profit factor, rejected orders), engine counter, callers, recording. Route: inline. Commit 34836a9, together with T4 because the optimizer does not compile without the metric types. RED: metrics_contract and the engine test did not compile.
 - [x] T3 S7, S5 neighbours: strategy signal guard and grid neighbours. Route: inline. Commit d4f298b. RED: 4 failing tests, then GREEN with strategies at 26 passed.
 - [x] T4 S2-S5: optimizer eligibility, fitness, stability, DSR, run_hpo selection, report and recording. Route: inline. Commit 34836a9. Workspace: 505 passed, 0 failed. Clippy -D warnings clean.
+- [x] T6 S10: O(1) RollingZScore (ecc8e28, equivalence test against the two-pass statistics over 5,000 prices) and window grid [100, 160, 250, 400, 650, 1000, 1600] (RED on the grid assertion, then GREEN). Workspace: 507 passed.
 - [ ] T5 S9: docs, local comparison run, relaunch command. Route: inline.
 
 ## Log
@@ -52,3 +55,12 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
   - `rejected_orders` is a new nullable JSON column in run_metrics, written only when non-empty, like `halted`. The DDL has an idempotent ALTER.
   - Delivery: the branch passed about 400 authored lines; ask-on-risk would ask for a chain strategy. The user is asleep, so the commits stay on `feat/hpo-scoring` as logical units, and the PR/slicing decision is left to the user.
   - The RDD consent for these commits cannot be given while the user is asleep. It is recorded as pending, not skipped.
+- L7 Local comparison (BTCUSDT 2026-01, 24 candidates, old window grid 14-40): 0 of 24 candidates were eligible, and most made 0 OOS trades. The old 100 cap had hidden this.
+  - Probe on 2026-01 with a fixed config (vol 1.5, Ze 2.0, Zs 3.5, Tb 1000), trades per window and take-profit floor:
+    - w20: 4 / 0
+    - w100: 34 / 1
+    - w400: 28 / 20
+    - w1600: 42 / 53
+  - Cause: the target (rolling mean of 14-40 bars, 2-5 min) sits closer than min_tp (0.25%-1%).
+  - Every probe lost about 15% in January, which is the monthly kill switch. The strategy may have no edge, and the HPO must say so honestly.
+  - Decision: rescale the window grid to day-trading horizons (S10), and make the rolling variance O(1) so the HPO time does not grow with the window.

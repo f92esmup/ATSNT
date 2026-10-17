@@ -86,7 +86,10 @@ space file). The slippage value is a placeholder until it is calibrated with rea
 The shipped space is `configs/param_space_daytrading_cusum.json` (guarded by
 `crates/backtest/tests/param_space_contract.rs`, which must equal `DollarBarsCusumSpace::default()`).
 It searches the window, the CUSUM multiplier, the entry and stop z-scores and the take-profit
-floor, and the holding horizon `time_barrier_bars` (100 to 2,000 bars: about 12 minutes to 4 hours
+floor, and the holding horizon. The rolling window (100 to 1,600 bars, about 12 minutes to 3 hours)
+sets the take-profit target, which is the rolling mean, so it spans the same intraday horizons:
+windows of 14 to 40 bars (2 to 5 minutes) put the target closer than the take-profit floor and
+almost never traded. The holding horizon `time_barrier_bars` (100 to 2,000 bars: about 12 minutes to 4 hours
 at the 7 s per $1M bar measured on BTCUSDT 2026-01). The barrier counts bars, not time: a quiet
 market stretches it, so it bounds the holding period on average, not as a clock limit. A space file written before `min_take_profit_pcts` existed keeps the
 single legacy value.
