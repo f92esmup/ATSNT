@@ -10,6 +10,7 @@ pub mod binance_ws;
 pub mod error;
 pub mod fetch_plan;
 pub mod gcp;
+pub mod simulated_venue;
 pub mod traits;
 
 pub use analytics::{
@@ -37,6 +38,7 @@ pub use gcp::{
     datetime_in_madrid, format_unix_ms_rfc3339, now_in_madrid, BigQueryRecord, BigQuerySink,
     GcpSecretManager, GcsArtifactSink, TelegramNotifier,
 };
+pub use simulated_venue::{SimulatedVenue, SimulatedVenueConfig, SimulatedVenueError};
 pub use traits::{AlertNotifier, AsyncMarketDataStream, MarketDataStream};
 
 /// Convenience helper to load `.env` key-value pairs into `std::env` if `.env` exists.
