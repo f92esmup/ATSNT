@@ -123,6 +123,17 @@ impl RunType {
     }
 }
 
+/// Why a typed run identifier was rejected.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidRunId {
+    /// Not 36 characters of lowercase hex groups separated by hyphens.
+    #[error("`{0}` is not a run id (expected a lowercase UUID v7 such as 0198b3c0-7a4e-7c21-8f3d-5b2a9c6e1d40)")]
+    Shape(String),
+    /// Well formed but not a UUID v7 with the RFC 4122 variant.
+    #[error("`{0}` is not a UUID v7 run id")]
+    NotV7(String),
+}
+
 /// Globally unique, time-ordered run identifier in UUID v7 text form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -162,7 +173,7 @@ impl RunId {
     ///
     /// Used for identifiers typed on a command line, where a typo must be rejected before it is
     /// recorded as a reference to a run that does not exist.
-    pub fn parse(text: &str) -> Result<Self, String> {
+    pub fn parse(text: &str) -> Result<Self, InvalidRunId> {
         let bytes = text.as_bytes();
         let shape_ok = bytes.len() == 36
             && bytes.iter().enumerate().all(|(i, b)| match i {
@@ -170,12 +181,11 @@ impl RunId {
                 _ => matches!(b, b'0'..=b'9' | b'a'..=b'f'),
             });
         if !shape_ok {
-            return Err(format!(
-                "`{text}` is not a run id (expected a lowercase UUID v7 such as 0198b3c0-7a4e-7c21-8f3d-5b2a9c6e1d40)"
-            ));
+            return Err(InvalidRunId::Shape(text.to_string()));
         }
+        // Invariant: `shape_ok` proved a 36-byte string, so indices 14 and 19 exist.
         if bytes[14] != b'7' || !matches!(bytes[19], b'8' | b'9' | b'a' | b'b') {
-            return Err(format!("`{text}` is not a UUID v7 run id"));
+            return Err(InvalidRunId::NotV7(text.to_string()));
         }
         Ok(Self(text.to_string()))
     }

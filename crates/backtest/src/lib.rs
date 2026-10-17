@@ -55,7 +55,7 @@ pub use recording::{
 pub use registry::{
     load_strategy, resolve_strategy_id, ConfigSource, LoadedStrategy, DEFAULT_STRATEGY_ID,
 };
-pub use run::{FillModel, RunId, RunSpec, RunType};
+pub use run::{FillModel, InvalidRunId, RunId, RunSpec, RunType};
 pub use sinks::{artifact_object_name, artifact_run_suffix, SinkFailures, StrictSinkError};
 pub use tick_simulation::{TickSimulation, TickSimulationConfig, TickSimulationError, TickStep};
 pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};

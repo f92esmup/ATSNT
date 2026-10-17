@@ -504,5 +504,6 @@ fi
 echo " Next Production Step: Run real-time paper trading:"
 echo "   cargo run --release -p backtest --bin paper_trading -- \\"
 echo "     --symbol ${SYMBOL,,} --config ${CONFIG_PATH}"
+echo "   (Add --baseline-run-id <backtest run id> to record which backtest justifies the session)"
 echo "   (Note: Dollar bar threshold is auto-adopted from the deployment artifact)"
 echo "============================================================"
