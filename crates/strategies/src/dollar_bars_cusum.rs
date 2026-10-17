@@ -550,6 +550,33 @@ mod tests {
         strategy.on_bar(&create_test_bar(7000, dec!(90)))
     }
 
+    /// Mirror of [`drop_to_ninety`]: a rise to 110 with z = +1.71 against a mean of 102.5.
+    fn rise_to_one_hundred_ten(strategy: &mut DollarBarsCusumStrategy) -> Option<OrderIntent> {
+        for (i, price) in [100, 100, 100, 99, 101, 100].into_iter().enumerate() {
+            strategy.on_bar(&create_test_bar(
+                (i as i64 + 1) * 1000,
+                Decimal::from(price),
+            ));
+        }
+        strategy.on_bar(&create_test_bar(7000, dec!(110)))
+    }
+
+    #[test]
+    fn a_short_signal_whose_z_score_already_crossed_the_stop_barrier_is_skipped() {
+        let base = grid_config(4, dec!(1.0), dec!(1.5), dec!(3.0), 10, dec!(0.0025));
+        let mut accepted = DollarBarsCusumStrategy::new(base.clone()).unwrap();
+        let intent = rise_to_one_hundred_ten(&mut accepted).expect("|z| 1.71 < z_stop 3.0");
+        assert_eq!(intent.side, Side::Sell);
+
+        // With z_stop 1.6 the stop (mean + 1.6 sigma = 109.5) would sit below the short entry.
+        let mut crossed = DollarBarsCusumStrategy::new(DollarBarsCusumConfig {
+            z_stop_threshold: dec!(1.6),
+            ..base
+        })
+        .unwrap();
+        assert!(rise_to_one_hundred_ten(&mut crossed).is_none());
+    }
+
     #[test]
     fn a_signal_whose_z_score_already_crossed_the_stop_barrier_is_skipped() {
         let base = grid_config(4, dec!(1.0), dec!(1.5), dec!(3.0), 10, dec!(0.0025));
