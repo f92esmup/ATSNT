@@ -5,6 +5,7 @@ use rust_decimal::Decimal;
 use strategies::Strategy;
 
 use crate::config::BacktestConfig;
+use crate::daily_watermark::DailyWatermark;
 use crate::metrics::{BacktestMetrics, ClosedTrade, TradeExcursion};
 use crate::monthly_guard::utc_month_key;
 
@@ -50,7 +51,8 @@ pub struct BacktestEngine {
     last_bar_end_time: Option<i64>,
     open_excursion: Option<TradeExcursion>,
     current_day_utc: Option<i64>,
-    daily_peak_equity: Decimal,
+    /// Per-UTC-day marked-equity peak, the same type the live session uses.
+    daily: DailyWatermark,
     daily_circuit_breaker_tripped: bool,
     current_month_key: Option<i64>,
     /// Marked equity at the first bar of the current UTC month (monthly drawdown reference).
@@ -82,7 +84,12 @@ impl BacktestEngine {
             last_bar_end_time: None,
             open_excursion: None,
             current_day_utc: None,
-            daily_peak_equity: initial,
+            daily: {
+                // Before the first bar the day's peak is the starting capital.
+                let mut watermark = DailyWatermark::new();
+                watermark.observe(0, initial);
+                watermark
+            },
             daily_circuit_breaker_tripped: false,
             current_month_key: None,
             monthly_open_equity: initial,
@@ -153,7 +160,7 @@ impl BacktestEngine {
         current_price: Decimal,
     ) -> Result<Decimal, domain::RiskError> {
         RiskPolicy::calculate_session_drawdown_pct(
-            self.daily_peak_equity,
+            self.daily.peak(),
             self.total_equity(current_price),
         )
     }
@@ -225,7 +232,7 @@ impl BacktestEngine {
         // Daily session rollover: reset watermark and circuit breaker at 00:00:00 UTC day boundary
         if self.current_day_utc != Some(day_key) {
             self.current_day_utc = Some(day_key);
-            self.daily_peak_equity = mark_before;
+            self.daily.observe(bar.end_time, mark_before);
             self.daily_circuit_breaker_tripped = false;
         }
 
@@ -301,9 +308,7 @@ impl BacktestEngine {
         if total_val > self.peak_equity {
             self.peak_equity = total_val;
         }
-        if total_val > self.daily_peak_equity {
-            self.daily_peak_equity = total_val;
-        }
+        self.daily.observe(bar.end_time, total_val);
 
         let dd_amount = self.peak_equity - total_val;
         if dd_amount > self.max_drawdown_amount {
@@ -319,11 +324,7 @@ impl BacktestEngine {
             self.max_drawdown_pct = dd_pct;
         }
 
-        let day_dd_pct = if self.daily_peak_equity > Decimal::ZERO {
-            (self.daily_peak_equity - total_val).max(Decimal::ZERO) / self.daily_peak_equity
-        } else {
-            Decimal::ZERO
-        };
+        let day_dd_pct = self.daily.drawdown_pct(total_val);
         if day_dd_pct >= self.config.max_daily_drawdown_pct {
             self.daily_circuit_breaker_tripped = true;
         }
