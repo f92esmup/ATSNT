@@ -64,3 +64,10 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
   - Cause: the target (rolling mean of 14-40 bars, 2-5 min) sits closer than min_tp (0.25%-1%).
   - Every probe lost about 15% in January, which is the monthly kill switch. The strategy may have no edge, and the HPO must say so honestly.
   - Decision: rescale the window grid to day-trading horizons (S10), and make the rolling variance O(1) so the HPO time does not grow with the window.
+- L8 Local Jan-Feb sweep with the new space (40 candidates, min 10 trades per fold, 4 cores, 11.6 min):
+  - 12 of 40 candidates were eligible, with the weakest fold at 19-63 trades.
+  - Every one loses: OOS per-trade Sortino about -0.4 to -0.6, DSR p 1.
+  - Backtests of 3 top configs on Jan-Feb: net about -85 USDT, which equals fees (~40) plus slippage (~42); the pre-cost PnL is about 0. Win rate is about 29%. All runs hit the monthly kill switch (-15%).
+  - Conclusion: the strategy has no gross edge at $1M bars, so no cost assumption makes it profitable.
+  - Decision: run_hpo still writes the best eligible candidate with its honest scorecard, so the holdout backtest gives the Sep-Oct evidence. A deployment gate in paper/live (refuse fitness 0 or a non-significant DSR) is left as a recommendation, because it is a product decision for the user.
+- L9 Relaunch: job `hpo-btcusdt-2026-500eur-v2`, image 780661f91b86, submitted 23:16 UTC. Both new preflights passed live (artifact absent; table-level grants on the 4 tables).
