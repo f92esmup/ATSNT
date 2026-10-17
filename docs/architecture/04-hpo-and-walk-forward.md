@@ -193,7 +193,7 @@ For unattended staging sweeps, the HPO engine is orchestrated automatically by [
 ./scripts/run_production_pipeline.sh --year 2026 --holdout-from-month 9 --candidates 120
 ```
 
-`--holdout-from-month MM` (2-12, not with `--month`) links the year's files into `splits/<symbol>-holdout-MM/{train,holdout}`:
+`--holdout-from-month MM` (2-12, not with `--month`) links the year's files into `splits/<symbol>-<year>-holdout-MM/{train,holdout}`:
 the HPO reads the months before MM, the backtest MM onwards (the current month's daily archives included). It
 fails when either side has no data.
 

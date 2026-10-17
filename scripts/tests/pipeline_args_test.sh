@@ -118,7 +118,7 @@ check "execution-context: the backtest adopts it from the artifact" '[[ "$(line_
 
 # --holdout-from-month: HPO on the earlier months, backtest on the held-out ones.
 touch "${DATA_ROOT}/BTCUSDT/BTCUSDT-aggTrades-2026-02-15.parquet"
-SPLIT="${DATA_ROOT}/splits/BTCUSDT-holdout-02"
+SPLIT="${DATA_ROOT}/splits/BTCUSDT-2026-holdout-02"
 run --skip-fetch --holdout-from-month 2
 check "holdout: exit 0" '[ "${STATUS}" -eq 0 ]'
 check "holdout: run_hpo reads only the training months" '[[ "$(line_with "/run_hpo ")" == *"--data ${SPLIT}/train "* ]]'
@@ -131,6 +131,22 @@ run --skip-fetch --holdout-from-month 2 --month 1
 check "holdout: refused together with --month" '[ "${STATUS}" -ne 0 ] && has "--holdout-from-month cannot be combined with --month"'
 run --skip-fetch --holdout-from-month 9
 check "holdout: an empty held-out set is refused" '[ "${STATUS}" -ne 0 ] && has "no held-out data"'
+
+# Real (non dry-run) split with stub binaries that list the directory they are given.
+STUBS="${WORK_DIR}/stubs"
+mkdir -p "${STUBS}"
+for bin in fetch_data run_hpo backtest; do
+    printf '#!/usr/bin/env bash\nfor a in "$@"; do [ -d "$a" ] && ls "$a" | sed "s|^|%s sees |"; done\nexit 0\n' "${bin}" > "${STUBS}/${bin}"
+    chmod +x "${STUBS}/${bin}"
+done
+echo '{}' > "${WORK_DIR}/winner.json"
+OUT="$(cd "${WORK_DIR}" && bash "${PIPELINE}" --no-inhibit --skip-fetch --year 2026 --output-dir "${DATA_ROOT}" --bin-dir "${STUBS}" --holdout-from-month 2 --config "${WORK_DIR}/winner.json" 2>&1)"
+STATUS=$?
+check "holdout (real): exit 0" '[ "${STATUS}" -eq 0 ]'
+check "holdout (real): HPO sees only January" 'has "run_hpo sees BTCUSDT-aggTrades-2026-01.parquet" && ! has "run_hpo sees BTCUSDT-aggTrades-2026-02"'
+check "holdout (real): backtest sees February and its daily file" 'has "backtest sees BTCUSDT-aggTrades-2026-02.parquet" && has "backtest sees BTCUSDT-aggTrades-2026-02-15.parquet" && ! has "backtest sees BTCUSDT-aggTrades-2026-01"'
+check "holdout (real): entries are symlinks to the downloaded files" '[ -L "${SPLIT}/train/BTCUSDT-aggTrades-2026-01.parquet" ] && [ "$(readlink "${SPLIT}/train/BTCUSDT-aggTrades-2026-01.parquet")" = "${DATA_ROOT}/BTCUSDT/BTCUSDT-aggTrades-2026-01.parquet" ]'
+rm -rf "${DATA_ROOT}/splits" "${WORK_DIR}/winner.json"
 rm -f "${DATA_ROOT}/BTCUSDT/BTCUSDT-aggTrades-2026-02-15.parquet"
 
 run --skip-fetch --skip-hpo --config "${WORK_DIR}/missing.json"

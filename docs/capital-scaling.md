@@ -87,7 +87,8 @@ The shipped space is `configs/param_space_daytrading_cusum.json` (guarded by
 `crates/backtest/tests/param_space_contract.rs`, which must equal `DollarBarsCusumSpace::default()`).
 It searches the window, the CUSUM multiplier, the entry and stop z-scores and the take-profit
 floor, and the holding horizon `time_barrier_bars` (100 to 2,000 bars: about 12 minutes to 4 hours
-at 7 s per $1M bar, so every position closes within the trading day). A space file written before `min_take_profit_pcts` existed keeps the
+at the 7 s per $1M bar measured on BTCUSDT 2026-01). The barrier counts bars, not time: a quiet
+market stretches it, so it bounds the holding period on average, not as a clock limit. A space file written before `min_take_profit_pcts` existed keeps the
 single legacy value.
 
 ## 6. What to re-optimize when the capital grows

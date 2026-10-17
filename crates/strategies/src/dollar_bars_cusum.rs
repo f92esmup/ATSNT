@@ -105,8 +105,8 @@ impl Default for DollarBarsCusumSpace {
                 dec!(4.5),
                 dec!(5.0),
             ],
-            // Intraday holding horizons (about 12 min to 4 h at 7 s per $1M bar): the wider
-            // take-profit floors need hours to be reached, and nothing is held overnight.
+            // Intraday holding horizons (about 12 min to 4 h at an average 7 s per $1M bar; a
+            // quiet market stretches them): the wider take-profit floors need hours to be reached.
             time_barrier_bars: vec![100, 300, 1000, 2000],
             min_take_profit_pcts: vec![
                 dec!(0.0025),

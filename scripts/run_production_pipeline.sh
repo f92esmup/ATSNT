@@ -281,7 +281,7 @@ HPO_DATA="${TARGET_DATA}"
 BACKTEST_DATA="${TARGET_DATA}"
 SPLIT_ROOT=""
 if [ -n "${HOLDOUT_PADDED}" ]; then
-    SPLIT_ROOT="${OUTPUT_DIR}/splits/${SYMBOL}-holdout-${HOLDOUT_PADDED}"
+    SPLIT_ROOT="${OUTPUT_DIR}/splits/${SYMBOL}-${YEAR}-holdout-${HOLDOUT_PADDED}"
     HPO_DATA="${SPLIT_ROOT}/train"
     BACKTEST_DATA="${SPLIT_ROOT}/holdout"
 fi
@@ -396,8 +396,6 @@ run_stage() {
     stage_timing "${name}" "${stage_start}"
 }
 
-# Fails fast when --month points at a monthly file that does not exist, instead of
-# silently reading other months.
 # Splits the year's files by month into train/ and holdout/ symlink directories. In dry-run it
 # only reports the split. Both sides must hold data, otherwise the run would be meaningless.
 prepare_holdout_split() {
@@ -434,6 +432,8 @@ prepare_holdout_split() {
     for file in "${holdout[@]}"; do ln -s "$(cd "$(dirname "${file}")" && pwd)/$(basename "${file}")" "${SPLIT_ROOT}/holdout/"; done
 }
 
+# Fails fast when --month points at a monthly file that does not exist, instead of
+# silently reading other months.
 require_target_data() {
     if [ -n "${MONTH_PADDED}" ] && [ ! -f "${TARGET_DATA}" ]; then
         echo "[ERROR] Monthly data file ${TARGET_DATA} not found."
