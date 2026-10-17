@@ -89,7 +89,7 @@ Every execution mode records the same run-centric contract through the `RunRecor
 
 | Table | Grain | Written by |
 |-------|-------|------------|
-| `runs` | One row per run and status change (`running` → `completed` / `stopped` / `failed`); full spec: strategy params, sampling, execution context (fees, slippage, capital), data window, git sha, `parent_run_id` | all run types |
+| `runs` | One row per run and status change (`running` → `completed` / `stopped` / `failed`); full spec: strategy params, sampling, execution context (fees, slippage, capital), data window, git sha, `parent_run_id`, `baseline_run_id` (paper/live: the backtest they were started from) | all run types |
 | `run_metrics` | One row per run and scope (`full`, `is_fold_<n>`, `oos_fold_<n>`); trade metrics plus `extras` JSON (DSR, stability, ruin probability, MC percentiles) | all run types |
 | `trades` | One row per closed trade with MAE/MFE equity points and the deepest drawdown while open | `backtest`, `paper`, `live` |
 | `run_series` | Event points, never time-sampled: `equity` (entry/trough/peak/exit per trade) and `mc_equity` (8 representative Monte Carlo curves) | `backtest`, `monte_carlo`, `paper`, `live` |

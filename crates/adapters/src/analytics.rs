@@ -45,6 +45,10 @@ mod bq_numeric {
 pub struct RunRow {
     pub run_id: String,
     pub parent_run_id: Option<String>,
+    /// Backtest a paper or live run was started from; omitted (NULL) otherwise so rows of other
+    /// runs do not depend on the column existing in the dataset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_run_id: Option<String>,
     pub run_type: String,
     /// `running` | `completed` | `failed` | `stopped`.
     pub status: String,

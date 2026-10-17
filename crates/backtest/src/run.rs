@@ -157,6 +157,28 @@ impl RunId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Parses the canonical text form (lowercase UUID v7, as printed by [`RunId::generate`]).
+    ///
+    /// Used for identifiers typed on a command line, where a typo must be rejected before it is
+    /// recorded as a reference to a run that does not exist.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let bytes = text.as_bytes();
+        let shape_ok = bytes.len() == 36
+            && bytes.iter().enumerate().all(|(i, b)| match i {
+                8 | 13 | 18 | 23 => *b == b'-',
+                _ => matches!(b, b'0'..=b'9' | b'a'..=b'f'),
+            });
+        if !shape_ok {
+            return Err(format!(
+                "`{text}` is not a run id (expected a lowercase UUID v7 such as 0198b3c0-7a4e-7c21-8f3d-5b2a9c6e1d40)"
+            ));
+        }
+        if bytes[14] != b'7' || !matches!(bytes[19], b'8' | b'9' | b'a' | b'b') {
+            return Err(format!("`{text}` is not a UUID v7 run id"));
+        }
+        Ok(Self(text.to_string()))
+    }
 }
 
 impl std::fmt::Display for RunId {

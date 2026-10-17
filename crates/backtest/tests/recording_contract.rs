@@ -1,6 +1,6 @@
 use backtest::{
-    BacktestConfig, BacktestMetrics, ClosedTrade, DataWindow, FillModel, RunContext, RunSpec,
-    RunStatus, RunType, SamplingConfig, TradeExcursion,
+    BacktestConfig, BacktestMetrics, ClosedTrade, DataWindow, FillModel, RunContext, RunId,
+    RunSpec, RunStatus, RunType, SamplingConfig, TradeExcursion,
 };
 use domain::PositionSide;
 use rust_decimal_macros::dec;
@@ -524,4 +524,66 @@ fn series_rows_match_the_bigquery_run_series_table() {
     let points = ctx.equity_points(&[closed_trade()], 1);
 
     assert_row_matches_schema("run_series", &serde_json::to_value(&points[0]).unwrap());
+}
+
+#[test]
+fn paper_run_records_the_baseline_it_was_started_from() {
+    let backtest = RunContext::new(RunType::Backtest, &spec(), 1_700_000_000_000);
+    let paper = RunContext::new(RunType::Paper, &spec(), 1_700_001_000_000)
+        .with_baseline(Some(backtest.run_id.clone()));
+    let window = DataWindow {
+        source: None,
+        start_ms: None,
+        end_ms: None,
+    };
+
+    let row = paper
+        .run_row(&spec(), RunStatus::Running, None, &window)
+        .unwrap();
+
+    assert_eq!(
+        row.baseline_run_id.as_deref(),
+        Some(backtest.run_id.as_str())
+    );
+    // The baseline is not a lineage link.
+    assert_eq!(row.parent_run_id, None);
+    let json = serde_json::to_value(&row).unwrap();
+    assert_eq!(json["baseline_run_id"], backtest.run_id.as_str());
+}
+
+#[test]
+fn runs_without_a_baseline_omit_the_column() {
+    let window = DataWindow {
+        source: None,
+        start_ms: None,
+        end_ms: None,
+    };
+    let backtest = RunContext::new(RunType::Backtest, &spec(), 1_700_000_000_000);
+    let child = backtest.child(RunType::MonteCarlo, 1_700_000_100_000);
+
+    for ctx in [&backtest, &child] {
+        let row = ctx
+            .run_row(&spec(), RunStatus::Running, None, &window)
+            .unwrap();
+        assert_eq!(row.baseline_run_id, None);
+        let json = serde_json::to_value(&row).unwrap();
+        assert!(json.get("baseline_run_id").is_none());
+    }
+}
+
+#[test]
+fn run_id_parse_accepts_generated_ids_and_rejects_typos() {
+    let id = RunId::generate();
+    assert_eq!(RunId::parse(id.as_str()).unwrap(), id);
+    for bad in [
+        "",
+        "not-a-run-id",
+        "0198B3C0-7A4E-7C21-8F3D-5B2A9C6E1D40",
+        "0198b3c0-7a4e-4c21-8f3d-5b2a9c6e1d40",
+        "0198b3c0-7a4e-7c21-0f3d-5b2a9c6e1d40",
+        "0198b3c0-7a4e-7c21-8f3d-5b2a9c6e1d4",
+        "0198b3c0-7a4e-7c21-8f3d-5b2a9c6e1d40 ",
+    ] {
+        assert!(RunId::parse(bad).is_err(), "{bad:?} must be rejected");
+    }
 }

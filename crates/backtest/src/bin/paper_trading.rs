@@ -14,7 +14,7 @@ use adapters::{
 use anyhow::{Context, Result};
 use backtest::{
     now_unix_ms, BacktestConfig, ClosedTrade, DataWindow, PaperTradingConfig, PaperTradingEvent,
-    PaperTradingSession, RunContext, RunSpec, RunStatus, RunType, SamplingConfig,
+    PaperTradingSession, RunContext, RunId, RunSpec, RunStatus, RunType, SamplingConfig,
 };
 use chrono::Timelike;
 use clap::Parser;
@@ -72,6 +72,11 @@ struct Args {
     /// (the artifact's value, or the 0.01% baseline, unless given)
     #[arg(long)]
     funding_rate: Option<Decimal>,
+
+    /// Backtest run this session was started from (its Monte Carlo run is found through
+    /// `parent_run_id`); lets BI compare the session with that backtest's expected range
+    #[arg(long, value_parser = RunId::parse)]
+    baseline_run_id: Option<RunId>,
 
     /// Record the session run (lifecycle, closed trades with equity events, final metrics) to Google Cloud BigQuery
     #[arg(long, default_value_t = false)]
@@ -283,7 +288,8 @@ async fn main() -> Result<()> {
         strategy_config: loaded.config_json.clone(),
         execution_context: backtest_config,
     };
-    let run_ctx = RunContext::new(RunType::Paper, &run_spec, started_at_ms);
+    let run_ctx = RunContext::new(RunType::Paper, &run_spec, started_at_ms)
+        .with_baseline(args.baseline_run_id.clone());
     let mut data_window = DataWindow {
         source: Some(ws_source),
         ..DataWindow::default()

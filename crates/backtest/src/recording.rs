@@ -59,6 +59,8 @@ pub struct DataWindow {
 pub struct RunContext {
     pub run_id: RunId,
     pub parent_run_id: Option<RunId>,
+    /// Backtest this paper or live run was started from; `None` when not declared.
+    pub baseline_run_id: Option<RunId>,
     pub run_type: RunType,
     pub strategy_id: String,
     pub symbol: String,
@@ -80,6 +82,7 @@ impl RunContext {
         Self {
             run_id: RunId::generate(),
             parent_run_id: None,
+            baseline_run_id: None,
             run_type,
             strategy_id: spec.strategy_id.clone(),
             symbol: spec.symbol.clone(),
@@ -94,11 +97,19 @@ impl RunContext {
         self
     }
 
+    /// Declares the backtest this run was started from, so a consumer can compare the run with
+    /// that backtest's Monte Carlo band instead of guessing the pairing from parameters.
+    pub fn with_baseline(mut self, baseline_run_id: Option<RunId>) -> Self {
+        self.baseline_run_id = baseline_run_id;
+        self
+    }
+
     /// Starts a run nested under this one (HPO trial, Monte Carlo of a backtest).
     pub fn child(&self, run_type: RunType, started_at_ms: i64) -> Self {
         Self {
             run_id: RunId::generate(),
             parent_run_id: Some(self.run_id.clone()),
+            baseline_run_id: None,
             run_type,
             strategy_id: self.strategy_id.clone(),
             symbol: self.symbol.clone(),
@@ -122,6 +133,7 @@ impl RunContext {
         Ok(RunRow {
             run_id: self.run_id.to_string(),
             parent_run_id: self.parent_run_id.as_ref().map(ToString::to_string),
+            baseline_run_id: self.baseline_run_id.as_ref().map(ToString::to_string),
             run_type: self.run_type.as_str().to_string(),
             status: status.as_str().to_string(),
             recorded_at: format_unix_ms_rfc3339(now_unix_ms()),

@@ -21,7 +21,7 @@ use backtest::session::{SessionConfig, SessionEvent, SkipReason, TradingSession}
 use backtest::AlertThrottle;
 use backtest::{
     now_unix_ms, record_closed_trade, record_run_status, BacktestConfig, BacktestMetrics,
-    DataWindow, ExitEvent, RunContext, RunSpec, RunStatus, RunType, SamplingConfig,
+    DataWindow, ExitEvent, RunContext, RunId, RunSpec, RunStatus, RunType, SamplingConfig,
 };
 use chrono::Timelike;
 use clap::Parser;
@@ -67,6 +67,11 @@ struct Args {
     /// If omitted, defaults to the full available USDT balance on Binance.
     #[arg(long)]
     capital: Option<Decimal>,
+
+    /// Backtest run this session was started from (its Monte Carlo run is found through
+    /// `parent_run_id`); lets BI compare the session with that backtest's expected range
+    #[arg(long, value_parser = RunId::parse)]
+    baseline_run_id: Option<RunId>,
 
     /// Record the session run (lifecycle, closed trades with equity events, final metrics) to Google Cloud BigQuery
     #[arg(long, default_value_t = false)]
@@ -471,7 +476,8 @@ async fn main() -> Result<()> {
         },
     };
     run_spec.execution_context.validate()?;
-    let run_ctx = RunContext::new(RunType::Live, &run_spec, started_at_ms);
+    let run_ctx = RunContext::new(RunType::Live, &run_spec, started_at_ms)
+        .with_baseline(args.baseline_run_id.clone());
     let mut data_window = DataWindow {
         source: Some(ws_source),
         ..DataWindow::default()

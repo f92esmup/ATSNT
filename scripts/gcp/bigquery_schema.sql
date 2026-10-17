@@ -25,6 +25,7 @@ OPTIONS (
 CREATE TABLE IF NOT EXISTS `atsnt_bi.runs` (
     run_id STRING NOT NULL,             -- UUID v7 (time ordered)
     parent_run_id STRING,               -- hpo -> hpo_trial, backtest -> monte_carlo
+    baseline_run_id STRING,             -- paper | live -> the backtest it was started from; NULL when not declared
     run_type STRING NOT NULL,           -- backtest | hpo | hpo_trial | monte_carlo | paper | live
     status STRING NOT NULL,             -- running | completed | failed | stopped
     recorded_at TIMESTAMP NOT NULL,
@@ -45,6 +46,9 @@ CREATE TABLE IF NOT EXISTS `atsnt_bi.runs` (
 PARTITION BY DATE(started_at)
 CLUSTER BY run_type, strategy_id, run_id
 OPTIONS (description = "Run lifecycle and full execution spec; append-only, latest row per run_id wins");
+
+-- Datasets created before baselines were recorded need the `baseline_run_id` column (idempotent).
+ALTER TABLE `atsnt_bi.runs` ADD COLUMN IF NOT EXISTS baseline_run_id STRING;
 
 -- -----------------------------------------------------------------------------
 -- 2. Table: `run_metrics` (strategy x-ray per run and scope)
