@@ -116,6 +116,14 @@ run --skip-fetch --execution-context configs/execution_real_500eur.json --candid
 check "execution-context: passed to run_hpo" '[[ "$(line_with "/run_hpo ")" == *"--execution-context configs/execution_real_500eur.json"* ]]'
 check "execution-context: the backtest adopts it from the artifact" '[[ "$(line_with "backtest --data")" != *"--execution-context"* ]]'
 
+run --skip-fetch --min-trades-per-fold 12 --candidates 7
+check "min-trades-per-fold: passed to run_hpo" '[[ "$(line_with "/run_hpo ")" == *"--min-trades-per-fold 12"* ]]'
+check "min-trades-per-fold: not passed to backtest" '[[ "$(line_with "backtest --data")" != *"--min-trades-per-fold"* ]]'
+run --skip-fetch --candidates 7
+check "min-trades-per-fold: run_hpo keeps its default when omitted" '[[ "$(line_with "/run_hpo ")" != *"--min-trades-per-fold"* ]]'
+run --skip-fetch --min-trades-per-fold abc
+check "min-trades-per-fold: a non-integer is refused" '[ "${STATUS}" -ne 0 ] && has "--min-trades-per-fold"'
+
 # --holdout-from-month: HPO on the earlier months, backtest on the held-out ones.
 touch "${DATA_ROOT}/BTCUSDT/BTCUSDT-aggTrades-2026-02-15.parquet"
 SPLIT="${DATA_ROOT}/splits/BTCUSDT-2026-holdout-02"
@@ -157,6 +165,9 @@ check "skip-hpo: existing config used by backtest" '! has "/run_hpo " && [[ "$(l
 
 run --skip-fetch --skip-hpo --execution-context configs/execution_real_500eur.json --config "${WORK_DIR}/winner.json"
 check "skip-hpo: an execution context is refused, not silently ignored" '[ "${STATUS}" -ne 0 ] && has "--execution-context" && has "--skip-hpo"'
+
+run --skip-fetch --skip-hpo --min-trades-per-fold 12 --config "${WORK_DIR}/winner.json"
+check "skip-hpo: a minimum of trades is refused, not silently ignored" '[ "${STATUS}" -ne 0 ] && has "--min-trades-per-fold" && has "--skip-hpo"'
 
 run --skip-fetch --detach
 check "detach: dry-run takes precedence (nothing dispatched)" '[ "${STATUS}" -eq 0 ] && ! has "Process dispatched"'

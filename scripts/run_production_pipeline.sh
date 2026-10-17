@@ -21,6 +21,7 @@ SYMBOL="BTCUSDT"
 STRATEGY="dollar_bars_cusum"
 PARAM_SPACE=""
 EXECUTION_CONTEXT=""
+MIN_TRADES_PER_FOLD=""
 CAPITAL=""
 YEAR="$(date +%Y)"
 MONTH=""
@@ -77,6 +78,9 @@ Options:
                              Optional JSON execution context for the HPO (capital, fees, slippage,
                              risk, drawdown, leverage, notional caps); the backtest adopts it from
                              the winning artifact. --capital still overrides the capital
+      --min-trades-per-fold <N>
+                             Closed trades a candidate needs in every HPO fold to be ranked
+                             (default: run_hpo's, 30); the HPO fails without an eligible one
       --gcp-bigquery         Record HPO, backtest and Monte Carlo runs to BigQuery
       --strict-sinks         Fail the run if any BigQuery recording or GCS upload fails
       --upload-winner        Upload the winning artifact to GCS (artifacts/<config stem>-<suffix>.json)
@@ -169,6 +173,10 @@ while [[ $# -gt 0 ]]; do
             EXECUTION_CONTEXT="$2"
             shift 2
             ;;
+        --min-trades-per-fold)
+            MIN_TRADES_PER_FOLD="$2"
+            shift 2
+            ;;
         --gcp-bigquery)
             GCP_BIGQUERY=true
             shift
@@ -254,6 +262,17 @@ if [ "${SKIP_HPO}" = "true" ] && [ -n "${EXECUTION_CONTEXT}" ]; then
     exit 1
 fi
 
+if [ -n "${MIN_TRADES_PER_FOLD}" ]; then
+    if ! [[ "${MIN_TRADES_PER_FOLD}" =~ ^[0-9]+$ ]]; then
+        echo "[ERROR] --min-trades-per-fold must be a non-negative integer, got '${MIN_TRADES_PER_FOLD}'"
+        exit 1
+    fi
+    if [ "${SKIP_HPO}" = "true" ]; then
+        echo "[ERROR] --min-trades-per-fold has no effect with --skip-hpo (it only ranks HPO candidates)"
+        exit 1
+    fi
+fi
+
 # Set dynamic default paths (month-scoped when --month is given so runs never overwrite each other)
 PERIOD="${YEAR}${MONTH_PADDED:+_${MONTH_PADDED}}"
 
@@ -310,6 +329,7 @@ FORWARD_ARGS=(
 [ -n "${HOLDOUT_FROM}" ] && FORWARD_ARGS+=(--holdout-from-month "${HOLDOUT_FROM}")
 [ -n "${PARAM_SPACE}" ] && FORWARD_ARGS+=(--param-space "${PARAM_SPACE}")
 [ -n "${EXECUTION_CONTEXT}" ] && FORWARD_ARGS+=(--execution-context "${EXECUTION_CONTEXT}")
+[ -n "${MIN_TRADES_PER_FOLD}" ] && FORWARD_ARGS+=(--min-trades-per-fold "${MIN_TRADES_PER_FOLD}")
 [ -n "${CAPITAL}" ] && FORWARD_ARGS+=(--capital "${CAPITAL}")
 [ -n "${BIN_DIR}" ] && FORWARD_ARGS+=(--bin-dir "${BIN_DIR}")
 [ -n "${ARTIFACT_SUFFIX}" ] && FORWARD_ARGS+=(--artifact-suffix "${ARTIFACT_SUFFIX}")
@@ -513,6 +533,9 @@ else
     fi
     if [ -n "${EXECUTION_CONTEXT}" ]; then
         HPO_ARGS+=("--execution-context" "${EXECUTION_CONTEXT}")
+    fi
+    if [ -n "${MIN_TRADES_PER_FOLD}" ]; then
+        HPO_ARGS+=("--min-trades-per-fold" "${MIN_TRADES_PER_FOLD}")
     fi
     if [ -n "${CAPITAL}" ]; then
         HPO_ARGS+=("--capital" "${CAPITAL}")
