@@ -260,11 +260,11 @@ cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --dollar-ba
 cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --config configs/hpo_results.json
 ```
 - Evaluates symmetric CUSUM filter and rolling Z-Score signals in real time upon bar completion.
-- Matches simulated orders with realistic maker/taker fees and slippage.
+- Runs the same `TradingSession` as live trading on a tick-level simulated venue: orders reach the market after `--latency-ms` (default 100, an assumption until measured), market orders walk the tape of real trades and pay the taker fee, and stop-loss/take-profit are conditional market orders armed by the tape.
 - Computes real-time *mark-to-market* unrealized PnL and drawdown tracking.
 - Implements Triple Barrier exits (Stop Loss, Take Profit, Time Barrier).
 - Records the session as a `paper` run in BigQuery (`--gcp-bigquery`): lifecycle rows, each closed trade with its entry/trough/peak/exit equity, and final metrics; sends instant push alerts to Telegram (`--telegram-alerts`).
-- Graceful shutdown on `Ctrl+C`: liquidates open position at current mark price, compiles full quantitative performance attribution (Sortino, Win Rate, Profit Factor), and records the final `stopped` run row with its metrics when `--gcp-bigquery` is enabled.
+- Graceful shutdown on `Ctrl+C`: an open position is not liquidated (like an exchange-held position it stays open and is not part of the metrics); compiles full quantitative performance attribution (Sortino, Win Rate, Profit Factor), and records the final `stopped` run row with its metrics when `--gcp-bigquery` is enabled.
 
 ---
 

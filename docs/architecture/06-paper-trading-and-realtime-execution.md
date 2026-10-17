@@ -25,8 +25,8 @@ Paper Trading is the critical intermediate proving ground between **historical d
      │                      │ OrderIntent
      ▼                      ▼
 ┌────────────────────────────────────────┐
-│             BacktestEngine             │ ──► Fills with friction (fees + slip)
-└────────────────────────────────────────┘     Triple Barrier Exits (SL, TP, Time)
+│  TradingSession + SimulatedVenue       │ ──► Latency, tape-walk market fills,
+└────────────────────────────────────────┘     taker fees, tape-armed SL/TP exits
      │
      ▼
 ┌────────────────────────────────────────┐
@@ -131,7 +131,7 @@ pub enum PaperTradingEvent {
 
 ## 5. Audit Telemetry Schema (`storage/reports/paper_trading_<timestamp>.json`)
 
-Upon receiving an interruption signal (`SIGINT` / `Ctrl+C`), the session liquidates any open position at the current mark price and serializes complete quantitative attribution metrics to disk:
+Upon receiving an interruption signal (`SIGINT` / `Ctrl+C`), the session leaves any open position open (it is not liquidated and not part of the metrics) and serializes complete quantitative attribution metrics to disk:
 
 ```json
 {

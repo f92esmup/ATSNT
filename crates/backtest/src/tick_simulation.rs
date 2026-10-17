@@ -10,7 +10,7 @@
 //! and is not counted in the metrics, unlike the bar engine, which marks it out.
 
 use adapters::{SimulatedVenue, SimulatedVenueConfig};
-use domain::{DollarBarAggregator, DomainError, RiskError, Side, Trade};
+use domain::{DollarBar, DollarBarAggregator, DomainError, RiskError, Side, Trade};
 use rust_decimal::Decimal;
 use strategies::Strategy;
 
@@ -43,6 +43,15 @@ pub enum TickSimulationError {
     /// The risk limits are invalid.
     #[error("invalid risk policy: {0}")]
     Risk(#[from] RiskError),
+}
+
+/// What one replayed trade produced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TickStep {
+    /// The dollar bar this trade completed, if any.
+    pub bar: Option<DollarBar>,
+    /// Everything the session did because of the trade.
+    pub events: Vec<SessionEvent>,
 }
 
 /// One strategy replayed trade by trade against a simulated exchange account.
@@ -92,7 +101,7 @@ impl<S: Strategy> TickSimulation<S> {
     /// The order mirrors the live loop: the venue executes first, the session absorbs the
     /// executions and the new balance, then the monthly breaker runs and finally a finished
     /// bar reaches the strategy.
-    pub async fn on_trade(&mut self, trade: &Trade) -> Vec<SessionEvent> {
+    pub async fn on_trade(&mut self, trade: &Trade) -> TickStep {
         self.ticks += 1;
         let mut events = Vec::new();
         for report in self.venue.on_trade(trade) {
@@ -104,11 +113,12 @@ impl<S: Strategy> TickSimulation<S> {
                 .on_trade(&self.venue, trade.timestamp, trade.price)
                 .await,
         );
-        if let Some(bar) = self.aggregator.process_trade(trade) {
+        let bar = self.aggregator.process_trade(trade);
+        if let Some(bar) = &bar {
             self.bars += 1;
-            events.extend(self.session.on_bar(&self.venue, &bar).await);
+            events.extend(self.session.on_bar(&self.venue, bar).await);
         }
-        events
+        TickStep { bar, events }
     }
 
     /// Trades closed so far, oldest first.
@@ -169,7 +179,7 @@ impl<S: Strategy> TickSimulation<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::{DollarBar, OrderIntent};
+    use domain::OrderIntent;
     use rust_decimal_macros::dec;
     use std::collections::VecDeque;
     use strategies::MarketType;
@@ -295,6 +305,27 @@ mod tests {
         // The stop armed at 97.9 and filled on the next sell print, 0.6 below the trigger.
         assert_eq!(trades[0].exit_price, dec!(97.4));
         assert!(trades[0].pnl_net < Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn the_time_barrier_closes_at_market_and_is_labelled_as_such() {
+        let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(98), dec!(104), 2).unwrap();
+        let mut simulation = simulation(vec![Some(intent)]);
+        let mut ticks = entry_ticks();
+        ticks.extend([
+            print(1_003, dec!(100.5), dec!(10), Side::Buy),
+            print(1_004, dec!(100.5), dec!(10), Side::Buy),
+            print(1_005, dec!(100.5), dec!(10), Side::Buy),
+            print(1_006, dec!(100.4), dec!(10), Side::Sell),
+        ]);
+
+        replay(&mut simulation, &ticks).await;
+
+        assert!(simulation.open_position().is_none());
+        let (_, trades) = simulation.finish();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].exit_reason, "TimeBarrier");
+        assert_eq!(trades[0].exit_price, dec!(100.4));
     }
 
     #[tokio::test]

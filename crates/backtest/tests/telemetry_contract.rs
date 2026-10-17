@@ -3,8 +3,8 @@ use domain::{Side, Trade};
 use rust_decimal_macros::dec;
 use strategies::DollarBarsCusumConfig;
 
-#[test]
-fn configured_session_preserves_raw_events_and_market_metadata() {
+#[tokio::test]
+async fn configured_session_preserves_raw_events_and_market_metadata() {
     let config = PaperTradingConfig {
         dollar_bar_threshold: dec!(100),
         strategy: DollarBarsCusumConfig {
@@ -15,6 +15,7 @@ fn configured_session_preserves_raw_events_and_market_metadata() {
             time_barrier_bars: 10,
             min_take_profit_pct: dec!(0.0025),
         },
+        latency_ms: 0,
         ..Default::default()
     };
     let metadata = TelemetryConfig {
@@ -25,18 +26,19 @@ fn configured_session_preserves_raw_events_and_market_metadata() {
     let mut raw = session.subscribe();
     let mut telemetry = session.subscribe_telemetry().unwrap();
     let mut kinds = std::collections::BTreeSet::new();
-    for (timestamp, price, quantity) in [
-        (1000, dec!(100), dec!(1)),
-        (2000, dec!(101), dec!(1)),
-        (3000, dec!(99), dec!(1.1)),
-        (4000, dec!(100), dec!(1)),
-        (5000, dec!(90), dec!(1.5)), // signal: the market order fills on the next bar
-        (5200, dec!(90), dec!(1.5)), // fill bar: the position opens at its open
-        (5500, dec!(91), dec!(0.1)),
-        (6000, dec!(101), dec!(1)),
+    for (timestamp, price, quantity, side) in [
+        (1000, dec!(100), dec!(1), Side::Buy),
+        (2000, dec!(101), dec!(1), Side::Buy),
+        (3000, dec!(99), dec!(1.1), Side::Buy),
+        (4000, dec!(100), dec!(1), Side::Buy),
+        (5000, dec!(90), dec!(1.5), Side::Sell), // signal: the market order needs a buyer
+        (5200, dec!(90.5), dec!(1000), Side::Buy), // a buyer print fills the entry
+        (5500, dec!(91), dec!(0.1), Side::Buy),
+        (6000, dec!(101), dec!(1), Side::Buy), // the tape crosses the target
+        (6100, dec!(100.9), dec!(1000), Side::Sell), // a seller takes the market exit
     ] {
-        let trade = Trade::new(timestamp, price, quantity, Side::Buy).unwrap();
-        for event in session.process_trade(&trade) {
+        let trade = Trade::new(timestamp, price, quantity, side).unwrap();
+        for event in session.process_trade(&trade).await {
             assert_eq!(raw.try_recv().unwrap(), event);
             let envelope = telemetry.try_recv().unwrap();
             assert_eq!(envelope.timestamp, Some(timestamp));

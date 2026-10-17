@@ -1,10 +1,11 @@
 //! Real-time paper trading engine for ATSNT.
 //!
 //! Provides live event-driven paper execution matching incoming trade ticks against
-//! synthetic dollar bar aggregations, executing signals via the deterministic [`BacktestEngine`],
+//! synthetic dollar bar aggregations, executing signals through the live trading session on a
+//! tick-level simulated venue,
 //! and broadcasting real-time lifecycle events ([`PaperTradingEvent`]) over Tokio channels.
 
-use domain::{DollarBar, DollarBarAggregator, Position, PositionSide, Trade};
+use domain::{DollarBar, PositionSide, Side, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -12,9 +13,10 @@ use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::config::BacktestConfig;
-use crate::engine::BacktestEngine;
 use crate::error::BacktestError;
 use crate::metrics::{BacktestMetrics, ClosedTrade};
+use crate::session::SessionEvent;
+use crate::tick_simulation::{TickSimulation, TickSimulationConfig};
 
 /// Real-time lifecycle events emitted during paper trading execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +130,10 @@ pub struct TelemetryEnvelope<T> {
     pub payload: T,
 }
 
+fn default_latency_ms() -> i64 {
+    100
+}
+
 /// Configuration settings for initializing a [`PaperTradingSession`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaperTradingConfig {
@@ -139,6 +145,10 @@ pub struct PaperTradingConfig {
     pub strategy: DollarBarsCusumConfig,
     /// Capacity of the Tokio broadcast event channel. Default: 10,000.
     pub channel_capacity: usize,
+    /// Milliseconds an order takes to reach the simulated market (an assumption until it is
+    /// measured against live fills).
+    #[serde(default = "default_latency_ms")]
+    pub latency_ms: i64,
 }
 
 impl Default for PaperTradingConfig {
@@ -148,6 +158,7 @@ impl Default for PaperTradingConfig {
             backtest: BacktestConfig::default(),
             strategy: DollarBarsCusumConfig::default(),
             channel_capacity: 10_000,
+            latency_ms: default_latency_ms(),
         }
     }
 }
@@ -163,32 +174,62 @@ impl PaperTradingConfig {
             backtest: artifact.spec.execution_context,
             strategy: artifact.spec.strategy_config.clone(),
             channel_capacity: 10_000,
+            latency_ms: default_latency_ms(),
         }
+    }
+}
+
+/// The position a paper session currently holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivePosition {
+    /// Direction of the position.
+    pub side: PositionSide,
+    /// Open quantity in base asset units.
+    pub quantity: Decimal,
+    /// Average entry price.
+    pub entry_price: Decimal,
+}
+
+fn position_side(side: Side) -> PositionSide {
+    match side {
+        Side::Buy => PositionSide::Long,
+        Side::Sell => PositionSide::Short,
     }
 }
 
 /// Live event-driven paper trading session coordinator.
 ///
-/// Bridges live incoming market trades with the deterministic [`BacktestEngine`]
-/// and [`DollarBarsCusumStrategy`], broadcasting execution telemetry in real time.
+/// Runs the same [`TradingSession`] as live trading against a tick-level
+/// [`adapters::SimulatedVenue`] (order latency, tape-walk market fills, tape-armed exits) and
+/// broadcasts execution telemetry in real time. The strategy only sees dollar bars; the
+/// venue sees every trade.
 pub struct PaperTradingSession {
-    aggregator: DollarBarAggregator,
-    strategy: DollarBarsCusumStrategy,
-    engine: BacktestEngine,
+    simulation: TickSimulation<DollarBarsCusumStrategy>,
     event_sender: broadcast::Sender<PaperTradingEvent>,
     telemetry: Option<(
         TelemetryConfig,
         broadcast::Sender<TelemetryEnvelope<PaperTradingEvent>>,
     )>,
+    pending_intent: Option<domain::OrderIntent>,
+    peak_equity: Decimal,
+    last_price: Option<Decimal>,
 }
 
 impl PaperTradingSession {
     /// Initializes a new paper trading session from the provided configuration.
     pub fn new(config: PaperTradingConfig) -> Result<Self, BacktestError> {
         config.backtest.validate()?;
-        let aggregator = DollarBarAggregator::new(config.dollar_bar_threshold)?;
         let strategy = DollarBarsCusumStrategy::new(config.strategy)?;
-        let engine = BacktestEngine::new(config.backtest);
+        let simulation = TickSimulation::new(
+            TickSimulationConfig {
+                backtest: config.backtest,
+                symbol: "PAPER".to_string(),
+                dollar_bar_threshold: config.dollar_bar_threshold,
+                latency_ms: config.latency_ms,
+            },
+            strategy,
+        )
+        .map_err(|error| BacktestError::General(error.to_string()))?;
         let capacity = if config.channel_capacity == 0 {
             10_000
         } else {
@@ -197,11 +238,12 @@ impl PaperTradingSession {
         let (event_sender, _) = broadcast::channel(capacity);
 
         Ok(Self {
-            aggregator,
-            strategy,
-            engine,
+            peak_equity: config.backtest.initial_capital,
+            simulation,
             event_sender,
             telemetry: None,
+            pending_intent: None,
+            last_price: None,
         })
     }
 
@@ -231,29 +273,6 @@ impl PaperTradingSession {
             .map(|(_, sender)| sender.subscribe())
     }
 
-    /// Initializes a paper trading session with pre-built components.
-    pub fn from_components(
-        aggregator: DollarBarAggregator,
-        strategy: DollarBarsCusumStrategy,
-        engine: BacktestEngine,
-        channel_capacity: usize,
-    ) -> Self {
-        let capacity = if channel_capacity == 0 {
-            10_000
-        } else {
-            channel_capacity
-        };
-        let (event_sender, _) = broadcast::channel(capacity);
-
-        Self {
-            aggregator,
-            strategy,
-            engine,
-            event_sender,
-            telemetry: None,
-        }
-    }
-
     /// Creates a new broadcast receiver to subscribe to live paper trading events.
     pub fn subscribe(&self) -> broadcast::Receiver<PaperTradingEvent> {
         self.event_sender.subscribe()
@@ -264,90 +283,39 @@ impl PaperTradingSession {
         self.event_sender.clone()
     }
 
-    /// Ingests a live market trade, steps the aggregator, evaluates strategy signals
-    /// and barrier exits, and returns all events generated during this tick.
-    pub fn process_trade(&mut self, trade: &Trade) -> Vec<PaperTradingEvent> {
+    /// Ingests a live market trade: the simulated venue executes what the tape allows, the
+    /// session reacts, and a finished dollar bar reaches the strategy. Returns every event
+    /// generated during this tick.
+    pub async fn process_trade(&mut self, trade: &Trade) -> Vec<PaperTradingEvent> {
         let mut events = Vec::new();
-        let was_halted_before_tick = self.engine.is_halted();
 
-        // 1. Mark to market on current trade if there is an active position
-        if let Some(pos) = self.engine.active_position() {
-            let unrealized_pnl = pos.unrealized_pnl(trade.price);
-            let total_equity = self.engine.total_equity(trade.price);
-            let peak_equity = self.engine.peak_equity();
-            let drawdown_pct = if peak_equity > Decimal::ZERO && peak_equity > total_equity {
-                (peak_equity - total_equity) / peak_equity
-            } else {
-                Decimal::ZERO
-            };
-
+        // 1. Mark to market the position held before this tick.
+        if let Some(position) = self.active_position() {
+            let unrealized_pnl = self.unrealized_pnl(&position, trade.price);
+            let total_equity = self.cash_equity() + unrealized_pnl;
+            self.peak_equity = self.peak_equity.max(total_equity);
             events.push(PaperTradingEvent::MarkToMarket {
                 current_price: trade.price,
                 unrealized_pnl,
                 total_equity,
-                drawdown_pct,
+                drawdown_pct: self.drawdown_pct(total_equity),
             });
         }
+        self.last_price = Some(trade.price);
 
-        // 2. Ingest trade into the DollarBarAggregator
-        if let Some(bar) = self.aggregator.process_trade(trade) {
-            events.push(PaperTradingEvent::BarFormed(bar.clone()));
-
-            let pending_before = self.engine.pending_intent().cloned();
-            let trades_before = self.engine.closed_trades().len();
-
-            self.engine.process_bar(&mut self.strategy, &bar);
-
-            let new_trades: Vec<ClosedTrade> =
-                self.engine.closed_trades()[trades_before..].to_vec();
-
-            // A market order submitted on the previous bar fills at this bar's open.
-            if let Some(intent) = &pending_before {
-                let opened = match (self.engine.active_position(), new_trades.first()) {
-                    (Some(pos), _) => Some((pos.side, pos.entry_price, pos.quantity)),
-                    (None, Some(trade)) => Some((trade.side, trade.entry_price, trade.quantity)),
-                    // Dropped: the monthly breaker halted the session before the fill.
-                    (None, None) => None,
-                };
-                if let Some((side, entry_price, quantity)) = opened {
-                    events.push(PaperTradingEvent::PositionOpened {
-                        side,
-                        entry_price,
-                        quantity,
-                        stop_loss: intent.stop_loss,
-                        take_profit: intent.take_profit,
-                    });
-                }
-            }
-
-            for trade in &new_trades {
-                events.push(PaperTradingEvent::PositionClosed {
-                    exit_reason: trade.exit_reason.clone(),
-                    exit_price: trade.exit_price,
-                    net_pnl: trade.pnl_net,
-                    total_equity: self.engine.cash_equity(),
-                });
-            }
-
-            // A signal was accepted: its market order waits for the next bar's open.
-            if pending_before.is_none() {
-                if let Some(intent) = self.engine.pending_intent() {
-                    events.push(PaperTradingEvent::SignalGenerated(intent.clone()));
-                }
+        // 2. Replay the trade through the venue, the session and the aggregator.
+        let step = self.simulation.on_trade(trade).await;
+        if let Some(bar) = step.bar {
+            events.push(PaperTradingEvent::BarFormed(bar));
+        }
+        for event in step.events {
+            if let Some(mapped) = self.map_event(event) {
+                events.push(mapped);
             }
         }
+        self.peak_equity = self.peak_equity.max(self.cash_equity());
 
-        if !was_halted_before_tick && self.engine.is_halted() {
-            events.push(PaperTradingEvent::CircuitBreakerTripped {
-                scope: "monthly".to_string(),
-                drawdown_pct: self
-                    .engine
-                    .monthly_trip_drawdown_pct()
-                    .unwrap_or(Decimal::ZERO),
-            });
-        }
-
-        // 3. Broadcast events to all active subscribers
+        // 3. Broadcast events to all active subscribers.
         for event in &events {
             let _ = self.event_sender.send(event.clone());
             if let Some((metadata, sender)) = &self.telemetry {
@@ -358,82 +326,114 @@ impl PaperTradingSession {
         events
     }
 
-    /// Terminates the paper trading session, liquidating any open position at the mark price,
-    /// and compiling statistical metrics and trade history.
-    pub fn finish(self, last_mark_price: Option<Decimal>) -> (BacktestMetrics, Vec<ClosedTrade>) {
-        self.engine.finish_with_trades(last_mark_price)
+    /// Translates a session event into its paper telemetry counterpart, if it has one.
+    fn map_event(&mut self, event: SessionEvent) -> Option<PaperTradingEvent> {
+        match event {
+            SessionEvent::Signal(intent) => {
+                self.pending_intent = Some(intent);
+                None
+            }
+            // Only an accepted order counts as a generated signal.
+            SessionEvent::EntrySubmitted(_) => self
+                .pending_intent
+                .take()
+                .map(PaperTradingEvent::SignalGenerated),
+            SessionEvent::SignalSkipped(_) | SessionEvent::EntryFailed(_) => {
+                self.pending_intent = None;
+                None
+            }
+            SessionEvent::PositionOpened {
+                side,
+                price,
+                quantity,
+                stop_loss,
+                take_profit,
+                ..
+            } => Some(PaperTradingEvent::PositionOpened {
+                side: position_side(side),
+                entry_price: price,
+                quantity,
+                stop_loss,
+                take_profit,
+            }),
+            SessionEvent::PositionClosed(trade) => Some(PaperTradingEvent::PositionClosed {
+                exit_reason: trade.exit_reason.clone(),
+                exit_price: trade.exit_price,
+                net_pnl: trade.pnl_net,
+                total_equity: self.cash_equity(),
+            }),
+            SessionEvent::MonthlyBreakerTripped { drawdown } => {
+                Some(PaperTradingEvent::CircuitBreakerTripped {
+                    scope: "monthly".to_string(),
+                    drawdown_pct: drawdown,
+                })
+            }
+            SessionEvent::EntryCancelled | SessionEvent::Exit(_) => None,
+        }
     }
 
-    /// Access the underlying backtest engine simulator.
-    #[inline]
-    pub fn engine(&self) -> &BacktestEngine {
-        &self.engine
+    fn unrealized_pnl(&self, position: &ActivePosition, price: Decimal) -> Decimal {
+        let direction = match position.side {
+            PositionSide::Long => Decimal::ONE,
+            PositionSide::Short => -Decimal::ONE,
+        };
+        (price - position.entry_price) * position.quantity * direction
     }
 
-    /// Access the underlying dollar bar aggregator.
-    #[inline]
-    pub fn aggregator(&self) -> &DollarBarAggregator {
-        &self.aggregator
+    fn drawdown_pct(&self, total_equity: Decimal) -> Decimal {
+        if self.peak_equity > Decimal::ZERO && self.peak_equity > total_equity {
+            (self.peak_equity - total_equity) / self.peak_equity
+        } else {
+            Decimal::ZERO
+        }
     }
 
-    /// Access the underlying strategy.
-    #[inline]
-    pub fn strategy(&self) -> &DollarBarsCusumStrategy {
-        &self.strategy
+    /// Terminates the session and compiles the statistics of the closed trades.
+    ///
+    /// A position still open is not liquidated: like an exchange-held position it simply stays
+    /// open, and it is not part of the metrics.
+    pub fn finish(self) -> (BacktestMetrics, Vec<ClosedTrade>) {
+        self.simulation.finish()
     }
 
-    /// Current portfolio cash equity balance.
-    #[inline]
+    /// Wallet balance: initial capital plus realized PnL minus commissions.
     pub fn cash_equity(&self) -> Decimal {
-        self.engine.cash_equity()
+        self.simulation.wallet_balance()
     }
 
-    /// Total portfolio equity mark-to-market.
-    #[inline]
+    /// Wallet balance plus the unrealized PnL of the open position at `current_price`.
     pub fn total_equity(&self, current_price: Decimal) -> Decimal {
-        self.engine.total_equity(current_price)
+        match self.active_position() {
+            Some(position) => self.cash_equity() + self.unrealized_pnl(&position, current_price),
+            None => self.cash_equity(),
+        }
     }
 
-    /// Currently active simulated position, if any.
-    #[inline]
-    pub fn active_position(&self) -> Option<&Position> {
-        self.engine.active_position()
+    /// The position currently held, if any.
+    pub fn active_position(&self) -> Option<ActivePosition> {
+        self.simulation
+            .open_position()
+            .map(|(side, quantity, entry_price)| ActivePosition {
+                side: position_side(side),
+                quantity,
+                entry_price,
+            })
     }
 
-    /// Active order intent, if any.
-    #[inline]
-    pub fn active_intent(&self) -> Option<&domain::OrderIntent> {
-        self.engine.active_intent()
-    }
-
-    /// Slice of all closed trades recorded so far.
-    #[inline]
+    /// Trades closed so far, oldest first.
     pub fn closed_trades(&self) -> &[ClosedTrade] {
-        self.engine.closed_trades()
+        self.simulation.closed_trades()
     }
 
-    /// Bars held for the active position.
-    #[inline]
-    pub fn bars_held(&self) -> usize {
-        self.engine.bars_held()
-    }
-
-    /// Peak equity reached during the session.
-    #[inline]
+    /// Peak total equity observed so far.
     pub fn peak_equity(&self) -> Decimal {
-        self.engine.peak_equity()
+        self.peak_equity
     }
 
-    /// Maximum drawdown amount observed.
-    #[inline]
-    pub fn max_drawdown_amount(&self) -> Decimal {
-        self.engine.max_drawdown_amount()
-    }
-
-    /// Maximum drawdown percentage observed.
-    #[inline]
-    pub fn max_drawdown_pct(&self) -> Decimal {
-        self.engine.max_drawdown_pct()
+    /// Current peak-to-trough drawdown at the last observed price.
+    pub fn current_drawdown_pct(&self) -> Decimal {
+        let mark = self.last_price.unwrap_or(Decimal::ZERO);
+        self.drawdown_pct(self.total_equity(mark))
     }
 }
 
@@ -499,7 +499,7 @@ impl PaperSessionOwner {
     /// Waits for supplied trades, forwarding session events to the telemetry sender.
     pub async fn run(mut self) -> (BacktestMetrics, Vec<ClosedTrade>) {
         while let Some(trade) = self.trades.recv().await {
-            for event in self.session.process_trade(&trade) {
+            for event in self.session.process_trade(&trade).await {
                 let _ = self
                     .events
                     .send(self.telemetry.envelope(trade.timestamp, event));
@@ -507,7 +507,7 @@ impl PaperSessionOwner {
         }
         // Consuming finish guarantees one finalization. No mark means no forced
         // liquidation; finalization itself does not publish a telemetry event.
-        self.session.finish(None)
+        self.session.finish()
     }
 }
 
@@ -521,38 +521,106 @@ mod tests {
         Trade::new(timestamp, price, quantity, side).expect("valid trade")
     }
 
+    fn config(strategy: DollarBarsCusumConfig) -> PaperTradingConfig {
+        PaperTradingConfig {
+            dollar_bar_threshold: dec!(100),
+            strategy,
+            channel_capacity: 100,
+            latency_ms: 0,
+            ..Default::default()
+        }
+    }
+
+    fn cusum(z_stop: Decimal, time_barrier_bars: usize) -> DollarBarsCusumConfig {
+        DollarBarsCusumConfig {
+            rolling_window_len: 4,
+            cusum_vol_multiplier: dec!(1.0),
+            z_entry_threshold: dec!(1.5),
+            z_stop_threshold: z_stop,
+            time_barrier_bars,
+            min_take_profit_pct: dec!(0.0025),
+        }
+    }
+
+    /// Four $100 bars that give the strategy its volatility baseline.
+    async fn warm_up(session: &mut PaperTradingSession) {
+        for (i, price) in [dec!(100), dec!(101), dec!(99), dec!(100)]
+            .iter()
+            .enumerate()
+        {
+            let events = session
+                .process_trade(&make_trade(
+                    (i as i64 + 1) * 1000,
+                    *price,
+                    dec!(1),
+                    Side::Buy,
+                ))
+                .await;
+            assert!(events
+                .iter()
+                .any(|e| matches!(e, PaperTradingEvent::BarFormed(_))));
+        }
+    }
+
+    /// Warm-up, a plunge that signals a long, and a deep buyer print that fills it.
+    /// Returns the stop and target the exchange-held exits were placed at.
+    async fn open_long(session: &mut PaperTradingSession) -> (Decimal, Decimal) {
+        warm_up(session).await;
+        let signal = session
+            .process_trade(&make_trade(5000, dec!(90), dec!(1.5), Side::Sell))
+            .await;
+        assert!(signal
+            .iter()
+            .any(|e| matches!(e, PaperTradingEvent::SignalGenerated(_))));
+        // The market order only trades once a buyer print shows up on the tape.
+        assert!(session.active_position().is_none());
+        let fill = session
+            .process_trade(&make_trade(5200, dec!(90.5), dec!(1000), Side::Buy))
+            .await;
+        fill.iter()
+            .find_map(|e| match e {
+                PaperTradingEvent::PositionOpened {
+                    stop_loss,
+                    take_profit,
+                    ..
+                } => Some((*stop_loss, *take_profit)),
+                _ => None,
+            })
+            .expect("PositionOpened event")
+    }
+
     #[test]
     fn test_paper_session_initialization() {
-        let config = PaperTradingConfig {
+        let session = PaperTradingSession::new(PaperTradingConfig {
             dollar_bar_threshold: dec!(1000),
             ..Default::default()
-        };
-        let session = PaperTradingSession::new(config).expect("init session");
+        })
+        .expect("init session");
         assert_eq!(session.cash_equity(), dec!(10_000));
         assert!(session.active_position().is_none());
         assert_eq!(session.closed_trades().len(), 0);
     }
 
-    #[test]
-    fn test_trade_processing_and_bar_formation() {
-        let config = PaperTradingConfig {
+    #[tokio::test]
+    async fn test_trade_processing_and_bar_formation() {
+        let mut session = PaperTradingSession::new(PaperTradingConfig {
             dollar_bar_threshold: dec!(1000),
             ..Default::default()
-        };
-        let mut session = PaperTradingSession::new(config).expect("init session");
+        })
+        .expect("init session");
         let mut rx = session.subscribe();
 
         // Trade 1: $100 * 5 = $500 (threshold 1000 not met)
-        let t1 = make_trade(1000, dec!(100), dec!(5), Side::Buy);
-        let events1 = session.process_trade(&t1);
+        let events1 = session
+            .process_trade(&make_trade(1000, dec!(100), dec!(5), Side::Buy))
+            .await;
         assert!(events1.is_empty());
         assert!(rx.try_recv().is_err());
 
         // Trade 2: $100 * 6 = $600 -> Total $1100 >= $1000 -> Bar completes!
-        let t2 = make_trade(2000, dec!(100), dec!(6), Side::Buy);
-        let events2 = session.process_trade(&t2);
-        assert!(!events2.is_empty());
-
+        let events2 = session
+            .process_trade(&make_trade(2000, dec!(100), dec!(6), Side::Buy))
+            .await;
         match &events2[0] {
             PaperTradingEvent::BarFormed(bar) => {
                 assert_eq!(bar.open, dec!(100));
@@ -563,79 +631,26 @@ mod tests {
             }
             _ => panic!("Expected BarFormed event"),
         }
-
-        // Verify broadcast receiver got the same event
-        let broadcasted = rx.try_recv().expect("broadcast event");
-        assert_eq!(broadcasted, events2[0]);
+        assert_eq!(rx.try_recv().expect("broadcast event"), events2[0]);
     }
 
-    #[test]
-    fn test_lifecycle_entry_mark_to_market_and_exit() {
-        let config = PaperTradingConfig {
-            dollar_bar_threshold: dec!(100), // Small threshold for quick bar creation
-            backtest: BacktestConfig {
-                initial_capital: dec!(10000),
-                maker_fee_pct: dec!(0.0002),
-                taker_fee_pct: dec!(0.0005),
-                slippage_pct: dec!(0.0005),
-                risk_per_trade_pct: dec!(0.01),
-                max_daily_drawdown_pct: dec!(0.05),
-                ..BacktestConfig::default()
-            },
-            strategy: DollarBarsCusumConfig {
-                rolling_window_len: 4,
-                cusum_vol_multiplier: dec!(1.0),
-                z_entry_threshold: dec!(1.5),
-                z_stop_threshold: dec!(3.0),
-                time_barrier_bars: 10,
-                min_take_profit_pct: dec!(0.0025),
-            },
-            channel_capacity: 100,
-        };
+    #[tokio::test]
+    async fn test_lifecycle_entry_mark_to_market_and_exit() {
+        let mut session = PaperTradingSession::new(config(cusum(dec!(3.0), 10))).unwrap();
+        let (_, take_profit) = open_long(&mut session).await;
+        let position = session.active_position().unwrap();
+        assert_eq!(position.side, PositionSide::Long);
+        // The entry paid the print it found, not the signal price.
+        assert_eq!(position.entry_price, dec!(90.5));
 
-        let mut session = PaperTradingSession::new(config).expect("init session");
-        let mut rx = session.subscribe();
-
-        // 1. Establish baseline volatility with 4 bars
-        for (i, p) in [dec!(100), dec!(101), dec!(99), dec!(100)]
-            .iter()
-            .enumerate()
-        {
-            let ts = (i as i64 + 1) * 1000;
-            let trade = make_trade(ts, *p, dec!(1.0), Side::Buy); // $100 notional completes bar
-            let events = session.process_trade(&trade);
-            assert!(events
-                .iter()
-                .any(|e| matches!(e, PaperTradingEvent::BarFormed(_))));
-        }
-
-        assert!(session.active_position().is_none());
-
-        // 2. Sharp price drop to 90 -> creates bar, triggers Long entry!
-        let plunge_trade = make_trade(5000, dec!(90), dec!(1.5), Side::Sell);
-        let plunge_events = session.process_trade(&plunge_trade);
-
-        // The signal is accepted, but the market order only fills on the next bar's open.
-        assert!(session.active_position().is_none());
-        assert!(plunge_events
-            .iter()
-            .any(|e| matches!(e, PaperTradingEvent::SignalGenerated(_))));
-
-        let fill_events = session.process_trade(&make_trade(5200, dec!(90), dec!(1.5), Side::Buy));
-        assert!(session.active_position().is_some());
-        let pos = session.active_position().unwrap();
-        assert_eq!(pos.side, PositionSide::Long);
-        assert!(fill_events
-            .iter()
-            .any(|e| matches!(e, PaperTradingEvent::PositionOpened { .. })));
-
-        // Drain broadcast receiver
-        while rx.try_recv().is_ok() {}
-
-        // 3. Next tick: test MarkToMarket generation with active position
-        let tick = make_trade(5500, dec!(91), dec!(0.1), Side::Buy);
-        let tick_events = session.process_trade(&tick);
-        assert_eq!(tick_events.len(), 1);
+        // A quiet tick marks the open position to market first.
+        let tick_events = session
+            .process_trade(&make_trade(5500, dec!(91), dec!(0.1), Side::Buy))
+            .await;
+        assert!(matches!(
+            tick_events[0],
+            PaperTradingEvent::MarkToMarket { .. }
+        ));
         match &tick_events[0] {
             PaperTradingEvent::MarkToMarket {
                 current_price,
@@ -644,128 +659,101 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*current_price, dec!(91));
-                assert!(*unrealized_pnl > Decimal::ZERO); // bought near ~90, price is 91
+                assert!(*unrealized_pnl > Decimal::ZERO);
                 assert!(*total_equity > Decimal::ZERO);
             }
             _ => panic!("Expected MarkToMarket event"),
         }
 
-        // 4. Rebound back above mean (100) -> completes bar, triggers TakeProfit!
-        let exit_trade = make_trade(6000, dec!(101), dec!(1.0), Side::Buy);
-        let exit_events = session.process_trade(&exit_trade);
+        // The tape reaches the target and a seller then takes the market exit.
+        session
+            .process_trade(&make_trade(6000, take_profit, dec!(1), Side::Buy))
+            .await;
+        let exit_price = take_profit - dec!(0.1);
+        let exit_events = session
+            .process_trade(&make_trade(6100, exit_price, dec!(1000), Side::Sell))
+            .await;
 
         assert!(session.active_position().is_none());
-        let pos_closed = exit_events
+        let closed = exit_events
             .iter()
-            .find(|e| matches!(e, PaperTradingEvent::PositionClosed { .. }));
-        assert!(pos_closed.is_some());
+            .find_map(|e| match e {
+                PaperTradingEvent::PositionClosed {
+                    exit_reason,
+                    exit_price,
+                    net_pnl,
+                    ..
+                } => Some((exit_reason.clone(), *exit_price, *net_pnl)),
+                _ => None,
+            })
+            .expect("PositionClosed event");
+        assert_eq!(closed.0, "TakeProfit");
+        assert_eq!(closed.1, exit_price);
+        assert!(closed.2 > Decimal::ZERO);
 
-        if let Some(PaperTradingEvent::PositionClosed {
-            exit_reason,
-            net_pnl,
-            ..
-        }) = pos_closed
-        {
-            assert_eq!(exit_reason, "TakeProfit");
-            assert!(*net_pnl > Decimal::ZERO);
-        }
-
-        // 5. Finish session
-        let (metrics, trades) = session.finish(None);
+        let (metrics, trades) = session.finish();
         assert_eq!(metrics.total_trades, 1);
         assert_eq!(metrics.winning_trades, 1);
         assert_eq!(trades.len(), 1);
     }
 
-    #[test]
-    fn test_stop_loss_exit_event() {
-        let config = PaperTradingConfig {
-            dollar_bar_threshold: dec!(100),
-            backtest: BacktestConfig::default(),
-            strategy: DollarBarsCusumConfig {
-                rolling_window_len: 4,
-                cusum_vol_multiplier: dec!(1.0),
-                z_entry_threshold: dec!(1.5),
-                z_stop_threshold: dec!(2.0),
-                time_barrier_bars: 10,
-                min_take_profit_pct: dec!(0.0025),
-            },
-            channel_capacity: 100,
-        };
+    #[tokio::test]
+    async fn test_stop_loss_exit_event() {
+        let mut session = PaperTradingSession::new(config(cusum(dec!(2.0), 10))).unwrap();
+        let (stop_loss, _) = open_long(&mut session).await;
 
-        let mut session = PaperTradingSession::new(config).expect("init session");
+        // The tape crosses the stop; the exit trades on the next seller print.
+        session
+            .process_trade(&make_trade(6000, stop_loss - dec!(1), dec!(1), Side::Sell))
+            .await;
+        let events = session
+            .process_trade(&make_trade(
+                6100,
+                stop_loss - dec!(2),
+                dec!(1000),
+                Side::Sell,
+            ))
+            .await;
 
-        // Baseline bars
-        for (i, p) in [dec!(100), dec!(101), dec!(99), dec!(100)]
-            .iter()
-            .enumerate()
-        {
-            let ts = (i as i64 + 1) * 1000;
-            session.process_trade(&make_trade(ts, *p, dec!(1.0), Side::Buy));
-        }
-
-        // Long signal on dip; the order fills on the next bar's open
-        session.process_trade(&make_trade(5000, dec!(90), dec!(1.5), Side::Sell));
         assert!(session.active_position().is_none());
-        session.process_trade(&make_trade(5500, dec!(90), dec!(1.5), Side::Buy));
-        assert!(session.active_position().is_some());
-
-        // Price crashes further to 70 -> Stop Loss
-        let crash_events =
-            session.process_trade(&make_trade(6000, dec!(70), dec!(1.5), Side::Sell));
-        assert!(session.active_position().is_none());
-
-        let closed = crash_events
+        let (reason, net_pnl) = events
             .iter()
-            .find(|e| matches!(e, PaperTradingEvent::PositionClosed { .. }))
+            .find_map(|e| match e {
+                PaperTradingEvent::PositionClosed {
+                    exit_reason,
+                    net_pnl,
+                    ..
+                } => Some((exit_reason.clone(), *net_pnl)),
+                _ => None,
+            })
             .expect("PositionClosed event");
-
-        if let PaperTradingEvent::PositionClosed {
-            exit_reason,
-            net_pnl,
-            ..
-        } = closed
-        {
-            assert_eq!(exit_reason, "StopLoss");
-            assert!(*net_pnl < Decimal::ZERO);
-        }
+        assert_eq!(reason, "StopLoss");
+        assert!(net_pnl < Decimal::ZERO);
     }
 
-    #[test]
-    fn test_monthly_breaker_emits_event_and_blocks_new_positions() {
-        let config = PaperTradingConfig {
-            dollar_bar_threshold: dec!(100),
+    #[tokio::test]
+    async fn test_monthly_breaker_emits_event_and_blocks_new_positions() {
+        let mut session = PaperTradingSession::new(PaperTradingConfig {
             backtest: BacktestConfig {
                 max_daily_drawdown_pct: dec!(0.5),
                 max_monthly_drawdown_pct: dec!(0.005),
                 ..BacktestConfig::default()
             },
-            strategy: DollarBarsCusumConfig {
-                rolling_window_len: 4,
-                cusum_vol_multiplier: dec!(1.0),
-                z_entry_threshold: dec!(1.5),
-                z_stop_threshold: dec!(2.0),
-                time_barrier_bars: 10,
-                min_take_profit_pct: dec!(0.0025),
-            },
-            channel_capacity: 100,
-        };
-        let mut session = PaperTradingSession::new(config).expect("init session");
+            ..config(cusum(dec!(2.0), 10))
+        })
+        .unwrap();
+        let (stop_loss, _) = open_long(&mut session).await;
 
-        for (i, p) in [dec!(100), dec!(101), dec!(99), dec!(100)]
-            .iter()
-            .enumerate()
-        {
-            session.process_trade(&make_trade((i as i64 + 1) * 1000, *p, dec!(1.0), Side::Buy));
-        }
-        session.process_trade(&make_trade(5000, dec!(90), dec!(1.5), Side::Sell));
-        session.process_trade(&make_trade(5500, dec!(90), dec!(1.5), Side::Buy));
-        assert!(session.active_position().is_some());
+        let crash = session
+            .process_trade(&make_trade(
+                6000,
+                stop_loss - dec!(15),
+                dec!(1.5),
+                Side::Sell,
+            ))
+            .await;
 
-        let crash_events =
-            session.process_trade(&make_trade(6000, dec!(70), dec!(1.5), Side::Sell));
-
-        let tripped = crash_events
+        let tripped = crash
             .iter()
             .find_map(|e| match e {
                 PaperTradingEvent::CircuitBreakerTripped {
@@ -779,100 +767,61 @@ mod tests {
         assert!(tripped.1 >= dec!(0.005));
 
         // Once halted, no further event may reopen a position or re-announce the trip.
-        let later = session.process_trade(&make_trade(7000, dec!(100), dec!(1.0), Side::Buy));
-        assert!(session.active_position().is_none());
+        let mut later = Vec::new();
+        for i in 0..5 {
+            later.extend(
+                session
+                    .process_trade(&make_trade(7000 + i, dec!(100), dec!(1000), Side::Buy))
+                    .await,
+            );
+        }
         assert!(!later
             .iter()
             .any(|e| matches!(e, PaperTradingEvent::CircuitBreakerTripped { .. })));
+        assert!(!later
+            .iter()
+            .any(|e| matches!(e, PaperTradingEvent::SignalGenerated(_))));
     }
 
-    #[test]
-    fn test_time_barrier_exit_event() {
-        let config = PaperTradingConfig {
-            dollar_bar_threshold: dec!(100),
-            backtest: BacktestConfig::default(),
-            strategy: DollarBarsCusumConfig {
-                rolling_window_len: 4,
-                cusum_vol_multiplier: dec!(1.0),
-                z_entry_threshold: dec!(1.5),
-                z_stop_threshold: dec!(5.0), // very wide SL
-                time_barrier_bars: 2,        // short time barrier
-                min_take_profit_pct: dec!(0.0025),
-            },
-            channel_capacity: 100,
-        };
+    #[tokio::test]
+    async fn test_time_barrier_exit_event() {
+        let mut session = PaperTradingSession::new(config(cusum(dec!(5.0), 2))).unwrap();
+        open_long(&mut session).await;
 
-        let mut session = PaperTradingSession::new(config).expect("init session");
+        // The fill bar counts as the first held bar; the second one hits the time barrier and
+        // the position is closed at market, so it needs a seller to take the other side.
+        session
+            .process_trade(&make_trade(6000, dec!(90.6), dec!(1.2), Side::Buy))
+            .await;
+        let barrier = session
+            .process_trade(&make_trade(7000, dec!(90.7), dec!(1.2), Side::Buy))
+            .await;
+        let exit = session
+            .process_trade(&make_trade(7100, dec!(90.7), dec!(1000), Side::Sell))
+            .await;
 
-        // Baseline bars
-        for (i, p) in [dec!(100), dec!(101), dec!(99), dec!(100)]
+        let closed = barrier
             .iter()
-            .enumerate()
-        {
-            let ts = (i as i64 + 1) * 1000;
-            session.process_trade(&make_trade(ts, *p, dec!(1.0), Side::Buy));
-        }
-
-        // Long signal: the order fills at the next bar's open
-        session.process_trade(&make_trade(5000, dec!(90), dec!(1.5), Side::Sell));
-        assert!(session.active_position().is_none());
-
-        // Bar 1 of holding (the fill bar): price stays near 90
-        session.process_trade(&make_trade(6000, dec!(90.1), dec!(1.2), Side::Buy));
-        assert!(session.active_position().is_some());
-        assert_eq!(session.bars_held(), 1);
-
-        // Bar 2 of holding: time barrier (max_bars_hold = 2) reached!
-        let events = session.process_trade(&make_trade(7000, dec!(90.2), dec!(1.2), Side::Buy));
-        assert!(session.active_position().is_none());
-
-        let closed = events
-            .iter()
-            .find(|e| matches!(e, PaperTradingEvent::PositionClosed { .. }))
+            .chain(exit.iter())
+            .find_map(|e| match e {
+                PaperTradingEvent::PositionClosed { exit_reason, .. } => Some(exit_reason.clone()),
+                _ => None,
+            })
             .expect("PositionClosed event");
-
-        if let PaperTradingEvent::PositionClosed { exit_reason, .. } = closed {
-            assert_eq!(exit_reason, "TimeBarrier");
-        }
+        assert_eq!(closed, "TimeBarrier");
+        assert!(session.active_position().is_none());
     }
 
-    #[test]
-    fn test_finish_liquidates_open_position() {
-        let config = PaperTradingConfig {
-            dollar_bar_threshold: dec!(100),
-            backtest: BacktestConfig::default(),
-            strategy: DollarBarsCusumConfig {
-                rolling_window_len: 4,
-                cusum_vol_multiplier: dec!(1.0),
-                z_entry_threshold: dec!(1.5),
-                z_stop_threshold: dec!(5.0),
-                time_barrier_bars: 10,
-                min_take_profit_pct: dec!(0.0025),
-            },
-            channel_capacity: 100,
-        };
-
-        let mut session = PaperTradingSession::new(config).expect("init session");
-
-        // Baseline bars
-        for (i, p) in [dec!(100), dec!(101), dec!(99), dec!(100)]
-            .iter()
-            .enumerate()
-        {
-            let ts = (i as i64 + 1) * 1000;
-            session.process_trade(&make_trade(ts, *p, dec!(1.0), Side::Buy));
-        }
-
-        // Long signal, then the fill bar
-        session.process_trade(&make_trade(5000, dec!(90), dec!(1.5), Side::Sell));
-        session.process_trade(&make_trade(5500, dec!(90), dec!(1.5), Side::Buy));
+    #[tokio::test]
+    async fn test_finish_leaves_an_open_position_out_of_the_metrics() {
+        let mut session = PaperTradingSession::new(config(cusum(dec!(5.0), 10))).unwrap();
+        open_long(&mut session).await;
         assert!(session.active_position().is_some());
 
-        // Terminate session with mark price of 95
-        let (metrics, trades) = session.finish(Some(dec!(95)));
-        assert_eq!(metrics.total_trades, 1);
-        assert_eq!(trades.len(), 1);
-        assert!(trades[0].pnl_net > Decimal::ZERO);
+        let (metrics, trades) = session.finish();
+
+        assert_eq!(metrics.total_trades, 0);
+        assert!(trades.is_empty());
     }
 
     #[tokio::test]
@@ -936,9 +885,12 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            owner.session.process_trade(
-                &Trade::new((i as i64 + 1) * 1000, price, dec!(1.5), Side::Buy).unwrap(),
-            );
+            owner
+                .session
+                .process_trade(
+                    &Trade::new((i as i64 + 1) * 1000, price, dec!(1.5), Side::Buy).unwrap(),
+                )
+                .await;
         }
         assert!(owner.session.active_position().is_some());
         let runtime = PaperSessionRuntime::spawn(owner, input);

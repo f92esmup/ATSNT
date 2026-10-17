@@ -12,7 +12,7 @@
 //!
 //! `aggTrades` carries no mark price, so triggers use the last trade price as the mark proxy.
 
-use std::cell::RefCell;
+use std::sync::{Mutex, MutexGuard};
 
 use domain::{OrderIntent, RiskError, RiskPolicy, Side, Trade};
 use ports::{EntryAck, ExecutionReport, ExecutionVenue, ExitGateway};
@@ -100,7 +100,7 @@ struct State {
 /// Simulated exchange account for one symbol, driven tick by tick.
 pub struct SimulatedVenue {
     config: SimulatedVenueConfig,
-    state: RefCell<State>,
+    state: Mutex<State>,
 }
 
 fn opposite(side: Side) -> Side {
@@ -116,7 +116,7 @@ impl SimulatedVenue {
         let wallet = config.initial_equity;
         Self {
             config,
-            state: RefCell::new(State {
+            state: Mutex::new(State {
                 clock_ms: 0,
                 last_price: None,
                 wallet,
@@ -128,22 +128,29 @@ impl SimulatedVenue {
         }
     }
 
+    /// Locks the account state; a poisoned lock still holds consistent data because no
+    /// operation panics halfway through an update.
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Wallet balance: initial equity plus realized PnL minus commissions.
     pub fn wallet_balance(&self) -> Decimal {
-        self.state.borrow().wallet
+        self.lock().wallet
     }
 
     /// Side, quantity and average entry price of the open position, if any.
     pub fn position(&self) -> Option<(Side, Decimal, Decimal)> {
-        self.state
-            .borrow()
+        self.lock()
             .position
             .map(|p| (p.side, p.quantity, p.entry_price))
     }
 
     /// Advances the market by one print and returns the executions it caused, oldest first.
     pub fn on_trade(&self, trade: &Trade) -> Vec<ExecutionReport> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.lock();
         state.clock_ms = trade.timestamp;
         state.last_price = Some(trade.price);
         // Orders already at the market trade first; an exit armed by this print reaches the
@@ -272,7 +279,7 @@ impl ExitGateway for SimulatedVenue {
         stop_loss: Decimal,
         take_profit: Decimal,
     ) -> Result<(), Self::Error> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.lock();
         let last = state.last_price.ok_or(SimulatedVenueError::NoMarketData)?;
         if state.position.is_none() {
             return Err(SimulatedVenueError::NoPosition);
@@ -292,14 +299,14 @@ impl ExitGateway for SimulatedVenue {
     }
 
     async fn cancel_orders(&self, _symbol: &str) -> Result<(), Self::Error> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.lock();
         state.exits = None;
         state.orders.retain(|order| order.reduce_only);
         Ok(())
     }
 
     async fn close_position(&self, _symbol: &str) -> Result<bool, Self::Error> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.lock();
         let Some(position) = state.position else {
             return Ok(false);
         };
@@ -309,15 +316,19 @@ impl ExitGateway for SimulatedVenue {
             .filter(|order| order.reduce_only)
             .map(|order| order.remaining)
             .sum();
-        if pending < position.quantity {
-            let due_ms = state.clock_ms + self.config.latency_ms;
-            state.orders.push(WorkingOrder {
-                side: opposite(position.side),
-                remaining: position.quantity - pending,
-                due_ms,
-                reduce_only: true,
-            });
+        if pending >= position.quantity {
+            // The closing order is already travelling to the market: nothing more to close. The
+            // exit lifecycle confirms flatness by asking again, and must not read an order in
+            // flight as a position that reappeared.
+            return Ok(false);
         }
+        let due_ms = state.clock_ms + self.config.latency_ms;
+        state.orders.push(WorkingOrder {
+            side: opposite(position.side),
+            remaining: position.quantity - pending,
+            due_ms,
+            reduce_only: true,
+        });
         Ok(true)
     }
 }
@@ -330,7 +341,7 @@ impl ExecutionVenue for SimulatedVenue {
         equity: Decimal,
         session_peak: Decimal,
     ) -> Result<EntryAck, Self::Error> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.lock();
         state.last_price.ok_or(SimulatedVenueError::NoMarketData)?;
         let working_entry = state.orders.iter().any(|order| !order.reduce_only);
         if state.position.is_some() || working_entry {
@@ -656,11 +667,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closing_twice_does_not_queue_a_second_order() {
+    async fn closing_twice_does_not_queue_a_second_order_or_report_one() {
         let venue = long_venue(0).await;
 
         assert!(venue.close_position("BTCUSDT").await.unwrap());
-        assert!(venue.close_position("BTCUSDT").await.unwrap());
+        // The order is already in flight, so a second request has nothing left to close.
+        assert!(!venue.close_position("BTCUSDT").await.unwrap());
         let fills = venue.on_trade(&print(3_000, dec!(100), dec!(100), Side::Sell));
 
         assert_eq!(fills.len(), 1);

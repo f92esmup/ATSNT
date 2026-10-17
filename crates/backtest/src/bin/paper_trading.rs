@@ -55,6 +55,11 @@ struct Args {
     #[arg(long, default_value = "0.01")]
     risk_pct: Decimal,
 
+    /// Milliseconds an order takes to reach the simulated market (an assumption until measured
+    /// against live fills)
+    #[arg(long, default_value_t = 100)]
+    latency_ms: i64,
+
     /// Record the session run (lifecycle, closed trades with equity events, final metrics) to Google Cloud BigQuery
     #[arg(long, default_value_t = false)]
     gcp_bigquery: bool,
@@ -251,6 +256,7 @@ async fn main() -> Result<()> {
         backtest: backtest_config,
         strategy: strat_config.clone(),
         channel_capacity: 10_000,
+        latency_ms: args.latency_ms,
     };
 
     let mut session = PaperTradingSession::new(paper_config)
@@ -340,7 +346,7 @@ async fn main() -> Result<()> {
                         };
                         let mark = if last_mark_price > Decimal::ZERO { last_mark_price } else { args.capital };
                         let total_eq = session.total_equity(mark);
-                        let dd = session.engine().current_drawdown_pct();
+                        let dd = session.current_drawdown_pct();
                         let date_str = now_madrid.format("%Y-%m-%d").to_string();
                         let msg = TelegramNotifier::format_daily_summary(
                             &date_str,
@@ -395,7 +401,7 @@ async fn main() -> Result<()> {
                         }
 
                         // Process trade through PaperTradingSession
-                        let events = session.process_trade(&trade);
+                        let events = session.process_trade(&trade).await;
 
                         for event in events {
                             match event {
@@ -466,7 +472,7 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 PaperTradingEvent::PositionClosed { exit_reason, exit_price, net_pnl, total_equity } => {
-                                    let closed_trade_opt = session.engine().closed_trades().last().cloned();
+                                    let closed_trade_opt = session.closed_trades().last().cloned();
                                     let (side_str, entry_p, qty, _entry_ts, gross_pnl, fees_paid, duration, ret_pct) = match &closed_trade_opt {
                                         Some(ct) => (
                                             match ct.side {
@@ -587,49 +593,15 @@ async fn main() -> Result<()> {
         }
     }
 
-    // 4. Terminate Session & Liquidate Open Position
-    let mark = if last_mark_price > Decimal::ZERO {
-        Some(last_mark_price)
-    } else {
-        None
-    };
-
-    let had_open_position = session.active_position().is_some();
-    let (metrics, closed_trades) = session.finish(mark);
-
-    if had_open_position {
+    // 4. Terminate the session. An open position is not liquidated: it stays open, like an
+    // exchange-held position would, and is not part of the metrics.
+    if let Some(position) = session.active_position() {
         println!(
-            "\n[LIQUIDATION] Open position marked to market and liquidated at price ${}",
-            last_mark_price
+            "\n[!] Position still open at shutdown ({:?} {} @ ${}); it is not part of the metrics.",
+            position.side, position.quantity, position.entry_price
         );
-        if let Some(last_trade) = closed_trades.last() {
-            let side_str = match last_trade.side {
-                PositionSide::Long => "Long",
-                PositionSide::Short => "Short",
-            };
-            if let Some(t) = &telegram {
-                let msg = TelegramNotifier::format_trade_summary(
-                    &args.symbol,
-                    side_str,
-                    &last_trade.exit_reason,
-                    last_trade.entry_price,
-                    last_trade.exit_price,
-                    last_trade.quantity,
-                    last_trade.holding_duration_seconds,
-                    last_trade.pnl_gross,
-                    last_trade.fees_paid + last_trade.slippage_paid,
-                    last_trade.pnl_net,
-                    last_trade.return_pct,
-                    args.capital + metrics.net_profit,
-                );
-                let _ = t.send_alert(&msg).await;
-            }
-            if let Some(bq) = &bq_sink {
-                trade_counter += 1;
-                record_closed_trade(bq, &run_ctx, last_trade, trade_counter).await;
-            }
-        }
     }
+    let (metrics, _) = session.finish();
 
     if let Some(bq) = &bq_sink {
         record_lifecycle(bq, &run_ctx, &run_spec, end_status, &data_window).await;
