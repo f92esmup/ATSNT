@@ -689,6 +689,8 @@ async fn main() -> Result<()> {
                         // The shared loop: monthly kill-switch and emergency close (retried
                         // until confirmed flat), then bar sampling, then the strategy.
                         let step = driver.on_market_trade(gateway.as_ref(), &trade).await;
+                        // Breaker and emergency-close news goes out before the telemetry below.
+                        sink.handle(step.trade_events, &mut stats, driver.session().wallet_equity()).await;
 
                         // Periodic MTM logging and BigQuery telemetry
                         if last_mtm_print.elapsed() >= mtm_interval {
@@ -734,7 +736,7 @@ async fn main() -> Result<()> {
                                 bar.dollar_volume
                             );
                         }
-                        sink.handle(step.events, &mut stats, driver.session().wallet_equity()).await;
+                        sink.handle(step.bar_events, &mut stats, driver.session().wallet_equity()).await;
                     }
                     Ok(None) => {}
                     Err(e) => {

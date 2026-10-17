@@ -18,8 +18,19 @@ use crate::session::{SessionEvent, TradingSession};
 pub struct DriverStep {
     /// The dollar bar this trade completed, if any.
     pub bar: Option<DollarBar>,
-    /// Everything the session did because of the trade, in order.
-    pub events: Vec<SessionEvent>,
+    /// What the session did because of the trade itself (monthly breaker, emergency close).
+    pub trade_events: Vec<SessionEvent>,
+    /// What the session did because the trade completed a bar (time barrier, signal, entry).
+    pub bar_events: Vec<SessionEvent>,
+}
+
+impl DriverStep {
+    /// Every event of the step in the order it happened.
+    pub fn into_events(self) -> Vec<SessionEvent> {
+        let mut events = self.trade_events;
+        events.extend(self.bar_events);
+        events
+    }
 }
 
 /// A session plus the dollar-bar sampler that feeds its strategy.
@@ -51,16 +62,21 @@ impl<S: Strategy> SessionDriver<S> {
         trade: &Trade,
     ) -> DriverStep {
         self.ticks += 1;
-        let mut events = self
+        let trade_events = self
             .session
             .on_trade(venue, trade.timestamp, trade.price)
             .await;
         let bar = self.aggregator.process_trade(trade);
+        let mut bar_events = Vec::new();
         if let Some(bar) = &bar {
             self.bars += 1;
-            events.extend(self.session.on_bar(venue, bar).await);
+            bar_events = self.session.on_bar(venue, bar).await;
         }
-        DriverStep { bar, events }
+        DriverStep {
+            bar,
+            trade_events,
+            bar_events,
+        }
     }
 
     /// Advances the session's clock when no market trade arrives; see
@@ -237,7 +253,7 @@ mod tests {
         let step = driver.on_market_trade(&venue, &print(1_000)).await;
 
         assert!(step.bar.is_none());
-        assert!(step.events.is_empty());
+        assert!(step.trade_events.is_empty() && step.bar_events.is_empty());
         assert_eq!((driver.ticks(), driver.bars()), (1, 0));
     }
 
@@ -251,9 +267,10 @@ mod tests {
         let step = driver.on_market_trade(&venue, &print(1_001)).await;
 
         assert_eq!(step.bar.as_ref().map(|bar| bar.close), Some(dec!(100)));
-        assert!(matches!(step.events[0], SessionEvent::Signal(_)));
+        assert!(step.trade_events.is_empty());
+        assert!(matches!(step.bar_events[0], SessionEvent::Signal(_)));
         assert!(step
-            .events
+            .bar_events
             .iter()
             .any(|e| matches!(e, SessionEvent::EntrySubmitted(_))));
         assert_eq!(venue.calls.borrow().as_slice(), ["entry"]);
@@ -273,12 +290,13 @@ mod tests {
 
         let step = driver.on_market_trade(&venue, &print(1_001)).await;
 
+        // The breaker is a trade-time event; the refused signal belongs to the bar.
         assert!(matches!(
-            step.events[0],
+            step.trade_events[0],
             SessionEvent::MonthlyBreakerTripped { .. }
         ));
         assert!(step
-            .events
+            .bar_events
             .iter()
             .any(|e| matches!(e, SessionEvent::SignalSkipped(_))));
         assert!(!venue.calls.borrow().iter().any(|c| c == "entry"));

@@ -122,11 +122,9 @@ impl<S: Strategy> TickSimulation<S> {
             self.driver.on_wallet_balance(self.venue.wallet_balance());
         }
         let step = self.driver.on_market_trade(&self.venue, trade).await;
-        events.extend(step.events);
-        TickStep {
-            bar: step.bar,
-            events,
-        }
+        let bar = step.bar.clone();
+        events.extend(step.into_events());
+        TickStep { bar, events }
     }
 
     /// Warms the strategy up on historical trades before the replay starts; nothing trades and
