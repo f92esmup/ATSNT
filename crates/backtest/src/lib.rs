@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod config;
 pub mod daily_watermark;
+pub mod driver;
 pub mod engine;
 pub mod error;
 pub mod excursion;
@@ -26,6 +27,7 @@ pub use artifact::{
 };
 pub use config::BacktestConfig;
 pub use daily_watermark::DailyWatermark;
+pub use driver::{DriverStep, SessionDriver};
 pub use engine::BacktestEngine;
 pub use error::BacktestError;
 pub use excursion::ExcursionTracker;

@@ -15,6 +15,7 @@ use adapters::{
     BinanceWebSocketStream, BinanceWsConfig, GcpSecretManager, RunRecorder, TelegramNotifier,
 };
 use anyhow::{Context, Result};
+use backtest::driver::SessionDriver;
 use backtest::parity::FillRecorder;
 use backtest::session::{SessionConfig, SessionEvent, SkipReason, TradingSession};
 use backtest::{
@@ -23,7 +24,7 @@ use backtest::{
 };
 use chrono::Timelike;
 use clap::Parser;
-use domain::{DollarBarAggregator, PositionSide, Side};
+use domain::{PositionSide, Side};
 use ports::ExecutionReport;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -428,14 +429,13 @@ async fn main() -> Result<()> {
         record_lifecycle(bq, &run_ctx, &run_spec, RunStatus::Running, &data_window).await;
     }
 
-    let mut aggregator = DollarBarAggregator::new(effective_dollar_bar)?;
     let mut account_ok = true;
     let mut account_read_failures: u32 = 0;
     let mut account_check = tokio::time::interval(Duration::from_secs(ACCOUNT_RECHECK_SECS));
     account_check.tick().await; // the startup verification already covered the first period
     let mut peak_equity = effective_capital;
     let mut current_equity = effective_capital;
-    let mut session = TradingSession::new(
+    let session = TradingSession::new(
         SessionConfig {
             symbol: symbol_upper.clone(),
             initial_equity: effective_capital,
@@ -445,6 +445,7 @@ async fn main() -> Result<()> {
         },
         strategy,
     );
+    let mut driver = SessionDriver::new(session, effective_dollar_bar)?;
     if let Some(minutes) = args.warmup_minutes {
         let now_ms = now_unix_ms();
         let from_ms = now_ms - i64::from(minutes) * 60_000;
@@ -454,7 +455,7 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| "Failed to fetch the warm-up trades")?;
         let trade_count = history.len();
-        let bars = session.warm_up_trades(effective_dollar_bar, history)?;
+        let bars = driver.warm_up_trades(history)?;
         println!("[*] Warm-up: {trade_count} trades formed {bars} dollar bars");
     }
     let sink = EventSink {
@@ -488,7 +489,7 @@ async fn main() -> Result<()> {
 
             // Periodic account re-verification; never changes anything while exposed.
             _ = account_check.tick() => {
-                let exposed = session.is_exposed();
+                let exposed = driver.session().is_exposed();
                 match gateway
                     .verify_account(&symbol_upper, !args.no_auto_fix && !exposed, exposed)
                     .await
@@ -499,13 +500,13 @@ async fn main() -> Result<()> {
                             println!("[OK] Account profile matches again; entries re-enabled.");
                         }
                         account_ok = true;
-                        session.set_account_ok(true);
+                        driver.set_account_ok(true);
                     }
                     Ok(report) => {
                         account_read_failures = 0;
                         let first = account_ok;
                         account_ok = false;
-                        session.set_account_ok(false);
+                        driver.set_account_ok(false);
                         eprintln!("[CRITICAL] Account profile drifted; new entries are blocked.\n{}", report.render());
                         if first {
                             if let Some(t) = &telegram {
@@ -554,7 +555,7 @@ async fn main() -> Result<()> {
                 if now_madrid.hour() == 20 && last_daily_report_date != Some(now_madrid.date_naive()) {
                     last_daily_report_date = Some(now_madrid.date_naive());
                     if let Some(t) = &telegram {
-                        let active_pos_desc = match session.open_position() {
+                        let active_pos_desc = match driver.session().open_position() {
                             Some((s, ep, q)) => format!("{:?} (qty: {}, entry: ${})", s, q, ep),
                             None => "Flat (No open position)".to_string(),
                         };
@@ -610,8 +611,8 @@ async fn main() -> Result<()> {
                         );
 
                         let report = ExecutionReport::from(&update);
-                        let events = session.on_execution(gateway.as_ref(), &report).await;
-                        sink.handle(events, &mut stats, session.wallet_equity()).await;
+                        let events = driver.on_execution(gateway.as_ref(), &report).await;
+                        sink.handle(events, &mut stats, driver.session().wallet_equity()).await;
                     }
                     Ok(BinancePrivateEvent::FuturesAccountUpdate(acct)) => {
                         for bal in acct.balances {
@@ -620,7 +621,7 @@ async fn main() -> Result<()> {
                                 if current_equity > peak_equity {
                                     peak_equity = current_equity;
                                 }
-                                session.on_wallet_balance(current_equity);
+                                driver.on_wallet_balance(current_equity);
                             }
                         }
                     }
@@ -662,11 +663,9 @@ async fn main() -> Result<()> {
                             );
                         }
 
-                        // Monthly kill-switch and emergency close (retried until confirmed flat).
-                        let events = session
-                            .on_trade(gateway.as_ref(), trade.timestamp, trade.price)
-                            .await;
-                        sink.handle(events, &mut stats, session.wallet_equity()).await;
+                        // The shared loop: monthly kill-switch and emergency close (retried
+                        // until confirmed flat), then bar sampling, then the strategy.
+                        let step = driver.on_market_trade(gateway.as_ref(), &trade).await;
 
                         // Periodic MTM logging and BigQuery telemetry
                         if last_mtm_print.elapsed() >= mtm_interval {
@@ -686,8 +685,7 @@ async fn main() -> Result<()> {
 
                         }
 
-                        // Feed trade to DollarBarAggregator
-                        if let Some(bar) = aggregator.process_trade(&trade) {
+                        if let Some(bar) = &step.bar {
                             total_bars += 1;
                             tracing::info!(
                                 target: "live_trading",
@@ -712,10 +710,8 @@ async fn main() -> Result<()> {
                                 bar.close,
                                 bar.dollar_volume
                             );
-                            // Time barrier, excursion marks, daily peak, strategy signal and entry.
-                            let events = session.on_bar(gateway.as_ref(), &bar).await;
-                            sink.handle(events, &mut stats, session.wallet_equity()).await;
                         }
+                        sink.handle(step.events, &mut stats, driver.session().wallet_equity()).await;
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -737,7 +733,7 @@ async fn main() -> Result<()> {
     println!("============================================================\n");
 
     if let Some(bq) = &bq_sink {
-        let closed_trades = session.closed_trades();
+        let closed_trades = driver.session().closed_trades();
         let max_dd_amount = closed_trades
             .iter()
             .map(|t| t.excursion.max_drawdown_amount)

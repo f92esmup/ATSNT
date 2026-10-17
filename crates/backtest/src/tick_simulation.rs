@@ -11,11 +11,12 @@
 
 use adapters::{SimulatedVenue, SimulatedVenueConfig};
 use domain::futures::FundingSchedule;
-use domain::{DollarBar, DollarBarAggregator, DomainError, RiskError, Side, Trade};
+use domain::{DollarBar, DomainError, RiskError, Side, Trade};
 use rust_decimal::Decimal;
 use strategies::Strategy;
 
 use crate::config::BacktestConfig;
+use crate::driver::SessionDriver;
 use crate::metrics::{BacktestMetrics, ClosedTrade};
 use crate::session::{SessionConfig, SessionEvent, TradingSession};
 
@@ -60,12 +61,9 @@ pub struct TickStep {
 
 /// One strategy replayed trade by trade against a simulated exchange account.
 pub struct TickSimulation<S: Strategy> {
-    config: TickSimulationConfig,
-    session: TradingSession<S>,
+    initial_capital: Decimal,
+    driver: SessionDriver<S>,
     venue: SimulatedVenue,
-    aggregator: DollarBarAggregator,
-    ticks: u64,
-    bars: u64,
 }
 
 impl<S: Strategy> TickSimulation<S> {
@@ -91,49 +89,40 @@ impl<S: Strategy> TickSimulation<S> {
             },
             strategy,
         );
-        let aggregator = DollarBarAggregator::new(config.dollar_bar_threshold)?;
+        let driver = SessionDriver::new(session, config.dollar_bar_threshold)?;
         Ok(Self {
-            config,
-            session,
+            initial_capital: backtest.initial_capital,
+            driver,
             venue,
-            aggregator,
-            ticks: 0,
-            bars: 0,
         })
     }
 
     /// Replays one market trade and returns what the session did because of it.
     ///
-    /// The order mirrors the live loop: the venue executes first, the session absorbs the
-    /// executions and the new balance, then the monthly breaker runs and finally a finished
-    /// bar reaches the strategy.
+    /// The venue executes the print first; the session absorbs the funding, executions and new
+    /// balance it produced, and then the shared [`SessionDriver`] runs the loop live runs: the
+    /// monthly breaker, the bar sampler and, last, the strategy.
     pub async fn on_trade(&mut self, trade: &Trade) -> TickStep {
-        self.ticks += 1;
         let mut events = Vec::new();
         let reports = self.venue.on_trade(trade);
         // Funding settled before the print traded, on the position held until then.
         let funding = self.venue.take_funding();
         for payment in &funding {
-            self.session.on_funding(payment.amount);
+            self.driver.on_funding(payment.amount);
         }
         if !funding.is_empty() {
-            self.session.on_wallet_balance(self.venue.wallet_balance());
+            self.driver.on_wallet_balance(self.venue.wallet_balance());
         }
         for report in reports {
-            events.extend(self.session.on_execution(&self.venue, &report).await);
-            self.session.on_wallet_balance(self.venue.wallet_balance());
+            events.extend(self.driver.on_execution(&self.venue, &report).await);
+            self.driver.on_wallet_balance(self.venue.wallet_balance());
         }
-        events.extend(
-            self.session
-                .on_trade(&self.venue, trade.timestamp, trade.price)
-                .await,
-        );
-        let bar = self.aggregator.process_trade(trade);
-        if let Some(bar) = &bar {
-            self.bars += 1;
-            events.extend(self.session.on_bar(&self.venue, bar).await);
+        let step = self.driver.on_market_trade(&self.venue, trade).await;
+        events.extend(step.events);
+        TickStep {
+            bar: step.bar,
+            events,
         }
-        TickStep { bar, events }
     }
 
     /// Warms the strategy up on historical trades before the replay starts; nothing trades and
@@ -142,14 +131,12 @@ impl<S: Strategy> TickSimulation<S> {
         &mut self,
         trades: impl IntoIterator<Item = Trade>,
     ) -> Result<usize, TickSimulationError> {
-        Ok(self
-            .session
-            .warm_up_trades(self.config.dollar_bar_threshold, trades)?)
+        Ok(self.driver.warm_up_trades(trades)?)
     }
 
     /// Trades closed so far, oldest first.
     pub fn closed_trades(&self) -> &[ClosedTrade] {
-        self.session.closed_trades()
+        self.driver.session().closed_trades()
     }
 
     /// Side, quantity and average price of the position still open, if any.
@@ -159,17 +146,17 @@ impl<S: Strategy> TickSimulation<S> {
 
     /// Trades replayed so far.
     pub fn ticks_processed(&self) -> u64 {
-        self.ticks
+        self.driver.ticks()
     }
 
     /// Dollar bars the strategy has seen so far.
     pub fn bars_processed(&self) -> u64 {
-        self.bars
+        self.driver.bars()
     }
 
     /// Whether the monthly breaker or an emergency halt stopped the run.
     pub fn is_halted(&self) -> bool {
-        self.session.is_halted()
+        self.driver.session().is_halted()
     }
 
     /// Wallet balance of the simulated account.
@@ -179,8 +166,8 @@ impl<S: Strategy> TickSimulation<S> {
 
     /// Ends the run and compiles its metrics from the closed trades.
     pub fn finish(self) -> (BacktestMetrics, Vec<ClosedTrade>) {
-        let halted = self.session.is_halted();
-        let trades = self.session.closed_trades().to_vec();
+        let halted = self.driver.session().is_halted();
+        let trades = self.driver.session().closed_trades().to_vec();
         let max_drawdown_amount = trades
             .iter()
             .map(|trade| trade.excursion.max_drawdown_amount)
@@ -192,7 +179,7 @@ impl<S: Strategy> TickSimulation<S> {
             .max()
             .unwrap_or(Decimal::ZERO);
         let mut metrics = BacktestMetrics::calculate(
-            self.config.backtest.initial_capital,
+            self.initial_capital,
             &trades,
             max_drawdown_amount,
             max_drawdown_pct,
