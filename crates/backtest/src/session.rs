@@ -6,6 +6,8 @@
 //! no I/O of its own: everything the caller may want to log, alert or persist comes back as
 //! [`SessionEvent`]s.
 
+use std::collections::VecDeque;
+
 use domain::{DollarBar, DollarBarAggregator, DomainError, OrderIntent, PositionSide, Side, Trade};
 use ports::{EntryAck, ExecutionReport, ExecutionVenue};
 use rust_decimal::Decimal;
@@ -154,6 +156,8 @@ pub struct TradingSession<S: Strategy> {
     exit_hint: Option<&'static str>,
     funding: Decimal,
     last_entry_timeout_attempt_ms: Option<i64>,
+    /// Trade ids of the latest fills, to ignore a report the venue repeats.
+    seen_trade_ids: VecDeque<i64>,
 }
 
 impl<S: Strategy> TradingSession<S> {
@@ -175,6 +179,7 @@ impl<S: Strategy> TradingSession<S> {
             exit_hint: None,
             funding: Decimal::ZERO,
             last_entry_timeout_attempt_ms: None,
+            seen_trade_ids: VecDeque::new(),
         }
     }
 
@@ -328,6 +333,9 @@ impl<S: Strategy> TradingSession<S> {
         report: &ExecutionReport,
     ) -> Vec<SessionEvent> {
         let mut events = Vec::new();
+        if self.is_repeated_fill(report) {
+            return events;
+        }
         if report.last_quantity > Decimal::ZERO {
             self.fees.record_fill(
                 report.commission,
@@ -406,6 +414,26 @@ impl<S: Strategy> TradingSession<S> {
             }
         }
         events
+    }
+
+    /// Whether `report` repeats a fill already counted. The venue numbers its trades, and a
+    /// repeated report would otherwise double the quantity and the commission.
+    fn is_repeated_fill(&mut self, report: &ExecutionReport) -> bool {
+        const REMEMBERED: usize = 1024;
+        let Some(id) = report.trade_id else {
+            return false;
+        };
+        if report.last_quantity <= Decimal::ZERO {
+            return false;
+        }
+        if self.seen_trade_ids.contains(&id) {
+            return true;
+        }
+        if self.seen_trade_ids.len() == REMEMBERED {
+            self.seen_trade_ids.pop_front();
+        }
+        self.seen_trade_ids.push_back(id);
+        false
     }
 
     /// Side, average entry price and quantity of the open position, if any.
@@ -906,6 +934,7 @@ mod tests {
             commission,
             commission_asset: Some("USDT".to_string()),
             liquidation: false,
+            trade_id: None,
         }
     }
 
@@ -921,6 +950,7 @@ mod tests {
             commission: Decimal::ZERO,
             commission_asset: None,
             liquidation: false,
+            trade_id: None,
         }
     }
 
@@ -1662,5 +1692,107 @@ mod tests {
             .iter()
             .any(|e| matches!(e, SessionEvent::Exit(ExitEvent::Halted))));
         assert!(session.is_halted());
+    }
+
+    fn with_trade_id(mut report: ExecutionReport, id: i64) -> ExecutionReport {
+        report.trade_id = Some(id);
+        report
+    }
+
+    #[tokio::test]
+    async fn a_repeated_fill_is_counted_once() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent()]);
+        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        let first = with_trade_id(
+            fill(
+                Side::Buy,
+                dec!(0.6),
+                dec!(100),
+                false,
+                JAN_1 + 20,
+                dec!(0.03),
+            ),
+            41,
+        );
+
+        session.on_execution(&venue, &first).await;
+        // The stream delivers the same trade again, e.g. after a reconnection.
+        let repeated = session.on_execution(&venue, &first).await;
+        let last = with_trade_id(
+            fill(
+                Side::Buy,
+                dec!(0.4),
+                dec!(100),
+                true,
+                JAN_1 + 30,
+                dec!(0.02),
+            ),
+            42,
+        );
+        let opened = session.on_execution(&venue, &last).await;
+
+        assert!(repeated.is_empty());
+        assert!(opened.iter().any(|e| matches!(
+            e,
+            SessionEvent::PositionOpened { quantity, .. } if *quantity == dec!(1.0)
+        )));
+        // The commission of the repeated fill is not charged twice.
+        let closed = session
+            .on_execution(
+                &venue,
+                &with_trade_id(
+                    fill(
+                        Side::Sell,
+                        dec!(1),
+                        dec!(110),
+                        true,
+                        JAN_1 + 90_000,
+                        dec!(0.05),
+                    ),
+                    43,
+                ),
+            )
+            .await;
+        assert_eq!(closed_trade(&closed).fees_paid, dec!(0.10));
+    }
+
+    #[tokio::test]
+    async fn reports_without_a_trade_id_are_never_treated_as_repeats() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent()]);
+        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+
+        session
+            .on_execution(
+                &venue,
+                &fill(
+                    Side::Buy,
+                    dec!(0.5),
+                    dec!(100),
+                    false,
+                    JAN_1 + 20,
+                    dec!(0.02),
+                ),
+            )
+            .await;
+        let events = session
+            .on_execution(
+                &venue,
+                &fill(
+                    Side::Buy,
+                    dec!(0.5),
+                    dec!(100),
+                    true,
+                    JAN_1 + 30,
+                    dec!(0.02),
+                ),
+            )
+            .await;
+
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SessionEvent::PositionOpened { quantity, .. } if *quantity == dec!(1.0)
+        )));
     }
 }

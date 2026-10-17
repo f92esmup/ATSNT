@@ -45,6 +45,10 @@ pub struct ExecutionReport {
     pub commission_asset: Option<String>,
     /// `true` when the exchange's liquidation engine produced this execution, not the session.
     pub liquidation: bool,
+    /// Identifier of the trade behind this execution, when the venue numbers them. A venue
+    /// that repeats a report (after a reconnection, say) repeats the id, which lets the
+    /// session count the fill once.
+    pub trade_id: Option<i64>,
 }
 
 /// Everything a trading session needs from an execution venue.

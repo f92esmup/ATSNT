@@ -633,6 +633,7 @@ impl From<&FuturesOrderTradeUpdate> for ports::ExecutionReport {
             commission_asset: update.commission_asset.clone(),
             // Forced closes carry the `autoclose-` client order id prefix.
             liquidation: update.client_order_id.starts_with("autoclose-"),
+            trade_id: update.trade_id.filter(|id| *id > 0),
         }
     }
 }
@@ -1073,6 +1074,12 @@ mod tests {
         assert_eq!(complete.last_price, dec!(42000.5));
         assert_eq!(complete.commission, dec!(0.0336004));
         assert_eq!(complete.commission_asset.as_deref(), Some("USDT"));
+        assert_eq!(complete.trade_id, Some(456));
+        // Updates that carry no trade (acknowledgements, cancellations) report trade id 0.
+        assert_eq!(
+            report(&filled.replace("\"t\":456", "\"t\":0")).trade_id,
+            None
+        );
         assert!(complete.order_filled);
         assert!(complete.order_closed);
         assert!(!report(&partial).order_filled);

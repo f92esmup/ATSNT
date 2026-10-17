@@ -131,6 +131,7 @@ struct State {
     exits: Option<ExitLegs>,
     orders: Vec<WorkingOrder>,
     next_order_id: u64,
+    next_trade_id: i64,
     funding: Vec<FundingPayment>,
 }
 
@@ -161,6 +162,7 @@ impl SimulatedVenue {
                 exits: None,
                 orders: Vec::new(),
                 next_order_id: 1,
+                next_trade_id: 1,
                 funding: Vec::new(),
             }),
         }
@@ -298,6 +300,7 @@ impl SimulatedVenue {
             commission: Decimal::ZERO,
             commission_asset: Some(COMMISSION_ASSET.to_string()),
             liquidation: true,
+            trade_id: None,
         })
     }
 
@@ -351,6 +354,8 @@ impl SimulatedVenue {
             state.orders[index].remaining -= take;
             let filled = state.orders[index].remaining <= Decimal::ZERO;
             let commission = trade.price * take * self.config.taker_fee_pct;
+            let trade_id = state.next_trade_id;
+            state.next_trade_id += 1;
             self.apply_fill(
                 state,
                 Fill {
@@ -372,6 +377,7 @@ impl SimulatedVenue {
                 commission,
                 commission_asset: Some(COMMISSION_ASSET.to_string()),
                 liquidation: false,
+                trade_id: Some(trade_id),
             });
             if filled {
                 state.orders.remove(index);
