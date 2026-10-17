@@ -112,6 +112,10 @@ check "candidates: passed to run_hpo" '[[ "$(line_with "/run_hpo ")" == *"--cand
 check "strategy: passed to both stages" '[[ "$(line_with "/run_hpo ")" == *"--strategy order_flow_imbalance"* && "$(line_with "backtest --data")" == *"--strategy order_flow_imbalance"* ]]'
 check "skip-fetch: ETL reported as skipped" 'has "[1/3] [SKIPPED] Historical ETL"'
 
+run --skip-fetch --execution-context configs/execution_real_500eur.json --candidates 7
+check "execution-context: passed to run_hpo" '[[ "$(line_with "/run_hpo ")" == *"--execution-context configs/execution_real_500eur.json"* ]]'
+check "execution-context: the backtest adopts it from the artifact" '[[ "$(line_with "backtest --data")" != *"--execution-context"* ]]'
+
 run --skip-fetch --skip-hpo --config "${WORK_DIR}/missing.json"
 check "skip-hpo: missing config still fails" '[ "${STATUS}" -ne 0 ] && has "not found"'
 touch "${WORK_DIR}/winner.json"

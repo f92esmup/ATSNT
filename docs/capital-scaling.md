@@ -99,6 +99,23 @@ single legacy value.
   compare it with the previous one.
 - This split is a guideline, not a measured threshold; confirm it with the comparison backtest.
 
+### Running the HPO for a given account
+
+The pipeline forwards `--execution-context` to `run_hpo`, so the search simulates every trial with
+that account's risk, drawdown, leverage and notional caps; the winning artifact carries the same
+context into the backtest, paper and live runs. The Batch image bakes `configs/` in at build time,
+so the file must be committed before the job is submitted.
+
+```
+scripts/gcp/run_ephemeral_batch_hpo.sh --project <project> --year 2026 -- \
+  --execution-context configs/execution_real_500eur.json \
+  --param-space configs/param_space_daytrading_cusum.json \
+  --candidates 1500
+```
+
+`--capital` still overrides the capital of the file. The pipeline default is 60 candidates, which is
+a very small random sample of a space of 10,290 combinations: raise it (the cost grows linearly).
+
 ## 7. Checklist before raising the capital
 
 1. At least 100 closed trades and 4 weeks at the current level, without `[CRITICAL]` halts.

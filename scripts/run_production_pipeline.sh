@@ -20,6 +20,7 @@ cd "${PROJECT_ROOT}"
 SYMBOL="BTCUSDT"
 STRATEGY="dollar_bars_cusum"
 PARAM_SPACE=""
+EXECUTION_CONTEXT=""
 CAPITAL=""
 YEAR="$(date +%Y)"
 MONTH=""
@@ -67,6 +68,10 @@ Options:
       --config <PATH>        Output/input path for winning HPO configuration JSON
       --strategy <NAME>      Target strategy identifier: 'dollar_bars_cusum' or 'order_flow_imbalance' (default: ${STRATEGY})
       --param-space <PATH>   Optional JSON path overriding default search space
+      --execution-context <PATH>
+                             Optional JSON execution context for the HPO (capital, fees, slippage,
+                             risk, drawdown, leverage, notional caps); the backtest adopts it from
+                             the winning artifact. --capital still overrides the capital
       --gcp-bigquery         Record HPO, backtest and Monte Carlo runs to BigQuery
       --strict-sinks         Fail the run if any BigQuery recording or GCS upload fails
       --upload-winner        Upload the winning artifact to GCS (artifacts/<config stem>-<suffix>.json)
@@ -149,6 +154,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --param-space)
             PARAM_SPACE="$2"
+            shift 2
+            ;;
+        --execution-context)
+            EXECUTION_CONTEXT="$2"
             shift 2
             ;;
         --gcp-bigquery)
@@ -262,6 +271,7 @@ FORWARD_ARGS=(
 )
 [ -n "${MONTH}" ] && FORWARD_ARGS+=(--month "${MONTH}")
 [ -n "${PARAM_SPACE}" ] && FORWARD_ARGS+=(--param-space "${PARAM_SPACE}")
+[ -n "${EXECUTION_CONTEXT}" ] && FORWARD_ARGS+=(--execution-context "${EXECUTION_CONTEXT}")
 [ -n "${CAPITAL}" ] && FORWARD_ARGS+=(--capital "${CAPITAL}")
 [ -n "${BIN_DIR}" ] && FORWARD_ARGS+=(--bin-dir "${BIN_DIR}")
 [ -n "${ARTIFACT_SUFFIX}" ] && FORWARD_ARGS+=(--artifact-suffix "${ARTIFACT_SUFFIX}")
@@ -425,6 +435,9 @@ else
     )
     if [ -n "${PARAM_SPACE}" ]; then
         HPO_ARGS+=("--param-space" "${PARAM_SPACE}")
+    fi
+    if [ -n "${EXECUTION_CONTEXT}" ]; then
+        HPO_ARGS+=("--execution-context" "${EXECUTION_CONTEXT}")
     fi
     if [ -n "${CAPITAL}" ]; then
         HPO_ARGS+=("--capital" "${CAPITAL}")
