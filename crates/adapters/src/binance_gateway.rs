@@ -103,6 +103,10 @@ pub struct OrderExecutionReport {
     pub cumulative_quote_qty: Decimal,
     /// Execution timestamp in Unix milliseconds.
     pub timestamp_ms: i64,
+    /// Local wall-clock time the order request was sent, in Unix milliseconds (0 when the report
+    /// did not come from a fresh submission).
+    #[serde(default)]
+    pub sent_at_ms: i64,
 }
 
 /// Configuration settings for [`BinanceGateway`].
@@ -571,6 +575,7 @@ impl BinanceGateway {
         validate_futures_mark_timestamp(snapshot.mark_time_ms, current_unix_time_ms()?)?;
 
         lease.mark_dispatching(order.clone())?;
+        let sent_at_ms = current_unix_time_ms()? as i64;
         let response = match self.client.post(&url).send().await {
             Ok(response) => response,
             Err(_) => return self.reconcile_futures_submission(order, lease).await,
@@ -612,7 +617,10 @@ impl BinanceGateway {
         match parse_futures_order_report(&body, &order) {
             Ok(report) => {
                 lease.mark_resolved();
-                Ok(report)
+                Ok(OrderExecutionReport {
+                    sent_at_ms,
+                    ..report
+                })
             }
             Err(_) => self.reconcile_futures_submission(order, lease).await,
         }
@@ -1330,6 +1338,7 @@ impl BinanceGateway {
             executed_qty: exec_qty,
             cumulative_quote_qty: cum_quote,
             timestamp_ms: time_ms,
+            sent_at_ms: 0,
         })
     }
 
@@ -1465,6 +1474,7 @@ impl BinanceGateway {
             executed_qty: exec_qty,
             cumulative_quote_qty: cum_quote,
             timestamp_ms: 0,
+            sent_at_ms: 0,
         })
     }
 
@@ -1683,6 +1693,7 @@ fn parse_futures_order_report(
         executed_qty,
         cumulative_quote_qty,
         timestamp_ms,
+        sent_at_ms: 0,
     })
 }
 
@@ -3025,6 +3036,7 @@ mod tests {
         let (base_url, requests, server) =
             spawn_futures_mock_server(valid_futures_responses(current_unix_time_ms().unwrap()));
         let gateway = futures_submission_test_gateway(base_url);
+        let before = current_unix_time_ms().unwrap() as i64;
 
         let ack = gateway
             .submit_entry(
@@ -3035,8 +3047,11 @@ mod tests {
             )
             .await
             .unwrap();
+        let after = current_unix_time_ms().unwrap() as i64;
 
         server.join().unwrap();
+        // The send stamp is the moment the request left, inside the call and not zero.
+        assert!(ack.sent_at_ms >= before && ack.sent_at_ms <= after);
         assert_eq!(ack.quantity, dec!(10));
         assert_eq!(ack.status, "NEW");
         assert!(!ack.order_id.is_empty());

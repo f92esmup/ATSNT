@@ -548,6 +548,7 @@ impl ExecutionVenue for SimulatedVenue {
             status: "NEW".to_string(),
             quantity,
             price: intent.price,
+            sent_at_ms: state.clock_ms,
         })
     }
 }

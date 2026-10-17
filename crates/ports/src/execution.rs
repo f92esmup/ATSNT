@@ -14,6 +14,10 @@ pub struct EntryAck {
     pub quantity: Decimal,
     /// Reference price of the order: the signal price the entry was sized at.
     pub price: Decimal,
+    /// Local wall-clock time, in Unix milliseconds, at which the order request left for the
+    /// venue (0 when the venue cannot tell). Parity calibration needs it: stamping the
+    /// acknowledgement's arrival instead would hide the round trip.
+    pub sent_at_ms: i64,
 }
 
 /// One execution (partial or complete) reported by the venue for any order of the session.

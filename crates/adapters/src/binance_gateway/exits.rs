@@ -374,6 +374,7 @@ impl ports::ExecutionVenue for BinanceGateway {
             status: report.status,
             quantity: report.original_qty,
             price: intent.price,
+            sent_at_ms: report.sent_at_ms,
         })
     }
 }
