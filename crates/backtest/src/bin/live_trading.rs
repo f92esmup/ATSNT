@@ -93,7 +93,7 @@ struct Args {
     record_fills: Option<PathBuf>,
 
     /// Strategy to run, by id or alias (inferred from the --config artifact if omitted; the
-    /// default otherwise)
+    /// default otherwise). A strategy that contradicts the artifact's is refused
     #[arg(long)]
     strategy: Option<String>,
 

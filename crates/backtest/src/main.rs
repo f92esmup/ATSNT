@@ -45,7 +45,8 @@ struct Args {
     config: Option<PathBuf>,
 
     /// Strategy to run: "dollar_bars_cusum" (or "cusum") vs "order_flow_imbalance" (or "ofi").
-    /// Inferred automatically from --config artifact if omitted.
+    /// Inferred automatically from --config artifact if omitted; one that contradicts the
+    /// artifact's is refused.
     #[arg(long)]
     strategy: Option<String>,
 
