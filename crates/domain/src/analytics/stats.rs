@@ -24,6 +24,9 @@ pub struct RollingZScore {
     window_size: usize,
     window: VecDeque<Decimal>,
     running_sum: Decimal,
+    /// Sum of the squares of the window. With `Decimal` the running sums stay exact, so the
+    /// variance needs no pass over the window (O(1) per update at any window size).
+    running_sum_sq: Decimal,
 }
 
 impl RollingZScore {
@@ -36,6 +39,7 @@ impl RollingZScore {
             window_size,
             window: VecDeque::with_capacity(window_size),
             running_sum: Decimal::ZERO,
+            running_sum_sq: Decimal::ZERO,
         })
     }
 
@@ -71,11 +75,13 @@ impl RollingZScore {
         if self.window.len() == self.window_size {
             if let Some(evicted) = self.window.pop_front() {
                 self.running_sum -= evicted;
+                self.running_sum_sq -= evicted * evicted;
             }
         }
 
         self.window.push_back(value);
         self.running_sum += value;
+        self.running_sum_sq += value * value;
 
         if self.window.len() < self.window_size {
             return None;
@@ -84,14 +90,10 @@ impl RollingZScore {
         let n = Decimal::from(self.window_size);
         let mean = self.running_sum / n;
 
-        // Sum of squared deviations: sum((x - mean)^2)
-        let mut sum_squared_diff = Decimal::ZERO;
-        for &item in &self.window {
-            let diff = item - mean;
-            sum_squared_diff += diff * diff;
-        }
-
-        let variance = sum_squared_diff / n;
+        // Population variance (n * sum(x^2) - (sum x)^2) / n^2: the numerator is exact, so the
+        // only rounding is the final division (no cancellation against a rounded mean).
+        let variance = ((n * self.running_sum_sq - self.running_sum * self.running_sum) / (n * n))
+            .max(Decimal::ZERO);
         let std_dev = variance.sqrt().unwrap_or(Decimal::ZERO);
 
         let z_score = if std_dev == Decimal::ZERO {
@@ -172,6 +174,40 @@ mod tests {
         assert_eq!(res.mean, dec!(100));
         assert_eq!(res.std_dev, dec!(0));
         assert_eq!(res.z_score, dec!(0));
+    }
+
+    /// Direct two-pass statistics of `values`, the definition the rolling window must match.
+    fn two_pass(values: &[Decimal]) -> (Decimal, Decimal) {
+        let n = Decimal::from(values.len());
+        let mean = values.iter().copied().sum::<Decimal>() / n;
+        let variance = values
+            .iter()
+            .map(|v| (*v - mean) * (*v - mean))
+            .sum::<Decimal>()
+            / n;
+        (mean, variance.sqrt().unwrap())
+    }
+
+    #[test]
+    fn a_long_window_over_many_bars_matches_the_two_pass_statistics() {
+        // BTC-like prices with cents, 5_000 updates through a 1_600-value window.
+        let prices: Vec<Decimal> = (0..5_000i64)
+            .map(|i| dec!(81000) + Decimal::new((i * 7919) % 50_000 - 25_000, 2))
+            .collect();
+        let mut r = RollingZScore::new(1_600).unwrap();
+
+        for (i, price) in prices.iter().enumerate() {
+            let res = r.update(*price);
+            if i + 1 >= 1_600 {
+                let (mean, std_dev) = two_pass(&prices[i + 1 - 1_600..=i]);
+                let res = res.expect("window is full");
+                assert!((res.mean - mean).abs() < dec!(0.0000000001), "mean at {i}");
+                assert!(
+                    (res.std_dev - std_dev).abs() < dec!(0.0000000001),
+                    "std at {i}"
+                );
+            }
+        }
     }
 
     #[test]
