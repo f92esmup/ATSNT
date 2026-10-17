@@ -64,6 +64,15 @@ pub struct DollarBarsCusumSpace {
     pub z_entry_thresholds: Vec<Decimal>,
     pub z_stop_thresholds: Vec<Decimal>,
     pub time_barrier_bars: Vec<usize>,
+    /// Minimum take-profit distance as a fraction of price. It is the lever against fees: the
+    /// round trip costs about 0.1% at taker rates, so a floor close to that leaves no edge.
+    /// Files written before this field existed keep the single legacy value.
+    #[serde(default = "default_min_take_profit_pcts")]
+    pub min_take_profit_pcts: Vec<Decimal>,
+}
+
+fn default_min_take_profit_pcts() -> Vec<Decimal> {
+    vec![default_min_take_profit_pct()]
 }
 
 impl Default for DollarBarsCusumSpace {
@@ -88,9 +97,23 @@ impl Default for DollarBarsCusumSpace {
                 dec!(2.6),
                 dec!(3.0),
             ],
-            z_stop_thresholds: vec![dec!(2.5), dec!(3.0), dec!(3.5), dec!(4.0)],
+            z_stop_thresholds: vec![
+                dec!(2.5),
+                dec!(3.0),
+                dec!(3.5),
+                dec!(4.0),
+                dec!(4.5),
+                dec!(5.0),
+            ],
             // Fixed wide barrier: trades resolve by TP/SL, search budget goes to the real edge.
             time_barrier_bars: vec![100],
+            min_take_profit_pcts: vec![
+                dec!(0.0025),
+                dec!(0.0035),
+                dec!(0.005),
+                dec!(0.007),
+                dec!(0.01),
+            ],
         }
     }
 }
@@ -106,14 +129,16 @@ impl HyperparameterSpace for DollarBarsCusumSpace {
                 for &z_entry in &self.z_entry_thresholds {
                     for &z_stop in &self.z_stop_thresholds {
                         for &tb in &self.time_barrier_bars {
-                            configs.push(DollarBarsCusumConfig {
-                                rolling_window_len: win,
-                                cusum_vol_multiplier: vol,
-                                z_entry_threshold: z_entry,
-                                z_stop_threshold: z_stop,
-                                time_barrier_bars: tb,
-                                min_take_profit_pct: default_min_take_profit_pct(),
-                            });
+                            for &min_tp in &self.min_take_profit_pcts {
+                                configs.push(DollarBarsCusumConfig {
+                                    rolling_window_len: win,
+                                    cusum_vol_multiplier: vol,
+                                    z_entry_threshold: z_entry,
+                                    z_stop_threshold: z_stop,
+                                    time_barrier_bars: tb,
+                                    min_take_profit_pct: min_tp,
+                                });
+                            }
                         }
                     }
                 }
@@ -343,8 +368,53 @@ mod tests {
 
         assert_eq!(space.time_barrier_bars, vec![100]);
         let candidates = space.generate_candidates(usize::MAX);
-        assert_eq!(candidates.len(), 7 * 7 * 7 * 4);
+        assert_eq!(candidates.len(), 7 * 7 * 7 * 6 * 5);
         assert!(candidates.iter().all(|c| c.time_barrier_bars == 100));
+    }
+
+    #[test]
+    fn default_space_searches_the_take_profit_floor_that_must_clear_the_round_trip_fees() {
+        let space = DollarBarsCusumSpace::default();
+
+        assert_eq!(
+            space.min_take_profit_pcts,
+            vec![
+                dec!(0.0025),
+                dec!(0.0035),
+                dec!(0.005),
+                dec!(0.007),
+                dec!(0.01)
+            ]
+        );
+        let candidates = space.generate_candidates(usize::MAX);
+        for floor in &space.min_take_profit_pcts {
+            assert!(candidates.iter().any(|c| c.min_take_profit_pct == *floor));
+        }
+        assert_eq!(space.z_stop_thresholds.last(), Some(&dec!(5.0)));
+    }
+
+    #[test]
+    fn a_legacy_space_file_without_the_take_profit_floor_keeps_the_old_single_value() {
+        let legacy = r#"{
+            "rolling_window_lens": [14],
+            "cusum_vol_multipliers": ["1.0"],
+            "z_entry_thresholds": ["2.0"],
+            "z_stop_thresholds": ["3.0"],
+            "time_barrier_bars": [100]
+        }"#;
+
+        let space: DollarBarsCusumSpace = serde_json::from_str(legacy).expect("legacy space");
+
+        assert_eq!(
+            space.min_take_profit_pcts,
+            vec![default_min_take_profit_pct()]
+        );
+        let candidates = space.generate_candidates(usize::MAX);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].min_take_profit_pct,
+            default_min_take_profit_pct()
+        );
     }
 
     #[test]

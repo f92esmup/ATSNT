@@ -352,6 +352,7 @@ mod tests {
             z_entry_thresholds: vec![dec!(1.0), dec!(1.5)],
             z_stop_thresholds: vec![dec!(2.5)],
             time_barrier_bars: vec![5],
+            ..ParameterSpace::default()
         };
 
         let optimizer =
