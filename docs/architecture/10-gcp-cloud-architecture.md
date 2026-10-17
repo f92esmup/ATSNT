@@ -208,11 +208,13 @@ cargo run -p backtest --bin run_hpo -- \
 1. Builds the image (`fetch_data`, `run_hpo`, `backtest`, pipeline script) and pushes it to Artifact Registry (`<region>-docker.pkg.dev/<project>/atsnt/atsnt-batch:<git sha>`).
 2. Submits a Batch job running `run_production_pipeline.sh --gcp-bigquery --strict-sinks --upload-winner --artifact-suffix <job>` as the `atsnt-batch` service account, with task logs sent to Cloud Logging.
 3. Market data is downloaded and processed inside the container filesystem on the VM boot disk (`--boot-disk-gb`) and is destroyed with the VM. GCS only receives the winning artifact `artifacts/hpo_<sym>_<period>-<job>.json`; metrics go to BigQuery.
-4. Waits for the job, prints its `batch_task_logs`, and downloads the winner to `configs/`. With `--strict-sinks`, a failed BigQuery write or artifact upload fails the job instead of losing the result silently; `--max-retries` (0-10) covers Spot preemption. The artifact upload is create-only (`ifGenerationMatch=0`): when a retried task re-uploads the same object name, the first attempt's artifact is kept and the upload counts as successful, so no overwrite permission is needed.
+4. Waits for the job, prints its `batch_task_logs`, and downloads the winner to `configs/`. With `--strict-sinks`, a failed BigQuery write or artifact upload fails the job instead of losing the result silently; Tasks are retried only on Spot preemption: a `lifecyclePolicies` entry `RETRY_TASK` on exit code `50001` retries a preempted task up to `--max-retries` (0-10) times, and any other exit code fails the job at once, so a deterministic error (for example a BigQuery 403) runs the pipeline once instead of `1 + --max-retries` times ([Automate task retries](https://docs.cloud.google.com/batch/docs/automate-task-retries): "Tasks that fail with any unspecified exit codes are not retried"). The artifact upload is create-only (`ifGenerationMatch=0`): when a retried task re-uploads the same object name, the first attempt's artifact is kept and the upload counts as successful, so no overwrite permission is needed.
 
 ```bash
 # Inspect the rendered job spec without touching GCP:
 ./scripts/gcp/run_ephemeral_batch_hpo.sh --project "$GCP_PROJECT_ID" --year 2026 --month 1 --dry-run
+
+# Without --job-name the name gets a UTC timestamp; an explicit name must be new for every run.
 
 # January 2026 on a 64-vCPU Spot VM with 720 candidates and 200 USDT capital:
 ./scripts/gcp/run_ephemeral_batch_hpo.sh --project "$GCP_PROJECT_ID" --year 2026 --month 1 -- --candidates 720 --capital 200
@@ -222,7 +224,19 @@ cargo run -p backtest --bin run_hpo -- \
     --machine-type n2-custom-30-30720 --year 2026 --month 1 -- --candidates 720 --capital 200
 ```
 
-The HPO search parallelizes across candidates, so use many more candidates than vCPUs. Before submitting, the script checks that the machine type exists in the region (custom types included) and that `CPUS_ALL_REGIONS` and the regional family quota (`N2_CPUS`, `C2D_CPUS`, ... or `PREEMPTIBLE_CPUS` for Spot when granted) have enough free vCPU; without that quota Batch keeps the job `QUEUED` forever (`CODE_GCE_QUOTA_EXCEEDED`). `c2-standard-60` is not offered in `europe-southwest1`. The first submission after enabling the Batch API can fail within seconds while its service agent is granted its role; submit again.
+The HPO search parallelizes across candidates, so use many more candidates than vCPUs. Before building the image, the script runs two read-only preflights with the submitting user's credentials (`--dry-run` only prints them):
+
+- **Winner artifact must not exist.** Because the upload is create-only, a job reusing a `--job-name` would keep the old `artifacts/hpo_<sym>_<period>-<job>.json` and the script would download it as this run's winner. If `gcloud storage objects describe` finds the object, the script aborts and asks for a new `--job-name`.
+- **BigQuery write grants.** The service account (`--service-account`, default `atsnt-batch@<project>.iam.gserviceaccount.com`) needs `roles/bigquery.dataEditor` on `runs`, `run_metrics`, `trades` and `run_series` (table IAM, `bq get-iam-policy`) or a dataset-level `WRITER`/`OWNER`/`dataEditor` entry (`bq show`). Project-level grants are not inspected. When a table lacks the grant, the script names it and prints the `bq add-iam-policy-binding` commands that fix it. **Recreating a table (for example in a schema migration) drops its table-level grants.** Re-apply them by re-running `scripts/gcp/setup_gcp_resources.sh` or with the printed commands:
+
+```bash
+for table in runs run_metrics trades run_series; do
+  bq add-iam-policy-binding --member="serviceAccount:atsnt-batch@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+    --role=roles/bigquery.dataEditor "${GCP_PROJECT_ID}:atsnt_bi.${table}"
+done
+```
+
+The script also checks that the machine type exists in the region (custom types included) and that `CPUS_ALL_REGIONS` and the regional family quota (`N2_CPUS`, `C2D_CPUS`, ... or `PREEMPTIBLE_CPUS` for Spot when granted) have enough free vCPU; without that quota Batch keeps the job `QUEUED` forever (`CODE_GCE_QUOTA_EXCEEDED`). `c2-standard-60` is not offered in `europe-southwest1`. The first submission after enabling the Batch API can fail within seconds while its service agent is granted its role; submit again.
 
 **Measured (T6, BTCUSDT 2026-01, $1M dollar bars, 60 candidates, 30-vCPU Spot):** fetch 68 s, ingest 7.5 s, HPO search 116 s (375,794 bars), backtest 20 s, about 4 minutes of VM. Runtime grows linearly with bars x candidates x months: a finer `--dollar-bar` multiplies the bar count (a $50k bar is ~20x more bars than $1M), so size `--max-run-seconds` (default 14400) accordingly. Prerequisites: the submitting user needs `roles/iam.serviceAccountUser` on `atsnt-batch`, and the region's default VPC must allow egress to `data.binance.vision`. On a first `setup_gcp_resources.sh` run, IAM bindings can fail while the new service account propagates; re-running the script fixes it. `setup_gcp_resources.sh` grants the service account only `batch.agentReporter`, `logging.logWriter`, `artifactregistry.reader` on the `atsnt` repository, `storage.objectCreator` on the bucket, and `bigquery.dataEditor` on the four tables the pipeline writes.
 

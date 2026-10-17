@@ -66,6 +66,10 @@ check "spec: SPOT provisioning" '[ "$(spec "j[\"allocationPolicy\"][\"instances\
 check "spec: default machine type" '[ "$(spec "j[\"allocationPolicy\"][\"instances\"][0][\"policy\"][\"machineType\"]")" = "n2-highcpu-64" ]'
 check "spec: boot disk sized" '[ "$(spec "j[\"allocationPolicy\"][\"instances\"][0][\"policy\"][\"bootDisk\"][\"sizeGb\"]")" = "100" ]'
 check "spec: retries" '[ "$(spec "j[\"taskGroups\"][0][\"taskSpec\"][\"maxRetryCount\"]")" = "2" ]'
+LIFECYCLE="$(spec 'json.dumps(j["taskGroups"][0]["taskSpec"].get("lifecyclePolicies"))')"
+check "spec: retries only on Spot preemption (exit code 50001)" '[ "${LIFECYCLE}" = "[{\"action\": \"RETRY_TASK\", \"actionCondition\": {\"exitCodes\": [50001]}}]" ]'
+check "plan: artifact preflight announced" 'has "[DRY-RUN] gcloud storage objects describe gs://atsnt-lake-my-proj/artifacts/hpo_btcusdt_2026_01-hpo-test-1.json"'
+check "plan: BigQuery grant preflight announced" 'has "[DRY-RUN] bq get-iam-policy --format=prettyjson my-proj:atsnt_bi.run_series"'
 check "spec: region restricted" '[ "$(spec "j[\"allocationPolicy\"][\"location\"][\"allowedLocations\"][0]")" = "regions/europe-southwest1" ]'
 check "spec: dedicated service account" '[ "$(spec "j[\"allocationPolicy\"][\"serviceAccount\"][\"email\"]")" = "atsnt-batch@my-proj.iam.gserviceaccount.com" ]'
 check "spec: logs to Cloud Logging" '[ "$(spec "j[\"logsPolicy\"][\"destination\"]")" = "CLOUD_LOGGING" ]'
@@ -94,6 +98,8 @@ check "override: standard provisioning" '[ "$(spec "j[\"allocationPolicy\"][\"in
 check "override: retries" '[ "$(spec "j[\"taskGroups\"][0][\"taskSpec\"][\"maxRetryCount\"]")" = "0" ]'
 check "override: boot disk" '[ "$(spec "j[\"allocationPolicy\"][\"instances\"][0][\"policy\"][\"bootDisk\"][\"sizeGb\"]")" = "200" ]'
 check "override: symbol upper-cased" '[[ "$(spec "${ARGS_EXPR}")" == *"--symbol ETHUSDT"* ]] && has "hpo_ethusdt_2026_01-hpo-test-1.json"'
+run "${BASE[@]}" --max-retries 5
+check "override: --max-retries bounds the preemption retries" '[ "$(spec "j[\"taskGroups\"][0][\"taskSpec\"][\"maxRetryCount\"]")" = "5" ] && [ "$(spec "j[\"taskGroups\"][0][\"taskSpec\"][\"lifecyclePolicies\"][0][\"actionCondition\"][\"exitCodes\"]")" = "[50001]" ]'
 
 # Full-year run (no month) uses year-only names.
 run --project my-proj --job-name hpo-year --year 2025
@@ -125,6 +131,82 @@ run --project my-proj --year 2026 --month 3
 check "default job name: derived and valid" '[[ "$(spec "${ARGS_EXPR}")" =~ --artifact-suffix\ hpo-btcusdt-2026-03-[0-9]{8}-[0-9]{6} ]]'
 
 check "dry-run: gcloud/docker never invoked (all cases)" '[ ! -s "${CALLS}" ]'
+
+# --- Live preflights (no --dry-run) against stateful stubs --------------------
+# The stubs answer from files in LIVE_STATE: `artifact_exists` makes the winner
+# object exist, `iam_<table>.json` is a table IAM policy, `dataset.json` the
+# dataset metadata. Submission is stubbed and --no-wait stops after it.
+LIVE_STUBS="${WORK_DIR}/live-stubs"
+LIVE_STATE="${WORK_DIR}/live-state"
+LIVE_CALLS="${WORK_DIR}/live-calls.log"
+mkdir -p "${LIVE_STUBS}" "${LIVE_STATE}"
+cat > "${LIVE_STUBS}/gcloud" << EOF
+#!/usr/bin/env bash
+echo "gcloud \$*" >> "${LIVE_CALLS}"
+case "\$*" in
+    "storage objects describe "*)
+        if [ -e "${LIVE_STATE}/artifact_exists" ]; then echo "name: x"; exit 0; fi
+        echo "ERROR: (gcloud.storage.objects.describe) \$4 not found: 404." >&2; exit 1 ;;
+    "compute zones list"*) echo "europe-southwest1-a" ;;
+    "compute machine-types describe"*) echo "64" ;;
+esac
+exit 0
+EOF
+cat > "${LIVE_STUBS}/bq" << EOF
+#!/usr/bin/env bash
+echo "bq \$*" >> "${LIVE_CALLS}"
+target="\${*: -1}"
+case "\$1" in
+    get-iam-policy)
+        f="${LIVE_STATE}/iam_\${target##*.}.json"
+        if [ -e "\${f}" ]; then cat "\${f}"; else echo '{"etag": "ACAB", "version": 1}'; fi ;;
+    show)
+        if [ -e "${LIVE_STATE}/dataset.json" ]; then cat "${LIVE_STATE}/dataset.json"; else echo '{"access": []}'; fi ;;
+esac
+exit 0
+EOF
+printf '#!/usr/bin/env bash\necho "docker $*" >> "%s"\n' "${LIVE_CALLS}" > "${LIVE_STUBS}/docker"
+chmod +x "${LIVE_STUBS}/gcloud" "${LIVE_STUBS}/bq" "${LIVE_STUBS}/docker"
+
+SA="atsnt-batch@my-proj.iam.gserviceaccount.com"
+grant_table() {
+    printf '{"bindings": [{"role": "roles/bigquery.dataEditor", "members": ["serviceAccount:%s"]}], "etag": "x"}\n' "${SA}" \
+        > "${LIVE_STATE}/iam_$1.json"
+}
+
+live() {
+    : > "${LIVE_CALLS}"
+    OUT="$(env -u GCP_PROJECT_ID -u GCP_REGION -u GCS_BUCKET_NAME PATH="${LIVE_STUBS}:${PATH}" bash "${ORCHESTRATOR}" \
+        --project my-proj --region europe-southwest1 --job-name hpo-test-1 --year 2026 --month 1 \
+        --image-tag t --no-wait "$@" 2>&1)"
+    STATUS=$?
+}
+submitted() { grep -q "^gcloud batch jobs submit" "${LIVE_CALLS}"; }
+
+for t in runs run_metrics trades run_series; do grant_table "${t}"; done
+touch "${LIVE_STATE}/artifact_exists"
+live
+check "preflight: existing winner artifact aborts before submit" '[ "${STATUS}" -ne 0 ] && has "[ERROR] Winner artifact gs://atsnt-lake-my-proj/artifacts/hpo_btcusdt_2026_01-hpo-test-1.json already exists" && has "--job-name" && ! submitted'
+rm -f "${LIVE_STATE}/artifact_exists"
+
+rm -f "${LIVE_STATE}/iam_trades.json" "${LIVE_STATE}/iam_run_series.json"
+live
+check "preflight: missing table grant aborts, names the tables and prints the fix" '[ "${STATUS}" -ne 0 ] && has "[ERROR]" && has "lacks roles/bigquery.dataEditor on: trades run_series" && has "bq add-iam-policy-binding --member=serviceAccount:${SA} --role=roles/bigquery.dataEditor my-proj:atsnt_bi.trades" && has "drops" && ! submitted'
+check "preflight: abort happens before the image build" '! grep -q "^docker" "${LIVE_CALLS}"'
+
+grant_table trades; grant_table run_series
+live
+check "preflight: table-level grants pass and the job is submitted" '[ "${STATUS}" -eq 0 ] && has "[OK]" && submitted'
+
+rm -f "${LIVE_STATE}"/iam_*.json
+printf '{"access": [{"role": "WRITER", "userByEmail": "%s"}]}\n' "${SA}" > "${LIVE_STATE}/dataset.json"
+live
+check "preflight: dataset-level WRITER passes and the job is submitted" '[ "${STATUS}" -eq 0 ] && submitted'
+rm -f "${LIVE_STATE}/dataset.json"
+
+for t in runs run_metrics trades run_series; do grant_table "${t}"; done
+live --service-account other@my-proj.iam.gserviceaccount.com
+check "preflight: grants are checked for the --service-account in use" '[ "${STATUS}" -ne 0 ] && has "other@my-proj.iam.gserviceaccount.com lacks roles/bigquery.dataEditor on: runs run_metrics trades run_series"'
 
 echo ""
 echo "${PASSED} passed, ${FAILED} failed"

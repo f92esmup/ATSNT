@@ -17,6 +17,11 @@
 # repository, Batch service account and its permissions); the submitting user
 # needs roles/iam.serviceAccountUser on the atsnt-batch service account; the
 # region's default VPC must allow egress to data.binance.vision.
+#
+# Before building, it aborts when the winner artifact object already exists (the
+# job uploads create-only, so a reused --job-name would keep the old winner) and
+# when the service account lacks roles/bigquery.dataEditor on the tables the
+# pipeline writes. Both checks are read-only and need python3 and bq.
 # =============================================================================
 
 set -euo pipefail
@@ -29,6 +34,14 @@ PROJECT_ID="${GCP_PROJECT_ID:-}"
 REGION="${GCP_REGION:-europe-southwest1}"
 BUCKET_NAME="${GCS_BUCKET_NAME:-}"
 DATASET_ID="${GCP_DATASET_ID:-atsnt_bi}"
+# Tables the pipeline streams rows into (same list as setup_gcp_resources.sh).
+BATCH_WRITE_TABLES=(runs run_metrics trades run_series)
+# Cloud Batch exit code for a task that failed because its Spot VM was preempted.
+# A RETRY_TASK lifecycle policy retries only the listed exit codes; "tasks that fail
+# with any unspecified exit codes are not retried", so other failures fail at once.
+# https://docs.cloud.google.com/batch/docs/automate-task-retries
+# https://docs.cloud.google.com/batch/docs/troubleshooting (exit code 50001)
+PREEMPTION_EXIT_CODE="50001"
 REPOSITORY="atsnt"
 IMAGE_NAME="atsnt-batch"
 IMAGE_TAG=""
@@ -64,11 +77,13 @@ Options:
   -s, --symbol <SYM>         Trading pair symbol (default: ${SYMBOL})
   -y, --year <YYYY>          Year to process (default: ${YEAR})
   -m, --month <MM>           Single completed month (default: whole year to date)
-      --job-name <NAME>      Batch job name, also the artifact suffix
+      --job-name <NAME>      Batch job name, also the artifact suffix; use a new one per
+                             run, an existing winner artifact aborts the submission
                              (default: hpo-<sym>-<year>[-<MM>]-<YYYYMMDD-HHMMSS>)
       --machine-type <TYPE>  VM machine type (default: ${MACHINE_TYPE})
       --standard             Use a standard VM instead of Spot
-      --max-retries <N>      Task retries, e.g. after Spot preemption (default: ${MAX_RETRIES})
+      --max-retries <N>      Task retries after Spot preemption; any other failure
+                             fails the job at once (default: ${MAX_RETRIES})
       --boot-disk-gb <N>     VM boot disk size; holds the market data (default: ${BOOT_DISK_GB})
       --max-run-seconds <N>  Hard limit for the task (default: ${MAX_RUN_SECONDS})
       --service-account <E>  VM service account (default: atsnt-batch@<project>.iam.gserviceaccount.com)
@@ -76,7 +91,7 @@ Options:
       --skip-build           Reuse an already pushed image tag
       --download-dir <DIR>   Where the winning artifact is downloaded (default: ${DOWNLOAD_DIR})
       --no-wait              Submit and exit without waiting, logs or download
-      --dry-run              Render the job spec and print the plan; call no gcloud/docker
+      --dry-run              Render the job spec and print the plan; call no gcloud/bq/docker
       --job-spec-out <PATH>  Also write the rendered job spec to PATH
   -h, --help                 Show this help message and exit
 
@@ -237,6 +252,9 @@ render_job_spec() {
           }
         ],
         "maxRetryCount": ${MAX_RETRIES},
+        "lifecyclePolicies": [
+          { "action": "RETRY_TASK", "actionCondition": { "exitCodes": [${PREEMPTION_EXIT_CODE}] } }
+        ],
         "maxRunDuration": "${MAX_RUN_SECONDS}s"
       }
     }
@@ -273,7 +291,7 @@ echo "============================================================"
 echo "Project:        ${PROJECT_ID}"
 echo "Region:         ${REGION}"
 echo "Job:            ${JOB_NAME}"
-echo "Machine:        ${MACHINE_TYPE} (${PROVISIONING}, ${BOOT_DISK_GB} GB disk, ${MAX_RETRIES} retries)"
+echo "Machine:        ${MACHINE_TYPE} (${PROVISIONING}, ${BOOT_DISK_GB} GB disk, ${MAX_RETRIES} retries on preemption)"
 echo "Image:          ${IMAGE_URI}"
 echo "Pipeline args:  ${PIPELINE_ARGS[*]}"
 echo "Winner (GCS):   ${ARTIFACT_URI}"
@@ -285,6 +303,11 @@ if [ "${DRY_RUN}" = "true" ]; then
     echo "[DRY-RUN] Job spec:"
     cat "${SPEC_FILE}"
     echo ""
+    echo "[DRY-RUN] gcloud storage objects describe ${ARTIFACT_URI}  (must not exist)"
+    for table in "${BATCH_WRITE_TABLES[@]}"; do
+        echo "[DRY-RUN] bq get-iam-policy --format=prettyjson ${PROJECT_ID}:${DATASET_ID}.${table}  (${SERVICE_ACCOUNT} needs roles/bigquery.dataEditor)"
+    done
+    echo "[DRY-RUN] bq show --format=prettyjson ${PROJECT_ID}:${DATASET_ID}  (dataset-level grant)"
     if [ "${SKIP_BUILD}" = "false" ]; then
         echo "[DRY-RUN] docker build --build-arg GIT_SHA=<sha> -t ${IMAGE_URI} ."
         echo "[DRY-RUN] docker push ${IMAGE_URI}"
@@ -296,6 +319,70 @@ if [ "${DRY_RUN}" = "true" ]; then
 fi
 
 command -v gcloud >/dev/null 2>&1 || die "gcloud CLI not found."
+command -v bq >/dev/null 2>&1 || die "bq CLI not found (needed to check the BigQuery grants)."
+command -v python3 >/dev/null 2>&1 || die "python3 not found (needed to read the BigQuery IAM policies)."
+
+# --- Preflight: the winner artifact does not exist yet -------------------------
+# run_hpo uploads create-only: with a reused job name the upload is refused and
+# the old artifact would be downloaded as if it were this run's winner.
+echo "[1/5] Checking that ${ARTIFACT_URI} does not exist..."
+if DESCRIBE_OUT="$(gcloud storage objects describe "${ARTIFACT_URI}" --project="${PROJECT_ID}" 2>&1)"; then
+    die "Winner artifact ${ARTIFACT_URI} already exists (job name ${JOB_NAME} was used before). Pass a new --job-name."
+elif ! grep -qiE "not found|404|matched no objects|No URLs matched" <<< "${DESCRIBE_OUT}"; then
+    die "Could not check whether ${ARTIFACT_URI} exists: ${DESCRIBE_OUT}"
+fi
+echo "      [OK] Not uploaded yet."
+
+# --- Preflight: the service account can write the BigQuery tables --------------
+# Accepted: roles/bigquery.dataEditor (or dataOwner) on each table, or a
+# dataset-level WRITER/OWNER/dataEditor/dataOwner entry. Project-level grants are
+# not inspected.
+echo "[1/5] Checking BigQuery write grants of ${SERVICE_ACCOUNT} on ${DATASET_ID}..."
+# Exit 0 when the JSON on stdin grants SA ($1) write access. Mode ($2): "table"
+# reads an IAM policy, "dataset" reads the access list of `bq show`.
+grants_write() {
+    python3 -I -c '
+import json, sys
+sa, mode = sys.argv[1], sys.argv[2]
+doc = json.load(sys.stdin)
+if mode == "table":
+    roles = {"roles/bigquery.dataEditor", "roles/bigquery.dataOwner"}
+    ok = any(b.get("role") in roles and "serviceAccount:" + sa in b.get("members", [])
+             for b in doc.get("bindings", []))
+else:
+    roles = {"WRITER", "OWNER", "roles/bigquery.dataEditor", "roles/bigquery.dataOwner"}
+    ok = any(e.get("role") in roles
+             and (e.get("userByEmail") == sa or e.get("iamMember") == "serviceAccount:" + sa)
+             for e in doc.get("access", []))
+sys.exit(0 if ok else 1)
+' "$1" "$2"
+}
+DATASET_REF="${PROJECT_ID}:${DATASET_ID}"
+DATASET_JSON="$(bq show --format=prettyjson "${DATASET_REF}" 2>&1)" \
+    || die "Could not read dataset ${DATASET_REF}: ${DATASET_JSON}"
+if grants_write "${SERVICE_ACCOUNT}" dataset <<< "${DATASET_JSON}"; then
+    echo "      [OK] Dataset-level write access."
+else
+    MISSING_TABLES=()
+    for table in "${BATCH_WRITE_TABLES[@]}"; do
+        POLICY="$(bq get-iam-policy --format=prettyjson "${DATASET_REF}.${table}" 2>&1)" \
+            || die "Could not read the IAM policy of ${DATASET_REF}.${table}: ${POLICY}"
+        grants_write "${SERVICE_ACCOUNT}" table <<< "${POLICY}" || MISSING_TABLES+=("${table}")
+    done
+    if [ "${#MISSING_TABLES[@]}" -gt 0 ]; then
+        {
+            echo "[ERROR] ${SERVICE_ACCOUNT} lacks roles/bigquery.dataEditor on: ${MISSING_TABLES[*]}"
+            echo "        The job would fail with a BigQuery 403 after the whole pipeline ran."
+            echo "        Recreating a table (e.g. a schema migration) drops its table-level grants."
+            echo "        Re-apply them (as in scripts/gcp/setup_gcp_resources.sh):"
+            for table in "${MISSING_TABLES[@]}"; do
+                echo "  bq add-iam-policy-binding --member=serviceAccount:${SERVICE_ACCOUNT} --role=roles/bigquery.dataEditor ${DATASET_REF}.${table}"
+            done
+        } >&2
+        exit 1
+    fi
+    echo "      [OK] Table-level write access on: ${BATCH_WRITE_TABLES[*]}"
+fi
 
 # --- Preflight: machine type available in the region, CPU quota free ----------
 echo "[1/5] Checking that ${MACHINE_TYPE} exists in ${REGION}..."

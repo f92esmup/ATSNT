@@ -109,11 +109,18 @@ so the file must be committed before the job is submitted.
 
 ```
 scripts/gcp/run_ephemeral_batch_hpo.sh --project <project> --year 2026 \
+  --job-name hpo-btcusdt-2026-500eur-v2 \
   --machine-type n2-custom-30-30720 -- \
   --execution-context configs/execution_real_500eur.json \
   --param-space configs/param_space_daytrading_cusum.json \
   --holdout-from-month 9 --candidates 120
 ```
+
+Use a new `--job-name` for every run: it names the uploaded winner
+(`artifacts/hpo_btcusdt_2026-<job name>.json`), the upload never overwrites, and the script aborts
+before building when that object already exists. It also aborts when `atsnt-batch` lacks
+`bigquery.dataEditor` on the tables the pipeline writes (lost when the tables are recreated) and
+prints the commands that re-grant it. A failed job is retried only after a Spot preemption.
 
 `--holdout-from-month 9` keeps September and the current month out of the search: the HPO reads
 January to August and the backtest of the winner reads only the held-out months, so that backtest is
