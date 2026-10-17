@@ -112,6 +112,15 @@ impl FillRecorder {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(now_ms);
     }
 
+    /// Forgets the pending submission: its send time is unknown, so its fill must not be
+    /// recorded with a guessed one.
+    pub fn discard_pending(&self) {
+        *self
+            .submitted_ms
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
     /// Appends the fill of the entry sent last. Returns `None` when no order was noted.
     pub fn on_entry_filled(
         &self,
@@ -430,6 +439,23 @@ mod tests {
 
         assert_eq!(tape_window(&fills), Some((4_000, 69_400)));
         assert_eq!(tape_window(&[]), None);
+    }
+
+    #[test]
+    fn a_discarded_submission_is_never_paired_with_a_later_fill() {
+        let path = std::env::temp_dir().join(format!("atsnt-discard-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let recorder = FillRecorder::new(&path);
+        recorder.on_entry_submitted(1_000);
+
+        // The next order's send time is unknown: nothing may be recorded for it.
+        recorder.discard_pending();
+        let fill = recorder
+            .on_entry_filled(Side::Buy, dec!(1), dec!(100), 1_200)
+            .unwrap();
+
+        assert_eq!(fill, None);
+        assert!(!path.exists());
     }
 
     #[test]

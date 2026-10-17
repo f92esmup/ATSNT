@@ -825,12 +825,13 @@ impl EventSink<'_> {
                     if let Some(recorder) = &self.fill_recorder {
                         // The moment the request left, not the moment the acknowledgement came
                         // back: parity calibration depends on the round trip being visible.
-                        let sent_at_ms = if ack.sent_at_ms > 0 {
-                            ack.sent_at_ms
+                        // An order whose submission had to be reconciled has no known send
+                        // time; it is left out rather than recorded with the arrival time.
+                        if ack.sent_at_ms > 0 {
+                            recorder.on_entry_submitted(ack.sent_at_ms);
                         } else {
-                            now_unix_ms()
-                        };
-                        recorder.on_entry_submitted(sent_at_ms);
+                            recorder.discard_pending();
+                        }
                     }
                     println!(
                         "[GATEWAY] Dispatching live order to Binance...\n\
