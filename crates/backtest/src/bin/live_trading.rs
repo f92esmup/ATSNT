@@ -478,6 +478,9 @@ async fn main() -> Result<()> {
     let mut total_ticks: u64 = 0;
     let mut total_bars: u64 = 0;
     let mut last_mtm_print = Instant::now();
+    // Market-trade time of the latest trade and when it arrived, to keep the session's clock
+    // moving while the public stream is quiet.
+    let mut last_trade: Option<(i64, Instant)> = None;
     let mtm_interval = Duration::from_secs(5);
 
     let mut current_day = now_in_madrid().date_naive();
@@ -555,6 +558,11 @@ async fn main() -> Result<()> {
             }
 
             _ = daily_timer.tick() => {
+                if let Some((trade_ms, arrived)) = last_trade {
+                    let estimated_ms = trade_ms + arrived.elapsed().as_millis() as i64;
+                    let events = driver.on_idle(gateway.as_ref(), estimated_ms).await;
+                    sink.handle(events, &mut stats, driver.session().wallet_equity()).await;
+                }
                 let now_madrid = now_in_madrid();
                 if now_madrid.date_naive() != current_day {
                     current_day = now_madrid.date_naive();
@@ -653,6 +661,7 @@ async fn main() -> Result<()> {
                         tracing::trace!(target: "live_trading", "Skipped a trade covered by the warm-up");
                     }
                     Ok(Some(trade)) => {
+                        last_trade = Some((trade.timestamp, Instant::now()));
                         total_ticks += 1;
                         data_window.start_ms.get_or_insert(trade.timestamp);
                         data_window.end_ms = Some(trade.timestamp);

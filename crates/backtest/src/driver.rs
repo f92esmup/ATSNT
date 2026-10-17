@@ -63,6 +63,16 @@ impl<S: Strategy> SessionDriver<S> {
         DriverStep { bar, events }
     }
 
+    /// Advances the session's clock when no market trade arrives; see
+    /// [`TradingSession::on_idle`].
+    pub async fn on_idle<V: ExecutionVenue>(
+        &mut self,
+        venue: &V,
+        now_ms: i64,
+    ) -> Vec<SessionEvent> {
+        self.session.on_idle(venue, now_ms).await
+    }
+
     /// Feeds one execution report from the venue.
     pub async fn on_execution<V: ExecutionVenue>(
         &mut self,
@@ -307,5 +317,22 @@ mod tests {
         );
 
         assert!(SessionDriver::new(session, Decimal::ZERO).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_clock_can_advance_without_a_market_trade() {
+        let venue = Venue::default();
+        let mut driver = driver(vec![long()]);
+        driver.on_market_trade(&venue, &print(1_000)).await;
+        driver.on_market_trade(&venue, &print(1_001)).await;
+        assert!(driver.session().is_exposed());
+
+        // The entry never reaches a terminal status and no trade arrives.
+        let events = driver.on_idle(&venue, 1_001 + 30_000).await;
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::EntryTimedOut { .. })));
+        assert!(!driver.session().is_exposed());
     }
 }
