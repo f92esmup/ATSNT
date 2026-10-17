@@ -96,7 +96,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] Tick-level `SimulatedVenue` (`--fill-model tick`): order latency, tape-walk market fills and tape-armed conditional exits, driven through the live `TradingSession`; used to validate finalists, while the bar-level engine stays the optimizer loop.
 - [ ] Known gaps, not yet modeled by the simulator: real mark-price stop triggers (last trade price is the proxy), bid/ask spread, notional-bracket maintenance margins, and live warm-up of rolling strategy windows.
 - [x] Strategy warm-up from recent trades (`--warmup-minutes` in live and paper) and a parity harness (`live_trading --record-fills` + `parity_check`) that recommends the simulator's order latency from real fills.
-- [ ] Venue ports (`ExecutionVenue`, `Clock`, `MarketData`) so simulation, paper and live share one session core.
+- [x] One session core shared by simulation, paper and live: `ExecutionVenue` port, `TradingSession` and the `SessionDriver` loop. Separate `Clock` and `MarketData` venue ports were judged unnecessary (time comes from the trade stream and market data already has `MarketDataStream`).
 - [x] Single strategy registry (`strategies::registry`, one line per strategy) and a generic contract suite; backtest, HPO, paper and live resolve strategies through it.
 
 ---

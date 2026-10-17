@@ -16,7 +16,7 @@ Branch: feat/sim-live-fidelity (continues) | Delivery: ask-on-risk | Test runner
 - [x] T3 (S3) — engine uses `DailyWatermark` | inline | previous behavior pinned by the existing engine breaker tests
 - [x] T4 (S4) — `funding_paid` column and fill-model tag in the run model and BigQuery schema; tick runs recordable | inline | RED: recording contract tests
 - [ ] T5 (S5) — native review of the real-money commits | needs consent
-- [ ] T6 (S6) — roadmap wording for the dropped ports | structural readback
+- [x] T6 (S6) — roadmap wording for the dropped ports | structural readback
 
 ## Log
 - L2 (T1-T4, 2026-10-17): T1 `SessionDriver` is the loop of both live and `TickSimulation`; T2 entry timeout (30 s of market-trade time) cancels, protects a partial fill, or closes a position whose fill report was lost, and a late fill afterwards flattens and halts (existing Flat-phase rule); T3 the engine's daily peak is `DailyWatermark` with unchanged results (all engine tests pass unmodified); T4 the BigQuery data model is final for this refactor: `runs.fill_model` (bar | tick | exchange, children inherit, a tick backtest is tagged tick and `--gcp-bigquery` is no longer refused), `trades.funding_paid`, and a contract test that checks every row type against `scripts/gcp/bigquery_schema.sql` in both directions (mutation-checked). Existing BigQuery tables must be recreated (the purge in Phase 1 does that); the schema file only uses CREATE ... IF NOT EXISTS.
