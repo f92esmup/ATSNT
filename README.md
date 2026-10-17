@@ -202,6 +202,21 @@ cargo run --release -p backtest -- --data data/historical/BTCUSDT/BTCUSDT-aggTra
 
 ---
 
+### Step 2c: Calibrate the Simulator Against Live Fills
+`--latency-ms` is an assumption until it is measured. Record the entry fills of a live run and compare them with the simulation of the same orders on the tape of that day:
+
+```bash
+# 1. Live (or testnet) run that records every entry fill
+cargo run -p backtest --bin live_trading -- --config configs/hpo_results.json --record-fills fills.jsonl
+# 2. Next day, with that day's aggTrades archive (see Step 1 for the data fetcher)
+cargo run --release -p backtest --bin parity_check -- --tape data/BTCUSDT-aggTrades-2026-10-17.parquet --fills fills.jsonl
+```
+- Replays each recorded market order on the tape with a sweep of order latencies and prints the mean price error and bias of each; the best fit is the `--latency-ms` to use for `--fill-model tick` and paper trading.
+- A positive bias means the simulation is pessimistic (it paid more than live did), a negative one optimistic. The tape must be the market the run traded (production archive for production fills; testnet prices differ).
+- The send time is the local wall clock and the fill time the exchange's, so clock skew shifts the reported time error; the price error drives the recommendation. Few fills give a noisy estimate: use at least a few dozen.
+
+---
+
 ### Step 3: Run Monte Carlo Stress Simulation
 Audit backtest trade sequences to test drawdown probability distributions and ruin risk:
 

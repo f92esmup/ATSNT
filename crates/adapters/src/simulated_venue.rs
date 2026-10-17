@@ -179,6 +179,33 @@ impl SimulatedVenue {
         self.lock().wallet
     }
 
+    /// Queues a raw market order sent at `at_ms`, with no sizing or risk gate, and returns its
+    /// id. It reaches the market after the configured latency and runs unlevered. Used to
+    /// replay orders a live run actually sent.
+    pub fn submit_market_order_at(
+        &self,
+        side: Side,
+        quantity: Decimal,
+        at_ms: i64,
+    ) -> Result<String, SimulatedVenueError> {
+        if quantity <= Decimal::ZERO {
+            return Err(SimulatedVenueError::Risk(
+                "the order quantity must be positive".to_string(),
+            ));
+        }
+        let mut state = self.lock();
+        let order_id = format!("sim-{}", state.next_order_id);
+        state.next_order_id += 1;
+        state.orders.push(WorkingOrder {
+            side,
+            remaining: quantity,
+            due_ms: at_ms + self.config.latency_ms,
+            reduce_only: false,
+            leverage: 1,
+        });
+        Ok(order_id)
+    }
+
     /// Funding payments settled since the last call, oldest first.
     pub fn take_funding(&self) -> Vec<FundingPayment> {
         std::mem::take(&mut self.lock().funding)
@@ -985,5 +1012,29 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(SimulatedVenueError::Risk(_))));
+    }
+
+    #[tokio::test]
+    async fn a_raw_market_order_reaches_the_market_after_the_latency() {
+        let venue = venue(100);
+        venue
+            .submit_market_order_at(Side::Buy, dec!(2), 5_000)
+            .unwrap();
+
+        let early = venue.on_trade(&print(5_050, dec!(100), dec!(5), Side::Buy));
+        let filled = venue.on_trade(&print(5_100, dec!(100.5), dec!(5), Side::Buy));
+
+        assert!(early.is_empty());
+        assert_eq!(filled[0].last_price, dec!(100.5));
+        assert_eq!(filled[0].last_quantity, dec!(2));
+    }
+
+    #[test]
+    fn a_raw_market_order_needs_a_positive_quantity() {
+        let venue = venue(0);
+
+        assert!(venue
+            .submit_market_order_at(Side::Buy, Decimal::ZERO, 0)
+            .is_err());
     }
 }

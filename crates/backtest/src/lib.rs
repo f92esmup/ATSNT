@@ -11,6 +11,7 @@ pub mod monte_carlo;
 pub mod monthly_guard;
 pub mod optimization;
 pub mod paper;
+pub mod parity;
 pub mod recording;
 pub mod run;
 pub mod session;

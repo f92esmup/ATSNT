@@ -15,6 +15,7 @@ use adapters::{
     BinanceWebSocketStream, BinanceWsConfig, GcpSecretManager, RunRecorder, TelegramNotifier,
 };
 use anyhow::{Context, Result};
+use backtest::parity::FillRecorder;
 use backtest::session::{SessionConfig, SessionEvent, SkipReason, TradingSession};
 use backtest::{
     now_unix_ms, record_closed_trade, record_run_status, BacktestConfig, BacktestMetrics,
@@ -86,6 +87,11 @@ struct Args {
     /// Print individual raw market trade ticks to stdout (verbose debug mode)
     #[arg(long, default_value_t = false)]
     show_ticks: bool,
+
+    /// Append every entry fill (send time, fill time, side, quantity, average price) to this
+    /// JSON-lines file, the input of `parity_check` for calibrating the simulator's latency
+    #[arg(long)]
+    record_fills: Option<PathBuf>,
 
     /// Warm the strategy's rolling windows with this many minutes of recent trades (public REST
     /// `aggTrades` of the same market the stream follows) before trading starts. Without it the
@@ -499,6 +505,7 @@ async fn main() -> Result<()> {
         run_ctx: &run_ctx,
         symbol: &symbol_upper,
         monthly_limit_pct: run_spec.execution_context.max_monthly_drawdown_pct,
+        fill_recorder: args.record_fills.as_ref().map(FillRecorder::new),
     };
     let mut total_ticks: u64 = 0;
     let mut total_bars: u64 = 0;
@@ -826,6 +833,7 @@ struct EventSink<'a> {
     run_ctx: &'a RunContext,
     symbol: &'a str,
     monthly_limit_pct: Decimal,
+    fill_recorder: Option<FillRecorder>,
 }
 
 impl EventSink<'_> {
@@ -856,15 +864,20 @@ impl EventSink<'_> {
                         SkipReason::PositionOpen => "Position already open.",
                     }
                 ),
-                SessionEvent::EntrySubmitted(ack) => println!(
-                    "[GATEWAY] Dispatching live order to Binance...\n\
+                SessionEvent::EntrySubmitted(ack) => {
+                    if let Some(recorder) = &self.fill_recorder {
+                        recorder.on_entry_submitted(now_unix_ms());
+                    }
+                    println!(
+                        "[GATEWAY] Dispatching live order to Binance...\n\
                      \n[ORDER PLACED] Order submitted to Binance!\n\
                      Client Order ID: {}\n\
                      Status:          {}\n\
                      Price:           ${}\n\
                      Quantity:        {}\n",
-                    ack.order_id, ack.status, ack.price, ack.quantity
-                ),
+                        ack.order_id, ack.status, ack.price, ack.quantity
+                    );
+                }
                 SessionEvent::EntryCancelled => println!(
                     "[ORDER] {}: the entry order ended without any fill; no position was opened.",
                     self.symbol
@@ -877,11 +890,17 @@ impl EventSink<'_> {
                     side,
                     price,
                     quantity,
+                    time_ms,
                     stop_loss,
                     take_profit,
                     protection,
-                    ..
                 } => {
+                    if let Some(recorder) = &self.fill_recorder {
+                        if let Err(error) = recorder.on_entry_filled(side, quantity, price, time_ms)
+                        {
+                            eprintln!("[WARN] Could not record the entry fill: {error}");
+                        }
+                    }
                     announce_exit_event(self.telegram, self.symbol, &protection).await;
                     if let Some(t) = self.telegram {
                         let side_str = match side {
