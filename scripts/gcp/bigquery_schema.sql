@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS `atsnt_bi.runs` (
     market_type STRING NOT NULL,
     sampling JSON NOT NULL,             -- e.g. {"type":"dollar_bar","threshold":"1000000"}
     params JSON NOT NULL,               -- strategy hyperparameters (schema-free per strategy)
-    execution_context JSON NOT NULL,    -- capital, maker/taker fees, slippage, risk
+    execution_context JSON NOT NULL,    -- capital, maker/taker fees, slippage, risk, funding, margin
+    fill_model STRING NOT NULL,         -- bar | tick | exchange: how the run's orders were filled
     data_source STRING,
     data_start TIMESTAMP,
     data_end TIMESTAMP,
@@ -101,6 +102,7 @@ CREATE TABLE IF NOT EXISTS `atsnt_bi.trades` (
     quantity NUMERIC NOT NULL,
     gross_pnl NUMERIC NOT NULL,
     fees_paid NUMERIC NOT NULL,
+    funding_paid NUMERIC NOT NULL,      -- perpetual funding paid while open (negative: received); inside net_pnl
     slippage_paid NUMERIC NOT NULL,
     net_pnl NUMERIC NOT NULL,
     return_pct NUMERIC NOT NULL,

@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::metrics::{BacktestMetrics, ClosedTrade};
 use crate::monte_carlo::{MonteCarloReport, ResampleMethod};
 use crate::optimization::CandidateEvaluation;
-use crate::run::{RunId, RunSpec, RunType};
+use crate::run::{FillModel, RunId, RunSpec, RunType};
 
 /// Git commit the binary was built from, when available at build time.
 pub const GIT_SHA: Option<&str> = option_env!("ATSNT_GIT_SHA");
@@ -63,6 +63,8 @@ pub struct RunContext {
     pub strategy_id: String,
     pub symbol: String,
     pub started_at_ms: i64,
+    /// How this run's orders were filled.
+    pub fill_model: FillModel,
 }
 
 /// Current wall-clock time in Unix milliseconds.
@@ -82,7 +84,14 @@ impl RunContext {
             strategy_id: spec.strategy_id.clone(),
             symbol: spec.symbol.clone(),
             started_at_ms,
+            fill_model: run_type.default_fill_model(),
         }
+    }
+
+    /// Same run with another fill model (a tick-level backtest); its children inherit it.
+    pub fn with_fill_model(mut self, fill_model: FillModel) -> Self {
+        self.fill_model = fill_model;
+        self
     }
 
     /// Starts a run nested under this one (HPO trial, Monte Carlo of a backtest).
@@ -94,6 +103,7 @@ impl RunContext {
             strategy_id: self.strategy_id.clone(),
             symbol: self.symbol.clone(),
             started_at_ms,
+            fill_model: self.fill_model,
         }
     }
 
@@ -123,6 +133,7 @@ impl RunContext {
             sampling: serde_json::to_string(&spec.sampling)?,
             params: serde_json::to_string(&spec.strategy_config)?,
             execution_context: serde_json::to_string(&spec.execution_context)?,
+            fill_model: self.fill_model.as_str().to_string(),
             data_source: data.source.clone(),
             data_start: data.start_ms.map(format_unix_ms_rfc3339),
             data_end: data.end_ms.map(format_unix_ms_rfc3339),
@@ -206,6 +217,7 @@ impl RunContext {
                 quantity: t.quantity,
                 gross_pnl: t.pnl_gross,
                 fees_paid: t.fees_paid,
+                funding_paid: t.funding_paid,
                 slippage_paid: t.slippage_paid,
                 net_pnl: t.pnl_net,
                 return_pct: t.return_pct,

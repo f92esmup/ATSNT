@@ -60,6 +60,8 @@ pub struct RunRow {
     pub params: String,
     /// JSON: fees, slippage, capital, and risk settings actually used.
     pub execution_context: String,
+    /// `bar` | `tick` | `exchange`: how the run's orders were filled.
+    pub fill_model: String,
     pub data_source: Option<String>,
     pub data_start: Option<String>,
     pub data_end: Option<String>,
@@ -184,6 +186,10 @@ pub struct RunTradeRow {
     pub gross_pnl: Decimal,
     #[serde(serialize_with = "bq_numeric::value")]
     pub fees_paid: Decimal,
+    /// Perpetual funding paid while the trade was open (negative when received); already part
+    /// of `net_pnl`.
+    #[serde(serialize_with = "bq_numeric::value")]
+    pub funding_paid: Decimal,
     #[serde(serialize_with = "bq_numeric::value")]
     pub slippage_paid: Decimal,
     #[serde(serialize_with = "bq_numeric::value")]

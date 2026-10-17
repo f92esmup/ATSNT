@@ -1,6 +1,6 @@
 use backtest::{
-    BacktestConfig, BacktestMetrics, ClosedTrade, DataWindow, RunContext, RunSpec, RunStatus,
-    RunType, SamplingConfig, TradeExcursion,
+    BacktestConfig, BacktestMetrics, ClosedTrade, DataWindow, FillModel, RunContext, RunSpec,
+    RunStatus, RunType, SamplingConfig, TradeExcursion,
 };
 use domain::PositionSide;
 use rust_decimal_macros::dec;
@@ -386,4 +386,142 @@ mod persistence {
         }
     }
     use strategies::DollarBarsCusumSpace;
+}
+
+fn fill_model_of(context: &RunContext) -> String {
+    context
+        .run_row(&spec(), RunStatus::Running, None, &DataWindow::default())
+        .unwrap()
+        .fill_model
+}
+
+#[test]
+fn every_run_type_records_how_its_orders_were_filled() {
+    let at = 1_700_000_000_000;
+
+    // The optimizer and plain backtests fill at bar level, paper trades the tick-level venue and
+    // live fills come from the exchange.
+    assert_eq!(
+        fill_model_of(&RunContext::new(RunType::Backtest, &spec(), at)),
+        "bar"
+    );
+    assert_eq!(
+        fill_model_of(&RunContext::new(RunType::Hpo, &spec(), at)),
+        "bar"
+    );
+    assert_eq!(
+        fill_model_of(&RunContext::new(RunType::Paper, &spec(), at)),
+        "tick"
+    );
+    assert_eq!(
+        fill_model_of(&RunContext::new(RunType::Live, &spec(), at)),
+        "exchange"
+    );
+}
+
+#[test]
+fn a_tick_backtest_and_its_children_are_tagged_as_tick() {
+    let at = 1_700_000_000_000;
+    let tick = RunContext::new(RunType::Backtest, &spec(), at).with_fill_model(FillModel::Tick);
+
+    let monte_carlo = tick.child(RunType::MonteCarlo, at + 1);
+
+    assert_eq!(fill_model_of(&tick), "tick");
+    assert_eq!(fill_model_of(&monte_carlo), "tick");
+}
+
+#[test]
+fn trade_rows_carry_the_funding_paid_while_the_trade_was_open() {
+    let context = RunContext::new(RunType::Backtest, &spec(), 1_700_000_000_000);
+    let mut trade = closed_trade();
+    trade.funding_paid = dec!(0.3);
+
+    let rows = context.trade_rows(&[trade], 1);
+
+    assert_eq!(rows[0].funding_paid, dec!(0.3));
+}
+
+/// Columns of `table` in `scripts/gcp/bigquery_schema.sql` as `(name, is_not_null)`.
+fn schema_columns(table: &str) -> Vec<(String, bool)> {
+    let sql = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/gcp/bigquery_schema.sql"),
+    )
+    .expect("the BigQuery schema file");
+    let header = format!("CREATE TABLE IF NOT EXISTS `atsnt_bi.{table}` (");
+    let body = sql
+        .split(&header)
+        .nth(1)
+        .unwrap_or_else(|| panic!("table {table} is not in the schema"))
+        .split("\n)")
+        .next()
+        .unwrap();
+    body.lines()
+        .map(|line| line.split("--").next().unwrap_or_default().trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let name = line.split_whitespace().next().unwrap().to_string();
+            (name, line.contains("NOT NULL"))
+        })
+        .collect()
+}
+
+/// Every field a row sends must be a column, and every required column must be sent: BigQuery
+/// rejects the whole batch otherwise, which would lose a run's records silently in a cloud job.
+fn assert_row_matches_schema(table: &str, row: &serde_json::Value) {
+    let columns = schema_columns(table);
+    let sent: Vec<&String> = row.as_object().expect("a JSON object").keys().collect();
+    for key in &sent {
+        assert!(
+            columns.iter().any(|(name, _)| name == *key),
+            "{table}: the row sends `{key}` but the schema has no such column"
+        );
+    }
+    for (name, required) in &columns {
+        if *required {
+            assert!(
+                sent.contains(&name),
+                "{table}: the schema requires `{name}` but the row does not send it"
+            );
+        }
+    }
+}
+
+#[test]
+fn run_rows_match_the_bigquery_runs_table() {
+    let ctx = RunContext::new(RunType::Backtest, &spec(), 1_700_000_000_000);
+    let row = ctx
+        .run_row(&spec(), RunStatus::Running, None, &DataWindow::default())
+        .unwrap();
+
+    assert_row_matches_schema("runs", &serde_json::to_value(row).unwrap());
+}
+
+#[test]
+fn metrics_rows_match_the_bigquery_run_metrics_table() {
+    let ctx = RunContext::new(RunType::Backtest, &spec(), 0);
+    let mut metrics =
+        BacktestMetrics::calculate(dec!(10_000), &[closed_trade()], dec!(10), dec!(0.001));
+    metrics.halted = true;
+
+    assert_row_matches_schema(
+        "run_metrics",
+        &serde_json::to_value(ctx.metrics_row("full", &metrics, None)).unwrap(),
+    );
+}
+
+#[test]
+fn trade_rows_match_the_bigquery_trades_table() {
+    let ctx = RunContext::new(RunType::Paper, &spec(), 0);
+    let rows = ctx.trade_rows(&[closed_trade()], 1);
+
+    assert_row_matches_schema("trades", &serde_json::to_value(&rows[0]).unwrap());
+}
+
+#[test]
+fn series_rows_match_the_bigquery_run_series_table() {
+    let ctx = RunContext::new(RunType::Paper, &spec(), 0);
+    let points = ctx.equity_points(&[closed_trade()], 1);
+
+    assert_row_matches_schema("run_series", &serde_json::to_value(&points[0]).unwrap());
 }

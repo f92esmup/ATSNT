@@ -19,7 +19,7 @@ use strategies::{MarketType, Strategy};
 
 /// How simulated orders are filled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum FillModel {
+enum FillModelArg {
     /// Bar-level fills through `BacktestEngine`.
     Bar,
     /// Tick-level fills through `TickSimulation`.
@@ -64,8 +64,8 @@ struct Args {
     /// Fill model: "bar" fills at bar granularity (fast, used by the optimizer); "tick" replays
     /// every trade through the live trading session on a simulated venue with order latency and
     /// tape-walk market fills (slow, for validating finalists)
-    #[arg(long, value_enum, default_value_t = FillModel::Bar)]
-    fill_model: FillModel,
+    #[arg(long, value_enum, default_value_t = FillModelArg::Bar)]
+    fill_model: FillModelArg,
 
     /// Milliseconds an order takes to reach the market with `--fill-model tick` (an assumption
     /// until measured against live fills)
@@ -233,11 +233,6 @@ async fn main() -> Result<()> {
         engine_config.funding_rate_pct = rate;
     }
     engine_config.validate()?;
-    if args.fill_model == FillModel::Tick && args.gcp_bigquery {
-        anyhow::bail!(
-            "--gcp-bigquery cannot record tick-level runs yet: the run model does not tag the fill model, so they would be indistinguishable from bar-level runs"
-        );
-    }
     let symbol = art_symbol.unwrap_or_else(|| {
         args.data
             .file_name()
@@ -259,7 +254,7 @@ async fn main() -> Result<()> {
 
     let replay_start = Instant::now();
     let (metrics, closed_trades) = match args.fill_model {
-        FillModel::Bar => {
+        FillModelArg::Bar => {
             let mut engine = BacktestEngine::new(engine_config);
             let mut last_price = Decimal::ZERO;
             while let Some(trade) = stream.next_trade()? {
@@ -288,7 +283,7 @@ async fn main() -> Result<()> {
             let mark = (last_price > Decimal::ZERO).then_some(last_price);
             engine.finish_with_trades(mark)
         }
-        FillModel::Tick => {
+        FillModelArg::Tick => {
             println!(
                 "[*] Fill model: tick-level venue, {} ms order latency, tape-walk market fills",
                 args.latency_ms
@@ -406,7 +401,12 @@ async fn main() -> Result<()> {
         strategy_config: strat_config_val,
         execution_context: engine_config,
     };
-    let run_ctx = RunContext::new(RunType::Backtest, &run_spec, started_at_ms);
+    let run_ctx = RunContext::new(RunType::Backtest, &run_spec, started_at_ms).with_fill_model(
+        match args.fill_model {
+            FillModelArg::Bar => backtest::FillModel::Bar,
+            FillModelArg::Tick => backtest::FillModel::Tick,
+        },
+    );
     let recorder = args
         .gcp_bigquery
         .then(|| BigQuerySink::from_env().with_strict(args.strict_sinks));

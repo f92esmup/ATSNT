@@ -88,6 +88,41 @@ impl RunType {
     }
 }
 
+/// How the orders of a run were filled, recorded with every run so results simulated at
+/// different fidelity are never mixed up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FillModel {
+    /// Bar-level fills (`BacktestEngine`): the optimizer's fast loop.
+    Bar,
+    /// Tick-level fills (`SimulatedVenue`): latency and tape-walk market orders.
+    Tick,
+    /// Fills reported by the real exchange.
+    Exchange,
+}
+
+impl FillModel {
+    /// Stable label used in persisted rows.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Bar => "bar",
+            Self::Tick => "tick",
+            Self::Exchange => "exchange",
+        }
+    }
+}
+
+impl RunType {
+    /// Fill model a run of this type uses unless it says otherwise.
+    pub fn default_fill_model(&self) -> FillModel {
+        match self {
+            Self::Backtest | Self::Hpo | Self::HpoTrial | Self::MonteCarlo => FillModel::Bar,
+            Self::Paper => FillModel::Tick,
+            Self::Live => FillModel::Exchange,
+        }
+    }
+}
+
 /// Globally unique, time-ordered run identifier in UUID v7 text form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
