@@ -8,6 +8,7 @@ Branch: feat/sim-live-fidelity (continues) | Delivery: ask-on-risk | Test runner
 - S3: The engine's per-UTC-day peak logic is `DailyWatermark`, the same type live uses.
 - S4: The analytics data model is final before BigQuery is purged: trades carry `funding_paid`, runs carry the fill model, and tick-level runs can be recorded.
 - S5: The commits that touch the real-money path get the native review (needs the user's consent).
+- S8 (user, 2026-10-17: "Sí, los 8"): the eight unfixed advisories of the native reviews (F1-F8, see L3 and L4) are fixed with tests before Phase 1.
 - S6 (assumption): the unbuilt `Clock` and `MarketData` venue ports are dropped from the roadmap unless the user wants them; no code needs them.
 
 ## Tasks
@@ -19,6 +20,15 @@ Branch: feat/sim-live-fidelity (continues) | Delivery: ask-on-risk | Test runner
 - [x] T6 (S6) — roadmap wording for the dropped ports | structural readback
 
 - [ ] T7 (S7) — pre-trade price band for MARKET entries | withdrawn: the session-side check is inert (see L7); the effective protection is a different design needing the user's decision
+
+- [x] T8 (S8) — F7: `cumQuote` is optional only in the acknowledgement of an order with no execution | inline | RED: gateway parser tests
+- [ ] T9 (S8) — F6: duplicated fills (same trade id) are ignored by the session, so quantity and commission are counted once | inline | RED: `session::tests::*duplicate*`
+- [ ] T10 (S8) — F1: a position recovered by the entry timeout is accounted as a closed trade (`RecoveredUnreportedEntry`, entry price = signal price estimate) | inline | RED: `session::tests::*recovered*`
+- [ ] T11 (S8) — F2: the entry timeout also runs on the clock (`on_idle`), not only when a market trade arrives | inline | RED: `session::tests::*idle*`, `driver::tests::*idle*`
+- [ ] T12 (S8) — F5: live handles trade-time events before the MTM/telemetry block again (`DriverStep` splits trade and bar events) | inline | RED: `driver::tests::*`
+- [ ] T13 (S8) — F3: `EntryTimeoutFailed` Telegram alerts are rate limited | inline | RED: sink unit test
+- [ ] T14 (S8) — F4: paper reports entry timeouts (`PaperTradingEvent::EntryTimedOut`/`EntryTimeoutFailed`) | inline | RED: `paper::tests::*`, telemetry contract
+- [ ] T15 (S8) — F8: bar-engine slippage metric includes the slippage paid on a favorable gap | inline | RED: `engine::tests::*`
 
 ## Log
 - L8 (2026-10-17, decision, user): "Seguir con MARKET (b)": entries stay MARKET orders; the loss during the order's flight is bounded only by the post-fill protection (rejected exits trigger the emergency close) and the daily and monthly breakers. The marketable IOC limit order (a) is deferred and should be revisited before production. The whole-branch candidate was refused a third time by the native review (`lens_context_budget_exceeded`).

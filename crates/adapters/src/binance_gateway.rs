@@ -1637,10 +1637,11 @@ fn parse_futures_order_report(
         })?;
     let original_qty = futures_decimal_field(body, "origQty", "USD-M order response")?;
     let executed_qty = futures_decimal_field(body, "executedQty", "USD-M order response")?;
-    // Order acknowledgements may omit `cumQuote`; a present but malformed value still fails.
+    // Only the acknowledgement of an order that has executed nothing may omit `cumQuote`; a
+    // present but malformed value, or a missing one next to an execution, still fails.
     let cumulative_quote_qty = match body.get("cumQuote") {
-        None | Some(serde_json::Value::Null) => Decimal::ZERO,
-        Some(_) => futures_decimal_field(body, "cumQuote", "USD-M order response")?,
+        None | Some(serde_json::Value::Null) if executed_qty.is_zero() => Decimal::ZERO,
+        _ => futures_decimal_field(body, "cumQuote", "USD-M order response")?,
     };
     let price = futures_decimal_field(body, "price", "USD-M order response")?;
     let timestamp_ms = ["updateTime", "time", "transactTime"]
@@ -3060,6 +3061,24 @@ mod tests {
             .unwrap()
             .iter()
             .any(|request| request.starts_with("POST /fapi/v1/order?")));
+    }
+
+    #[test]
+    fn an_execution_without_a_cumulative_quote_is_not_an_acknowledgement() {
+        // Only an order that has not executed anything may omit `cumQuote`.
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{"orderId":1,"symbol":"BTCUSDT","status":"FILLED","clientOrderId":"x","price":"0.00","origQty":"0.002","executedQty":"0.002","side":"BUY","updateTime":1792178222682}"#,
+        )
+        .unwrap();
+        let expected = FuturesOrderRequest {
+            symbol: "BTCUSDT".to_string(),
+            client_order_id: "x".to_string(),
+            side: Side::Buy,
+            price: Decimal::ZERO,
+            quantity: dec!(0.002),
+        };
+
+        assert!(parse_futures_order_report(&body, &expected).is_err());
     }
 
     #[test]
