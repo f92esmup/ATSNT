@@ -123,6 +123,9 @@ enum Phase {
         fills: Fills,
         /// Market-trade time the entry was sent.
         submitted_ms: i64,
+        /// Market-trade time the cancel was sent after a timeout with part of the entry already
+        /// filled; the terminal report that follows carries the final filled quantity.
+        cancel_sent_ms: Option<i64>,
     },
     Open {
         intent: OrderIntent,
@@ -346,6 +349,7 @@ impl<S: Strategy> TradingSession<S> {
                 intent,
                 mut fills,
                 submitted_ms,
+                cancel_sent_ms,
             } => {
                 fills.add(report);
                 let ended = report.order_filled || report.order_closed;
@@ -362,6 +366,7 @@ impl<S: Strategy> TradingSession<S> {
                         intent,
                         fills,
                         submitted_ms,
+                        cancel_sent_ms,
                     };
                 }
             }
@@ -447,6 +452,7 @@ impl<S: Strategy> TradingSession<S> {
                     intent,
                     fills: Fills::default(),
                     submitted_ms: now_ms,
+                    cancel_sent_ms: None,
                 };
                 self.last_entry_timeout_attempt_ms = None;
                 vec![SessionEvent::EntrySubmitted(ack)]
@@ -455,18 +461,29 @@ impl<S: Strategy> TradingSession<S> {
         }
     }
 
-    /// Resolves an entry that has waited past the timeout without a terminal status: cancel what
-    /// is working, protect whatever filled, and otherwise make sure the venue really is flat
-    /// (a fill report may have been lost). A failure leaves the entry pending for a retry.
+    /// Resolves an entry that has waited past the timeout without a terminal status.
+    ///
+    /// With nothing filled, the working order is cancelled and the venue is checked for a
+    /// position whose fill report was lost, which is closed. With part of the entry filled, only
+    /// the cancel is sent: quantity matched before it is reported afterwards, so the position is
+    /// protected from the terminal report, which carries the final filled quantity. If that
+    /// report never comes, the session flattens and halts rather than guess a size. A failure
+    /// leaves the entry pending for a throttled retry.
     async fn resolve_stale_entry<V: ExecutionVenue>(
         &mut self,
         venue: &V,
         now_ms: i64,
     ) -> Vec<SessionEvent> {
-        let Phase::EntryPending { submitted_ms, .. } = &self.phase else {
+        let Phase::EntryPending {
+            submitted_ms,
+            cancel_sent_ms,
+            ..
+        } = &self.phase
+        else {
             return Vec::new();
         };
-        if now_ms - *submitted_ms < self.config.entry_timeout_ms {
+        let waiting_since = cancel_sent_ms.unwrap_or(*submitted_ms);
+        if now_ms - waiting_since < self.config.entry_timeout_ms {
             return Vec::new();
         }
         let throttled = self
@@ -477,6 +494,28 @@ impl<S: Strategy> TradingSession<S> {
         }
         self.last_entry_timeout_attempt_ms = Some(now_ms);
 
+        if cancel_sent_ms.is_some() {
+            // The cancel went out and the terminal report still has not arrived.
+            return match self.exits.halt(venue).await {
+                ExitEvent::Halted => {
+                    self.phase = Phase::Flat;
+                    vec![
+                        SessionEvent::Exit(ExitEvent::Halted),
+                        SessionEvent::EntryTimedOut {
+                            closed_unreported_position: true,
+                        },
+                    ]
+                }
+                other => vec![
+                    SessionEvent::Exit(other),
+                    SessionEvent::EntryTimeoutFailed(
+                        "the terminal report never arrived and the venue could not be flattened"
+                            .to_string(),
+                    ),
+                ],
+            };
+        }
+
         if let Err(error) = venue.cancel_orders(&self.config.symbol).await {
             return vec![SessionEvent::EntryTimeoutFailed(error.to_string())];
         }
@@ -484,15 +523,19 @@ impl<S: Strategy> TradingSession<S> {
             intent,
             fills,
             submitted_ms,
+            ..
         } = std::mem::replace(&mut self.phase, Phase::Flat)
         else {
             return Vec::new();
         };
         if fills.quantity > Decimal::ZERO {
-            let side = intent.side;
-            return self
-                .open_position_from(venue, intent, &fills, side, now_ms)
-                .await;
+            self.phase = Phase::EntryPending {
+                intent,
+                fills,
+                submitted_ms,
+                cancel_sent_ms: Some(now_ms),
+            };
+            return Vec::new();
         }
         match venue.close_position(&self.config.symbol).await {
             Ok(closed) => vec![SessionEvent::EntryTimedOut {
@@ -503,6 +546,7 @@ impl<S: Strategy> TradingSession<S> {
                     intent,
                     fills,
                     submitted_ms,
+                    cancel_sent_ms: None,
                 };
                 vec![SessionEvent::EntryTimeoutFailed(error.to_string())]
             }
@@ -1462,14 +1506,15 @@ mod tests {
         assert!(!session.is_exposed());
     }
 
-    #[tokio::test]
-    async fn a_partial_fill_is_protected_when_the_rest_of_the_entry_times_out() {
-        let venue = FakeVenue::default();
-        let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+    /// A long entry with 0.4 filled, then the timeout: the cancel has been sent.
+    async fn partially_filled_then_timed_out(
+        venue: &FakeVenue,
+        session: &mut TradingSession<Scripted>,
+    ) -> Vec<SessionEvent> {
+        session.on_bar(venue, &bar(JAN_1 + 10, dec!(100))).await;
         session
             .on_execution(
-                &venue,
+                venue,
                 &fill(
                     Side::Buy,
                     dec!(0.4),
@@ -1480,19 +1525,90 @@ mod tests {
                 ),
             )
             .await;
+        session
+            .on_trade(venue, JAN_1 + 10 + TIMEOUT, dec!(100))
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_partial_fill_waits_for_the_terminal_report_before_it_is_protected() {
+        // Quantity that matched before the cancel is reported afterwards, so the exits must be
+        // sized from the terminal report, not from the fills seen at the timeout.
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent()]);
+
+        let events = partially_filled_then_timed_out(&venue, &mut session).await;
+
+        assert!(events.is_empty());
+        assert_eq!(venue.calls(), vec!["cancel"]);
+        assert!(session.is_exposed());
+        assert!(session.open_position().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_terminal_report_after_the_cancel_protects_everything_that_filled() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent()]);
+        partially_filled_then_timed_out(&venue, &mut session).await;
+
+        // 0.1 more had matched before the cancel; its report arrives last.
+        let events = session
+            .on_execution(
+                &venue,
+                &fill(
+                    Side::Buy,
+                    dec!(0.1),
+                    dec!(100),
+                    true,
+                    JAN_1 + 40_000,
+                    dec!(0.005),
+                ),
+            )
+            .await;
+
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SessionEvent::PositionOpened { quantity, .. } if *quantity == dec!(0.5)
+        )));
+        assert!(venue.calls().contains(&"place Buy 90 110".to_string()));
+        assert_eq!(session.open_position().map(|p| p.2), Some(dec!(0.5)));
+    }
+
+    #[tokio::test]
+    async fn a_cancellation_report_protects_the_quantity_that_had_filled() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent()]);
+        partially_filled_then_timed_out(&venue, &mut session).await;
 
         let events = session
-            .on_trade(&venue, JAN_1 + 10 + TIMEOUT, dec!(100))
+            .on_execution(&venue, &terminated(Side::Buy, JAN_1 + 40_000))
             .await;
 
         assert!(events.iter().any(|e| matches!(
             e,
             SessionEvent::PositionOpened { quantity, .. } if *quantity == dec!(0.4)
         )));
-        let calls = venue.calls();
-        assert_eq!(calls[0], "cancel");
-        assert!(calls.contains(&"place Buy 90 110".to_string()));
-        assert_eq!(session.open_position().map(|p| p.2), Some(dec!(0.4)));
+    }
+
+    #[tokio::test]
+    async fn a_terminal_report_that_never_arrives_flattens_and_halts_the_session() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent()]);
+        partially_filled_then_timed_out(&venue, &mut session).await;
+
+        let events = session
+            .on_trade(&venue, JAN_1 + 10 + 2 * TIMEOUT, dec!(100))
+            .await;
+
+        assert!(events.contains(&SessionEvent::EntryTimedOut {
+            closed_unreported_position: true
+        }));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Exit(ExitEvent::Halted))));
+        assert!(venue.calls().contains(&"close".to_string()));
+        assert!(session.is_halted());
+        assert!(!venue.calls().contains(&"place Buy 90 110".to_string()));
     }
 
     #[tokio::test]
