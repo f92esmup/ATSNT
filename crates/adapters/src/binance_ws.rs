@@ -64,6 +64,16 @@ impl BinanceWsConfig {
         }
     }
 
+    /// Creates a configuration for the Binance USD-M Futures production feed
+    /// (`fstream.binance.com`), the market a production account trades.
+    pub fn futures_production(symbol: impl Into<String>) -> Self {
+        Self {
+            base_url: "wss://fstream.binance.com/ws/{symbol}@aggTrade".to_string(),
+            symbol: symbol.into().to_ascii_lowercase(),
+            ..Self::default()
+        }
+    }
+
     /// Creates a configuration for Binance Spot (`stream.binance.com:9443`).
     pub fn spot(symbol: impl Into<String>) -> Self {
         Self {
@@ -500,5 +510,19 @@ mod tests {
             ..Default::default()
         };
         assert!(BinanceWebSocketStream::connect(invalid_ping_config).is_err());
+    }
+
+    #[test]
+    fn the_production_futures_feed_is_not_the_testnet_one() {
+        let production = BinanceWsConfig::futures_production("BTCUSDT");
+
+        assert_eq!(
+            production.stream_url(),
+            "wss://fstream.binance.com/ws/btcusdt@aggTrade"
+        );
+        assert_ne!(
+            production.stream_url(),
+            BinanceWsConfig::futures("btcusdt").stream_url()
+        );
     }
 }

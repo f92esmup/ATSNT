@@ -261,7 +261,7 @@ cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --dollar-ba
 # Run with an optimized HPO configuration file
 cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --config configs/hpo_results.json
 ```
-- Evaluates symmetric CUSUM filter and rolling Z-Score signals in real time upon bar completion.
+- Evaluates symmetric CUSUM filter and rolling Z-Score signals in real time upon bar completion. `--warmup-minutes N` first feeds the strategy N minutes of recent trades (public REST `aggTrades`, futures only) so its rolling windows are warm instead of cold, as in a backtest. USD-M futures paper trading follows the production market feed.
 - Runs the same `TradingSession` as live trading on a tick-level simulated venue: orders reach the market after `--latency-ms` (default 100, an assumption until measured), market orders walk the tape of real trades and pay the taker fee, and stop-loss/take-profit are conditional market orders armed by the tape.
 - Computes real-time *mark-to-market* unrealized PnL and drawdown tracking.
 - Implements Triple Barrier exits (Stop Loss, Take Profit, Time Barrier).

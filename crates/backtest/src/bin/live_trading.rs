@@ -87,6 +87,12 @@ struct Args {
     #[arg(long, default_value_t = false)]
     show_ticks: bool,
 
+    /// Warm the strategy's rolling windows with this many minutes of recent trades (public REST
+    /// `aggTrades` of the same market the stream follows) before trading starts. Without it the
+    /// strategy starts cold, unlike a backtest, and needs its full window of live bars first.
+    #[arg(long)]
+    warmup_minutes: Option<u32>,
+
     /// Verify the Binance account against the strategy profile, print the report and exit
     /// without changing anything.
     #[arg(long, default_value_t = false)]
@@ -419,7 +425,12 @@ async fn main() -> Result<()> {
         "[*] Subscribing to public market trade feed: wss://fstream.binancefuture.com/ws/{}@aggTrade",
         args.symbol.to_ascii_lowercase()
     );
-    let ws_config = BinanceWsConfig::futures(&args.symbol);
+    // The public feed must be the market the account trades: testnet and production differ.
+    let ws_config = if is_testnet {
+        BinanceWsConfig::futures(&args.symbol)
+    } else {
+        BinanceWsConfig::futures_production(&args.symbol)
+    };
     let ws_source = ws_config.stream_url();
     let mut market_stream = BinanceWebSocketStream::connect(ws_config)
         .with_context(|| "Failed to connect to public Binance WebSocket feed")?;
@@ -470,6 +481,18 @@ async fn main() -> Result<()> {
         },
         strategy,
     );
+    if let Some(minutes) = args.warmup_minutes {
+        let now_ms = now_unix_ms();
+        let from_ms = now_ms - i64::from(minutes) * 60_000;
+        println!("[*] Warming the strategy up with {minutes} minutes of recent trades...");
+        let history = adapters::BinanceRecentTrades::futures(is_testnet)
+            .fetch(&symbol_upper, from_ms, now_ms)
+            .await
+            .with_context(|| "Failed to fetch the warm-up trades")?;
+        let trade_count = history.len();
+        let bars = session.warm_up_trades(effective_dollar_bar, history)?;
+        println!("[*] Warm-up: {trade_count} trades formed {bars} dollar bars");
+    }
     let sink = EventSink {
         telegram: &telegram,
         bq: &bq_sink,

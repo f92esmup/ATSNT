@@ -55,6 +55,11 @@ struct Args {
     #[arg(long, default_value = "0.01")]
     risk_pct: Decimal,
 
+    /// Warm the strategy's rolling windows with this many minutes of recent trades (public REST
+    /// `aggTrades`, USD-M futures only) before the session starts
+    #[arg(long)]
+    warmup_minutes: Option<u32>,
+
     /// Milliseconds an order takes to reach the simulated market (an assumption until measured
     /// against live fills)
     #[arg(long, default_value_t = 100)]
@@ -271,11 +276,28 @@ async fn main() -> Result<()> {
     let mut session = PaperTradingSession::new(paper_config)
         .map_err(|e| anyhow::anyhow!("Failed to initialize paper trading session: {e}"))?;
 
+    if let Some(minutes) = args.warmup_minutes {
+        if args.spot {
+            anyhow::bail!("--warmup-minutes supports USD-M futures only, not --spot");
+        }
+        let now_ms = now_unix_ms();
+        println!("[*] Warming the strategy up with {minutes} minutes of recent trades...");
+        let history = adapters::BinanceRecentTrades::futures(false)
+            .fetch(&args.symbol, now_ms - i64::from(minutes) * 60_000, now_ms)
+            .await
+            .with_context(|| "Failed to fetch the warm-up trades")?;
+        let trade_count = history.len();
+        let bars = session
+            .warm_up_trades(history)
+            .map_err(|e| anyhow::anyhow!("Warm-up failed: {e}"))?;
+        println!("[*] Warm-up: {trade_count} trades formed {bars} dollar bars");
+    }
+
     // 3. Connect to Binance WebSocket Feed
     let ws_config = if args.spot {
         BinanceWsConfig::spot(&args.symbol)
     } else {
-        BinanceWsConfig::futures(&args.symbol)
+        BinanceWsConfig::futures_production(&args.symbol)
     };
 
     let ws_source = ws_config.stream_url();

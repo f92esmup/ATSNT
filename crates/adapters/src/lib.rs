@@ -6,6 +6,7 @@ pub mod binance_funding;
 pub mod binance_gateway;
 pub mod binance_parquet;
 pub mod binance_private_stream;
+pub mod binance_recent_trades;
 pub mod binance_user_stream;
 pub mod binance_ws;
 pub mod error;
@@ -32,6 +33,7 @@ pub use binance_private_stream::{
     FuturesAccountUpdate, FuturesBalance, FuturesOrderTradeUpdate, FuturesPosition,
     ListenKeyRenewer, SpotAccountPosition, SpotBalance, SpotBalanceDelta,
 };
+pub use binance_recent_trades::BinanceRecentTrades;
 pub use binance_user_stream::{BinanceUserDataStream, ExecutionUpdate};
 pub use binance_ws::{BinanceAggTradePayload, BinanceWebSocketStream, BinanceWsConfig};
 pub use error::AdapterError;
