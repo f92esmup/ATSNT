@@ -24,6 +24,7 @@ EXECUTION_CONTEXT=""
 CAPITAL=""
 YEAR="$(date +%Y)"
 MONTH=""
+HOLDOUT_FROM=""
 DOLLAR_BAR="1000000"
 FOLDS="5"
 TRAIN_RATIO="0.70"
@@ -58,6 +59,10 @@ Options:
   -m, --month <MM>           Optional single month (1-12): fetches it and runs HPO/backtest on that
                              month's Parquet file only (the current month is only published as
                              daily archives, so pick a completed month or omit --month)
+      --holdout-from-month <MM>
+                             Hold out month MM (2-12) and later from the HPO: the search reads only
+                             the earlier months of --year, the backtest only the held-out ones
+                             (daily archives of the current month included). Not with --month
   -b, --dollar-bar <AMOUNT>  Dollar bar threshold in USD (default: ${DOLLAR_BAR})
   -f, --folds <N>            Walk-Forward validation folds (default: ${FOLDS})
   -r, --train-ratio <FLOAT>  In-Sample train ratio (default: ${TRAIN_RATIO})
@@ -106,6 +111,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -k|--capital)
             CAPITAL="$2"
+            shift 2
+            ;;
+        --holdout-from-month)
+            HOLDOUT_FROM="$2"
             shift 2
             ;;
         -y|--year)
@@ -226,6 +235,19 @@ if [ -n "${MONTH}" ]; then
     MONTH_PADDED="$(printf "%02d" "$((10#${MONTH}))")"
 fi
 
+HOLDOUT_PADDED=""
+if [ -n "${HOLDOUT_FROM}" ]; then
+    if [ -n "${MONTH}" ]; then
+        echo "[ERROR] --holdout-from-month cannot be combined with --month (it splits the whole --year)"
+        exit 1
+    fi
+    if ! [[ "${HOLDOUT_FROM}" =~ ^[0-9]{1,2}$ ]] || [ $((10#${HOLDOUT_FROM})) -lt 2 ] || [ $((10#${HOLDOUT_FROM})) -gt 12 ]; then
+        echo "[ERROR] --holdout-from-month must be between 2 and 12 (got '${HOLDOUT_FROM}')"
+        exit 1
+    fi
+    HOLDOUT_PADDED="$(printf "%02d" "$((10#${HOLDOUT_FROM}))")"
+fi
+
 # The execution context only feeds the HPO stage; with --skip-hpo it would be ignored silently.
 if [ "${SKIP_HPO}" = "true" ] && [ -n "${EXECUTION_CONTEXT}" ]; then
     echo "[ERROR] --execution-context has no effect with --skip-hpo (the backtest adopts the context of the existing --config artifact)"
@@ -254,6 +276,15 @@ TARGET_DATA="${DATA_PATH}"
 if [ -n "${MONTH_PADDED}" ]; then
     TARGET_DATA="${DATA_PATH}/${SYMBOL}-aggTrades-${YEAR}-${MONTH_PADDED}.parquet"
 fi
+# With --holdout-from-month the stages read two directories of symlinks instead.
+HPO_DATA="${TARGET_DATA}"
+BACKTEST_DATA="${TARGET_DATA}"
+SPLIT_ROOT=""
+if [ -n "${HOLDOUT_PADDED}" ]; then
+    SPLIT_ROOT="${OUTPUT_DIR}/splits/${SYMBOL}-holdout-${HOLDOUT_PADDED}"
+    HPO_DATA="${SPLIT_ROOT}/train"
+    BACKTEST_DATA="${SPLIT_ROOT}/holdout"
+fi
 
 if [ -n "${BIN_DIR}" ]; then
     BIN_PATH="${BIN_DIR%/}"
@@ -276,6 +307,7 @@ FORWARD_ARGS=(
     --strategy "${STRATEGY}"
 )
 [ -n "${MONTH}" ] && FORWARD_ARGS+=(--month "${MONTH}")
+[ -n "${HOLDOUT_FROM}" ] && FORWARD_ARGS+=(--holdout-from-month "${HOLDOUT_FROM}")
 [ -n "${PARAM_SPACE}" ] && FORWARD_ARGS+=(--param-space "${PARAM_SPACE}")
 [ -n "${EXECUTION_CONTEXT}" ] && FORWARD_ARGS+=(--execution-context "${EXECUTION_CONTEXT}")
 [ -n "${CAPITAL}" ] && FORWARD_ARGS+=(--capital "${CAPITAL}")
@@ -366,6 +398,42 @@ run_stage() {
 
 # Fails fast when --month points at a monthly file that does not exist, instead of
 # silently reading other months.
+# Splits the year's files by month into train/ and holdout/ symlink directories. In dry-run it
+# only reports the split. Both sides must hold data, otherwise the run would be meaningless.
+prepare_holdout_split() {
+    [ -n "${HOLDOUT_PADDED}" ] || return 0
+    local train=() holdout=() file name month
+    for file in "${DATA_PATH}/${SYMBOL}-aggTrades-${YEAR}-"*.parquet; do
+        [ -e "${file}" ] || continue
+        name="$(basename "${file}")"
+        if [[ "${name}" =~ ^${SYMBOL}-aggTrades-${YEAR}-([0-9]{2})(-[0-9]{2})?\.parquet$ ]]; then
+            month="${BASH_REMATCH[1]}"
+            if [ $((10#${month})) -lt $((10#${HOLDOUT_PADDED})) ]; then
+                train+=("${file}")
+            else
+                holdout+=("${file}")
+            fi
+        fi
+    done
+    if [ "${#train[@]}" -eq 0 ]; then
+        echo "[ERROR] --holdout-from-month ${HOLDOUT_PADDED}: no training data before month ${HOLDOUT_PADDED} in ${DATA_PATH}"
+        exit 1
+    fi
+    if [ "${#holdout[@]}" -eq 0 ]; then
+        echo "[ERROR] --holdout-from-month ${HOLDOUT_PADDED}: no held-out data from month ${HOLDOUT_PADDED} in ${DATA_PATH}"
+        exit 1
+    fi
+    echo "[*] Holdout split: ${#train[@]} training file(s) (months 01-$(printf "%02d" $((10#${HOLDOUT_PADDED} - 1)))), ${#holdout[@]} held-out file(s) (months ${HOLDOUT_PADDED}-12)"
+    if [ "${DRY_RUN}" = "true" ]; then
+        echo "[DRY-RUN] would link them into ${SPLIT_ROOT}/{train,holdout}"
+        return 0
+    fi
+    rm -rf "${SPLIT_ROOT}"
+    mkdir -p "${SPLIT_ROOT}/train" "${SPLIT_ROOT}/holdout"
+    for file in "${train[@]}"; do ln -s "$(cd "$(dirname "${file}")" && pwd)/$(basename "${file}")" "${SPLIT_ROOT}/train/"; done
+    for file in "${holdout[@]}"; do ln -s "$(cd "$(dirname "${file}")" && pwd)/$(basename "${file}")" "${SPLIT_ROOT}/holdout/"; done
+}
+
 require_target_data() {
     if [ -n "${MONTH_PADDED}" ] && [ ! -f "${TARGET_DATA}" ]; then
         echo "[ERROR] Monthly data file ${TARGET_DATA} not found."
@@ -417,6 +485,7 @@ fi
 # (in dry-run it can only be checked when fetch was skipped).
 if [ "${DRY_RUN}" = "false" ] || [ "${SKIP_FETCH}" = "true" ]; then
     require_target_data
+    prepare_holdout_split
 fi
 
 # Step 2: Parallel Walk-Forward HPO
@@ -431,7 +500,7 @@ else
     HPO_ARGS=(
         "--strategy" "${STRATEGY}"
         "--symbol" "${SYMBOL}"
-        "--data" "${TARGET_DATA}"
+        "--data" "${HPO_DATA}"
         "--dollar-bar" "${DOLLAR_BAR}"
         "--folds" "${FOLDS}"
         "--train-ratio" "${TRAIN_RATIO}"
@@ -466,7 +535,7 @@ fi
 # Step 3: Backtest + Discrete Event Monte Carlo Stress-Test
 echo -e "\n[3/3] Running 1:1 Backtest & Monte Carlo Stress-Testing..."
 BACKTEST_ARGS=(
-    "--data" "${TARGET_DATA}"
+    "--data" "${BACKTEST_DATA}"
     "--dollar-bar" "${DOLLAR_BAR}"
     "--config" "${CONFIG_PATH}"
     "--strategy" "${STRATEGY}"

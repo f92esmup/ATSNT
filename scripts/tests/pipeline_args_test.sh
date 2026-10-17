@@ -116,6 +116,23 @@ run --skip-fetch --execution-context configs/execution_real_500eur.json --candid
 check "execution-context: passed to run_hpo" '[[ "$(line_with "/run_hpo ")" == *"--execution-context configs/execution_real_500eur.json"* ]]'
 check "execution-context: the backtest adopts it from the artifact" '[[ "$(line_with "backtest --data")" != *"--execution-context"* ]]'
 
+# --holdout-from-month: HPO on the earlier months, backtest on the held-out ones.
+touch "${DATA_ROOT}/BTCUSDT/BTCUSDT-aggTrades-2026-02-15.parquet"
+SPLIT="${DATA_ROOT}/splits/BTCUSDT-holdout-02"
+run --skip-fetch --holdout-from-month 2
+check "holdout: exit 0" '[ "${STATUS}" -eq 0 ]'
+check "holdout: run_hpo reads only the training months" '[[ "$(line_with "/run_hpo ")" == *"--data ${SPLIT}/train "* ]]'
+check "holdout: backtest reads only the held-out months" '[[ "$(line_with "backtest --data")" == *"--data ${SPLIT}/holdout "* ]]'
+check "holdout: split counts monthly and daily files" 'has "1 training file(s) (months 01-01), 2 held-out file(s) (months 02-12)"'
+check "holdout: dry-run creates nothing" '[ ! -e "${DATA_ROOT}/splits" ]'
+run --skip-fetch --holdout-from-month 1
+check "holdout: month 1 is refused" '[ "${STATUS}" -ne 0 ] && has "--holdout-from-month must be between 2 and 12"'
+run --skip-fetch --holdout-from-month 2 --month 1
+check "holdout: refused together with --month" '[ "${STATUS}" -ne 0 ] && has "--holdout-from-month cannot be combined with --month"'
+run --skip-fetch --holdout-from-month 9
+check "holdout: an empty held-out set is refused" '[ "${STATUS}" -ne 0 ] && has "no held-out data"'
+rm -f "${DATA_ROOT}/BTCUSDT/BTCUSDT-aggTrades-2026-02-15.parquet"
+
 run --skip-fetch --skip-hpo --config "${WORK_DIR}/missing.json"
 check "skip-hpo: missing config still fails" '[ "${STATUS}" -ne 0 ] && has "not found"'
 touch "${WORK_DIR}/winner.json"
