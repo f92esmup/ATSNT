@@ -136,6 +136,17 @@ impl<S: Strategy> TickSimulation<S> {
         TickStep { bar, events }
     }
 
+    /// Warms the strategy up on historical trades before the replay starts; nothing trades and
+    /// the replay's own bar sampling starts fresh. Returns the bars the strategy saw.
+    pub fn warm_up_trades(
+        &mut self,
+        trades: impl IntoIterator<Item = Trade>,
+    ) -> Result<usize, TickSimulationError> {
+        Ok(self
+            .session
+            .warm_up_trades(self.config.dollar_bar_threshold, trades)?)
+    }
+
     /// Trades closed so far, oldest first.
     pub fn closed_trades(&self) -> &[ClosedTrade] {
         self.session.closed_trades()
@@ -359,6 +370,21 @@ mod tests {
         let (_, trades) = simulation.finish();
         let net: Decimal = trades.iter().map(|trade| trade.pnl_net).sum();
         assert_eq!(wallet, dec!(1000) + net);
+    }
+
+    #[tokio::test]
+    async fn warming_up_shows_the_strategy_bars_without_trading_or_counting_them() {
+        // The scripted signal is consumed by the warm-up bar, so the replay never trades.
+        let mut simulation = simulation(vec![long_signal()]);
+        // One $2000 print completes exactly one bar at the $2000 threshold.
+        let history = vec![print(0, dec!(100), dec!(20), Side::Sell)];
+
+        let bars = simulation.warm_up_trades(history).unwrap();
+        replay(&mut simulation, &entry_ticks()).await;
+
+        assert_eq!(bars, 1);
+        assert_eq!(simulation.bars_processed(), 1);
+        assert!(simulation.open_position().is_none());
     }
 
     #[tokio::test]

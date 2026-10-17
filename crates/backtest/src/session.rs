@@ -6,7 +6,7 @@
 //! no I/O of its own: everything the caller may want to log, alert or persist comes back as
 //! [`SessionEvent`]s.
 
-use domain::{DollarBar, OrderIntent, PositionSide, Side};
+use domain::{DollarBar, DollarBarAggregator, DomainError, OrderIntent, PositionSide, Side, Trade};
 use ports::{EntryAck, ExecutionReport, ExecutionVenue};
 use rust_decimal::Decimal;
 use strategies::Strategy;
@@ -177,6 +177,31 @@ impl<S: Strategy> TradingSession<S> {
     /// While exposed the account profile must not be modified.
     pub fn is_exposed(&self) -> bool {
         !matches!(self.phase, Phase::Flat) || !self.exits.can_open()
+    }
+
+    /// Feeds one historical dollar bar to the strategy so its rolling windows are as warm as in
+    /// a backtest. Nothing trades: a signal raised on history is discarded.
+    pub fn warm_up(&mut self, bar: &DollarBar) {
+        let _ = self.strategy.on_bar(bar);
+    }
+
+    /// Warms the strategy up from historical trades, aggregated with a dedicated aggregator of
+    /// the live `threshold` so the live stream starts on a fresh bar. Returns how many bars the
+    /// strategy saw; the trailing partial bar is dropped.
+    pub fn warm_up_trades(
+        &mut self,
+        threshold: Decimal,
+        trades: impl IntoIterator<Item = Trade>,
+    ) -> Result<usize, DomainError> {
+        let mut aggregator = DollarBarAggregator::new(threshold)?;
+        let mut bars = 0;
+        for trade in trades {
+            if let Some(bar) = aggregator.process_trade(&trade) {
+                self.warm_up(&bar);
+                bars += 1;
+            }
+        }
+        Ok(bars)
     }
 
     /// Records the latest wallet balance reported by the venue.
@@ -1247,5 +1272,39 @@ mod tests {
         let trade = closed_trade(&events);
         assert_eq!(trade.exit_reason, "Liquidation");
         assert_eq!(trade.exit_price, dec!(80));
+    }
+
+    #[tokio::test]
+    async fn warming_up_feeds_the_strategy_without_trading() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent()]);
+
+        // The scripted strategy would signal on the first bar it sees.
+        session.warm_up(&bar(JAN_1 + 10, dec!(100)));
+        let events = session.on_bar(&venue, &bar(JAN_1 + 20, dec!(100))).await;
+
+        assert!(venue.entries.borrow().is_empty());
+        assert!(!events.iter().any(|e| matches!(e, SessionEvent::Signal(_))));
+        assert!(!session.is_exposed());
+    }
+
+    #[test]
+    fn warming_up_from_trades_forms_bars_and_drops_the_partial_one() {
+        let mut session = session(Vec::new());
+        let trades: Vec<Trade> = (0..5)
+            .map(|i| Trade::new(JAN_1 + i, dec!(100), dec!(1), Side::Buy).unwrap())
+            .collect();
+
+        // $100 trades with a $200 threshold: two bars, and one trade left over.
+        let bars = session.warm_up_trades(dec!(200), trades).unwrap();
+
+        assert_eq!(bars, 2);
+    }
+
+    #[test]
+    fn warming_up_rejects_an_invalid_threshold() {
+        let mut session = session(Vec::new());
+
+        assert!(session.warm_up_trades(Decimal::ZERO, Vec::new()).is_err());
     }
 }

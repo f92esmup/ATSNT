@@ -328,6 +328,17 @@ impl PaperTradingSession {
         events
     }
 
+    /// Warms the strategy up on recent historical trades before the live feed starts. Nothing
+    /// trades and no event is emitted. Returns how many dollar bars the strategy saw.
+    pub fn warm_up_trades(
+        &mut self,
+        trades: impl IntoIterator<Item = Trade>,
+    ) -> Result<usize, BacktestError> {
+        self.simulation
+            .warm_up_trades(trades)
+            .map_err(|error| BacktestError::General(error.to_string()))
+    }
+
     /// Translates a session event into its paper telemetry counterpart, if it has one.
     fn map_event(&mut self, event: SessionEvent) -> Option<PaperTradingEvent> {
         match event {
