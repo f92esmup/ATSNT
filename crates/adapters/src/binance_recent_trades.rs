@@ -86,14 +86,17 @@ impl BinanceRecentTrades {
         &self.base_url
     }
 
-    /// One page, retried with a growing pause on transport errors, HTTP 429 and 5xx; any other
-    /// HTTP error is final.
+    /// One page, retried with a growing pause on transport errors and 5xx. Any other HTTP
+    /// error is final, rate limits (429, 418) included: retrying inside a rate-limit window only
+    /// adds requests and can turn it into an IP ban that would hit order traffic too.
     async fn get_page(&self, url: &str) -> Result<Vec<AggTradeRecord>, AdapterError> {
         let mut attempt = 1;
         loop {
             let outcome = async {
                 self.client
                     .get(url)
+                    // Set per request too, so the bound survives a client built without it.
+                    .timeout(REQUEST_TIMEOUT)
                     .send()
                     .await?
                     .error_for_status()?
@@ -108,9 +111,9 @@ impl BinanceRecentTrades {
                         || error.is_connect()
                         || error.is_request()
                         || error.is_body()
-                        || error.status().is_some_and(|status| {
-                            status.as_u16() == 429 || status.is_server_error()
-                        });
+                        || error
+                            .status()
+                            .is_some_and(|status| status.is_server_error());
                     if !transient || attempt >= MAX_ATTEMPTS {
                         return Err(error.into());
                     }
@@ -333,22 +336,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rate_limited_or_failing_page_is_retried() {
+    async fn a_failing_server_is_retried_but_a_rate_limit_is_not() {
         let page = format!("[{}]", record(1, 1_000, "100", false));
         let (url, requests, handle) = spawn_server_with_status(vec![
-            (429, "{}".to_string()),
             (503, "{}".to_string()),
+            (502, "{}".to_string()),
             (200, page),
         ]);
-
         let trades = BinanceRecentTrades::with_base_url(url)
             .fetch("BTCUSDT", 1_000, 2_000)
             .await
             .unwrap();
         handle.join().unwrap();
-
         assert_eq!(trades.len(), 1);
         assert_eq!(requests.lock().unwrap().len(), 3);
+
+        // A 429 inside a rate-limit window is final: one request, no hammering.
+        let (url, requests, handle) = spawn_server_with_status(vec![(429, "{}".to_string())]);
+        let result = BinanceRecentTrades::with_base_url(url)
+            .fetch("BTCUSDT", 1_000, 2_000)
+            .await;
+        handle.join().unwrap();
+        assert!(result.is_err());
+        assert_eq!(requests.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

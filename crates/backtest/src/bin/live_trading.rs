@@ -869,10 +869,13 @@ impl EventSink<'_> {
                         ack.order_id, ack.status, ack.price, ack.quantity
                     );
                 }
-                SessionEvent::EntryCancelled => println!(
-                    "[ORDER] {}: the entry order ended without any fill; no position was opened.",
-                    self.symbol
-                ),
+                SessionEvent::EntryCancelled => {
+                    self.timeout_alerts.reset();
+                    println!(
+                        "[ORDER] {}: the entry order ended without any fill; no position was opened.",
+                        self.symbol
+                    );
+                }
                 SessionEvent::EntryTimedOut {
                     closed_unreported_position,
                 } => {
@@ -926,6 +929,7 @@ impl EventSink<'_> {
                     take_profit,
                     protection,
                 } => {
+                    self.timeout_alerts.reset();
                     if let Some(recorder) = &self.fill_recorder {
                         if let Err(error) = recorder.on_entry_filled(side, quantity, price, time_ms)
                         {
