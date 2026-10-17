@@ -23,7 +23,7 @@ Branch: feat/sim-live-fidelity (continues) | Delivery: ask-on-risk | Test runner
 
 - [x] T8 (S8) — F7: `cumQuote` is optional only in the acknowledgement of an order with no execution | inline | RED: gateway parser tests
 - [x] T9 (S8) — F6: duplicated fills (same trade id) are ignored by the session, so quantity and commission are counted once | inline | RED: `session::tests::*duplicate*`
-- [ ] T10 (S8) — F1: a position recovered by the entry timeout is accounted as a closed trade (`RecoveredUnreportedEntry`, entry price = signal price estimate) | inline | RED: `session::tests::*recovered*`
+- [x] T10 (S8) — F1: a position recovered by the entry timeout is accounted as a closed trade (`RecoveredUnreportedEntry`, entry price = signal price estimate) | inline | RED: `session::tests::*recovered*`
 - [ ] T11 (S8) — F2: the entry timeout also runs on the clock (`on_idle`), not only when a market trade arrives | inline | RED: `session::tests::*idle*`, `driver::tests::*idle*`
 - [ ] T12 (S8) — F5: live handles trade-time events before the MTM/telemetry block again (`DriverStep` splits trade and bar events) | inline | RED: `driver::tests::*`
 - [ ] T13 (S8) — F3: `EntryTimeoutFailed` Telegram alerts are rate limited | inline | RED: sink unit test

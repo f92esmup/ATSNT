@@ -158,6 +158,16 @@ pub struct TradingSession<S: Strategy> {
     last_entry_timeout_attempt_ms: Option<i64>,
     /// Trade ids of the latest fills, to ignore a report the venue repeats.
     seen_trade_ids: VecDeque<i64>,
+    /// A position the entry timeout had to close because its fill report was lost.
+    recovery: Option<Recovery>,
+}
+
+/// What is known about a position recovered by the entry timeout: the signal that opened it
+/// and the fills of the order that closed it.
+struct Recovery {
+    intent: OrderIntent,
+    submitted_ms: i64,
+    fills: Fills,
 }
 
 impl<S: Strategy> TradingSession<S> {
@@ -180,6 +190,7 @@ impl<S: Strategy> TradingSession<S> {
             funding: Decimal::ZERO,
             last_entry_timeout_attempt_ms: None,
             seen_trade_ids: VecDeque::new(),
+            recovery: None,
         }
     }
 
@@ -347,6 +358,35 @@ impl<S: Strategy> TradingSession<S> {
 
         match std::mem::replace(&mut self.phase, Phase::Flat) {
             Phase::Flat => {
+                // The closing fills of a position the entry timeout recovered are booked as a
+                // trade, with the signal price standing in for the entry that was never seen.
+                let recovered = match &mut self.recovery {
+                    Some(recovery) if report.last_quantity > Decimal::ZERO => {
+                        recovery.fills.add(report);
+                        report.order_filled.then(|| {
+                            (
+                                recovery.intent.clone(),
+                                recovery.submitted_ms,
+                                recovery.fills.clone(),
+                            )
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some((intent, submitted_ms, fills)) = recovered {
+                    self.recovery = None;
+                    self.exit_hint = Some("RecoveredUnreportedEntry");
+                    let closed = ClosedPosition {
+                        side: intent.side,
+                        entry_price: intent.price,
+                        quantity: fills.quantity,
+                        entry_time_ms: submitted_ms,
+                        exit_price: fills.average_price(),
+                        exit_time_ms: report.time_ms,
+                        intent,
+                    };
+                    events.extend(self.close_position_from(venue, closed).await);
+                }
                 // A fill nobody asked for cannot be protected: flatten and stop.
                 if report.last_quantity > Decimal::ZERO || report.order_filled {
                     let event = self.exits.halt(venue).await;
@@ -566,9 +606,19 @@ impl<S: Strategy> TradingSession<S> {
             return Vec::new();
         }
         match venue.close_position(&self.config.symbol).await {
-            Ok(closed) => vec![SessionEvent::EntryTimedOut {
-                closed_unreported_position: closed,
-            }],
+            Ok(closed) => {
+                if closed {
+                    // Its closing fill is accounted when the report arrives.
+                    self.recovery = Some(Recovery {
+                        intent,
+                        submitted_ms,
+                        fills: Fills::default(),
+                    });
+                }
+                vec![SessionEvent::EntryTimedOut {
+                    closed_unreported_position: closed,
+                }]
+            }
             Err(error) => {
                 self.phase = Phase::EntryPending {
                     intent,
@@ -1794,5 +1844,69 @@ mod tests {
             e,
             SessionEvent::PositionOpened { quantity, .. } if *quantity == dec!(1.0)
         )));
+    }
+
+    #[tokio::test]
+    async fn a_position_recovered_by_the_timeout_is_accounted_as_a_closed_trade() {
+        // The entry fill report was lost; the timeout closed the position it found.
+        let venue = FakeVenue::default();
+        *venue.position_left.borrow_mut() = true;
+        let mut session = session(vec![long_intent()]);
+        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade(&venue, JAN_1 + 10 + TIMEOUT, dec!(100))
+            .await;
+
+        // The recovery close fills at 101 and its report arrives while the session is flat.
+        let events = session
+            .on_execution(
+                &venue,
+                &fill(
+                    Side::Sell,
+                    dec!(1),
+                    dec!(101),
+                    true,
+                    JAN_1 + 40_000,
+                    dec!(0.05),
+                ),
+            )
+            .await;
+
+        let trade = closed_trade(&events);
+        assert_eq!(trade.exit_reason, "RecoveredUnreportedEntry");
+        // The entry fill was never seen: the signal price stands in for it.
+        assert_eq!(trade.entry_price, dec!(100));
+        assert_eq!(trade.exit_price, dec!(101));
+        assert_eq!(trade.quantity, dec!(1));
+        assert_eq!(trade.fees_paid, dec!(0.05));
+        assert_eq!(session.closed_trades().len(), 1);
+        // The anomaly still stops the bot for inspection.
+        assert!(session.is_halted());
+    }
+
+    #[tokio::test]
+    async fn a_fill_with_nothing_to_recover_is_not_booked_as_a_trade() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent()]);
+
+        let events = session
+            .on_execution(
+                &venue,
+                &fill(
+                    Side::Sell,
+                    dec!(1),
+                    dec!(101),
+                    true,
+                    JAN_1 + 40_000,
+                    dec!(0.05),
+                ),
+            )
+            .await;
+
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::PositionClosed(_))));
+        assert!(session.closed_trades().is_empty());
+        assert!(session.is_halted());
     }
 }
