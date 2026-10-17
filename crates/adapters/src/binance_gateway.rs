@@ -2246,9 +2246,16 @@ fn parse_futures_preflight_snapshot(
     // unusable when a position or orders already run on the exchange's current leverage.
     let leverage_unusable = current_leverage == 0 && (has_position || !orders.is_empty());
     if leverage_unusable || maximum_notional <= Decimal::ZERO {
-        return Err(GatewayError::FuturesPreflight(format!(
-            "symbol configuration contains invalid leverage or notional bounds (leverage {current_leverage}, maxNotionalValue {maximum_notional})"
-        )));
+        tracing::warn!(
+            current_leverage,
+            maximum_notional = %maximum_notional,
+            has_position,
+            has_open_orders = !orders.is_empty(),
+            "symbol configuration refused: invalid leverage or notional bounds"
+        );
+        return Err(GatewayError::FuturesPreflight(
+            "symbol configuration contains invalid leverage or notional bounds".to_string(),
+        ));
     }
     if required_futures_bool_or_string(symbol_config, "isAutoAddMargin", "symbol config")? {
         return Err(GatewayError::FuturesPreflight(
@@ -2322,11 +2329,18 @@ fn validate_futures_snapshot_age(
 
 fn validate_futures_mark_timestamp(mark_time_ms: u64, now_ms: u64) -> Result<(), GatewayError> {
     if mark_time_ms > now_ms || now_ms - mark_time_ms > 2_000 {
-        // Positive: how old the mark price is; negative: how far ahead of the local clock.
+        // Positive: how old the mark price is; negative: how far ahead of the local clock. The
+        // refusal text stays as it always was; the numbers go to the log for diagnosis.
         let age_ms = i128::from(now_ms) - i128::from(mark_time_ms);
-        return Err(GatewayError::FuturesPreflight(format!(
-            "mark-price exchange timestamp is stale or in the future (age {age_ms} ms when received, limit 2000 ms)"
-        )));
+        tracing::warn!(
+            mark_time_ms,
+            received_ms = now_ms,
+            age_ms = %age_ms,
+            "mark price refused: stale or in the future (limit 2000 ms when received)"
+        );
+        return Err(GatewayError::FuturesPreflight(
+            "mark-price exchange timestamp is stale or in the future".to_string(),
+        ));
     }
     Ok(())
 }
