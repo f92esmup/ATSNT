@@ -2330,15 +2330,18 @@ fn minimum_sufficient_leverage(
             "no positive USDT balance or supported leverage is available".to_string(),
         ));
     }
-    for leverage in 1..=maximum_leverage {
-        let initial_margin = notional / Decimal::from(leverage);
-        if initial_margin.max(maintenance_margin) + commission <= available_balance {
-            return Ok(leverage);
-        }
-    }
-    Err(GatewayError::FuturesPreflight(
-        "available USDT balance cannot cover exposure at any supported leverage".to_string(),
-    ))
+    domain::futures::minimum_leverage(
+        notional,
+        maintenance_margin,
+        commission,
+        available_balance,
+        maximum_leverage,
+    )
+    .ok_or_else(|| {
+        GatewayError::FuturesPreflight(
+            "available USDT balance cannot cover exposure at any supported leverage".to_string(),
+        )
+    })
 }
 
 fn parse_commission_rates(

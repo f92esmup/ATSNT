@@ -5,6 +5,7 @@
 pub mod analytics;
 pub mod bar;
 pub mod error;
+pub mod futures;
 pub mod order;
 pub mod position;
 pub mod risk;
