@@ -71,12 +71,15 @@ ATSNT enforces the **Zero-Toy-Assumption Principle**:
      $$\text{Fill}_{\text{Buy}} = O_{k+1} \cdot (1 + \text{Slippage}), \quad \text{Fill}_{\text{Sell}} = O_{k+1} \cdot (1 - \text{Slippage})$$
    - The strategy sees **every** bar, also while a position is open, exactly like the live session, so its rolling state (windows, accumulators) is identical in both. Signals only turn into orders while flat; a bar whose time barrier just closed a position cannot open a new one (the close is still settling live).
 
-2. **Triple Barrier Exits** (all are market orders: taker fee plus slippage against the position):
+2. **Perpetual funding and isolated margin** (bar-level engine; the tick-level venue applies the same rules from `domain::futures`):
+   - A position pays $\text{qty} \cdot \text{mark} \cdot \text{rate}$ at every 00:00/08:00/16:00 UTC settlement a bar crosses (marked at that bar's open); longs pay a positive rate. It is deducted from cash and reported as `funding_paid` inside the trade's net PnL. The rate is `funding_rate_pct` (0.01% baseline).
+   - The account runs each position at the lowest leverage its balance can margin (as the live gateway does). When the mark reaches the liquidation price before the stop does, or a bar gaps through it, the exchange closes at the bankruptcy price and the whole margin is lost (`Liquidation`). Maintenance margin is one flat `maintenance_margin_rate` (0.4%), not the exchange's notional brackets.
+3. **Triple Barrier Exits** (all are market orders: taker fee plus slippage against the position):
    - **Stop Loss**: Triggered when the bar breaches the stop level. Fills at the stop or, if the bar opened beyond it (a gap), at the open, minus slippage.
    - **Take Profit**: Triggered when the bar touches the target (`TAKE_PROFIT_MARKET` live). Fills at the target or, on a favorable gap, at the open, minus slippage. When one bar touches both barriers the stop wins.
    - **Time Barrier**: Forced market exit after holding a position for $N$ consecutive Dollar Bars (e.g. 15 bars; the fill bar counts as the first). Executed at the bar close with taker fee and slippage.
 
-3. **Mark-to-Market Telemetry**:
+4. **Mark-to-Market Telemetry**:
    - On every incoming trade tick, if a position is active, the session computes:
      $$\text{Unrealized PnL} = (\text{Mark Price} - \text{Entry Price}) \cdot \text{Quantity} \cdot \text{Direction}$$
      $$\text{Total Equity} = \text{Cash Equity} + \text{Unrealized PnL}$$

@@ -22,6 +22,14 @@ fn default_min_order_notional() -> Decimal {
     dec!(5)
 }
 
+fn default_funding_rate_pct() -> Decimal {
+    dec!(0.0001)
+}
+
+fn default_maintenance_margin_rate() -> Decimal {
+    dec!(0.004)
+}
+
 /// Friction parameters and account risk settings for 1:1 realistic simulation.
 ///
 /// Targets the Zero-Toy-Assumption Principle specified in AGENTS.md. Today it models fee
@@ -61,6 +69,14 @@ pub struct BacktestConfig {
     /// Minimum order notional in quote currency (exchange MIN_NOTIONAL).
     #[serde(default = "default_min_order_notional")]
     pub min_order_notional: Decimal,
+    /// Perpetual funding rate charged to an open position at every eight-hour settlement
+    /// (e.g. 0.0001 = 0.01%, the exchange's calm-market baseline). Positive: longs pay.
+    #[serde(default = "default_funding_rate_pct")]
+    pub funding_rate_pct: Decimal,
+    /// Maintenance margin as a fraction of notional, which sets the liquidation price of an
+    /// isolated position (a flat stand-in for the exchange's notional brackets).
+    #[serde(default = "default_maintenance_margin_rate")]
+    pub maintenance_margin_rate: Decimal,
 }
 
 impl BacktestConfig {
@@ -108,6 +124,14 @@ impl BacktestConfig {
                 )));
             }
         }
+        if self.maintenance_margin_rate < Decimal::ZERO
+            || self.maintenance_margin_rate >= Decimal::ONE
+        {
+            return Err(crate::error::BacktestError::General(format!(
+                "maintenance_margin_rate must be at least 0 and below 1, got {}",
+                self.maintenance_margin_rate
+            )));
+        }
         Ok(())
     }
 }
@@ -126,6 +150,8 @@ impl Default for BacktestConfig {
             min_order_quantity: default_min_order_quantity(),
             quantity_step_size: default_quantity_step_size(),
             min_order_notional: default_min_order_notional(),
+            funding_rate_pct: default_funding_rate_pct(),
+            maintenance_margin_rate: default_maintenance_margin_rate(),
         }
     }
 }

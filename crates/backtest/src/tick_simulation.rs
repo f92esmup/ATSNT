@@ -19,13 +19,6 @@ use crate::config::BacktestConfig;
 use crate::metrics::{BacktestMetrics, ClosedTrade};
 use crate::session::{SessionConfig, SessionEvent, TradingSession};
 
-/// Funding rate per settlement when none is recorded: the 0.01% interest component Binance
-/// charges a perpetual in calm markets.
-pub const DEFAULT_FUNDING_RATE: Decimal = Decimal::from_parts(1, 0, 0, false, 4);
-
-/// Maintenance margin rate of the first Binance BTCUSDT notional bracket.
-pub const DEFAULT_MAINTENANCE_MARGIN_RATE: Decimal = Decimal::from_parts(4, 0, 0, false, 3);
-
 /// Milliseconds between emergency-close attempts while halting.
 const HALT_RETRY_MS: i64 = 5_000;
 
@@ -40,10 +33,9 @@ pub struct TickSimulationConfig {
     pub dollar_bar_threshold: Decimal,
     /// Milliseconds an order takes to reach the market.
     pub latency_ms: i64,
-    /// Funding rates charged at each settlement.
+    /// Funding rates charged at each settlement; `FundingSchedule::constant` of the
+    /// configuration's rate unless a recorded history is supplied.
     pub funding: FundingSchedule,
-    /// Maintenance margin as a fraction of notional.
-    pub maintenance_margin_rate: Decimal,
 }
 
 /// Why a tick simulation could not be built.
@@ -87,7 +79,7 @@ impl<S: Strategy> TickSimulation<S> {
             risk_per_trade_pct: backtest.risk_per_trade_pct,
             risk_policy: backtest.risk_policy()?,
             funding: config.funding.clone(),
-            maintenance_margin_rate: config.maintenance_margin_rate,
+            maintenance_margin_rate: backtest.maintenance_margin_rate,
         });
         let session = TradingSession::new(
             SessionConfig {
@@ -243,7 +235,6 @@ mod tests {
             dollar_bar_threshold: dec!(2000),
             latency_ms: 0,
             funding: FundingSchedule::constant(dec!(0.0001)),
-            maintenance_margin_rate: dec!(0.004),
         };
         TickSimulation::new(
             config,
@@ -390,7 +381,6 @@ mod tests {
             dollar_bar_threshold: Decimal::ZERO,
             latency_ms: 0,
             funding: FundingSchedule::constant(Decimal::ZERO),
-            maintenance_margin_rate: dec!(0.004),
         };
 
         let result = TickSimulation::new(

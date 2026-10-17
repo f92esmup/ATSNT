@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use backtest::{
     now_unix_ms, record_backtest, record_monte_carlo, BacktestConfig, BacktestEngine, DataWindow,
     MonteCarloConfig, MonteCarloSimulator, RunContext, RunSpec, RunType, SamplingConfig,
-    SinkFailures, TickSimulation, TickSimulationConfig, DEFAULT_MAINTENANCE_MARGIN_RATE,
+    SinkFailures, TickSimulation, TickSimulationConfig,
 };
 use clap::Parser;
 use domain::futures::FundingSchedule;
@@ -75,10 +75,11 @@ struct Args {
     #[arg(long, default_value_t = 100)]
     latency_ms: i64,
 
-    /// Funding rate per eight-hour settlement with `--fill-model tick`, used where
-    /// `--funding-file` has no record (0.01% is the exchange's calm-market baseline)
-    #[arg(long, default_value = "0.0001")]
-    funding_rate: Decimal,
+    /// Override of the funding rate per eight-hour settlement (e.g. 0.0001 for 0.01%, the
+    /// exchange's calm-market baseline); with `--funding-file` it applies where the file has no
+    /// record
+    #[arg(long)]
+    funding_rate: Option<Decimal>,
 
     /// Funding history JSON in the `GET /fapi/v1/fundingRate` format, charged at the settlements
     /// it covers with `--fill-model tick`
@@ -395,6 +396,10 @@ async fn main() -> Result<()> {
         );
         engine_config.risk_per_trade_pct = risk;
     }
+    if let Some(rate) = args.funding_rate {
+        println!("[*] Funding Rate: Override set to {:.4}%", rate * dec!(100));
+        engine_config.funding_rate_pct = rate;
+    }
     engine_config.validate()?;
     if args.fill_model == FillModel::Tick && args.gcp_bigquery {
         anyhow::bail!(
@@ -460,9 +465,12 @@ async fn main() -> Result<()> {
                 Some(path) => {
                     let history = std::fs::read_to_string(path)
                         .with_context(|| format!("Failed to read {}", path.display()))?;
-                    adapters::funding_schedule_from_history(&history, args.funding_rate)?
+                    adapters::funding_schedule_from_history(
+                        &history,
+                        engine_config.funding_rate_pct,
+                    )?
                 }
-                None => FundingSchedule::constant(args.funding_rate),
+                None => FundingSchedule::constant(engine_config.funding_rate_pct),
             };
             let mut simulation = TickSimulation::new(
                 TickSimulationConfig {
@@ -471,7 +479,6 @@ async fn main() -> Result<()> {
                     dollar_bar_threshold: effective_dollar_bar,
                     latency_ms: args.latency_ms,
                     funding,
-                    maintenance_margin_rate: DEFAULT_MAINTENANCE_MARGIN_RATE,
                 },
                 strategy,
             )?;

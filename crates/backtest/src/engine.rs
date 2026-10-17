@@ -1,4 +1,6 @@
+use domain::futures;
 use domain::{DollarBar, Position, PositionSide, RiskPolicy, Side};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use strategies::Strategy;
 
@@ -19,7 +21,12 @@ struct PendingEntry {
 /// A signal becomes a market order that fills at the next bar's open (the first price after
 /// the signal); take-profit and stop exits are market orders too, so they pay taker fees and
 /// slippage and fill at the open when a bar gaps through the trigger. Tick-level fills,
-/// latency and funding are tracked in `odd/tasks/sim-live-fidelity.md`.
+/// latency are tracked in `odd/tasks/sim-live-fidelity.md`.
+///
+/// A position pays perpetual funding at every eight-hour settlement a bar crosses (marked at
+/// that bar's open) and runs on isolated margin: when a bar reaches the liquidation price
+/// before the stop does, or gaps through it, the exchange closes the position at its
+/// bankruptcy price and the whole margin is lost.
 #[derive(Debug, Clone)]
 pub struct BacktestEngine {
     config: BacktestConfig,
@@ -36,6 +43,10 @@ pub struct BacktestEngine {
     entry_time: Option<i64>,
     entry_fee: Decimal,
     entry_slippage: Decimal,
+    /// Isolated margin posted for the open position.
+    position_margin: Decimal,
+    /// Funding paid by the open position so far.
+    funding_accrued: Decimal,
     last_bar_end_time: Option<i64>,
     open_excursion: Option<TradeExcursion>,
     current_day_utc: Option<i64>,
@@ -66,6 +77,8 @@ impl BacktestEngine {
             entry_time: None,
             entry_fee: Decimal::ZERO,
             entry_slippage: Decimal::ZERO,
+            position_margin: Decimal::ZERO,
+            funding_accrued: Decimal::ZERO,
             last_bar_end_time: None,
             open_excursion: None,
             current_day_utc: None,
@@ -201,6 +214,7 @@ impl BacktestEngine {
 
     /// Ingests a closed DollarBar, updates position barriers, and steps the strategy.
     pub fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &DollarBar) {
+        let previous_bar_end = self.last_bar_end_time;
         self.last_bar_end_time = Some(bar.end_time);
         if self.halted {
             return;
@@ -220,6 +234,11 @@ impl BacktestEngine {
         if self.current_month_key != Some(month_key) {
             self.current_month_key = Some(month_key);
             self.monthly_open_equity = mark_before;
+        }
+
+        // Funding settles on the position held since the previous bar, marked at this open.
+        if let Some(previous_end) = previous_bar_end {
+            self.settle_funding(previous_end, bar);
         }
 
         // 0. A market order submitted on the previous bar fills at this bar's open.
@@ -325,7 +344,96 @@ impl BacktestEngine {
         }
     }
 
+    /// Charges every funding settlement in `(previous_end, bar.end_time]` to the open position.
+    fn settle_funding(&mut self, previous_end: i64, bar: &DollarBar) {
+        let Some(position) = &self.active_position else {
+            return;
+        };
+        let side = match position.side {
+            PositionSide::Long => Side::Buy,
+            PositionSide::Short => Side::Sell,
+        };
+        let settlements =
+            futures::funding_settlements(futures::FUNDING_INTERVAL_MS, previous_end, bar.end_time);
+        for _ in settlements {
+            let payment = futures::funding_payment(
+                side,
+                position.quantity,
+                bar.open,
+                self.config.funding_rate_pct,
+            );
+            self.equity -= payment;
+            self.funding_accrued += payment;
+        }
+    }
+
+    /// Liquidation price of the open position, if one is open.
+    fn liquidation_price(&self) -> Option<Decimal> {
+        let position = self.active_position.as_ref()?;
+        let side = match position.side {
+            PositionSide::Long => Side::Buy,
+            PositionSide::Short => Side::Sell,
+        };
+        let maintenance =
+            position.quantity * position.entry_price * self.config.maintenance_margin_rate;
+        Some(futures::liquidation_price(
+            side,
+            position.entry_price,
+            position.quantity,
+            self.position_margin,
+            maintenance,
+        ))
+    }
+
+    /// Closes the position at its bankruptcy price when the exchange would liquidate it on
+    /// this bar: the mark reaches the liquidation price before the stop trades, or gaps through.
+    fn liquidate_if_due(&mut self, bar: &DollarBar) -> bool {
+        let (Some(liquidation), Some(intent), Some(position)) = (
+            self.liquidation_price(),
+            self.active_intent.clone(),
+            self.active_position.clone(),
+        ) else {
+            return false;
+        };
+        let (reached, gapped, stop_first) = match position.side {
+            PositionSide::Long => (
+                bar.low <= liquidation,
+                bar.open <= liquidation,
+                intent.stop_loss > liquidation,
+            ),
+            PositionSide::Short => (
+                bar.high >= liquidation,
+                bar.open >= liquidation,
+                intent.stop_loss < liquidation,
+            ),
+        };
+        if !reached || (stop_first && !gapped) {
+            return false;
+        }
+        let side = match position.side {
+            PositionSide::Long => Side::Buy,
+            PositionSide::Short => Side::Sell,
+        };
+        let bankruptcy = futures::bankruptcy_price(
+            side,
+            position.entry_price,
+            position.quantity,
+            self.position_margin,
+        );
+        self.execute_close_with_fee_rate(
+            bar.end_time,
+            bankruptcy,
+            Decimal::ZERO,
+            Decimal::ZERO,
+            "Liquidation",
+        );
+        true
+    }
+
     fn check_barriers(&mut self, bar: &DollarBar) {
+        if self.liquidate_if_due(bar) {
+            return;
+        }
         let (intent, pos) = match (&self.active_intent, &self.active_position) {
             (Some(i), Some(p)) => (i.clone(), p.clone()),
             _ => return,
@@ -437,6 +545,19 @@ impl BacktestEngine {
 
         // Entry Fee (Taker)
         let entry_fee = fill_price * quantity * self.config.taker_fee_pct;
+
+        // The exchange runs the position at the lowest leverage the balance can margin; an
+        // order it cannot margin at any supported leverage is rejected.
+        let notional = fill_price * quantity;
+        let Some(leverage) = futures::minimum_leverage(
+            notional,
+            notional * self.config.maintenance_margin_rate,
+            entry_fee,
+            self.equity,
+            self.config.max_leverage.trunc().to_u32().unwrap_or(1),
+        ) else {
+            return;
+        };
         // Slippage is already embedded in fill_price; do not deduct from cash equity here
         self.equity -= entry_fee;
         // Reported slippage is the adverse distance from the signal price, gap included.
@@ -457,6 +578,8 @@ impl BacktestEngine {
             self.entry_time = Some(bar.start_time);
             self.entry_fee = entry_fee;
             self.entry_slippage = adverse_per_unit * quantity;
+            self.position_margin = notional / Decimal::from(leverage);
+            self.funding_accrued = Decimal::ZERO;
         }
     }
 
@@ -466,6 +589,28 @@ impl BacktestEngine {
         exit_price: Decimal,
         slippage_per_unit: Decimal,
         is_taker: bool,
+        exit_reason: &str,
+    ) {
+        let fee_rate = if is_taker {
+            self.config.taker_fee_pct
+        } else {
+            self.config.maker_fee_pct
+        };
+        self.execute_close_with_fee_rate(
+            exit_time,
+            exit_price,
+            slippage_per_unit,
+            fee_rate,
+            exit_reason,
+        );
+    }
+
+    fn execute_close_with_fee_rate(
+        &mut self,
+        exit_time: i64,
+        exit_price: Decimal,
+        slippage_per_unit: Decimal,
+        fee_rate: Decimal,
         exit_reason: &str,
     ) {
         let pos = match self.active_position.take() {
@@ -479,11 +624,8 @@ impl BacktestEngine {
 
         let pnl_gross = pos.unrealized_pnl(exit_price);
         let exit_notional = exit_price * pos.quantity;
-        let fee_rate = if is_taker {
-            self.config.taker_fee_pct
-        } else {
-            self.config.maker_fee_pct
-        };
+        let funding_paid = std::mem::take(&mut self.funding_accrued);
+        self.position_margin = Decimal::ZERO;
 
         let exit_fee = exit_notional * fee_rate;
         let exit_slippage = slippage_per_unit * pos.quantity;
@@ -492,7 +634,7 @@ impl BacktestEngine {
 
         // In real execution, fill_price and exit_price already embed slippage into pnl_gross.
         // We report total_slippage as an informative metric, but do not double-deduct it.
-        let pnl_net = pnl_gross - total_fees;
+        let pnl_net = pnl_gross - total_fees - funding_paid;
 
         // self.equity already had entry_fee deducted upon entry. Adjust with pnl_gross and exit_fee.
         self.equity += pnl_gross - exit_fee;
@@ -521,7 +663,7 @@ impl BacktestEngine {
             side: pos.side,
             pnl_gross,
             fees_paid: total_fees,
-            funding_paid: Decimal::ZERO,
+            funding_paid,
             slippage_paid: total_slippage,
             pnl_net,
             return_pct,
@@ -1384,5 +1526,217 @@ mod tests {
         assert!(metrics.halted);
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].exit_reason, "MonthlyCircuitBreaker");
+    }
+
+    const SETTLEMENT: i64 = domain::futures::FUNDING_INTERVAL_MS * 10;
+
+    fn leveraged_engine(capital: Decimal) -> BacktestEngine {
+        BacktestEngine::new(BacktestConfig {
+            initial_capital: capital,
+            slippage_pct: Decimal::ZERO,
+            max_daily_drawdown_pct: dec!(0.90),
+            max_monthly_drawdown_pct: dec!(0.95),
+            ..BacktestConfig::default()
+        })
+    }
+
+    /// Long at 100 with a stop 0.1 away, so the risk sizing asks for a lot of notional.
+    fn tight_long() -> Option<domain::OrderIntent> {
+        Some(domain::OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.9), dec!(110), 50).unwrap())
+    }
+
+    #[test]
+    fn a_settlement_crossed_while_open_charges_funding_to_the_trade() {
+        let mut engine = realistic_engine();
+        let mut strategy = Scripted::new(vec![long_intent(50), None, None, None]);
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(
+                SETTLEMENT - 3_000,
+                dec!(100),
+                dec!(100),
+                dec!(100),
+                dec!(100),
+            ),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(
+                SETTLEMENT - 2_000,
+                dec!(100),
+                dec!(101),
+                dec!(99),
+                dec!(100),
+            ),
+        );
+        // This bar crosses the settlement while the long is open.
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(
+                SETTLEMENT + 1_000,
+                dec!(101),
+                dec!(102),
+                dec!(100),
+                dec!(101),
+            ),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(
+                SETTLEMENT + 2_000,
+                dec!(101),
+                dec!(112),
+                dec!(100),
+                dec!(111),
+            ),
+        );
+
+        let (_, trades) = engine.finish_with_trades(None);
+
+        let trade = &trades[0];
+        // 20 units marked at the crossing bar's open (101) with a 0.01% rate.
+        assert_eq!(trade.funding_paid, dec!(0.202));
+        assert_eq!(
+            trade.pnl_net,
+            trade.pnl_gross - trade.fees_paid - trade.funding_paid
+        );
+    }
+
+    #[test]
+    fn funding_is_not_charged_without_a_position_or_a_settlement() {
+        let mut engine = realistic_engine();
+        let mut strategy = Scripted::new(vec![None, None, long_intent(50), None, None]);
+        // The settlement passes while flat.
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(
+                SETTLEMENT - 1_000,
+                dec!(100),
+                dec!(100),
+                dec!(100),
+                dec!(100),
+            ),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(
+                SETTLEMENT + 1_000,
+                dec!(100),
+                dec!(100),
+                dec!(100),
+                dec!(100),
+            ),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(
+                SETTLEMENT + 2_000,
+                dec!(100),
+                dec!(100),
+                dec!(100),
+                dec!(100),
+            ),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(
+                SETTLEMENT + 3_000,
+                dec!(100),
+                dec!(101),
+                dec!(99),
+                dec!(100),
+            ),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(
+                SETTLEMENT + 4_000,
+                dec!(101),
+                dec!(112),
+                dec!(100),
+                dec!(111),
+            ),
+        );
+
+        let (_, trades) = engine.finish_with_trades(None);
+
+        assert_eq!(trades[0].funding_paid, Decimal::ZERO);
+    }
+
+    #[test]
+    fn a_gap_through_the_liquidation_price_loses_the_margin_and_no_more() {
+        let mut engine = leveraged_engine(dec!(1000));
+        let mut strategy = Scripted::new(vec![tight_long(), None, None]);
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(1_000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(2_000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+        let position = engine.active_position().unwrap().clone();
+        assert_eq!(position.quantity, dec!(100));
+
+        // 100 units on 1000 need 11x: 909.09 of margin, liquidated near 91.3. The bar opens at
+        // 80, so the stop would have filled far below the bankruptcy price.
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(3_000, dec!(80), dec!(81), dec!(79), dec!(80)),
+        );
+
+        let (_, trades) = engine.finish_with_trades(None);
+        let trade = &trades[0];
+        assert_eq!(trade.exit_reason, "Liquidation");
+        assert_eq!(trade.exit_price.round_dp(4), dec!(90.9091));
+        let entry_fee = dec!(100) * dec!(100) * dec!(0.0005);
+        assert_eq!(trade.fees_paid, entry_fee);
+        assert_eq!((trade.pnl_gross).round_dp(2), dec!(-909.09));
+    }
+
+    #[test]
+    fn a_stop_that_trades_before_the_liquidation_price_is_a_stop() {
+        let mut engine = leveraged_engine(dec!(1000));
+        let mut strategy = Scripted::new(vec![tight_long(), None, None]);
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(1_000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(2_000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+
+        // The bar trades through the stop (99.9) and on down to the liquidation price.
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(3_000, dec!(100), dec!(100), dec!(90), dec!(90)),
+        );
+
+        let (_, trades) = engine.finish_with_trades(None);
+        assert_eq!(trades[0].exit_reason, "StopLoss");
+    }
+
+    #[test]
+    fn an_entry_the_balance_cannot_margin_never_opens() {
+        let mut engine = leveraged_engine(dec!(400));
+        let intent = Some(
+            domain::OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.99), dec!(110), 50).unwrap(),
+        );
+        let mut strategy = Scripted::new(vec![intent, None]);
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(1_000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+
+        engine.process_bar(
+            &mut strategy,
+            &ohlc_bar(2_000, dec!(100), dec!(100), dec!(100), dec!(100)),
+        );
+
+        // The leverage cap limits the order to 8000 of notional: 400 of margin at 20x plus
+        // the entry fee exceeds the 400 balance.
+        assert!(engine.active_position().is_none());
+        assert_eq!(engine.cash_equity(), dec!(400));
     }
 }

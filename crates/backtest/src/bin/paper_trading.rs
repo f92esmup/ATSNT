@@ -60,10 +60,10 @@ struct Args {
     #[arg(long, default_value_t = 100)]
     latency_ms: i64,
 
-    /// Funding rate charged to an open position at every eight-hour settlement (the 0.01%
-    /// baseline unless overridden)
-    #[arg(long, default_value = "0.0001")]
-    funding_rate: Decimal,
+    /// Override of the funding rate charged to an open position at every eight-hour settlement
+    /// (the artifact's value, or the 0.01% baseline, unless given)
+    #[arg(long)]
+    funding_rate: Option<Decimal>,
 
     /// Record the session run (lifecycle, closed trades with equity events, final metrics) to Google Cloud BigQuery
     #[arg(long, default_value_t = false)]
@@ -256,13 +256,16 @@ async fn main() -> Result<()> {
             }
         };
 
+    let mut backtest_config = backtest_config;
+    if let Some(rate) = args.funding_rate {
+        backtest_config.funding_rate_pct = rate;
+    }
     let paper_config = PaperTradingConfig {
         dollar_bar_threshold: effective_dollar_bar,
         backtest: backtest_config,
         strategy: strat_config.clone(),
         channel_capacity: 10_000,
         latency_ms: args.latency_ms,
-        funding_rate: args.funding_rate,
     };
 
     let mut session = PaperTradingSession::new(paper_config)
