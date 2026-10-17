@@ -44,7 +44,7 @@ For every candidate $\theta$ the optimizer runs each fold's train (IS) and test 
 
 $$\text{Fitness}(\theta) = \max\left(0, \overline{\text{Sortino}}_{\text{OOS}}(\theta)\right) \times \text{Stability}(\theta)$$
 
-It applies only to an eligible candidate (section 2.4) whose mean IS Sortino is positive; every other candidate has fitness 0. The ranking lists the eligible candidates first, by descending fitness, and the ineligible ones after them. The OOS folds are the walk-forward test slices. The final, untouched check is the holdout backtest of the winner (`--holdout-from-month`).
+It applies only to an eligible candidate (section 2.4) whose mean IS Sortino is positive; every other candidate has fitness 0. The ranking lists the eligible candidates first, by descending fitness, and the ineligible ones after them. Equal fitness falls back to the higher OOS Sortino. For example, when no candidate is profitable, every fitness is 0, and the least bad candidate comes first. The OOS folds are the walk-forward test slices. The final, untouched check is the holdout backtest of the winner (`--holdout-from-month`).
 
 $\text{Stability}(\theta)$ is the share of the base performance that its grid neighbours keep. The neighbours are one step down and one step up the grid for each of the six parameters, the others held fixed: up to 12 neighbours. Each neighbour runs on fold 0's training slice:
 
@@ -81,7 +81,11 @@ The terms in this implementation (`deflated_sharpe_p_value`):
 - $N$ is the number of candidates evaluated.
 - $\gamma$ is the Euler-Mascheroni constant.
 
-A candidate with fewer than two OOS trades, or no variance, gets $p = 1$.
+Only **eligible** trials (section 2.4) get a p-value and enter $V[\widehat{\text{SR}}_n]$. Every other trial gets $p = 1$:
+- A Sharpe ratio over a handful of returns is not an estimate. Two near-equal returns give a per-trade Sharpe of 20.
+- One such outlier would raise $\text{SR}_0$ enough to deflate every real trial to $p = 1$.
+
+$N$ still counts every candidate tried, because the selection bias comes from all of them.
 
 A candidate is significant at $p < 0.05$. Significance is **reported, not used to filter**:
 - The winner's significance is printed, stored in the artifact scorecard and recorded in BigQuery.

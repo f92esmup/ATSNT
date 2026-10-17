@@ -481,29 +481,49 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
 
         pb.finish_with_message("HPO parameter evaluation complete");
 
-        // The DSR deflates each Sharpe ratio by the best one expected from the whole sweep, so
-        // it needs every trial's Sharpe before any p-value.
-        let sharpes: Vec<f64> = evaluated
-            .iter()
-            .filter_map(|(_, m)| m.map(|m| m.sharpe()))
-            .collect();
-        let sharpe_variance = population_variance(&sharpes);
-        let mut evaluations: Vec<CandidateEvaluation<S::Config>> = evaluated
-            .into_iter()
-            .map(|(mut eval, moments)| {
-                if let Some(moments) = moments {
-                    eval.dsr_p_value =
-                        deflated_sharpe_p_value(&moments, total_candidates, sharpe_variance);
-                    eval.is_statistically_significant = eval.dsr_p_value < DSR_SIGNIFICANCE;
-                }
-                eval
-            })
-            .collect();
+        let mut evaluations = assign_deflated_p_values(evaluated, total_candidates);
 
-        evaluations.sort_by(|a, b| b.eligible.cmp(&a.eligible).then(b.fitness.cmp(&a.fitness)));
+        // Ties in fitness (e.g. every eligible candidate at 0 when none is profitable) fall back
+        // to the out-of-sample Sortino, so the first one is still the least bad.
+        evaluations.sort_by(|a, b| {
+            b.eligible
+                .cmp(&a.eligible)
+                .then(b.fitness.cmp(&a.fitness))
+                .then(b.mean_oos_sortino.cmp(&a.mean_oos_sortino))
+        });
 
         Ok(evaluations)
     }
+}
+
+/// Sets each eligible trial's Deflated Sharpe p-value against the Sharpe variance of the
+/// eligible trials, with `trials` (every candidate tried) as the number of trials.
+///
+/// An ineligible trial keeps p = 1 and stays out of the variance: its Sharpe ratio comes from
+/// too few returns to be an estimate (two near-equal returns give a Sharpe of 20), and one such
+/// outlier would raise the expected maximum enough to deflate every real trial to p = 1.
+pub fn assign_deflated_p_values<C>(
+    evaluated: Vec<(CandidateEvaluation<C>, Option<ReturnMoments>)>,
+    trials: usize,
+) -> Vec<CandidateEvaluation<C>> {
+    let sharpes: Vec<f64> = evaluated
+        .iter()
+        .filter(|(eval, _)| eval.eligible)
+        .filter_map(|(_, m)| m.map(|m| m.sharpe()))
+        .collect();
+    let sharpe_variance = population_variance(&sharpes);
+    evaluated
+        .into_iter()
+        .map(|(mut eval, moments)| {
+            eval.dsr_p_value = Decimal::ONE;
+            eval.is_statistically_significant = false;
+            if let Some(moments) = moments.filter(|_| eval.eligible) {
+                eval.dsr_p_value = deflated_sharpe_p_value(&moments, trials, sharpe_variance);
+                eval.is_statistically_significant = eval.dsr_p_value < DSR_SIGNIFICANCE;
+            }
+            eval
+        })
+        .collect()
 }
 
 fn population_variance(values: &[f64]) -> f64 {
@@ -703,6 +723,69 @@ mod tests {
             );
             if eval.oos_sharpe.is_none() {
                 assert_eq!(eval.dsr_p_value, Decimal::ONE);
+            }
+        }
+    }
+
+    fn evaluation(eligible: bool) -> CandidateEvaluation<MockConfig> {
+        CandidateEvaluation {
+            config: MockConfig {
+                window: 1,
+                threshold: Decimal::ONE,
+            },
+            mean_is_sortino: Decimal::ZERO,
+            mean_oos_sortino: Decimal::ZERO,
+            mean_oos_profit_factor: None,
+            total_oos_trades: 0,
+            min_fold_trades: 0,
+            eligible,
+            oos_sharpe: None,
+            stability_score: Decimal::ZERO,
+            fitness: Decimal::ZERO,
+            dsr_p_value: Decimal::ONE,
+            is_statistically_significant: false,
+            fold_metrics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_sharpe_over_a_handful_of_trades_neither_gets_a_p_value_nor_deflates_the_others() {
+        // Seen in BigQuery: two near-equal OOS returns give a per-trade Sharpe of 20 and p = 0,
+        // and that outlier inflated the cross-trial variance so every real trial got p = 1.
+        let evaluated = vec![
+            (evaluation(true), Some(moments(101, 0.03, 0.1))),
+            (evaluation(false), Some(moments(2, 1.0, 0.05))),
+        ];
+
+        let deflated = assign_deflated_p_values(evaluated, 2);
+
+        assert_eq!(deflated[1].dsr_p_value, Decimal::ONE);
+        assert!(!deflated[1].is_statistically_significant);
+        // Only the eligible Sharpe enters V (zero), so it is tested against SR0 = 0:
+        // z = 0.3 * 10 / sqrt(1 + 0.5 * 0.09) = 2.93, p = 0.0017.
+        assert!(
+            deflated[0].dsr_p_value < dec!(0.01),
+            "{}",
+            deflated[0].dsr_p_value
+        );
+        assert!(deflated[0].is_statistically_significant);
+    }
+
+    #[test]
+    fn eligible_trials_with_equal_fitness_rank_by_out_of_sample_sortino() {
+        let results = mock_sweep(1);
+
+        for pair in results.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            if a.eligible == b.eligible && a.fitness == b.fitness {
+                assert!(
+                    a.mean_oos_sortino >= b.mean_oos_sortino,
+                    "{} ({}) ranked above {} ({})",
+                    a.config,
+                    a.mean_oos_sortino,
+                    b.config,
+                    b.mean_oos_sortino
+                );
             }
         }
     }
