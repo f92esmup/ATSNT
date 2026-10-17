@@ -3,7 +3,7 @@
 > [!NOTE]
 > **Document Status**: Production Specification (Milestone 5 Phase 2)  
 > **Target Cloud Provider**: Google Cloud Platform (GCP)  
-> **Analytics consumers**: read-only clients of the `v_*` views (see [12-bi-data-contract.md](12-bi-data-contract.md))  
+> **Analytics consumers**: read-only clients of the `v_*` views (see [13-bi-data-contract.md](13-bi-data-contract.md))  
 > **Hosting & Analytics Cost**: **0,00 € / mes** (100% Always Free Tier compliant)
 
 ---
@@ -173,7 +173,7 @@ If none of the above are configured or network access fails, the engine operates
 
 ## 7. BI Data Contract for Consumers
 
-Consumers read only the views defined in `bigquery_schema.sql`: `v_runs` (latest run row + `full` metrics + flattened spec fields), `v_run_metrics`, `v_trades`, `v_series`, `v_equity` (event-based equity with running peak and drawdown), `v_latest_equity` (paper/live monitor), and the flattened `v_hpo_trials`, `v_hpo_folds` and `v_monte_carlo`. Their columns, types, semantics and rules of change are the contract in [12-bi-data-contract.md](12-bi-data-contract.md).
+Consumers read only the views defined in `bigquery_schema.sql`: `v_runs` (latest run row + `full` metrics + flattened spec fields), `v_run_metrics`, `v_trades`, `v_series`, `v_equity` (event-based equity with running peak and drawdown), `v_latest_equity` (paper/live monitor), and the flattened `v_hpo_trials`, `v_hpo_folds` and `v_monte_carlo`. Their columns, types, semantics and rules of change are the contract in [13-bi-data-contract.md](13-bi-data-contract.md).
 
 ---
 

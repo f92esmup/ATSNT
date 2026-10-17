@@ -80,7 +80,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] BigQuery tables `runs`, `run_metrics`, `trades`, `run_series` with latest-row views; legacy `equity_snapshots`, `hpo_evaluations`, `monte_carlo_runs` dropped.
 - [x] Event-based equity (entry/trough/peak/exit per trade with MAE/MFE) replacing time-sampled snapshots; per-trade drawdown reproduces the engine max drawdown exactly.
 - [x] Local JSON reports and GCS Parquet exports removed; GCS keeps only deployment artifacts.
-- [x] BI data contract for consumers of the `v_*` views: [`docs/architecture/12-bi-data-contract.md`](architecture/12-bi-data-contract.md).
+- [x] BI data contract for consumers of the `v_*` views: [`docs/architecture/13-bi-data-contract.md`](architecture/13-bi-data-contract.md).
 - [ ] ETL backlog requested by consumers (gaps G1-G15 in the contract), starting with `baseline_run_id` and the quote currency of each run.
 - [x] Perpetual futures funding payments are modelled as cash flows inside each trade's net PnL (`funding_paid`; not yet a separate BigQuery column).
 

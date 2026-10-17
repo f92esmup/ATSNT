@@ -50,7 +50,7 @@ The trading engine operates as a strictly headless, outbound-only system. It exp
    - The engine does not bind to any network interface.
    - All external interactions with the monitoring layer are strictly **outbound HTTPS POST requests** (to BigQuery streaming insert API, GCS upload API, and Telegram webhook).
 2. **Zero Maintenance Analytics (Downstream Consumers)**:
-   - Data scientists and operators consume normalized tabular SQL data directly from the `v_*` views in their own tools (see [12-bi-data-contract.md](12-bi-data-contract.md)).
+   - Data scientists and operators consume normalized tabular SQL data directly from the `v_*` views in their own tools (see [13-bi-data-contract.md](13-bi-data-contract.md)).
    - Zero JavaScript/CSS/HTML maintenance; zero client-side WebSocket synchronization bugs.
 3. **Instant Mobile Situational Awareness (Telegram)**:
    - Critical operational events (position entries, exits, risk threshold violations) are pushed directly to mobile devices in under 200 milliseconds.
@@ -93,7 +93,7 @@ The notifier formats events with visual cues and dispatches them asynchronously:
 
 ## 3. Data Warehouse Schema (`atsnt_bi`)
 
-The engine streams run-centric rows into four append-only tables (`runs`, `run_metrics`, `trades`, `run_series`) and exposes deduplicated `v_*` views. The DDL is `scripts/gcp/bigquery_schema.sql`; the columns, semantics and rules of change that consumers can rely on are the contract in [12-bi-data-contract.md](12-bi-data-contract.md). (The earlier per-purpose tables `trades`, `equity_snapshots`, `hpo_evaluations` and `monte_carlo_runs` described in previous revisions of this document were replaced by this model and are dropped by `scripts/gcp/bigquery_drop_legacy.sql`.)
+The engine streams run-centric rows into four append-only tables (`runs`, `run_metrics`, `trades`, `run_series`) and exposes deduplicated `v_*` views. The DDL is `scripts/gcp/bigquery_schema.sql`; the columns, semantics and rules of change that consumers can rely on are the contract in [13-bi-data-contract.md](13-bi-data-contract.md). (The earlier per-purpose tables `trades`, `equity_snapshots`, `hpo_evaluations` and `monte_carlo_runs` described in previous revisions of this document were replaced by this model and are dropped by `scripts/gcp/bigquery_drop_legacy.sql`.)
 
 ---
 

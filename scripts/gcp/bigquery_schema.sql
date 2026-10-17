@@ -3,7 +3,7 @@
 --
 -- Run-centric analytics model. Every execution mode (backtest, hpo, hpo_trial,
 -- monte_carlo, paper, live) writes the same four append-only tables keyed by
--- `run_id`; consumers read only the `v_*` views (contract: docs/architecture/12-bi-data-contract.md).
+-- `run_id`; consumers read only the `v_*` views (contract: docs/architecture/13-bi-data-contract.md).
 --
 -- Run with `bq query --use_legacy_sql=false < bigquery_schema.sql`
 -- (scripts/gcp/setup_gcp_resources.sh does this). Legacy objects from the

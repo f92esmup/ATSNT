@@ -310,7 +310,7 @@ cargo run -p backtest -- \
   --mc-iterations 10000 \
   --gcp-bigquery
 ```
-- **BI consumers** (for example the `/trading` module of Econoweb): read the run-centric views in BigQuery dataset `atsnt_bi` (`v_runs`, `v_run_metrics`, `v_trades`, `v_series`, `v_equity`, `v_hpo_trials`, `v_hpo_folds`, `v_monte_carlo`); the contract is in `docs/architecture/12-bi-data-contract.md`.
+- **BI consumers** (for example the `/trading` module of Econoweb): read the run-centric views in BigQuery dataset `atsnt_bi` (`v_runs`, `v_run_metrics`, `v_trades`, `v_series`, `v_equity`, `v_hpo_trials`, `v_hpo_folds`, `v_monte_carlo`); the contract is in `docs/architecture/13-bi-data-contract.md`.
 - **Telegram Bot Webhook**: Dispatches instant push notifications (<200ms) for position entries, exits, stop loss triggers, and circuit breakers.
 - **Fail-Open / Offline Safe**: If GCP/Telegram environment variables (`GCP_PROJECT_ID`, `TELEGRAM_BOT_TOKEN`, etc.) are omitted, sinks safely log information and continue without interruption.
 
@@ -391,7 +391,7 @@ cargo run -p adapters --bin live_gateway -- \
 - [`docs/architecture/05-monte-carlo-and-telemetry.md`](docs/architecture/05-monte-carlo-and-telemetry.md): Discrete Event Monte Carlo Stress-Testing, trade sequence bootstrap, and web telemetry schemas.
 - [`docs/architecture/12-adding-a-strategy.md`](docs/architecture/12-adding-a-strategy.md): How to add a strategy (one registry line) and what the generic contract suite checks.
 - [`docs/architecture/06-paper-trading-and-realtime-execution.md`](docs/architecture/06-paper-trading-and-realtime-execution.md): Real-time Paper Trading architecture, event broadcasting, and mark-to-market telemetry.
-- [`docs/architecture/07-web-telemetry-dashboard.md`](docs/architecture/07-web-telemetry-dashboard.md): Cloud-First telemetry, the CLI export flags and Telegram mobile alerting (supersedes web presentation); the BigQuery schema and consumer contract are in `docs/architecture/12-bi-data-contract.md`.
+- [`docs/architecture/07-web-telemetry-dashboard.md`](docs/architecture/07-web-telemetry-dashboard.md): Cloud-First telemetry, the CLI export flags and Telegram mobile alerting (supersedes web presentation); the BigQuery schema and consumer contract are in `docs/architecture/13-bi-data-contract.md`.
 - [`docs/architecture/08-live-execution-gateway.md`](docs/architecture/08-live-execution-gateway.md): Live Execution Gateway, HMAC-SHA256 authentication, Pre-Trade Risk Manager, and User Data Stream reconciliation.
 
 ---

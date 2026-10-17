@@ -79,7 +79,7 @@ From the $N$ synthetic equity curves, the engine computes:
 
 ## 4. Telemetry & Web Presentation Architecture
 
-The schemas and route examples in this section are historical design specifications from before the in-process web server was decommissioned (Milestone 5); they are not a current API. Consumers read the BigQuery views described in [12-bi-data-contract.md](12-bi-data-contract.md).
+The schemas and route examples in this section are historical design specifications from before the in-process web server was decommissioned (Milestone 5); they are not a current API. Consumers read the BigQuery views described in [13-bi-data-contract.md](13-bi-data-contract.md).
 
 ### 4.1 The "Anti-Bloat" Storage Contract
 A critical architectural pitfall in quantitative dashboards is attempting to serialize and persist all $10,000$ synthetic equity curves at tick or trade resolution. Doing so creates massive multi-gigabyte JSON files that choke browser rendering, exhaust server memory, and degrade I/O throughput.
