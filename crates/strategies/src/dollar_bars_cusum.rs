@@ -157,35 +157,77 @@ impl HyperparameterSpace for DollarBarsCusumSpace {
         configs
     }
 
+    /// One step down and one step up the grid for each of the six parameters, the others
+    /// held: up to 12 neighbours. A value that is not on the grid steps to the nearest grid
+    /// values around it; at the edge of the grid only the inward step exists.
     fn perturb_neighbors(&self, base: &DollarBarsCusumConfig) -> Vec<DollarBarsCusumConfig> {
-        let mut neighbors = Vec::with_capacity(4);
+        let mut neighbors = Vec::with_capacity(12);
+        let windows = adjacent_grid_values(&self.rolling_window_lens, base.rolling_window_len);
+        let vols = adjacent_grid_values(&self.cusum_vol_multipliers, base.cusum_vol_multiplier);
+        let entries = adjacent_grid_values(&self.z_entry_thresholds, base.z_entry_threshold);
+        let stops = adjacent_grid_values(&self.z_stop_thresholds, base.z_stop_threshold);
+        let barriers = adjacent_grid_values(&self.time_barrier_bars, base.time_barrier_bars);
+        let floors = adjacent_grid_values(&self.min_take_profit_pcts, base.min_take_profit_pct);
 
-        // Perturbation 1: cusum_vol_multiplier +/- 0.2
-        if base.cusum_vol_multiplier > dec!(0.5) {
-            let mut c = base.clone();
-            c.cusum_vol_multiplier -= dec!(0.2);
-            neighbors.push(c);
+        for value in [windows.0, windows.1].into_iter().flatten() {
+            neighbors.push(DollarBarsCusumConfig {
+                rolling_window_len: value,
+                ..base.clone()
+            });
         }
-        {
-            let mut c = base.clone();
-            c.cusum_vol_multiplier += dec!(0.2);
-            neighbors.push(c);
+        for value in [vols.0, vols.1].into_iter().flatten() {
+            neighbors.push(DollarBarsCusumConfig {
+                cusum_vol_multiplier: value,
+                ..base.clone()
+            });
         }
-
-        // Perturbation 2: z_entry_threshold +/- 0.2
-        if base.z_entry_threshold > dec!(0.5) {
-            let mut c = base.clone();
-            c.z_entry_threshold -= dec!(0.2);
-            neighbors.push(c);
+        for value in [entries.0, entries.1].into_iter().flatten() {
+            neighbors.push(DollarBarsCusumConfig {
+                z_entry_threshold: value,
+                ..base.clone()
+            });
         }
-        {
-            let mut c = base.clone();
-            c.z_entry_threshold += dec!(0.2);
-            neighbors.push(c);
+        for value in [stops.0, stops.1].into_iter().flatten() {
+            neighbors.push(DollarBarsCusumConfig {
+                z_stop_threshold: value,
+                ..base.clone()
+            });
         }
-
+        for value in [barriers.0, barriers.1].into_iter().flatten() {
+            neighbors.push(DollarBarsCusumConfig {
+                time_barrier_bars: value,
+                ..base.clone()
+            });
+        }
+        for value in [floors.0, floors.1].into_iter().flatten() {
+            neighbors.push(DollarBarsCusumConfig {
+                min_take_profit_pct: value,
+                ..base.clone()
+            });
+        }
         neighbors
     }
+}
+
+/// The largest grid value below `value` and the smallest above it.
+fn adjacent_grid_values<T: PartialOrd + Copy>(grid: &[T], value: T) -> (Option<T>, Option<T>) {
+    let below = grid
+        .iter()
+        .copied()
+        .filter(|v| *v < value)
+        .fold(None, |best: Option<T>, v| match best {
+            Some(b) if b >= v => Some(b),
+            _ => Some(v),
+        });
+    let above = grid
+        .iter()
+        .copied()
+        .filter(|v| *v > value)
+        .fold(None, |best: Option<T>, v| match best {
+            Some(b) if b <= v => Some(b),
+            _ => Some(v),
+        });
+    (below, above)
 }
 
 /// Concrete implementation of the AFML information-driven mean-reversion strategy.
@@ -278,12 +320,12 @@ impl Strategy for DollarBarsCusumStrategy {
                     return None; // Target run distance too small to overcome exchange friction
                 }
 
-                let stop_dist = self.config.z_stop_threshold * z_res.std_dev;
-                let stop_loss = if z_res.mean > stop_dist {
-                    z_res.mean - stop_dist
-                } else {
-                    bar.close * dec!(0.90) // safety fallback floor
-                };
+                let stop_loss = z_res.mean - self.config.z_stop_threshold * z_res.std_dev;
+                if stop_loss <= Decimal::ZERO || stop_loss >= bar.close {
+                    // The move already crossed the stop barrier (|z| >= z_stop), or the
+                    // barrier is below zero: there is no stop that bounds this trade.
+                    return None;
+                }
 
                 OrderIntent::new(
                     bar.end_time,
@@ -305,8 +347,11 @@ impl Strategy for DollarBarsCusumStrategy {
                     return None; // Target run distance too small to overcome exchange friction
                 }
 
-                let stop_dist = self.config.z_stop_threshold * z_res.std_dev;
-                let stop_loss = z_res.mean + stop_dist;
+                let stop_loss = z_res.mean + self.config.z_stop_threshold * z_res.std_dev;
+                if stop_loss <= bar.close {
+                    // The move already crossed the stop barrier (|z| >= z_stop).
+                    return None;
+                }
 
                 OrderIntent::new(
                     bar.end_time,
@@ -419,6 +464,108 @@ mod tests {
             candidates[0].min_take_profit_pct,
             default_min_take_profit_pct()
         );
+    }
+
+    fn grid_config(
+        win: usize,
+        vol: Decimal,
+        ze: Decimal,
+        zs: Decimal,
+        tb: usize,
+        tp: Decimal,
+    ) -> DollarBarsCusumConfig {
+        DollarBarsCusumConfig {
+            rolling_window_len: win,
+            cusum_vol_multiplier: vol,
+            z_entry_threshold: ze,
+            z_stop_threshold: zs,
+            time_barrier_bars: tb,
+            min_take_profit_pct: tp,
+        }
+    }
+
+    #[test]
+    fn neighbors_step_every_parameter_to_its_adjacent_grid_values() {
+        let space = DollarBarsCusumSpace::default();
+        let base = grid_config(22, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.005));
+
+        let neighbors = space.perturb_neighbors(&base);
+
+        let expected = vec![
+            grid_config(18, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.005)),
+            grid_config(26, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.005)),
+            grid_config(22, dec!(1.0), dec!(1.9), dec!(3.5), 300, dec!(0.005)),
+            grid_config(22, dec!(1.5), dec!(1.9), dec!(3.5), 300, dec!(0.005)),
+            grid_config(22, dec!(1.2), dec!(1.7), dec!(3.5), 300, dec!(0.005)),
+            grid_config(22, dec!(1.2), dec!(2.1), dec!(3.5), 300, dec!(0.005)),
+            grid_config(22, dec!(1.2), dec!(1.9), dec!(3.0), 300, dec!(0.005)),
+            grid_config(22, dec!(1.2), dec!(1.9), dec!(4.0), 300, dec!(0.005)),
+            grid_config(22, dec!(1.2), dec!(1.9), dec!(3.5), 100, dec!(0.005)),
+            grid_config(22, dec!(1.2), dec!(1.9), dec!(3.5), 1000, dec!(0.005)),
+            grid_config(22, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.0035)),
+            grid_config(22, dec!(1.2), dec!(1.9), dec!(3.5), 300, dec!(0.007)),
+        ];
+        assert_eq!(neighbors, expected);
+    }
+
+    #[test]
+    fn neighbors_at_the_grid_edge_only_step_inwards() {
+        let space = DollarBarsCusumSpace::default();
+        let base = grid_config(14, dec!(2.4), dec!(1.5), dec!(5.0), 100, dec!(0.01));
+
+        let neighbors = space.perturb_neighbors(&base);
+
+        assert_eq!(neighbors.len(), 6);
+        assert!(neighbors.iter().all(|n| n.rolling_window_len >= 14
+            && n.cusum_vol_multiplier <= dec!(2.4)
+            && n.z_entry_threshold >= dec!(1.5)
+            && n.z_stop_threshold <= dec!(5.0)
+            && n.time_barrier_bars >= 100
+            && n.min_take_profit_pct <= dec!(0.01)));
+    }
+
+    #[test]
+    fn an_off_grid_value_steps_to_the_nearest_grid_values_around_it() {
+        let space = DollarBarsCusumSpace::default();
+        let base = DollarBarsCusumConfig::default(); // window 20 is between 18 and 22
+
+        let windows: Vec<usize> = space
+            .perturb_neighbors(&base)
+            .iter()
+            .filter(|n| n.rolling_window_len != base.rolling_window_len)
+            .map(|n| n.rolling_window_len)
+            .collect();
+
+        assert_eq!(windows, vec![18, 22]);
+    }
+
+    /// Bars that end in a drop to 90 with z = -1.71 against a window-4 mean of 97.5.
+    fn drop_to_ninety(strategy: &mut DollarBarsCusumStrategy) -> Option<OrderIntent> {
+        for (i, price) in [100, 100, 100, 101, 99, 100].into_iter().enumerate() {
+            strategy.on_bar(&create_test_bar(
+                (i as i64 + 1) * 1000,
+                Decimal::from(price),
+            ));
+        }
+        strategy.on_bar(&create_test_bar(7000, dec!(90)))
+    }
+
+    #[test]
+    fn a_signal_whose_z_score_already_crossed_the_stop_barrier_is_skipped() {
+        let base = grid_config(4, dec!(1.0), dec!(1.5), dec!(3.0), 10, dec!(0.0025));
+        let mut accepted = DollarBarsCusumStrategy::new(base.clone()).unwrap();
+        assert!(
+            drop_to_ninety(&mut accepted).is_some(),
+            "|z| 1.71 < z_stop 3.0"
+        );
+
+        // With z_stop 1.6 the stop (mean - 1.6 sigma = 90.5) would sit above the long entry.
+        let mut crossed = DollarBarsCusumStrategy::new(DollarBarsCusumConfig {
+            z_stop_threshold: dec!(1.6),
+            ..base
+        })
+        .unwrap();
+        assert!(drop_to_ninety(&mut crossed).is_none());
     }
 
     #[test]
