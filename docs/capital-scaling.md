@@ -131,6 +131,23 @@ not better on their own: every extra trial raises the chance that the winner is 
 Deflated Sharpe ratio penalizes. 120 candidates still try each value of each parameter dozens of
 times. The cost grows linearly with candidates times bars.
 
+### Reading the result
+
+The search ranks by out-of-sample quality. See `docs/architecture/04-hpo-and-walk-forward.md`,
+sections 2.2 to 2.4.
+
+- **Eligible.** Only a candidate with at least 30 closed trades in every fold can win
+  (`--min-trades-per-fold`). The job fails, and deploys nothing, when none reaches it.
+- **Fitness.** Fitness is the mean out-of-sample Sortino per trade times the stability (the share
+  of the edge that one-step neighbours keep). Per-trade Sortino values are small fractions: 0.1 is
+  a good figure, not a poor one.
+- **DSR p-value.** It says whether the winner beats the best result expected from luck among all
+  candidates. A winner with p ≥ 0.05 is reported as not significant. It is still deployed, but
+  judge it by the holdout backtest before trusting it.
+- **Rejected signals** (`rejected_orders`). On a small account, `OrderSizeExceeded` means a stop
+  so tight that the risk-based size exceeds the notional cap (section 2). Many of them mean that
+  the account size, not the market, limits the strategy.
+
 ## 7. Checklist before raising the capital
 
 1. At least 100 closed trades and 4 weeks at the current level, without `[CRITICAL]` halts.

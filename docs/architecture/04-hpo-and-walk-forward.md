@@ -39,30 +39,66 @@ Performance (Sortino)
         └─────┴──────────────────────────────────────────► Parameter Space (θ)
 ```
 
-#### Mathematical Fitness Function with Stability Penalty:
-For any candidate parameter vector $\theta = (\theta_{\text{dollar}}, h_{\text{mult}}, Z_{\text{entry}}, Z_{\text{stop}}, K_{\text{bars}})$:
-$$\text{Fitness}(\theta) = \text{Metric}_{\text{IS}}(\theta) \times \text{StabilityScore}(\theta)$$
+#### Fitness function with stability penalty
+For every candidate $\theta$ the optimizer runs each fold's train (IS) and test (OOS) slice. The ranking is:
 
-Where $\text{StabilityScore}(\theta)$ measures the standard deviation of performance when perturbing $\theta$ by $\pm \epsilon$:
-$$\text{StabilityScore}(\theta) = \exp\left(-\lambda \cdot \text{StdDev}\left(\{\text{Metric}(\theta + \delta_i)\}_{i=1}^k\right)\right)$$
+$$\text{Fitness}(\theta) = \max\left(0, \overline{\text{Sortino}}_{\text{OOS}}(\theta)\right) \times \text{Stability}(\theta)$$
 
-This forces the search algorithm to select broad parameter **plateaus** where small regime shifts do not destroy profitability.
+It applies only to an eligible candidate (section 2.4) whose mean IS Sortino is positive; every other candidate has fitness 0. The ranking lists the eligible candidates first, by descending fitness, and the ineligible ones after them. The OOS folds are the walk-forward test slices. The final, untouched check is the holdout backtest of the winner (`--holdout-from-month`).
+
+$\text{Stability}(\theta)$ is the share of the base performance that its grid neighbours keep. The neighbours are one step down and one step up the grid for each of the six parameters, the others held fixed: up to 12 neighbours. Each neighbour runs on fold 0's training slice:
+
+$$\text{Stability}(\theta) = \text{clamp}\left(\frac{\frac{1}{k}\sum_{i=1}^{k} \max\left(0, S(\theta + \delta_i)\right)}{S(\theta)}, 0, 1\right)$$
+
+- A neighbour with fewer trades than the minimum, or with an undefined Sortino, counts as 0.
+- When the base Sortino is not positive, stability is 0.
+- 1 means a plateau: every step performs at least as well.
+- 0.5 means a step loses half of the edge on average.
+- Ineligible candidates skip this computation, which costs up to 12 backtests per candidate.
+
+#### Sortino ratio (per trade)
+The return of a trade is $r_i = \text{pnl}^{\text{net}}_i / \text{equity at entry}_i$. Sizing risks a fraction of equity, so this is the return the account sees. The Sortino ratio uses all $N$ trades with a target return of 0:
+
+$$\text{Sortino} = \frac{\bar r}{\sqrt{\frac{1}{N}\sum_{i=1}^{N} \min(r_i, 0)^2}}$$
+
+It is **undefined** (`None`, NULL in BigQuery) without trades or without downside. A fixed cap there (the former `100`) reads as an excellent measurement, so the ratio is left undefined instead. The profit factor follows the same rule: it is undefined without losing trades. In a fold mean, an undefined Sortino counts as 0.
 
 ---
 
 ### 2.3 Statistical Significance: Deflated Sharpe Ratio (DSR)
-When evaluating $N$ configurations during an HPO sweep, the maximum observed Sharpe ratio increases purely as a function of trials $N$, even if all strategies are random walks.
+When an HPO sweep evaluates $N$ configurations, the maximum observed Sharpe ratio increases purely as a function of the number of trials, even if every strategy is a random walk. The Deflated Sharpe Ratio (Bailey and López de Prado, 2014) tests the observed Sharpe ratio against the best one expected from luck:
 
-The **Deflated Sharpe Ratio (DSR)** adjusts the observed Sharpe ratio $\widehat{\text{SR}}$ for:
-1. Number of parameter trials tested ($N$).
-2. Return distribution non-normality (skewness $\gamma_3$ and kurtosis $\gamma_4$).
-3. Length of observation track record ($T$).
+$$\text{SR}_0 = \sqrt{V[\widehat{\text{SR}}_n]}\left((1-\gamma)\,\Phi^{-1}\left(1-\tfrac{1}{N}\right) + \gamma\,\Phi^{-1}\left(1-\tfrac{1}{N e}\right)\right)$$
 
-$$\text{DSR} = \Phi\left(\frac{(\widehat{\text{SR}} - \text{SR}^*) \cdot \sqrt{T - 1}}{\sqrt{1 - \gamma_3 \widehat{\text{SR}} + \frac{\gamma_4 - 1}{4}\widehat{\text{SR}}^2}}\right)$$
-Where $\text{SR}^*$ is the expected maximum Sharpe ratio under the null hypothesis of zero skill:
-$$\text{SR}^* \approx \sqrt{2 \ln(N)} + \frac{\gamma}{\sqrt{2 \ln(N)}}$$
+$$p = 1 - \Phi\left(\frac{(\widehat{\text{SR}} - \text{SR}_0)\sqrt{T - 1}}{\sqrt{1 - \gamma_3 \widehat{\text{SR}} + \frac{\gamma_4 - 1}{4}\widehat{\text{SR}}^2}}\right)$$
 
-Configurations failing to achieve a statistically significant DSR ($p < 0.05$) are discarded.
+The terms in this implementation (`deflated_sharpe_p_value`):
+
+- $\widehat{\text{SR}}$ is the per-trade Sharpe ratio (mean over sample standard deviation) of the candidate's out-of-sample trade returns, concatenated over all folds.
+- $T$ is the number of those trades.
+- $\gamma_3$ and $\gamma_4$ are their skewness and kurtosis (not excess).
+- $V[\widehat{\text{SR}}_n]$ is the variance of $\widehat{\text{SR}}$ across all trials that have one.
+- $N$ is the number of candidates evaluated.
+- $\gamma$ is the Euler-Mascheroni constant.
+
+A candidate with fewer than two OOS trades, or no variance, gets $p = 1$.
+
+A candidate is significant at $p < 0.05$. Significance is **reported, not used to filter**:
+- The winner's significance is printed, stored in the artifact scorecard and recorded in BigQuery.
+- A winner that is not significant can still be deployed, but its edge may be the luck of selection. Treat it as such.
+
+---
+
+### 2.4 Minimum trades per fold
+A ratio measured on a handful of trades says more about luck than about the rule: two winning trades have no downside to measure.
+
+- A candidate is **eligible** only when every IS and every OOS fold closed at least `--min-trades-per-fold` trades (default 30, `DEFAULT_MIN_TRADES_PER_FOLD`).
+- Ineligible candidates are recorded with their metrics, but they never win.
+- When no candidate is eligible, `run_hpo` records the trials and exits non-zero without writing or uploading an artifact.
+- The fewest trades in any fold is reported per candidate as `min_fold_trades`.
+
+#### Rejected signals
+Signals the risk policy refuses are counted per reason in `BacktestMetrics::rejected_orders` and the `rejected_orders` column of `run_metrics`. Examples are a notional above the cap (`OrderSizeExceeded`), a quantity below one lot (`OrderBelowMinLotSize`), or a day halted by the daily circuit breaker (`DailyHalt`). A candidate with few trades and many rejections is constrained by the account size, not by the market.
 
 ---
 
@@ -163,10 +199,14 @@ The HPO engine produces a structured JSON artifact summarizing the optimization 
       "z_stop_threshold": "3.50",
       "time_barrier_bars": 15
     },
-    "mean_is_sortino": "2.45",
-    "mean_oos_sortino": "2.10",
-    "stability_score": "0.92",
-    "fitness": "2.25",
+    "mean_is_sortino": "0.21",
+    "mean_oos_sortino": "0.14",
+    "mean_oos_profit_factor": "1.32",
+    "oos_sharpe": "0.081",
+    "total_oos_trades": 412,
+    "min_fold_trades": 37,
+    "stability_score": "0.78",
+    "fitness": "0.109",
     "dsr_p_value": "0.0120",
     "is_statistically_significant": true
   }
