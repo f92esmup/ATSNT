@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 use backtest::driver::SessionDriver;
 use backtest::parity::FillRecorder;
 use backtest::session::{SessionConfig, SessionEvent, SkipReason, TradingSession};
+use backtest::AlertThrottle;
 use backtest::{
     now_unix_ms, record_closed_trade, record_run_status, BacktestConfig, BacktestMetrics,
     DataWindow, ExitEvent, RunContext, RunSpec, RunStatus, RunType, SamplingConfig,
@@ -474,6 +475,7 @@ async fn main() -> Result<()> {
         symbol: &symbol_upper,
         monthly_limit_pct: run_spec.execution_context.max_monthly_drawdown_pct,
         fill_recorder: args.record_fills.as_ref().map(FillRecorder::new),
+        timeout_alerts: AlertThrottle::new(60_000),
     };
     let mut total_ticks: u64 = 0;
     let mut total_bars: u64 = 0;
@@ -813,6 +815,8 @@ struct EventSink<'a> {
     symbol: &'a str,
     monthly_limit_pct: Decimal,
     fill_recorder: Option<FillRecorder>,
+    /// Limits the Telegram alert of a timed-out entry that keeps failing to resolve.
+    timeout_alerts: AlertThrottle,
 }
 
 impl EventSink<'_> {
@@ -872,6 +876,7 @@ impl EventSink<'_> {
                 SessionEvent::EntryTimedOut {
                     closed_unreported_position,
                 } => {
+                    self.timeout_alerts.reset();
                     let detail = if closed_unreported_position {
                         "the exchange held a position the bot had not been told about; it was closed at market"
                     } else {
@@ -896,13 +901,16 @@ impl EventSink<'_> {
                         "[CRITICAL] {}: an entry order timed out and could not be resolved ({reason}); retrying.",
                         self.symbol
                     );
-                    if let Some(t) = self.telegram {
-                        let _ = t
-                            .send_alert(&format!(
-                                "🚨 *ATSNT* `{}`: a timed-out entry could not be resolved ({reason}); retrying.",
-                                self.symbol
-                            ))
-                            .await;
+                    // The retry runs every few seconds: one Telegram message a minute is enough.
+                    if self.timeout_alerts.allow(now_unix_ms()) {
+                        if let Some(t) = self.telegram {
+                            let _ = t
+                                .send_alert(&format!(
+                                    "🚨 *ATSNT* `{}`: a timed-out entry could not be resolved ({reason}); retrying.",
+                                    self.symbol
+                                ))
+                                .await;
+                        }
                     }
                 }
                 SessionEvent::EntryFailed(reason) => {

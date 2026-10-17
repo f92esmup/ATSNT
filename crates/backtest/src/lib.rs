@@ -1,3 +1,4 @@
+pub mod alert_throttle;
 pub mod artifact;
 pub mod config;
 pub mod daily_watermark;
@@ -21,6 +22,7 @@ pub mod sinks;
 pub mod tick_simulation;
 pub mod walk_forward;
 
+pub use alert_throttle::AlertThrottle;
 pub use artifact::{
     load_strategy_config, HpoScorecard, LoadedStrategyConfig, SamplingConfig,
     StrategyDeploymentArtifact,
