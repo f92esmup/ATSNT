@@ -60,7 +60,7 @@ struct Args {
 
     /// Warm the strategy's rolling windows with this many minutes of recent trades (public REST
     /// `aggTrades`, USD-M futures only) before the session starts
-    #[arg(long)]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1440))]
     warmup_minutes: Option<u32>,
 
     /// Milliseconds an order takes to reach the simulated market (an assumption until measured
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
     }
     let loaded = backtest::load_strategy(&strategy_id, args.config.as_deref())?;
     for line in loaded.report_lines() {
-        println!("[*] {line}");
+        println!("{line}");
     }
     if let Some(artifact_sym) = loaded.symbol.as_deref() {
         if !artifact_sym.eq_ignore_ascii_case(&args.symbol) {
@@ -235,11 +235,14 @@ async fn main() -> Result<()> {
     let mut session = PaperTradingSession::with_strategy(paper_config, loaded.strategy)
         .map_err(|e| anyhow::anyhow!("Failed to initialize paper trading session: {e}"))?;
 
+    // Live trades up to this instant were already covered by the warm-up history.
+    let mut warmup_cutoff_ms = i64::MIN;
     if let Some(minutes) = args.warmup_minutes {
         if args.spot {
             anyhow::bail!("--warmup-minutes supports USD-M futures only, not --spot");
         }
         let now_ms = now_unix_ms();
+        warmup_cutoff_ms = now_ms;
         println!("[*] Warming the strategy up with {minutes} minutes of recent trades...");
         let history = adapters::BinanceRecentTrades::futures(false)
             .fetch(&args.symbol, now_ms - i64::from(minutes) * 60_000, now_ms)
@@ -363,6 +366,9 @@ async fn main() -> Result<()> {
 
             trade_res = stream.next_trade() => {
                 match trade_res {
+                    // Already part of the warm-up history; feeding it twice would repeat those
+                    // trades in the strategy's window.
+                    Ok(Some(trade)) if trade.timestamp <= warmup_cutoff_ms => {}
                     Ok(Some(trade)) => {
                         total_ticks += 1;
                         last_mark_price = trade.price;

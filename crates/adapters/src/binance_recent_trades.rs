@@ -12,6 +12,8 @@ use std::str::FromStr;
 use crate::error::AdapterError;
 
 const PAGE_LIMIT: usize = 1_000;
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_ATTEMPTS: u32 = 4;
 const WINDOW_MS: i64 = 60 * 60 * 1_000;
 const TESTNET_BASE_URL: &str = "https://testnet.binancefuture.com";
 const PRODUCTION_BASE_URL: &str = "https://fapi.binance.com";
@@ -72,13 +74,52 @@ impl BinanceRecentTrades {
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
     /// Endpoint this client queries.
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// One page, retried with a growing pause on transport errors, HTTP 429 and 5xx; any other
+    /// HTTP error is final.
+    async fn get_page(&self, url: &str) -> Result<Vec<AggTradeRecord>, AdapterError> {
+        let mut attempt = 1;
+        loop {
+            let outcome = async {
+                self.client
+                    .get(url)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<Vec<AggTradeRecord>>()
+                    .await
+            }
+            .await;
+            match outcome {
+                Ok(page) => return Ok(page),
+                Err(error) => {
+                    let transient = error.is_timeout()
+                        || error.is_connect()
+                        || error.is_request()
+                        || error.is_body()
+                        || error.status().is_some_and(|status| {
+                            status.as_u16() == 429 || status.is_server_error()
+                        });
+                    if !transient || attempt >= MAX_ATTEMPTS {
+                        return Err(error.into());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * u64::from(attempt)))
+                        .await;
+                    attempt += 1;
+                }
+            }
+        }
     }
 
     /// Trades of `symbol` in `[from_ms, to_ms]`, oldest first.
@@ -102,14 +143,7 @@ impl BinanceRecentTrades {
                     ),
                 };
                 let url = format!("{}/fapi/v1/aggTrades?{query}", self.base_url);
-                let page: Vec<AggTradeRecord> = self
-                    .client
-                    .get(&url)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json()
-                    .await?;
+                let page = self.get_page(&url).await?;
                 let full = page.len() >= PAGE_LIMIT;
                 let last_id = page.last().map(|record| record.id);
                 let mut past_window = false;
@@ -141,9 +175,17 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    /// Serves the given response bodies, one per request, and records the request lines.
+    /// Serves the given response bodies with status 200, one per request, and records the
+    /// request lines.
     fn spawn_server(
         bodies: Vec<String>,
+    ) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+        spawn_server_with_status(bodies.into_iter().map(|body| (200, body)).collect())
+    }
+
+    /// Like `spawn_server`, with the HTTP status of each response.
+    fn spawn_server_with_status(
+        bodies: Vec<(u16, String)>,
     ) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -153,7 +195,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let mut queue = bodies.into_iter();
             let mut last = Instant::now();
-            while last.elapsed() < Duration::from_millis(300) {
+            while last.elapsed() < Duration::from_millis(900) {
                 let (mut stream, _) = match listener.accept() {
                     Ok(connection) => connection,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -182,9 +224,9 @@ mod tests {
                     .unwrap_or_default()
                     .to_string();
                 captured.lock().unwrap().push(line);
-                let body = queue.next().unwrap_or_else(|| "[]".to_string());
+                let (status, body) = queue.next().unwrap_or((200, "[]".to_string()));
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body
                 );
@@ -288,5 +330,37 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_or_failing_page_is_retried() {
+        let page = format!("[{}]", record(1, 1_000, "100", false));
+        let (url, requests, handle) = spawn_server_with_status(vec![
+            (429, "{}".to_string()),
+            (503, "{}".to_string()),
+            (200, page),
+        ]);
+
+        let trades = BinanceRecentTrades::with_base_url(url)
+            .fetch("BTCUSDT", 1_000, 2_000)
+            .await
+            .unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(trades.len(), 1);
+        assert_eq!(requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_client_error_is_final_and_not_retried() {
+        let (url, requests, handle) = spawn_server_with_status(vec![(400, "{}".to_string())]);
+
+        let result = BinanceRecentTrades::with_base_url(url)
+            .fetch("BTCUSDT", 1_000, 2_000)
+            .await;
+        handle.join().unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(requests.lock().unwrap().len(), 1);
     }
 }

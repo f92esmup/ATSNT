@@ -166,6 +166,7 @@ mod tests {
                 status: "NEW".to_string(),
                 quantity: dec!(1),
                 price: dec!(100),
+                sent_at_ms: 0,
             })
         }
     }

@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
     }
     let loaded = backtest::load_strategy(&strategy_id, args.config.as_deref())?;
     for line in loaded.report_lines() {
-        println!("[*] {line}");
+        println!("{line}");
     }
     let mut strategy = loaded.strategy;
     let strat_config_val = loaded.config_json;

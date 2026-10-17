@@ -100,7 +100,7 @@ struct Args {
     /// Warm the strategy's rolling windows with this many minutes of recent trades (public REST
     /// `aggTrades` of the same market the stream follows) before trading starts. Without it the
     /// strategy starts cold, unlike a backtest, and needs its full window of live bars first.
-    #[arg(long)]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1440))]
     warmup_minutes: Option<u32>,
 
     /// Verify the Binance account against the strategy profile, print the report and exit
@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
     }
     let loaded = backtest::load_strategy(&strategy_id, args.config.as_deref())?;
     for line in loaded.report_lines() {
-        println!("[*] {line}");
+        println!("{line}");
     }
 
     // Contract validation
@@ -236,6 +236,9 @@ async fn main() -> Result<()> {
     // like the simulation that selected the strategy; only `--risk-pct` may override it.
     let artifact_context = loaded.execution_context.unwrap_or_default();
     let risk_per_trade_pct = args.risk_pct.unwrap_or(artifact_context.risk_per_trade_pct);
+    if risk_per_trade_pct <= Decimal::ZERO || risk_per_trade_pct > Decimal::ONE {
+        anyhow::bail!("--risk-pct must be greater than 0 and at most 1, got {risk_per_trade_pct}");
+    }
     let risk_policy = artifact_context
         .risk_policy()
         .with_context(|| "Invalid risk limits in the execution context")?;
@@ -386,16 +389,16 @@ async fn main() -> Result<()> {
             .with_context(|| "Failed to connect to Binance Private User Data Stream")?;
 
     // 5. Connect Public Market Stream
-    println!(
-        "[*] Subscribing to public market trade feed: wss://fstream.binancefuture.com/ws/{}@aggTrade",
-        args.symbol.to_ascii_lowercase()
-    );
     // The public feed must be the market the account trades: testnet and production differ.
     let ws_config = if is_testnet {
         BinanceWsConfig::futures(&args.symbol)
     } else {
         BinanceWsConfig::futures_production(&args.symbol)
     };
+    println!(
+        "[*] Subscribing to public market trade feed: {}",
+        ws_config.stream_url()
+    );
     let ws_source = ws_config.stream_url();
     let mut market_stream = BinanceWebSocketStream::connect(ws_config)
         .with_context(|| "Failed to connect to public Binance WebSocket feed")?;
@@ -449,8 +452,11 @@ async fn main() -> Result<()> {
         strategy,
     );
     let mut driver = SessionDriver::new(session, effective_dollar_bar)?;
+    // Live trades up to this instant were already covered by the warm-up history.
+    let mut warmup_cutoff_ms = i64::MIN;
     if let Some(minutes) = args.warmup_minutes {
         let now_ms = now_unix_ms();
+        warmup_cutoff_ms = now_ms;
         let from_ms = now_ms - i64::from(minutes) * 60_000;
         println!("[*] Warming the strategy up with {minutes} minutes of recent trades...");
         let history = adapters::BinanceRecentTrades::futures(is_testnet)
@@ -641,6 +647,11 @@ async fn main() -> Result<()> {
             // Ingest public market trade ticks
             trade_res = market_stream.next_trade() => {
                 match trade_res {
+                    Ok(Some(trade)) if trade.timestamp <= warmup_cutoff_ms => {
+                        // Already part of the warm-up history; feeding it twice would repeat
+                        // those trades in the strategy's window.
+                        tracing::trace!(target: "live_trading", "Skipped a trade covered by the warm-up");
+                    }
                     Ok(Some(trade)) => {
                         total_ticks += 1;
                         data_window.start_ms.get_or_insert(trade.timestamp);

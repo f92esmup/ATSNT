@@ -65,11 +65,11 @@ impl LoadedStrategy {
     pub fn report_lines(&self) -> Vec<String> {
         match &self.source {
             ConfigSource::Default => vec![format!(
-                "Using default {} hyperparameters: {}",
+                "[*] Using default {} hyperparameters: {}",
                 self.strategy_id, self.config_display
             )],
             ConfigSource::Bare => vec![
-                "Legacy bare hyperparameter configuration loaded (no deployment manifest)"
+                "[*] Legacy bare hyperparameter configuration loaded (no deployment manifest)"
                     .to_string(),
             ],
             ConfigSource::Artifact {
@@ -77,11 +77,11 @@ impl LoadedStrategy {
                 scorecard,
             } => {
                 let mut lines = vec![format!(
-                    "Authoritative Deployment Artifact loaded (schema v{schema_version})"
+                    "[*] Authoritative Deployment Artifact loaded (schema v{schema_version})"
                 )];
                 if let Some(card) = scorecard {
                     lines.push(format!(
-                        "HPO Scorecard: IS Sortino={:.2}, OOS Sortino={:.2}, Stability={:.2}, DSR p={:.4} ({})",
+                        "    • HPO Scorecard: IS Sortino={:.2}, OOS Sortino={:.2}, Stability={:.2}, DSR p={:.4} ({})",
                         card.mean_is_sortino,
                         card.mean_oos_sortino,
                         card.stability_score,
@@ -99,9 +99,10 @@ impl LoadedStrategy {
     }
 }
 
-/// Strategy id to use: the artifact's own id wins, then the command line, then the default.
-/// Aliases resolve to the canonical id; an unregistered name is an error listing the registered
-/// ones.
+/// Strategy id to use: the artifact's id, else the command line, else the default. Aliases
+/// resolve to the canonical id; an unregistered name is an error listing the registered ones.
+/// A command-line strategy that disagrees with the artifact's is an error too, never silently
+/// ignored.
 pub fn resolve_strategy_id(requested: Option<&str>, config_path: Option<&Path>) -> Result<String> {
     let from_artifact = match config_path {
         Some(path) => {
@@ -116,12 +117,25 @@ pub fn resolve_strategy_id(requested: Option<&str>, config_path: Option<&Path>) 
         }
         None => None,
     };
-    let name = from_artifact
-        .or_else(|| requested.map(str::to_string))
-        .unwrap_or_else(|| DEFAULT_STRATEGY_ID.to_string());
-    canonical_id(&name)
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!(unknown_strategy_message(&name)))
+    let resolve = |name: &str| {
+        canonical_id(name)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!(unknown_strategy_message(name)))
+    };
+    match (from_artifact, requested) {
+        (Some(declared), Some(asked)) => {
+            let (declared, asked) = (resolve(&declared)?, resolve(asked)?);
+            if declared != asked {
+                anyhow::bail!(
+                    "--strategy {asked} conflicts with the {declared} strategy declared by the configuration file; drop the option or use a matching file"
+                );
+            }
+            Ok(declared)
+        }
+        (Some(declared), None) => resolve(&declared),
+        (None, Some(asked)) => resolve(asked),
+        (None, None) => resolve(DEFAULT_STRATEGY_ID),
+    }
 }
 
 struct Loader<'a> {
@@ -217,7 +231,7 @@ mod tests {
             serde_json::to_value(OrderFlowImbalanceConfig::default()).unwrap()
         );
         assert!(loaded.dollar_bar_threshold.is_none());
-        assert!(loaded.report_lines()[0].contains("default order_flow_imbalance"));
+        assert!(loaded.report_lines()[0].starts_with("[*] Using default order_flow_imbalance"));
     }
 
     #[test]
@@ -238,6 +252,7 @@ mod tests {
         assert_eq!(loaded.market_type, Some(MarketType::UsdMPerpetual));
         assert_eq!(loaded.execution_context, Some(BacktestConfig::default()));
         assert!(matches!(loaded.source, ConfigSource::Artifact { .. }));
+        assert!(loaded.report_lines()[0].starts_with("[*] Authoritative Deployment Artifact"));
         assert!(loaded.report_lines()[0].contains("schema v1.0"));
     }
 
@@ -252,18 +267,23 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         assert_eq!(loaded.source, ConfigSource::Bare);
-        assert!(loaded.report_lines()[0].contains("Legacy bare"));
+        assert!(loaded.report_lines()[0].starts_with("[*] Legacy bare"));
     }
 
     #[test]
-    fn the_artifact_id_beats_the_command_line_and_aliases_resolve() {
+    fn the_artifact_id_is_honoured_and_aliases_resolve() {
         let path = temp_file(
             "ofi-artifact.json",
             r#"{"strategy_id":"ofi","schema_version":"1.0"}"#,
         );
 
+        // Nothing on the command line, or the same strategy under another spelling: fine.
         assert_eq!(
-            resolve_strategy_id(Some("cusum"), Some(&path)).unwrap(),
+            resolve_strategy_id(None, Some(&path)).unwrap(),
+            "order_flow_imbalance"
+        );
+        assert_eq!(
+            resolve_strategy_id(Some("order_flow_imbalance"), Some(&path)).unwrap(),
             "order_flow_imbalance"
         );
         std::fs::remove_file(&path).unwrap();
@@ -275,6 +295,21 @@ mod tests {
             resolve_strategy_id(None, None).unwrap(),
             DEFAULT_STRATEGY_ID
         );
+    }
+
+    #[test]
+    fn a_command_line_strategy_that_contradicts_the_artifact_is_refused() {
+        let path = temp_file(
+            "contradiction.json",
+            r#"{"strategy_id":"ofi","schema_version":"1.0"}"#,
+        );
+
+        let error = resolve_strategy_id(Some("cusum"), Some(&path)).unwrap_err();
+        std::fs::remove_file(&path).unwrap();
+
+        let message = error.to_string();
+        assert!(message.contains("--strategy dollar_bars_cusum conflicts"));
+        assert!(message.contains("order_flow_imbalance"));
     }
 
     #[test]
