@@ -28,7 +28,8 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
 - [x] T3 S7, S5 neighbours: strategy signal guard and grid neighbours. Route: inline. Commit d4f298b. RED: 4 failing tests, then GREEN with strategies at 26 passed.
 - [x] T4 S2-S5: optimizer eligibility, fitness, stability, DSR, run_hpo selection, report and recording. Route: inline. Commit 34836a9. Workspace: 505 passed, 0 failed. Clippy -D warnings clean.
 - [x] T6 S10: O(1) RollingZScore (ecc8e28, equivalence test against the two-pass statistics over 5,000 prices) and window grid [100, 160, 250, 400, 650, 1000, 1600] (RED on the grid assertion, then GREEN). Workspace: 507 passed.
-- [ ] T5 S9: docs, local comparison run, relaunch command. Route: inline.
+- [x] T5 S9: docs (04, 10, 13 -> contract v2, capital-scaling), local comparison (L7, L8), relaunch (L9-L11). Route: inline.
+- [x] T7 (found in v2 results): DSR over eligible trials only, plus a fitness tie-break by OOS Sortino. Commit fce2b78; workspace 509 passed.
 
 ## Log
 
@@ -71,3 +72,22 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
   - Conclusion: the strategy has no gross edge at $1M bars, so no cost assumption makes it profitable.
   - Decision: run_hpo still writes the best eligible candidate with its honest scorecard, so the holdout backtest gives the Sep-Oct evidence. A deployment gate in paper/live (refuse fitness 0 or a non-significant DSR) is left as a recommendation, because it is a product decision for the user.
 - L9 Relaunch: job `hpo-btcusdt-2026-500eur-v2`, image 780661f91b86, submitted 23:16 UTC. Both new preflights passed live (artifact absent; table-level grants on the 4 tables).
+- L10 Job v2 (`hpo-btcusdt-2026-500eur-v2`, HPO run 01a14c33-e1ef-...): SUCCEEDED in 13 min, all sinks OK, no retries.
+  - 25 of 120 candidates were eligible, and none had a positive OOS Sortino.
+  - BigQuery showed ineligible trials with 2 OOS trades at a per-trade Sharpe of 15-22 and p = 0. They inflated V[SR], so every other trial got p = 1.
+  - With every fitness at 0, the winner was arbitrary (OOS -0.62, while -0.32 existed). Both are fixed in fce2b78.
+- L11 Job v3 (`hpo-btcusdt-2026-500eur-v3`, HPO run 01a14c45-c73e-747c-9d4e-f8a97002c1cd): SUCCEEDED, 25/120 eligible.
+  - Winner (least bad): W:1600|V:0.8|Ze:1.7|Zs:5.0|Tb:2000|MinTp:0.005, OOS Sortino -0.32, 778 OOS trades, weakest fold 100, DSR p 1.
+  - The whole top 5 sits at the grid edge W = 1600, and Tb = 2000 recurs.
+  - Holdout Sep-Oct 17: 155 trades, win rate 51%, net -85.00 USDT; the monthly kill switch tripped. Fees 59.10 and slippage 61.64, so the pre-cost PnL is +35.74 (+0.23 per trade, against 0.78 per trade in costs). Monte Carlo P95 drawdown is 22.7% and the probability of ruin 0.01%.
+  - Verdict: there is a small gross edge, but costs are about 3.4 times it. Not deployable. Artifact: gs://atsnt-lake-mi-facturador-bot-01/artifacts/hpo_btcusdt_2026-hpo-btcusdt-2026-500eur-v3.json.
+  - Sensitivity, computed by hand from the holdout figures (not simulated):
+    - slippage at 0.01% per side: net about -35;
+    - plus maker entries (0.02%): net about -17;
+    - so a cost cut alone does not make it profitable.
+- Next steps (the user's decisions):
+  - (a) Deployment gate in paper/live: refuse an artifact with fitness 0 or a non-significant DSR. The pipeline banner still says "Next Production Step: Run real-time paper trading".
+  - (b) Calibrate slippage with real fills (phase 4) before any further HPO.
+  - (c) Strategy direction: maker entries, or a longer horizon (the optimum sits at the grid edge).
+  - (d) Push/PR of feat/hpo-scoring (about 1,600 changed lines in 15 commits; slicing to be decided).
+  - (e) RDD review consent for the branch.
