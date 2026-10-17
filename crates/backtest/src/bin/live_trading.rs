@@ -1,7 +1,7 @@
 //! Live Execution Gateway Runner for ATSNT on Binance Futures Testnet and Production.
 //!
 //! Ingests the real-time Binance aggregate trade WebSocket stream, aggregates trades into
-//! information-driven Dollar Bars, evaluates algorithmic signals from [`DollarBarsCusumStrategy`],
+//! information-driven Dollar Bars, evaluates algorithmic signals from the selected strategy,
 //! validates pre-trade risk policy constraints, dispatches authenticated live orders via [`BinanceGateway`],
 //! and listens for execution updates and order fills over the private [`BinancePrivateUserDataStream`].
 
@@ -27,9 +27,7 @@ use domain::{DollarBarAggregator, PositionSide, Side};
 use ports::ExecutionReport;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use strategies::{
-    DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType, OptimizableStrategy, Strategy,
-};
+use strategies::{MarketType, Strategy};
 use tracing::{error, warn};
 
 #[derive(Parser, Debug)]
@@ -93,6 +91,11 @@ struct Args {
     #[arg(long)]
     record_fills: Option<PathBuf>,
 
+    /// Strategy to run, by id or alias (inferred from the --config artifact if omitted; the
+    /// default otherwise)
+    #[arg(long)]
+    strategy: Option<String>,
+
     /// Warm the strategy's rolling windows with this many minutes of recent trades (public REST
     /// `aggTrades` of the same market the stream follows) before trading starts. Without it the
     /// strategy starts cold, unlike a backtest, and needs its full window of live bars first.
@@ -112,7 +115,7 @@ struct Args {
 /// Seconds between account profile re-verifications while the bot runs.
 const ACCOUNT_RECHECK_SECS: u64 = 600;
 
-fn validate_strategy_market(strategy: &DollarBarsCusumStrategy, market: MarketType) -> Result<()> {
+fn validate_strategy_market(strategy: &impl Strategy, market: MarketType) -> Result<()> {
     if !strategy.supports_market_type(market) {
         anyhow::bail!(
             "Strategy '{}' does not support market type {:?}. Only {:?} is supported.",
@@ -169,76 +172,39 @@ async fn main() -> Result<()> {
     }
 
     // 1. Load Strategy Configuration & Authoritative Deployment Artifact
-    let (strat_config, loaded_config) = if let Some(config_path) = &args.config {
+    let strategy_id =
+        backtest::resolve_strategy_id(args.strategy.as_deref(), args.config.as_deref())?;
+    if let Some(config_path) = &args.config {
         println!(
             "[*] Loading strategy configuration from: {}",
             config_path.display()
         );
-        let loaded = backtest::load_strategy_config::<DollarBarsCusumConfig>(config_path)?;
-        match &loaded {
-            backtest::LoadedStrategyConfig::Artifact(artifact) => {
-                println!(
-                    "[*] Authoritative Deployment Artifact loaded (schema v{})",
-                    artifact.schema_version
-                );
-                if let Some(scorecard) = &artifact.hpo_scorecard {
-                    println!(
-                        "    • HPO Scorecard: IS Sortino={:.2}, OOS Sortino={:.2}, Stability={:.2}, DSR p={:.4} ({})",
-                        scorecard.mean_is_sortino,
-                        scorecard.mean_oos_sortino,
-                        scorecard.stability_score,
-                        scorecard.dsr_p_value,
-                        if scorecard.is_statistically_significant { "PASS" } else { "FAIL" }
-                    );
-                }
-            }
-            backtest::LoadedStrategyConfig::Bare(_) => {
-                println!(
-                    "[*] Legacy bare hyperparameter configuration loaded (no deployment manifest)"
-                );
-            }
-        }
-        (loaded.strategy_config().clone(), Some(loaded))
-    } else {
-        println!("[*] Using default CUSUM + Z-Score strategy hyperparameters");
-        (DollarBarsCusumConfig::default(), None)
-    };
+    }
+    let loaded = backtest::load_strategy(&strategy_id, args.config.as_deref())?;
+    for line in loaded.report_lines() {
+        println!("[*] {line}");
+    }
 
     // Contract validation
-    if let Some(loaded) = &loaded_config {
-        if let Some(strat_id) = loaded.strategy_id() {
-            if strat_id != "dollar_bars_cusum" && strat_id != "cusum" {
-                anyhow::bail!(
-                    "Deployment artifact strategy '{}' is not compatible with live_trading runner (expected 'dollar_bars_cusum')",
-                    strat_id
-                );
-            }
+    if let Some(artifact_sym) = loaded.symbol.as_deref() {
+        if !artifact_sym.eq_ignore_ascii_case(&args.symbol) {
+            println!(
+                "[WARNING] Artifact symbol ({}) does not match session symbol ({})!",
+                artifact_sym, symbol_upper
+            );
         }
-        if let Some(artifact_sym) = loaded.symbol() {
-            if !artifact_sym.eq_ignore_ascii_case(&args.symbol) {
-                println!(
-                    "[WARNING] Artifact symbol ({}) does not match session symbol ({})!",
-                    artifact_sym, symbol_upper
-                );
-            }
-        }
-        if let Some(market) = loaded.market_type() {
-            if market != MarketType::UsdMPerpetual {
-                anyhow::bail!(
-                    "Deployment artifact specifies {:?}, but live_trading currently operates on UsdMPerpetual",
-                    market
-                );
-            }
+    }
+    if let Some(market) = loaded.market_type {
+        if market != MarketType::UsdMPerpetual {
+            anyhow::bail!(
+                "Deployment artifact specifies {:?}, but live_trading currently operates on UsdMPerpetual",
+                market
+            );
         }
     }
 
     // Resolve Dollar Bar threshold: CLI override > Artifact manifest > Fallback default ($50,000)
-    let effective_dollar_bar = match (
-        args.dollar_bar,
-        loaded_config
-            .as_ref()
-            .and_then(|c| c.dollar_bar_threshold()),
-    ) {
+    let effective_dollar_bar = match (args.dollar_bar, loaded.dollar_bar_threshold) {
         (Some(cli_val), Some(artifact_val)) => {
             if cli_val != artifact_val {
                 println!(
@@ -259,19 +225,15 @@ async fn main() -> Result<()> {
         (None, None) => dec!(50_000),
     };
 
-    let estimated_taker_fee_pct = loaded_config
+    let estimated_taker_fee_pct = loaded
+        .execution_context
         .as_ref()
-        .and_then(|c| c.execution_context())
         .map(|ctx| ctx.taker_fee_pct)
         .unwrap_or(dec!(0.0005));
 
     // The artifact is authoritative for sizing and risk limits so live gates orders exactly
     // like the simulation that selected the strategy; only `--risk-pct` may override it.
-    let artifact_context = loaded_config
-        .as_ref()
-        .and_then(|c| c.execution_context())
-        .copied()
-        .unwrap_or_default();
+    let artifact_context = loaded.execution_context.unwrap_or_default();
     let risk_per_trade_pct = args.risk_pct.unwrap_or(artifact_context.risk_per_trade_pct);
     let risk_policy = artifact_context
         .risk_policy()
@@ -334,16 +296,12 @@ async fn main() -> Result<()> {
         None
     };
 
-    let strategy = DollarBarsCusumStrategy::new(strat_config.clone())?;
+    let strategy = loaded.strategy;
     validate_strategy_market(&strategy, MarketType::UsdMPerpetual)?;
 
     println!(
-        "[*] Strategy Hyperparameters: Window={}, VolMultiplier={}, Z_Entry={}, Z_Stop={}, TimeBarrier={}",
-        strat_config.rolling_window_len,
-        strat_config.cusum_vol_multiplier,
-        strat_config.z_entry_threshold,
-        strat_config.z_stop_threshold,
-        strat_config.time_barrier_bars
+        "[*] Strategy {}: {}",
+        loaded.strategy_id, loaded.config_display
     );
 
     // 2. Initialize Binance Execution Gateway
@@ -442,13 +400,13 @@ async fn main() -> Result<()> {
         .with_context(|| "Failed to connect to public Binance WebSocket feed")?;
 
     let run_spec = RunSpec {
-        strategy_id: DollarBarsCusumStrategy::id().to_string(),
+        strategy_id: loaded.strategy_id.clone(),
         symbol: symbol_upper.clone(),
         market_type: MarketType::UsdMPerpetual,
         sampling: SamplingConfig::DollarBar {
             threshold: effective_dollar_bar,
         },
-        strategy_config: strat_config.clone(),
+        strategy_config: loaded.config_json.clone(),
         execution_context: BacktestConfig {
             initial_capital: effective_capital,
             taker_fee_pct: estimated_taker_fee_pct,
@@ -1033,7 +991,7 @@ async fn announce_exit_event(telegram: &Option<TelegramNotifier>, symbol: &str, 
 async fn record_lifecycle<R: RunRecorder>(
     recorder: &R,
     ctx: &RunContext,
-    spec: &RunSpec<DollarBarsCusumConfig>,
+    spec: &RunSpec<serde_json::Value>,
     status: RunStatus,
     data: &DataWindow,
 ) {

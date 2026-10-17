@@ -10,7 +10,7 @@ use domain::{DollarBar, PositionSide, Side, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy};
+use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, Strategy};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::config::BacktestConfig;
@@ -205,7 +205,7 @@ fn position_side(side: Side) -> PositionSide {
 /// broadcasts execution telemetry in real time. The strategy only sees dollar bars; the
 /// venue sees every trade.
 pub struct PaperTradingSession {
-    simulation: TickSimulation<DollarBarsCusumStrategy>,
+    simulation: TickSimulation<Box<dyn Strategy>>,
     event_sender: broadcast::Sender<PaperTradingEvent>,
     telemetry: Option<(
         TelemetryConfig,
@@ -219,8 +219,17 @@ pub struct PaperTradingSession {
 impl PaperTradingSession {
     /// Initializes a new paper trading session from the provided configuration.
     pub fn new(config: PaperTradingConfig) -> Result<Self, BacktestError> {
+        let strategy = DollarBarsCusumStrategy::new(config.strategy.clone())?;
+        Self::with_strategy(config, Box::new(strategy))
+    }
+
+    /// Initializes a session around any strategy. The strategy carries its own
+    /// hyperparameters, so `config.strategy` is ignored.
+    pub fn with_strategy(
+        config: PaperTradingConfig,
+        strategy: Box<dyn Strategy>,
+    ) -> Result<Self, BacktestError> {
         config.backtest.validate()?;
-        let strategy = DollarBarsCusumStrategy::new(config.strategy)?;
         let simulation = TickSimulation::new(
             TickSimulationConfig {
                 backtest: config.backtest,
@@ -612,6 +621,27 @@ mod tests {
         assert_eq!(session.cash_equity(), dec!(10_000));
         assert!(session.active_position().is_none());
         assert_eq!(session.closed_trades().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn any_registered_strategy_can_drive_a_paper_session() {
+        let strategy = strategies::OrderFlowImbalanceStrategy::new(Default::default()).unwrap();
+        let mut session = PaperTradingSession::with_strategy(
+            PaperTradingConfig {
+                dollar_bar_threshold: dec!(100),
+                ..Default::default()
+            },
+            Box::new(strategy),
+        )
+        .unwrap();
+
+        let events = session
+            .process_trade(&make_trade(1000, dec!(100), dec!(2), Side::Buy))
+            .await;
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, PaperTradingEvent::BarFormed(_))));
     }
 
     #[tokio::test]

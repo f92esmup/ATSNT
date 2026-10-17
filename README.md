@@ -386,6 +386,7 @@ cargo run -p adapters --bin live_gateway -- \
 - [`docs/architecture/03-adapters-and-market-data.md`](docs/architecture/03-adapters-and-market-data.md): Ports and Adapters, Binance `aggTrades` mapping, and WebSocket streaming.
 - [`docs/architecture/04-hpo-and-walk-forward.md`](docs/architecture/04-hpo-and-walk-forward.md): Walk-Forward Optimization, parameter stability scoring, DSR, and Rayon parallelism.
 - [`docs/architecture/05-monte-carlo-and-telemetry.md`](docs/architecture/05-monte-carlo-and-telemetry.md): Discrete Event Monte Carlo Stress-Testing, trade sequence bootstrap, and web telemetry schemas.
+- [`docs/architecture/12-adding-a-strategy.md`](docs/architecture/12-adding-a-strategy.md): How to add a strategy (one registry line) and what the generic contract suite checks.
 - [`docs/architecture/06-paper-trading-and-realtime-execution.md`](docs/architecture/06-paper-trading-and-realtime-execution.md): Real-time Paper Trading architecture, event broadcasting, and mark-to-market telemetry.
 - [`docs/architecture/07-web-telemetry-dashboard.md`](docs/architecture/07-web-telemetry-dashboard.md): Cloud-First BI telemetry, BigQuery schemas, GCS Parquet export, and Telegram mobile alerting (supersedes web presentation).
 - [`docs/architecture/08-live-execution-gateway.md`](docs/architecture/08-live-execution-gateway.md): Live Execution Gateway, HMAC-SHA256 authentication, Pre-Trade Risk Manager, and User Data Stream reconciliation.

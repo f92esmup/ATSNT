@@ -21,9 +21,7 @@ use clap::Parser;
 use domain::PositionSide;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use strategies::{
-    DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType, OptimizableStrategy, Strategy,
-};
+use strategies::{MarketType, Strategy};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -43,7 +41,12 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Select Spot; the configured DollarBarsCusum_v1 strategy is currently Futures-only
+    /// Strategy to run, by id or alias (inferred from the --config artifact if omitted; the
+    /// default otherwise)
+    #[arg(long)]
+    strategy: Option<String>,
+
+    /// Select Spot; refused for strategies that declare themselves futures-only
     #[arg(long, default_value_t = false)]
     spot: bool,
 
@@ -90,69 +93,30 @@ async fn main() -> Result<()> {
     let started_at_ms = now_unix_ms();
 
     // 1. Load Strategy Configuration & Authoritative Deployment Artifact
-    let (strat_config, loaded_config) = if let Some(config_path) = &args.config {
+    let strategy_id =
+        backtest::resolve_strategy_id(args.strategy.as_deref(), args.config.as_deref())?;
+    if let Some(config_path) = &args.config {
         println!(
             "[*] Loading strategy configuration from: {}",
             config_path.display()
         );
-        let loaded = backtest::load_strategy_config::<DollarBarsCusumConfig>(config_path)?;
-        match &loaded {
-            backtest::LoadedStrategyConfig::Artifact(artifact) => {
-                println!(
-                    "[*] Authoritative Deployment Artifact loaded (schema v{})",
-                    artifact.schema_version
-                );
-                if let Some(scorecard) = &artifact.hpo_scorecard {
-                    println!(
-                        "    • HPO Scorecard: IS Sortino={:.2}, OOS Sortino={:.2}, Stability={:.2}, DSR p={:.4} ({})",
-                        scorecard.mean_is_sortino,
-                        scorecard.mean_oos_sortino,
-                        scorecard.stability_score,
-                        scorecard.dsr_p_value,
-                        if scorecard.is_statistically_significant { "PASS" } else { "FAIL" }
-                    );
-                }
-            }
-            backtest::LoadedStrategyConfig::Bare(_) => {
-                println!(
-                    "[*] Legacy bare hyperparameter configuration loaded (no deployment manifest)"
-                );
-            }
-        }
-        (loaded.strategy_config().clone(), Some(loaded))
-    } else {
-        println!("[*] Using default CUSUM + Z-Score strategy hyperparameters");
-        (DollarBarsCusumConfig::default(), None)
-    };
-
-    // Contract validation
-    if let Some(loaded) = &loaded_config {
-        if let Some(strat_id) = loaded.strategy_id() {
-            if strat_id != "dollar_bars_cusum" && strat_id != "cusum" {
-                anyhow::bail!(
-                    "Deployment artifact strategy '{}' is not compatible with paper_trading runner (expected 'dollar_bars_cusum')",
-                    strat_id
-                );
-            }
-        }
-        if let Some(artifact_sym) = loaded.symbol() {
-            if !artifact_sym.eq_ignore_ascii_case(&args.symbol) {
-                println!(
-                    "[WARNING] Artifact symbol ({}) does not match session symbol ({})!",
-                    artifact_sym,
-                    args.symbol.to_ascii_uppercase()
-                );
-            }
+    }
+    let loaded = backtest::load_strategy(&strategy_id, args.config.as_deref())?;
+    for line in loaded.report_lines() {
+        println!("[*] {line}");
+    }
+    if let Some(artifact_sym) = loaded.symbol.as_deref() {
+        if !artifact_sym.eq_ignore_ascii_case(&args.symbol) {
+            println!(
+                "[WARNING] Artifact symbol ({}) does not match session symbol ({})!",
+                artifact_sym,
+                args.symbol.to_ascii_uppercase()
+            );
         }
     }
 
     // Resolve Dollar Bar threshold: CLI override > Artifact manifest > Fallback default ($50,000)
-    let effective_dollar_bar = match (
-        args.dollar_bar,
-        loaded_config
-            .as_ref()
-            .and_then(|c| c.dollar_bar_threshold()),
-    ) {
+    let effective_dollar_bar = match (args.dollar_bar, loaded.dollar_bar_threshold) {
         (Some(cli_val), Some(artifact_val)) => {
             if cli_val != artifact_val {
                 println!(
@@ -220,46 +184,40 @@ async fn main() -> Result<()> {
         None
     };
 
-    let selected_strategy = DollarBarsCusumStrategy::new(strat_config.clone())?;
     let market_type = if args.spot {
         MarketType::Spot
     } else {
         MarketType::UsdMPerpetual
     };
-    validate_strategy_market(&selected_strategy, market_type)?;
+    validate_strategy_market(&loaded.strategy, market_type)?;
 
     println!(
-        "[*] Strategy Hyperparameters: Window={}, VolMultiplier={}, Z_Entry={}, Z_Stop={}, TimeBarrier={}",
-        strat_config.rolling_window_len,
-        strat_config.cusum_vol_multiplier,
-        strat_config.z_entry_threshold,
-        strat_config.z_stop_threshold,
-        strat_config.time_barrier_bars
+        "[*] Strategy {}: {}",
+        loaded.strategy_id, loaded.config_display
     );
 
     // 2. Initialize Paper Trading Session
-    let backtest_config =
-        if let Some(artifact_ctx) = loaded_config.as_ref().and_then(|c| c.execution_context()) {
-            BacktestConfig {
-                initial_capital: if args.capital != dec!(10_000) {
-                    args.capital
-                } else {
-                    artifact_ctx.initial_capital
-                },
-                risk_per_trade_pct: if args.risk_pct != dec!(0.01) {
-                    args.risk_pct
-                } else {
-                    artifact_ctx.risk_per_trade_pct
-                },
-                ..*artifact_ctx
-            }
-        } else {
-            BacktestConfig {
-                initial_capital: args.capital,
-                risk_per_trade_pct: args.risk_pct,
-                ..BacktestConfig::default()
-            }
-        };
+    let backtest_config = if let Some(artifact_ctx) = loaded.execution_context.as_ref() {
+        BacktestConfig {
+            initial_capital: if args.capital != dec!(10_000) {
+                args.capital
+            } else {
+                artifact_ctx.initial_capital
+            },
+            risk_per_trade_pct: if args.risk_pct != dec!(0.01) {
+                args.risk_pct
+            } else {
+                artifact_ctx.risk_per_trade_pct
+            },
+            ..*artifact_ctx
+        }
+    } else {
+        BacktestConfig {
+            initial_capital: args.capital,
+            risk_per_trade_pct: args.risk_pct,
+            ..BacktestConfig::default()
+        }
+    };
 
     let mut backtest_config = backtest_config;
     if let Some(rate) = args.funding_rate {
@@ -268,12 +226,13 @@ async fn main() -> Result<()> {
     let paper_config = PaperTradingConfig {
         dollar_bar_threshold: effective_dollar_bar,
         backtest: backtest_config,
-        strategy: strat_config.clone(),
+        // Unused by `with_strategy`: the loaded strategy carries its own hyperparameters.
+        strategy: Default::default(),
         channel_capacity: 10_000,
         latency_ms: args.latency_ms,
     };
 
-    let mut session = PaperTradingSession::new(paper_config)
+    let mut session = PaperTradingSession::with_strategy(paper_config, loaded.strategy)
         .map_err(|e| anyhow::anyhow!("Failed to initialize paper trading session: {e}"))?;
 
     if let Some(minutes) = args.warmup_minutes {
@@ -308,13 +267,13 @@ async fn main() -> Result<()> {
     println!("[*] Engine initialized. Awaiting market trades (Press Ctrl+C to terminate)...\n");
 
     let run_spec = RunSpec {
-        strategy_id: DollarBarsCusumStrategy::id().to_string(),
+        strategy_id: loaded.strategy_id.clone(),
         symbol: args.symbol.to_uppercase(),
         market_type,
         sampling: SamplingConfig::DollarBar {
             threshold: effective_dollar_bar,
         },
-        strategy_config: strat_config.clone(),
+        strategy_config: loaded.config_json.clone(),
         execution_context: backtest_config,
     };
     let run_ctx = RunContext::new(RunType::Paper, &run_spec, started_at_ms);
@@ -698,7 +657,7 @@ async fn main() -> Result<()> {
 async fn record_lifecycle<R: RunRecorder>(
     recorder: &R,
     ctx: &RunContext,
-    spec: &RunSpec<DollarBarsCusumConfig>,
+    spec: &RunSpec<serde_json::Value>,
     status: RunStatus,
     data: &DataWindow,
 ) {
@@ -746,7 +705,7 @@ mod tests {
     use rust_decimal_macros::dec;
     use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType};
 
-    fn spec() -> RunSpec<DollarBarsCusumConfig> {
+    fn spec() -> RunSpec<serde_json::Value> {
         RunSpec {
             strategy_id: "dollar_bars_cusum".into(),
             symbol: "BTCUSDT".into(),
@@ -754,7 +713,7 @@ mod tests {
             sampling: SamplingConfig::DollarBar {
                 threshold: dec!(1_000_000),
             },
-            strategy_config: DollarBarsCusumConfig::default(),
+            strategy_config: serde_json::to_value(DollarBarsCusumConfig::default()).unwrap(),
             execution_context: BacktestConfig::default(),
         }
     }

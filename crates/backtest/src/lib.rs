@@ -13,6 +13,7 @@ pub mod optimization;
 pub mod paper;
 pub mod parity;
 pub mod recording;
+pub mod registry;
 pub mod run;
 pub mod session;
 pub mod sinks;
@@ -46,6 +47,9 @@ pub use paper::{
 pub use recording::{
     now_unix_ms, record_backtest, record_closed_trade, record_hpo, record_monte_carlo,
     record_run_status, DataWindow, RunContext, RunStatus, GIT_SHA,
+};
+pub use registry::{
+    load_strategy, resolve_strategy_id, ConfigSource, LoadedStrategy, DEFAULT_STRATEGY_ID,
 };
 pub use run::{RunId, RunSpec, RunType};
 pub use sinks::{artifact_object_name, artifact_run_suffix, SinkFailures, StrictSinkError};

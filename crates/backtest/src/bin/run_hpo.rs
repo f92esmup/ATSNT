@@ -220,39 +220,19 @@ async fn main() -> Result<()> {
         engine_config.slippage_pct
     );
 
-    match args.strategy.as_str() {
-        "dollar_bars_cusum" | "cusum" => {
-            run_and_report_hpo::<strategies::DollarBarsCusumStrategy>(
-                &args,
-                &bars,
-                &folds,
-                engine_config,
-                started_at_ms,
-                raw_trades,
-                opt_start,
-                &symbol_upper,
-            )
-            .await?;
-        }
-        "order_flow_imbalance" | "ofi" => {
-            run_and_report_hpo::<strategies::OrderFlowImbalanceStrategy>(
-                &args,
-                &bars,
-                &folds,
-                engine_config,
-                started_at_ms,
-                raw_trades,
-                opt_start,
-                &symbol_upper,
-            )
-            .await?;
-        }
-        unknown => {
-            anyhow::bail!(
-                "Unknown strategy '{}'. Available strategies: 'dollar_bars_cusum', 'order_flow_imbalance'",
-                unknown
-            );
-        }
+    let run = HpoRun {
+        args: &args,
+        bars: &bars,
+        folds: &folds,
+        engine_config,
+        started_at_ms,
+        raw_trades,
+        opt_start,
+        symbol_upper: &symbol_upper,
+    };
+    match strategies::dispatch(&args.strategy, run) {
+        Some(report) => report.await?,
+        None => anyhow::bail!(strategies::unknown_strategy_message(&args.strategy)),
     }
 
     print_phase_timing("total", start_total);
@@ -265,6 +245,40 @@ fn print_phase_timing(phase: &str, since: Instant) {
         "[TIMING] phase={phase} seconds={:.2}",
         since.elapsed().as_secs_f64()
     );
+}
+
+/// One HPO run waiting for the registry to say which strategy it optimizes.
+struct HpoRun<'a> {
+    args: &'a Args,
+    bars: &'a [domain::DollarBar],
+    folds: &'a [backtest::WalkForwardFold],
+    engine_config: BacktestConfig,
+    started_at_ms: i64,
+    raw_trades: usize,
+    opt_start: Instant,
+    symbol_upper: &'a str,
+}
+
+impl<'a> strategies::StrategyVisitor for HpoRun<'a> {
+    type Output = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>;
+
+    fn visit<S>(self) -> Self::Output
+    where
+        S: OptimizableStrategy + 'static,
+        S::Config: Default,
+        S::Space: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        Box::pin(run_and_report_hpo::<S>(
+            self.args,
+            self.bars,
+            self.folds,
+            self.engine_config,
+            self.started_at_ms,
+            self.raw_trades,
+            self.opt_start,
+            self.symbol_upper,
+        ))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
