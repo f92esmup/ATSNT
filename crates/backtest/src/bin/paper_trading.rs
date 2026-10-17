@@ -547,6 +547,21 @@ async fn main() -> Result<()> {
                                         record_closed_trade(bq, &run_ctx, ct, trade_counter).await;
                                     }
                                 }
+                                PaperTradingEvent::EntryTimedOut { closed_unreported_position } => {
+                                    println!(
+                                        "\n[ALERT] An entry order never reached a terminal status and was cancelled{}.",
+                                        if closed_unreported_position {
+                                            "; an unreported position was closed at market"
+                                        } else {
+                                            ""
+                                        }
+                                    );
+                                }
+                                PaperTradingEvent::EntryTimeoutFailed { reason } => {
+                                    println!(
+                                        "\n[ALERT] A timed-out entry order could not be resolved ({reason}); retrying."
+                                    );
+                                }
                                 PaperTradingEvent::CircuitBreakerTripped { scope, drawdown_pct } => {
                                     println!(
                                         "\n[ALERT] {} circuit breaker tripped at {:.2}% drawdown: trading halted, no new positions will open.",

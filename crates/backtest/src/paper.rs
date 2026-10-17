@@ -61,6 +61,17 @@ pub enum PaperTradingEvent {
         /// Current peak-to-trough drawdown percentage.
         drawdown_pct: Decimal,
     },
+    /// A market entry never reached a terminal status and was cancelled.
+    EntryTimedOut {
+        /// `true` when the venue held a position the session had not been told about, which
+        /// was closed at market.
+        closed_unreported_position: bool,
+    },
+    /// A timed-out entry could not be resolved yet; it stays pending and is retried.
+    EntryTimeoutFailed {
+        /// Why the cancel or the position check failed.
+        reason: String,
+    },
     /// A drawdown circuit breaker halted the session; no further entries will open.
     CircuitBreakerTripped {
         /// Breaker horizon that tripped (currently `"monthly"`).
@@ -79,6 +90,8 @@ impl PaperTradingEvent {
             Self::PositionOpened { .. } => "PositionOpened",
             Self::PositionClosed { .. } => "PositionClosed",
             Self::MarkToMarket { .. } => "MarkToMarket",
+            Self::EntryTimedOut { .. } => "EntryTimedOut",
+            Self::EntryTimeoutFailed { .. } => "EntryTimeoutFailed",
             Self::CircuitBreakerTripped { .. } => "CircuitBreakerTripped",
         }
     }
@@ -390,10 +403,15 @@ impl PaperTradingSession {
                     drawdown_pct: drawdown,
                 })
             }
-            SessionEvent::EntryCancelled
-            | SessionEvent::EntryTimedOut { .. }
-            | SessionEvent::EntryTimeoutFailed(_)
-            | SessionEvent::Exit(_) => None,
+            SessionEvent::EntryTimedOut {
+                closed_unreported_position,
+            } => Some(PaperTradingEvent::EntryTimedOut {
+                closed_unreported_position,
+            }),
+            SessionEvent::EntryTimeoutFailed(reason) => {
+                Some(PaperTradingEvent::EntryTimeoutFailed { reason })
+            }
+            SessionEvent::EntryCancelled | SessionEvent::Exit(_) => None,
         }
     }
 
@@ -645,6 +663,40 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, PaperTradingEvent::BarFormed(_))));
+    }
+
+    #[tokio::test]
+    async fn an_entry_the_tape_never_fills_is_reported_when_it_times_out() {
+        let mut session = PaperTradingSession::new(config(cusum(dec!(3.0), 10))).unwrap();
+        warm_up(&mut session).await;
+        session
+            .process_trade(&make_trade(5000, dec!(90), dec!(1.5), Side::Sell))
+            .await;
+
+        // Only sellers trade for longer than the entry timeout: a market buy finds no offers.
+        let events = session
+            .process_trade(&make_trade(5000 + 30_000, dec!(90), dec!(0.1), Side::Sell))
+            .await;
+
+        assert!(events.contains(&PaperTradingEvent::EntryTimedOut {
+            closed_unreported_position: false
+        }));
+        assert!(session.active_position().is_none());
+    }
+
+    #[test]
+    fn timeout_events_have_stable_wire_names() {
+        assert_eq!(
+            PaperTradingEvent::EntryTimedOut {
+                closed_unreported_position: true
+            }
+            .event_type(),
+            "EntryTimedOut"
+        );
+        assert_eq!(
+            PaperTradingEvent::EntryTimeoutFailed { reason: "x".into() }.event_type(),
+            "EntryTimeoutFailed"
+        );
     }
 
     #[tokio::test]
