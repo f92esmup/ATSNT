@@ -2241,10 +2241,14 @@ fn parse_futures_preflight_snapshot(
     let current_leverage = required_futures_u32(symbol_config, "leverage", "symbol config")?;
     let maximum_notional =
         futures_decimal_field(symbol_config, "maxNotionalValue", "symbol config")?;
-    if current_leverage == 0 || maximum_notional <= Decimal::ZERO {
-        return Err(GatewayError::FuturesPreflight(
-            "symbol configuration contains invalid leverage or notional bounds".to_string(),
-        ));
+    // Leverage 0 means "never set on this account" (testnet reports it for untouched symbols).
+    // While flat the gateway chooses and sets the leverage of the order itself, so it is only
+    // unusable when a position or orders already run on the exchange's current leverage.
+    let leverage_unusable = current_leverage == 0 && (has_position || !orders.is_empty());
+    if leverage_unusable || maximum_notional <= Decimal::ZERO {
+        return Err(GatewayError::FuturesPreflight(format!(
+            "symbol configuration contains invalid leverage or notional bounds (leverage {current_leverage}, maxNotionalValue {maximum_notional})"
+        )));
     }
     if required_futures_bool_or_string(symbol_config, "isAutoAddMargin", "symbol config")? {
         return Err(GatewayError::FuturesPreflight(
@@ -3771,6 +3775,76 @@ mod tests {
             mark_received_ms,
             allow_foreign_collateral: false,
         })
+    }
+
+    fn preflight_snapshot_with_overrides(
+        overrides: &[(&str, &str)],
+    ) -> Result<FuturesPreflightSnapshot, GatewayError> {
+        let mark_time = 1_700_000_000_000;
+        let mut responses = valid_futures_responses(mark_time);
+        for (path, body) in overrides {
+            responses.insert(path, body.to_string());
+        }
+        let json = |path: &str| -> serde_json::Value {
+            serde_json::from_str(&responses[path]).expect("valid fixture JSON")
+        };
+        let observed = std::time::Instant::now();
+        parse_futures_preflight_snapshot(FuturesPreflightInput {
+            symbol: "BTCUSDT",
+            observed_at: [observed; 5],
+            account: &json("/fapi/v3/account"),
+            positions: &json("/fapi/v3/positionRisk"),
+            open_orders: &json("/fapi/v1/openOrders"),
+            algo_orders: &json("/fapi/v1/openAlgoOrders"),
+            exchange_info: &json("/fapi/v1/exchangeInfo"),
+            mark: &json("/fapi/v1/premiumIndex"),
+            leverage_brackets: &json("/fapi/v1/leverageBracket"),
+            commission: &json("/fapi/v1/commissionRate"),
+            symbol_config: &json("/fapi/v1/symbolConfig"),
+            mark_received_ms: mark_time + 100,
+            allow_foreign_collateral: false,
+        })
+    }
+
+    const UNSET_LEVERAGE_CONFIG: &str = r#"[{"symbol":"BTCUSDT","marginType":"isolated","leverage":0,"maxNotionalValue":"500000000","isAutoAddMargin":"false"}]"#;
+
+    #[test]
+    fn a_symbol_whose_leverage_was_never_set_is_accepted_while_the_account_is_flat() {
+        // Testnet reports leverage 0 for a symbol the account never configured; the gateway
+        // chooses and sets the leverage of every order itself.
+        let snapshot =
+            preflight_snapshot_with_overrides(&[("/fapi/v1/symbolConfig", UNSET_LEVERAGE_CONFIG)])
+                .unwrap();
+
+        assert_eq!(snapshot.current_leverage, 0);
+        assert_eq!(snapshot.maximum_notional, dec!(500_000_000));
+    }
+
+    #[test]
+    fn an_unset_leverage_is_still_refused_when_a_position_or_orders_exist() {
+        // With exposure the exchange's current leverage is what the margin math runs on.
+        let with_position = preflight_snapshot_with_overrides(&[
+            ("/fapi/v1/symbolConfig", UNSET_LEVERAGE_CONFIG),
+            (
+                "/fapi/v3/positionRisk",
+                r#"[{"symbol":"BTCUSDT","positionSide":"BOTH","positionAmt":"1","notional":"100","marginAsset":"USDT","isolatedWallet":"50","updateTime":1}]"#,
+            ),
+        ]);
+
+        assert!(
+            matches!(&with_position, Err(GatewayError::FuturesPreflight(r)) if r.contains("invalid leverage")),
+            "{with_position:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_positive_notional_bound_is_always_refused() {
+        let zero_notional = preflight_snapshot_with_overrides(&[(
+            "/fapi/v1/symbolConfig",
+            r#"[{"symbol":"BTCUSDT","marginType":"isolated","leverage":20,"maxNotionalValue":"0","isAutoAddMargin":"false"}]"#,
+        )]);
+
+        assert!(zero_notional.is_err());
     }
 
     #[test]
