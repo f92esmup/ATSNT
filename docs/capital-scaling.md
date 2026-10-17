@@ -86,8 +86,8 @@ space file). The slippage value is a placeholder until it is calibrated with rea
 The shipped space is `configs/param_space_daytrading_cusum.json` (guarded by
 `crates/backtest/tests/param_space_contract.rs`, which must equal `DollarBarsCusumSpace::default()`).
 It searches the window, the CUSUM multiplier, the entry and stop z-scores and the take-profit
-floor. `time_barrier_bars` is fixed on purpose so the budget goes to the edge; widen it in the file
-if you want to search it. A space file written before `min_take_profit_pcts` existed keeps the
+floor, and the holding horizon `time_barrier_bars` (100 to 2,000 bars: about 12 minutes to 4 hours
+at 7 s per $1M bar, so every position closes within the trading day). A space file written before `min_take_profit_pcts` existed keeps the
 single legacy value.
 
 ## 6. What to re-optimize when the capital grows
@@ -107,14 +107,21 @@ context into the backtest, paper and live runs. The Batch image bakes `configs/`
 so the file must be committed before the job is submitted.
 
 ```
-scripts/gcp/run_ephemeral_batch_hpo.sh --project <project> --year 2026 -- \
+scripts/gcp/run_ephemeral_batch_hpo.sh --project <project> --year 2026 \
+  --machine-type n2-custom-30-30720 -- \
   --execution-context configs/execution_real_500eur.json \
   --param-space configs/param_space_daytrading_cusum.json \
-  --candidates 1500
+  --holdout-from-month 9 --candidates 120
 ```
 
-`--capital` still overrides the capital of the file. The pipeline default is 60 candidates, which is
-a very small random sample of a space of 10,290 combinations: raise it (the cost grows linearly).
+`--holdout-from-month 9` keeps September and the current month out of the search: the HPO reads
+January to August and the backtest of the winner reads only the held-out months, so that backtest is
+an honest out-of-sample check. `--capital` still overrides the capital of the file.
+
+Candidates: the space has 41,160 combinations and the HPO samples them at random. More candidates are
+not better on their own: every extra trial raises the chance that the winner is luck, which the
+Deflated Sharpe ratio penalizes. 120 candidates still try each value of each parameter dozens of
+times. The cost grows linearly with candidates times bars.
 
 ## 7. Checklist before raising the capital
 

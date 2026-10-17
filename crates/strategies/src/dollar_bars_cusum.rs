@@ -105,8 +105,9 @@ impl Default for DollarBarsCusumSpace {
                 dec!(4.5),
                 dec!(5.0),
             ],
-            // Fixed wide barrier: trades resolve by TP/SL, search budget goes to the real edge.
-            time_barrier_bars: vec![100],
+            // Intraday holding horizons (about 12 min to 4 h at 7 s per $1M bar): the wider
+            // take-profit floors need hours to be reached, and nothing is held overnight.
+            time_barrier_bars: vec![100, 300, 1000, 2000],
             min_take_profit_pcts: vec![
                 dec!(0.0025),
                 dec!(0.0035),
@@ -363,13 +364,16 @@ mod tests {
     }
 
     #[test]
-    fn default_space_fixes_time_barrier_and_densifies_edge_parameters() {
+    fn default_space_searches_intraday_holding_horizons() {
         let space = DollarBarsCusumSpace::default();
 
-        assert_eq!(space.time_barrier_bars, vec![100]);
+        // At about 7 s per $1M bar (BTCUSDT 2026-01) these are 12 min, 35 min, 2 h and 4 h.
+        assert_eq!(space.time_barrier_bars, vec![100, 300, 1000, 2000]);
         let candidates = space.generate_candidates(usize::MAX);
-        assert_eq!(candidates.len(), 7 * 7 * 7 * 6 * 5);
-        assert!(candidates.iter().all(|c| c.time_barrier_bars == 100));
+        assert_eq!(candidates.len(), 7 * 7 * 7 * 6 * 4 * 5);
+        for horizon in &space.time_barrier_bars {
+            assert!(candidates.iter().any(|c| c.time_barrier_bars == *horizon));
+        }
     }
 
     #[test]

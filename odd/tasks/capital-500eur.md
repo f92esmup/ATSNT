@@ -10,12 +10,19 @@ Branch: feat/sim-live-fidelity | Delivery: ask-on-risk | Runner: cargo test --wo
 - S5: docs/capital-scaling.md: capital-dependent vs independent parameters, the cap formula `cap = risk_usdt / min_stop_pct`, a scaling table (500/1000/2000/5000 EUR), what to re-optimize, checklist to move up.
 - S6: "podemos incluir en las tareas lo siguiente:" read-only audit of branches `docs/decouple-bi-consumers` and `feat/baseline-run-id` (worktrees under ATSNT-worktrees), report only, no push/merge/rebase/modify.
 
+- S7: "yo quiero datos hasta el año actual. Osea, 2026 con septiembre y lo que va de octubre como prueba pues si."
+- S8: "la temporalidad a la que quiero operar es day trading maximo" -> holding horizon searched up to 2000 bars (about 4 h on average).
+- S9: HPO with 120 candidates (user: "Yo propongo 120").
+
 ## Tasks
 - T1 (S4) param space: min_take_profit_pcts + wider z_stop | inline | done 7685c6d
 - T2 (S3,S5) docs/capital-scaling.md + example artifact config for 500 EUR | inline | done e6d0860
+- T4 (S7) pipeline --holdout-from-month: HPO on Jan-Aug, backtest on Sep onwards | inline | done (see commits)
+- T5 (S8) intraday time barrier [100,300,1000,2000] in the search space | inline | done (see commits)
 - T3 (S6) audit of the two branches (read-only report) | inline | done (report delivered in chat; nothing modified)
 
 ## Log
 - L1 (2026-10-17): "me parece bien tu propuesta.hagamoslo. Adicionalmente. podemos incluir en las tareas lo siguiente: <audit prompt for docs/decouple-bi-consumers and feat/baseline-run-id>"
 - Note: time_barrier_bars stays [100] in the default space (existing deliberate decision and test); widen via the JSON file only if wanted.
 - L2 (2026-10-17): audit results: fmt/clippy clean and 277 tests pass on feat/baseline-run-id (separate target dir); docs branch changes comments only in code; findings reported to the user.
+- L3 (2026-10-17): "Si, implementa." Branch audit clarified: the audit was read-only by request; nothing was applied to docs/decouple-bi-consumers or feat/baseline-run-id.

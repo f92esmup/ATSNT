@@ -187,14 +187,21 @@ For unattended staging sweeps, the HPO engine is orchestrated automatically by [
 ./scripts/run_production_pipeline.sh --strategy dollar_bars_cusum --param-space configs/custom_space.json
 
 # Simulate every trial with a real account's risk, drawdown, leverage and notional caps:
-./scripts/run_production_pipeline.sh --execution-context configs/execution_real_500eur.json --candidates 1500
+./scripts/run_production_pipeline.sh --execution-context configs/execution_real_500eur.json --candidates 120
+
+# Out-of-sample check: search January-August, backtest the winner on September onwards:
+./scripts/run_production_pipeline.sh --year 2026 --holdout-from-month 9 --candidates 120
 ```
+
+`--holdout-from-month MM` (2-12, not with `--month`) links the year's files into `splits/<symbol>-holdout-MM/{train,holdout}`:
+the HPO reads the months before MM, the backtest MM onwards (the current month's daily archives included). It
+fails when either side has no data.
 
 `--execution-context` feeds the HPO stage only; the winning artifact carries the same context into
 the backtest, paper and live runs, and the option is refused with `--skip-hpo`. The shipped search
 space (`configs/param_space_daytrading_cusum.json`) covers the window, the CUSUM multiplier, the entry
-and stop z-scores and the minimum take-profit floor (`min_take_profit_pcts`, the lever against fees);
-`time_barrier_bars` is fixed on purpose. See [Capital scaling](../capital-scaling.md) for how these
+and stop z-scores, the minimum take-profit floor (`min_take_profit_pcts`, the lever against fees) and
+the intraday holding horizon (`time_barrier_bars`, 100 to 2,000 bars). See [Capital scaling](../capital-scaling.md) for how these
 values depend on the account size.
 
 1. **Purged Walk-Forward Folds**: Dynamically constructs rolling train/embargo/test folds across the in-memory Dollar Bar series.
