@@ -20,6 +20,9 @@ use crate::driver::SessionDriver;
 use crate::metrics::{BacktestMetrics, ClosedTrade};
 use crate::session::{SessionConfig, SessionEvent, TradingSession};
 
+/// Milliseconds a market entry may wait for a terminal status before the session cancels it.
+const ENTRY_TIMEOUT_MS: i64 = 30_000;
+
 /// Milliseconds between emergency-close attempts while halting.
 const HALT_RETRY_MS: i64 = 5_000;
 
@@ -86,6 +89,7 @@ impl<S: Strategy> TickSimulation<S> {
                 fallback_fee_pct: backtest.taker_fee_pct,
                 max_monthly_drawdown_pct: backtest.max_monthly_drawdown_pct,
                 halt_retry_ms: HALT_RETRY_MS,
+                entry_timeout_ms: ENTRY_TIMEOUT_MS,
             },
             strategy,
         );
@@ -340,6 +344,27 @@ mod tests {
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].exit_reason, "TimeBarrier");
         assert_eq!(trades[0].exit_price, dec!(100.4));
+    }
+
+    #[tokio::test]
+    async fn an_entry_the_tape_never_fills_is_cancelled_after_the_timeout() {
+        let mut simulation = simulation(vec![long_signal(), long_signal()]);
+        let mut ticks = vec![
+            print(1_000, dec!(100), dec!(10), Side::Sell),
+            print(1_001, dec!(100), dec!(10), Side::Sell),
+        ];
+        // Only sellers trade for longer than the timeout: a market buy finds no offers.
+        ticks.push(print(1_001 + 30_000, dec!(100), dec!(1), Side::Sell));
+
+        let mut events = Vec::new();
+        for tick in &ticks {
+            events.extend(simulation.on_trade(tick).await.events);
+        }
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::EntryTimedOut { .. })));
+        assert!(simulation.open_position().is_none());
     }
 
     #[tokio::test]

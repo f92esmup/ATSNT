@@ -442,6 +442,9 @@ async fn main() -> Result<()> {
             fallback_fee_pct: estimated_taker_fee_pct,
             max_monthly_drawdown_pct: run_spec.execution_context.max_monthly_drawdown_pct,
             halt_retry_ms: 5_000,
+            // A market order settles in milliseconds; half a minute without a terminal status
+            // means a lost report or a stuck order.
+            entry_timeout_ms: 30_000,
         },
         strategy,
     );
@@ -836,6 +839,42 @@ impl EventSink<'_> {
                     "[ORDER] {}: the entry order ended without any fill; no position was opened.",
                     self.symbol
                 ),
+                SessionEvent::EntryTimedOut {
+                    closed_unreported_position,
+                } => {
+                    let detail = if closed_unreported_position {
+                        "the exchange held a position the bot had not been told about; it was closed at market"
+                    } else {
+                        "no fill was observed; the order was cancelled"
+                    };
+                    println!(
+                        "[CRITICAL] {}: the entry order never reached a terminal status; {detail}.",
+                        self.symbol
+                    );
+                    if let Some(t) = self.telegram {
+                        let _ = t
+                            .send_alert(&format!(
+                                "🚨 *ATSNT* `{}`: an entry order timed out ({detail}).",
+                                self.symbol
+                            ))
+                            .await;
+                    }
+                }
+                SessionEvent::EntryTimeoutFailed(reason) => {
+                    error!(error = %reason, "Could not resolve a timed-out entry order");
+                    eprintln!(
+                        "[CRITICAL] {}: an entry order timed out and could not be resolved ({reason}); retrying.",
+                        self.symbol
+                    );
+                    if let Some(t) = self.telegram {
+                        let _ = t
+                            .send_alert(&format!(
+                                "🚨 *ATSNT* `{}`: a timed-out entry could not be resolved ({reason}); retrying.",
+                                self.symbol
+                            ))
+                            .await;
+                    }
+                }
                 SessionEvent::EntryFailed(reason) => {
                     error!(error = %reason, "Failed to submit live order to Binance");
                     eprintln!("[ERROR] Order placement failed: {reason}");

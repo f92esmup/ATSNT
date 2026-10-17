@@ -200,6 +200,7 @@ mod tests {
                 fallback_fee_pct: dec!(0.0005),
                 max_monthly_drawdown_pct: dec!(0.15),
                 halt_retry_ms: 5_000,
+                entry_timeout_ms: 30_000,
             },
             Scripted {
                 intents: intents.into(),
@@ -296,6 +297,7 @@ mod tests {
                 fallback_fee_pct: dec!(0.0005),
                 max_monthly_drawdown_pct: dec!(0.15),
                 halt_retry_ms: 5_000,
+                entry_timeout_ms: 30_000,
             },
             Scripted {
                 intents: VecDeque::new(),

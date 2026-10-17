@@ -390,7 +390,10 @@ impl PaperTradingSession {
                     drawdown_pct: drawdown,
                 })
             }
-            SessionEvent::EntryCancelled | SessionEvent::Exit(_) => None,
+            SessionEvent::EntryCancelled
+            | SessionEvent::EntryTimedOut { .. }
+            | SessionEvent::EntryTimeoutFailed(_)
+            | SessionEvent::Exit(_) => None,
         }
     }
 

@@ -12,7 +12,7 @@ Branch: feat/sim-live-fidelity (continues) | Delivery: ask-on-risk | Test runner
 
 ## Tasks
 - [x] T1 (S1) — `SessionDriver` in `backtest`, used by `TickSimulation` and `live_trading` | inline | RED: `driver::tests::*`
-- [ ] T2 (S2) — entry timeout in `TradingSession` | inline | RED: `session::tests::an_entry_that_never_terminates_*`
+- [x] T2 (S2) — entry timeout in `TradingSession` | inline | RED: `session::tests::an_entry_that_never_terminates_*`
 - [ ] T3 (S3) — engine uses `DailyWatermark` | inline | previous behavior pinned by the existing engine breaker tests
 - [ ] T4 (S4) — `funding_paid` column and fill-model tag in the run model and BigQuery schema; tick runs recordable | inline | RED: recording contract tests
 - [ ] T5 (S5) — native review of the real-money commits | needs consent
