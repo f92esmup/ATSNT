@@ -125,8 +125,8 @@ struct Args {
     #[arg(long, default_value_t = false)]
     allow_foreign_collateral: bool,
 
-    /// Run an artifact whose HPO scorecard shows no deployable edge (fitness 0, a
-    /// non-significant Deflated Sharpe Ratio or a pre-eligibility scorecard). Without it such an
+    /// Run an artifact whose HPO scorecard shows no deployable edge (fitness <= 0, a
+    /// Deflated Sharpe p-value >= 0.05, or no fold with enough trades). Without it such an
     /// artifact is refused at start-up.
     #[arg(long, default_value_t = false)]
     allow_unproven_strategy: bool,

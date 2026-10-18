@@ -3,6 +3,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use strategies::MarketType;
 
@@ -63,8 +64,9 @@ impl HpoScorecard {
     pub fn deployment_blocker(&self) -> Option<String> {
         if self.min_fold_trades == 0 {
             return Some(
-                "the scorecard predates the minimum-trades rule (its ratios may be the old 100 \
-                 cap): re-run the HPO"
+                "the scorecard records no fold with enough trades: either it predates the \
+                 minimum-trades rule (its ratios may be the old 100 cap) or the search ran with \
+                 --min-trades-per-fold 0; re-run the HPO with the minimum"
                     .to_string(),
             );
         }
@@ -74,7 +76,8 @@ impl HpoScorecard {
                 self.fitness, self.mean_oos_sortino
             ));
         }
-        if !self.is_statistically_significant {
+        // The p-value is the evidence; the stored flag alone could contradict it.
+        if !self.is_statistically_significant || self.dsr_p_value >= dec!(0.05) {
             return Some(format!(
                 "Deflated Sharpe p = {:.4} >= 0.05: the edge is indistinguishable from the luck \
                  of picking the best of {} trials",
@@ -258,6 +261,18 @@ mod tests {
         };
 
         let reason = lucky.deployment_blocker().expect("blocked");
+        assert!(reason.contains("Deflated Sharpe p = 0.3100"), "{reason}");
+    }
+
+    #[test]
+    fn a_significance_flag_that_contradicts_the_p_value_does_not_pass_the_gate() {
+        let inconsistent = HpoScorecard {
+            dsr_p_value: dec!(0.31),
+            is_statistically_significant: true,
+            ..scorecard()
+        };
+
+        let reason = inconsistent.deployment_blocker().expect("blocked");
         assert!(reason.contains("Deflated Sharpe p = 0.3100"), "{reason}");
     }
 
