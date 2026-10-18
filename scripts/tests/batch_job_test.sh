@@ -71,6 +71,7 @@ LIFECYCLE="$(spec 'json.dumps(j["taskGroups"][0]["taskSpec"].get("lifecyclePolic
 check "spec: retries only on Spot preemption (exit code 50001)" '[ "${LIFECYCLE}" = "[{\"action\": \"RETRY_TASK\", \"actionCondition\": {\"exitCodes\": [50001]}}]" ]'
 check "plan: artifact preflight announced" 'has "[DRY-RUN] gcloud storage objects describe gs://atsnt-lake-my-proj/artifacts/hpo_btcusdt_2026_01-hpo-test-1.json"'
 check "plan: BigQuery grant preflight announced" 'has "[DRY-RUN] bq get-iam-policy --format=prettyjson my-proj:atsnt_bi.run_series"'
+check "plan: BigQuery column preflight announced" 'has "[DRY-RUN] bq show --schema --format=prettyjson my-proj:atsnt_bi.run_metrics"'
 check "spec: region restricted" '[ "$(spec "j[\"allocationPolicy\"][\"location\"][\"allowedLocations\"][0]")" = "regions/europe-southwest1" ]'
 check "spec: dedicated service account" '[ "$(spec "j[\"allocationPolicy\"][\"serviceAccount\"][\"email\"]")" = "atsnt-batch@my-proj.iam.gserviceaccount.com" ]'
 check "spec: logs to Cloud Logging" '[ "$(spec "j[\"logsPolicy\"][\"destination\"]")" = "CLOUD_LOGGING" ]'

@@ -308,6 +308,9 @@ if [ "${DRY_RUN}" = "true" ]; then
         echo "[DRY-RUN] bq get-iam-policy --format=prettyjson ${PROJECT_ID}:${DATASET_ID}.${table}  (${SERVICE_ACCOUNT} needs roles/bigquery.dataEditor)"
     done
     echo "[DRY-RUN] bq show --format=prettyjson ${PROJECT_ID}:${DATASET_ID}  (dataset-level grant)"
+    for table in "${BATCH_WRITE_TABLES[@]}"; do
+        echo "[DRY-RUN] bq show --schema --format=prettyjson ${PROJECT_ID}:${DATASET_ID}.${table}  (columns of scripts/gcp/bigquery_schema.sql)"
+    done
     if [ "${SKIP_BUILD}" = "false" ]; then
         echo "[DRY-RUN] docker build --build-arg GIT_SHA=<sha> -t ${IMAGE_URI} ."
         echo "[DRY-RUN] docker push ${IMAGE_URI}"
