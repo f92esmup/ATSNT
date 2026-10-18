@@ -28,13 +28,13 @@ Branch: fix/audit-remediation (from main) | Delivery: ask-on-risk | Test runner:
 - T1.1 | S1 | inline | done, RED observed: 9 compile errors on the missing API (`verify_archive_sha256`, `with_base_url`, `ChecksumMismatch`, `ChecksumUnreadable`)
 - T1.2 | S1 | inline | done, GREEN: `.CHECKSUM` fetched first, archive verified before `ZipArchive::new`; a 404 on the checksum keeps the `HTTP 404` text so unpublished days are still skipped
 - T1.3 | S1 | inline | done by existing behaviour: `fetch_one` skips when the Parquet exists and a Parquet is only written after verification. Limit: Parquet files written before this change were never verified; `--force` re-converts them
-- T2.1 | S2 | inline | RED: a notifier that sleeps 10 s does not delay the loop
-- T2.2 | S2 | inline | GREEN: bounded channel plus drain task; drop-and-count when full
-- T2.3 | S3 | inline | reconnection alert with rate limit
-- T2.4 | S4 | inline | 12 h heartbeat
-- T2.5 | S5 | inline | order rejection alert, deduplicated by order id
-- T2.6 | S6, S7 | inline | paper halt parity and `account_ok` transition alert
-- T2.7 | S8 | inline | `OnFailure=` unit file under `scripts/` (documented, not deployed)
+- T2.1 | S2-S5 | inline | done, RED observed: `operator_alerts` tests failed to compile on the missing API (16 errors) and `consecutive_connection_failures_are_published` on the missing `connection_failures` (1 error)
+- T2.2 | S2 | inline | done: `operator_alerts::AlertQueue` (capacity 64, `try_send`, drop-and-count, 5 s flush at shutdown); every `send_alert(..).await` in `live_trading` and `paper_trading` now enqueues. Port `AlertNotifier::send_alert` returns a `Send` future (only implementor: `TelegramNotifier`)
+- T2.3 | S3 | inline | done: `BinanceWebSocketStream::connection_failures()` (watch, reset on connect) + `FeedMonitor` (60 s / 3 failures / 1 per 10 min / one recovery), wired in live and paper
+- T2.4 | S4 | inline | done: heartbeat via `AlertThrottle(12 h)`, first one at start (start notice); live and paper. Graceful stop notice added in both
+- T2.5 | S5 | inline | done: live alerts `REJECTED` user-stream updates once per order id (`RejectionAlerts`, last 256 ids) and REST-refused entries (`EntryFailed`, no order id yet) at most once a minute
+- T2.6 | S6, S7 | inline | done: paper alerts circuit-breaker trips. S7 already existed: `live_trading.rs` alerts the first `account_ok` drift (audit grep missed it)
+- T2.7 | S8 | inline | done: `docs/deployment/atsnt-alert@.service` (verified with `systemd-analyze verify`), not installed. With `Restart=always` `OnFailure=` only fires with a start limit, documented in the unit
 - T3.1 | S9 | inline | RED: extend `architecture_contract.rs`
 - T3.2 | S10 | inline | move or document network dependencies of `backtest`
 - T3.3 | S11 | inline | remove the `ParameterSpace` alias
@@ -58,3 +58,5 @@ Branch: fix/audit-remediation (from main) | Delivery: ask-on-risk | Test runner:
 - L6: Native RDD review `review-fc3c5bc4b57eab98` (medium, lens reliability): approved and acknowledged. Advisories: R3-001 (`file.read` does not retry `ErrorKind::Interrupted`), R3-002 (no retry on the `.CHECKSUM` request; archives without a checksum are no longer converted).
 - L7 (2026-10-18, user, verbatim): "si quiero la verificación independiente". Independent verifier on `e0c56ff`: S1 PASS, S19 PASS, no blockers. 8 probes passed (matching, uppercase hex, truncated archive, checksum 404 skipped as not archived, archive 404, checksum 403 counted as failure, temp zip removed, URL builders byte-identical to baseline). R3-001 judged out of domain; R3-002 matches baseline (archive GET had no retry either). Note: a daily archive whose `.CHECKSUM` returns 404 is skipped as "not archived"; a monthly one is reported as a failure. Parent spot check: tree clean, `cargo test -p adapters --lib binance_fetcher` 6 passed.
 - L8 (2026-10-18, user, verbatim): "Pero los parquet se quedaron como efimeros en el batch. Creo que lo que dices no importa. Todo eso se puede purgar sin riesgo". Verified: `data/` is git-ignored and no code reads those files (paths in code are CLI defaults and string-only test fixtures). The 29 local Parquet files (5.4G) were deleted; `data/sample_trades.csv` kept. Question (b) of L5 is closed.
+- L9 (2026-10-18, user, verbatim): "Adelante. completa la fase 2" — approving the proposed values: heartbeat every 12 h (equity, open position, last-tick age); stream alert after 3 failed reconnects or >60 s without data, at most once per 10 min plus one on recovery; one alert per rejected order, deduplicated by order id. Rate limits reuse the existing `crates/backtest/src/alert_throttle.rs`.
+- L10: Phase 2 verification: `cargo test --workspace --no-fail-fast` 550 passed, 0 failed (539 + 11 new); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --check` clean; `scripts/tests/*.sh` pass. Not verifiable here: the binaries' Telegram output end to end (needs a bot token and a live feed). Observed for later (Phase 6): the deployed `docs/deployment/atsnt.service` runs `paper_trading --config configs/hpo_btcusdt_2026.json`; with the deployment gate that artifact may be refused at start, which `Restart=always` would turn into a restart loop.
