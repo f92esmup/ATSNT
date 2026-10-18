@@ -446,10 +446,23 @@ prepare_holdout_split() {
         echo "[DRY-RUN] would link them into ${SPLIT_ROOT}/{train,holdout}"
         return 0
     fi
+    # Built next to its final place and moved in with one rename, so a reader never sees a
+    # half-linked split; a run that fails while linking leaves the previous split untouched.
+    mkdir -p "$(dirname "${SPLIT_ROOT}")"
+    local staging
+    staging="$(mktemp -d "${SPLIT_ROOT}.staging.XXXXXX")"
+    if ! (
+        set -e
+        mkdir -p "${staging}/train" "${staging}/holdout"
+        for file in "${train[@]}"; do ln -s "$(cd "$(dirname "${file}")" && pwd)/$(basename "${file}")" "${staging}/train/"; done
+        for file in "${holdout[@]}"; do ln -s "$(cd "$(dirname "${file}")" && pwd)/$(basename "${file}")" "${staging}/holdout/"; done
+    ); then
+        rm -rf "${staging}"
+        echo "[ERROR] --holdout-from-month ${HOLDOUT_PADDED}: could not link the split into ${SPLIT_ROOT}"
+        exit 1
+    fi
     rm -rf "${SPLIT_ROOT}"
-    mkdir -p "${SPLIT_ROOT}/train" "${SPLIT_ROOT}/holdout"
-    for file in "${train[@]}"; do ln -s "$(cd "$(dirname "${file}")" && pwd)/$(basename "${file}")" "${SPLIT_ROOT}/train/"; done
-    for file in "${holdout[@]}"; do ln -s "$(cd "$(dirname "${file}")" && pwd)/$(basename "${file}")" "${SPLIT_ROOT}/holdout/"; done
+    mv "${staging}" "${SPLIT_ROOT}"
 }
 
 # Fails fast when --month points at a monthly file that does not exist, instead of

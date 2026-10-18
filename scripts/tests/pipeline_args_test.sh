@@ -153,7 +153,15 @@ STATUS=$?
 check "holdout (real): exit 0" '[ "${STATUS}" -eq 0 ]'
 check "holdout (real): HPO sees only January" 'has "run_hpo sees BTCUSDT-aggTrades-2026-01.parquet" && ! has "run_hpo sees BTCUSDT-aggTrades-2026-02"'
 check "holdout (real): backtest sees February and its daily file" 'has "backtest sees BTCUSDT-aggTrades-2026-02.parquet" && has "backtest sees BTCUSDT-aggTrades-2026-02-15.parquet" && ! has "backtest sees BTCUSDT-aggTrades-2026-01"'
-check "holdout (real): entries are symlinks to the downloaded files" '[ -L "${SPLIT}/train/BTCUSDT-aggTrades-2026-01.parquet" ] && [ "$(readlink "${SPLIT}/train/BTCUSDT-aggTrades-2026-01.parquet")" = "${DATA_ROOT}/BTCUSDT/BTCUSDT-aggTrades-2026-01.parquet" ]'
+# Compared as resolved paths: the temp root may itself sit behind a symlink (macOS /tmp).
+check "holdout (real): entries are symlinks to the downloaded files" '[ -L "${SPLIT}/train/BTCUSDT-aggTrades-2026-01.parquet" ] && [ "$(realpath "${SPLIT}/train/BTCUSDT-aggTrades-2026-01.parquet")" = "$(realpath "${DATA_ROOT}/BTCUSDT/BTCUSDT-aggTrades-2026-01.parquet")" ]'
+
+# A rerun replaces the split as a whole: nothing stale survives and no staging dir is left.
+touch "${SPLIT}/train/stale.parquet"
+OUT="$(cd "${WORK_DIR}" && bash "${PIPELINE}" --no-inhibit --skip-fetch --year 2026 --output-dir "${DATA_ROOT}" --bin-dir "${STUBS}" --holdout-from-month 2 --config "${WORK_DIR}/winner.json" 2>&1)"
+STATUS=$?
+check "holdout (real): a rerun leaves no stale entry" '[ "${STATUS}" -eq 0 ] && [ ! -e "${SPLIT}/train/stale.parquet" ] && [ -L "${SPLIT}/train/BTCUSDT-aggTrades-2026-01.parquet" ]'
+check "holdout (real): the split is built aside and moved into place" '[ -z "$(ls -d "${SPLIT}".staging.* 2>/dev/null)" ] && has "[*] Holdout split:"'
 rm -rf "${DATA_ROOT}/splits" "${WORK_DIR}/winner.json"
 rm -f "${DATA_ROOT}/BTCUSDT/BTCUSDT-aggTrades-2026-02-15.parquet"
 

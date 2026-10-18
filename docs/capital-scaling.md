@@ -78,8 +78,9 @@ reference values (0.05% and 0.05%) `c = 0.2%`.
   With `t = s = 0.5%` you need 70%; with `t = 1%, s = 0.5%` you need about 47%.
 
 That is why `min_take_profit_pct` is a searched hyperparameter (`min_take_profit_pcts` in the
-space file). The slippage value is a placeholder until it is calibrated with real fills
-(`parity_check`, roadmap phase 4).
+space file). The slippage value is a placeholder until it is measured from real fills (roadmap
+phase 4). `live_trading --record-fills` records them; `parity_check` uses them today to recommend
+the simulator's order latency, not the slippage.
 
 ## 5. Hyperparameter search
 

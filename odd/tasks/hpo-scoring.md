@@ -51,7 +51,13 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
 - [x] T9 S12-U1: sink retries (gcp/retry.rs; RED: 3 retry tests failed with 1 attempt), column preflight from the DDL (scripts/gcp/ddl_columns.py matches the live schema of all 4 tables), sub-step labels (a)-(d). Batch suite 51/51, pipeline 58/58. Route: inline.
 - [x] T10 S12-U2: readability (no behaviour change): run_hpo block, shared rankable predicate, oos_profit_factor with the serialized key kept (a new test pins the key), DAILY_HALT_REJECTION, stats and trade_returns docs, no shadowing. Workspace 524 passed. Route: inline.
 - [x] T11 S12-U3: gate polish. NO_ELIGIBLE_FOLD_TRADES; DeploymentPolicy enum; ensure_deployable returns the operator notice; shared ALLOW_UNPROVEN_STRATEGY_HELP; "has no effect" notice; boundary tests (0.05 refused, 0.0499 passes); binary-level override tests (paper stops at the Spot refusal, live at --risk-pct, both after the warning, offline); shared fixture tests/fixtures/losing_artifact.json; docs. RED: the registry and boundary tests did not compile, and the paper override test failed on the wrong stop. Workspace 528+. Route: inline.
-- [ ] T12 S12-U4: holdout leftovers and the stash. Route: inline.
+- [x] T12 S12-U4:
+  - The holdout split is built in a staging dir and renamed into place; a failed link keeps the old split. The new rerun/staging checks pass before and after (behaviour guards: atomicity cannot be shown RED sequentially).
+  - The symlink test compares realpaths.
+  - The 500 EUR contract measures 3x on the file's own caps (a mutation to 3000 fails), and the 200 USDT config asserts the RiskPolicy default caps.
+  - capital-scaling.md: parity_check calibrates latency, not slippage (ROADMAP line 99).
+  - The stash is NOT dropped: it touches crates/web/ (retired, absent from main), so the approved condition "already on main" does not hold.
+  - Pipeline 60/60. Route: inline.
 - [x] T7 (found in v2 results): DSR over eligible trials only, plus a fitness tie-break by OOS Sortino. Commit fce2b78; workspace 509 passed.
 
 ## Log
