@@ -1,30 +1,35 @@
-# Telegram notice when a systemd unit fails (for example atsnt.service).
+# Telegram notice when a systemd unit stops unexpectedly (for example atsnt.service).
 #
 # NOT installed by scripts/gcp/deploy_to_vm.sh: install it by hand on the VM.
 #
-# Why it is needed: the trading binary cannot report its own crash. Since the operator alerts
-# work, every (re)start already sends a heartbeat that doubles as a start notice, so a crash
-# loop shows up as repeated start notices. This unit covers the case where systemd gives up.
+# Why it is needed: the trading binary cannot report its own crash. Every (re)start already
+# sends a heartbeat that doubles as a start notice, so a crash loop shows up as repeated start
+# notices; this unit names the failure itself.
 #
 # Install:
 #   1. Put the bot credentials in /home/f92esmup/atsnt/telegram.env (chmod 600):
 #        TELEGRAM_BOT_TOKEN=...
 #        TELEGRAM_CHAT_ID=...
 #   2. sudo cp atsnt-alert@.service /etc/systemd/system/
-#   3. Add to the [Unit] section of /etc/systemd/system/atsnt.service:
-#        OnFailure=atsnt-alert@%n.service
-#        StartLimitIntervalSec=600
-#        StartLimitBurst=5
-#      With Restart=always the unit never enters the "failed" state unless a start limit
-#      exists, so OnFailure= alone would never fire. With these values systemd stops after
-#      5 crashes in 10 minutes, marks the unit failed and starts this notice.
+#   3. Add to the [Service] section of /etc/systemd/system/atsnt.service:
+#        ExecStopPost=+/bin/sh -c 'if [ "$$SERVICE_RESULT" != "success" ]; then systemctl start --no-block atsnt-alert@%n.service; fi'
+#      ExecStopPost runs after every stop on every systemd version, so the notice goes out on
+#      each crash while Restart=always keeps restarting the service. A clean stop (SIGINT,
+#      result "success") sends nothing. The "+" runs the hook with the privileges
+#      `systemctl start` needs.
+#      Why not OnFailure=: from systemd 254 on (RestartMode=normal, the default) each
+#      auto-restart passes through the failed state and OnFailure= would fire too; before
+#      254 it only fires once a start limit (StartLimitBurst) is hit, and reaching that limit
+#      stops the restarts for good, which would leave trading down after a transient
+#      start-up outage. ExecStopPost= behaves the same everywhere. Check the VM with
+#      `systemctl --version`.
 #   4. sudo systemctl daemon-reload
 #   5. Test: sudo systemctl start atsnt-alert@atsnt.service
 
 [Unit]
-Description=Telegram notice for the failed unit %i
+Description=Telegram notice for the unexpected stop of %i
 
 [Service]
 Type=oneshot
 EnvironmentFile=/home/f92esmup/atsnt/telegram.env
-ExecStart=/bin/sh -c 'curl -fsS --max-time 10 "https://api.telegram.org/bot$${TELEGRAM_BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=$${TELEGRAM_CHAT_ID}" --data-urlencode "text=ATSNT: unit %i FAILED on %H and systemd stopped restarting it. Check: journalctl -u %i -n 100" > /dev/null'
+ExecStart=/bin/sh -c 'curl -fsS --max-time 10 "https://api.telegram.org/bot$${TELEGRAM_BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=$${TELEGRAM_CHAT_ID}" --data-urlencode "text=ATSNT: unit %i stopped unexpectedly on %H; systemd is restarting it. Check: journalctl -u %i -n 100" > /dev/null'
