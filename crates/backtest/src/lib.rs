@@ -11,6 +11,7 @@ pub mod live_exits;
 pub mod metrics;
 pub mod monte_carlo;
 pub mod monthly_guard;
+pub mod operator_alerts;
 pub mod optimization;
 pub mod paper;
 pub mod parity;

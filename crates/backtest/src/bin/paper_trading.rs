@@ -8,13 +8,17 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use adapters::{
-    now_in_madrid, AlertNotifier, AsyncMarketDataStream, BigQuerySink, BinanceWebSocketStream,
-    BinanceWsConfig, GcpSecretManager, RunRecorder, TelegramNotifier,
+    now_in_madrid, AsyncMarketDataStream, BigQuerySink, BinanceWebSocketStream, BinanceWsConfig,
+    GcpSecretManager, RunRecorder, TelegramNotifier,
 };
 use anyhow::{Context, Result};
+use backtest::operator_alerts::{
+    heartbeat_message, AlertQueue, FeedMonitor, DEFAULT_ALERT_QUEUE_CAPACITY, HEARTBEAT_INTERVAL_MS,
+};
 use backtest::{
-    now_unix_ms, BacktestConfig, ClosedTrade, DataWindow, PaperTradingConfig, PaperTradingEvent,
-    PaperTradingSession, RunContext, RunId, RunSpec, RunStatus, RunType, SamplingConfig,
+    now_unix_ms, AlertThrottle, BacktestConfig, ClosedTrade, DataWindow, PaperTradingConfig,
+    PaperTradingEvent, PaperTradingSession, RunContext, RunId, RunSpec, RunStatus, RunType,
+    SamplingConfig,
 };
 use chrono::Timelike;
 use clap::Parser;
@@ -191,7 +195,8 @@ async fn main() -> Result<()> {
                 "ENABLED (Pending TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)"
             }
         );
-        Some(t)
+        // Alerts are delivered from their own task: the trading loop only enqueues them.
+        Some(AlertQueue::spawn(t, DEFAULT_ALERT_QUEUE_CAPACITY))
     } else {
         None
     };
@@ -282,6 +287,7 @@ async fn main() -> Result<()> {
     println!("[*] Connecting to WebSocket: {}", ws_source);
     let mut stream = BinanceWebSocketStream::connect(ws_config)
         .with_context(|| "Failed to connect to Binance WebSocket stream")?;
+    let feed_failures = stream.connection_failures();
 
     println!("[*] Engine initialized. Awaiting market trades (Press Ctrl+C to terminate)...\n");
 
@@ -325,6 +331,10 @@ async fn main() -> Result<()> {
     let mut daily_fees = Decimal::ZERO;
     let mut daily_net_pnl = Decimal::ZERO;
     let mut daily_timer = tokio::time::interval(Duration::from_secs(10));
+    let mut feed = FeedMonitor::new(now_unix_ms());
+    // The first heartbeat goes out on the first timer tick and doubles as the start notice.
+    let heartbeat = AlertThrottle::new(HEARTBEAT_INTERVAL_MS);
+    let mut last_trade_at: Option<Instant> = None;
 
     loop {
         tokio::select! {
@@ -332,10 +342,38 @@ async fn main() -> Result<()> {
 
             _ = tokio::signal::ctrl_c() => {
                 println!("\n[SHUTDOWN] Interruption signal received (Ctrl+C). Liquidating open positions...");
+                if let Some(t) = &telegram {
+                    let mark = if last_mark_price > Decimal::ZERO { last_mark_price } else { args.capital };
+                    t.send(format!(
+                        "🛑 *ATSNT STOPPED* `{}` (paper): shut down by the operator. Equity `${:.2}`, position: {}.",
+                        args.symbol.to_uppercase(),
+                        session.total_equity(mark),
+                        paper_position_description(&session)
+                    ));
+                }
                 break;
             }
 
             _ = daily_timer.tick() => {
+                let now_ms = now_unix_ms();
+                if let Some(status) = feed.on_check(now_ms, *feed_failures.borrow()) {
+                    let text = status.message(&args.symbol.to_uppercase());
+                    eprintln!("[CRITICAL] {text}");
+                    if let Some(t) = &telegram {
+                        t.send(text);
+                    }
+                }
+                if let Some(t) = &telegram {
+                    if heartbeat.allow(now_ms) {
+                        let mark = if last_mark_price > Decimal::ZERO { last_mark_price } else { args.capital };
+                        t.send(heartbeat_message(
+                            &args.symbol.to_uppercase(),
+                            session.total_equity(mark),
+                            &paper_position_description(&session),
+                            last_trade_at.map(|at| at.elapsed().as_secs() as i64),
+                        ));
+                    }
+                }
                 let now_madrid = now_in_madrid();
                 if now_madrid.date_naive() != current_day {
                     current_day = now_madrid.date_naive();
@@ -350,10 +388,7 @@ async fn main() -> Result<()> {
                 if now_madrid.hour() == 20 && last_daily_report_date != Some(now_madrid.date_naive()) {
                     last_daily_report_date = Some(now_madrid.date_naive());
                     if let Some(t) = &telegram {
-                        let active_pos_desc = match session.active_position() {
-                            Some(pos) => format!("{:?} (qty: {}, entry: ${})", pos.side, pos.quantity, pos.entry_price),
-                            None => "Flat (No open position)".to_string(),
-                        };
+                        let active_pos_desc = paper_position_description(&session);
                         let mark = if last_mark_price > Decimal::ZERO { last_mark_price } else { args.capital };
                         let total_eq = session.total_equity(mark);
                         let dd = session.current_drawdown_pct();
@@ -375,13 +410,23 @@ async fn main() -> Result<()> {
                             total_ticks,
                             total_bars,
                         );
-                        let _ = t.send_alert(&msg).await;
-                        tracing::info!(target: "telegram", "Dispatched 20:00 Madrid daily performance summary via Telegram");
+                        t.send(msg);
+                        tracing::info!(target: "telegram", "Queued 20:00 Madrid daily performance summary for Telegram");
                     }
                 }
             }
 
             trade_res = stream.next_trade() => {
+                if let Ok(Some(_)) = &trade_res {
+                    last_trade_at = Some(Instant::now());
+                    if let Some(status) = feed.on_trade(now_unix_ms()) {
+                        let text = status.message(&args.symbol.to_uppercase());
+                        println!("[OK] {text}");
+                        if let Some(t) = &telegram {
+                            t.send(text);
+                        }
+                    }
+                }
                 match trade_res {
                     // Already part of the warm-up history; feeding it twice would repeat those
                     // trades in the strategy's window.
@@ -481,7 +526,7 @@ async fn main() -> Result<()> {
                                             take_profit,
                                             session.cash_equity(),
                                         );
-                                        let _ = t.send_alert(&msg).await;
+                                        t.send(msg);
                                     }
                                 }
                                 PaperTradingEvent::PositionClosed { exit_reason, exit_price, net_pnl, total_equity } => {
@@ -557,7 +602,7 @@ async fn main() -> Result<()> {
                                             ret_pct,
                                             total_equity,
                                         );
-                                        let _ = t.send_alert(&msg).await;
+                                        t.send(msg);
                                     }
                                     if let (Some(bq), Some(ct)) = (&bq_sink, &closed_trade_opt) {
                                         trade_counter += 1;
@@ -585,6 +630,14 @@ async fn main() -> Result<()> {
                                         scope,
                                         drawdown_pct * dec!(100)
                                     );
+                                    if let Some(t) = &telegram {
+                                        t.send(format!(
+                                            "🚨 *ATSNT CIRCUIT BREAKER* `{}` (paper): {} breaker tripped at {:.2}% drawdown. Trading halted, no new positions will open.",
+                                            args.symbol.to_uppercase(),
+                                            scope,
+                                            drawdown_pct * dec!(100)
+                                        ));
+                                    }
                                 }
                                 PaperTradingEvent::MarkToMarket { current_price, unrealized_pnl, total_equity, drawdown_pct } => {
                                     // Periodic display to avoid terminal flooding
@@ -698,7 +751,23 @@ async fn main() -> Result<()> {
     );
     println!("============================================================");
 
+    // Give queued alerts (the stop notice included) a moment to leave before the process exits.
+    if let Some(alerts) = telegram {
+        alerts.shutdown(Duration::from_secs(5)).await;
+    }
+
     Ok(())
+}
+
+/// One-line description of the open paper position for operator messages.
+fn paper_position_description(session: &PaperTradingSession) -> String {
+    match session.active_position() {
+        Some(pos) => format!(
+            "{:?} (qty: {}, entry: ${})",
+            pos.side, pos.quantity, pos.entry_price
+        ),
+        None => "Flat (No open position)".to_string(),
+    }
 }
 
 /// Appends a lifecycle row for the paper run; failures are logged, never fatal.

@@ -10,12 +10,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use adapters::{
-    now_in_madrid, AlertNotifier, AsyncMarketDataStream, BigQuerySink, BinanceGateway,
-    BinanceGatewayConfig, BinancePrivateEvent, BinancePrivateUserDataStream,
-    BinanceWebSocketStream, BinanceWsConfig, GcpSecretManager, RunRecorder, TelegramNotifier,
+    now_in_madrid, AsyncMarketDataStream, BigQuerySink, BinanceGateway, BinanceGatewayConfig,
+    BinancePrivateEvent, BinancePrivateUserDataStream, BinanceWebSocketStream, BinanceWsConfig,
+    GcpSecretManager, RunRecorder, TelegramNotifier,
 };
 use anyhow::{Context, Result};
 use backtest::driver::SessionDriver;
+use backtest::operator_alerts::{
+    heartbeat_message, AlertQueue, FeedMonitor, RejectionAlerts, DEFAULT_ALERT_QUEUE_CAPACITY,
+    HEARTBEAT_INTERVAL_MS,
+};
 use backtest::parity::FillRecorder;
 use backtest::session::{SessionConfig, SessionEvent, SkipReason, TradingSession};
 use backtest::AlertThrottle;
@@ -344,7 +348,8 @@ async fn main() -> Result<()> {
                 "ENABLED (Pending TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)"
             }
         );
-        Some(t)
+        // Alerts are delivered from their own task: the trading loop only enqueues them.
+        Some(AlertQueue::spawn(t, DEFAULT_ALERT_QUEUE_CAPACITY))
     } else {
         None
     };
@@ -466,6 +471,7 @@ async fn main() -> Result<()> {
     let ws_source = ws_config.stream_url();
     let mut market_stream = BinanceWebSocketStream::connect(ws_config)
         .with_context(|| "Failed to connect to public Binance WebSocket feed")?;
+    let feed_failures = market_stream.connection_failures();
 
     let run_spec = RunSpec {
         strategy_id: loaded.strategy_id.clone(),
@@ -540,7 +546,12 @@ async fn main() -> Result<()> {
         monthly_limit_pct: run_spec.execution_context.max_monthly_drawdown_pct,
         fill_recorder: args.record_fills.as_ref().map(FillRecorder::new),
         timeout_alerts: AlertThrottle::new(60_000),
+        entry_failure_alerts: AlertThrottle::new(60_000),
     };
+    let mut feed = FeedMonitor::new(now_unix_ms());
+    // The first heartbeat goes out on the first timer tick and doubles as the start notice.
+    let heartbeat = AlertThrottle::new(HEARTBEAT_INTERVAL_MS);
+    let mut rejections = RejectionAlerts::default();
     let mut total_ticks: u64 = 0;
     let mut total_bars: u64 = 0;
     let mut last_mtm_print = Instant::now();
@@ -588,12 +599,10 @@ async fn main() -> Result<()> {
                         eprintln!("[CRITICAL] Account profile drifted; new entries are blocked.\n{}", report.render());
                         if first {
                             if let Some(t) = &telegram {
-                                let _ = t
-                                    .send_alert(&format!(
-                                        "🚨 *ATSNT ACCOUNT DRIFT* `{symbol_upper}`: new entries blocked.\n{}",
-                                        report.render()
-                                    ))
-                                    .await;
+                                t.send(format!(
+                                    "🚨 *ATSNT ACCOUNT DRIFT* `{symbol_upper}`: new entries blocked.\n{}",
+                                    report.render()
+                                ));
                             }
                         }
                     }
@@ -604,12 +613,10 @@ async fn main() -> Result<()> {
                         if account_read_failures == 3 {
                             eprintln!("[CRITICAL] The account profile could not be verified for {} minutes.", 3 * ACCOUNT_RECHECK_SECS / 60);
                             if let Some(t) = &telegram {
-                                let _ = t
-                                    .send_alert(&format!(
-                                        "🚨 *ATSNT* `{symbol_upper}`: the account profile could not be verified for the last {} minutes (last error: {e}).",
-                                        3 * ACCOUNT_RECHECK_SECS / 60
-                                    ))
-                                    .await;
+                                t.send(format!(
+                                    "🚨 *ATSNT* `{symbol_upper}`: the account profile could not be verified for the last {} minutes (last error: {e}).",
+                                    3 * ACCOUNT_RECHECK_SECS / 60
+                                ));
                             }
                         }
                     }
@@ -619,6 +626,12 @@ async fn main() -> Result<()> {
             // Handle graceful shutdown on Ctrl+C
             _ = &mut shutdown_signal => {
                 println!("\n[SHUTDOWN] Interruption signal received (Ctrl+C). Terminating engine...");
+                if let Some(t) = &telegram {
+                    t.send(format!(
+                        "🛑 *ATSNT STOPPED* `{symbol_upper}`: shut down by the operator. Equity `${current_equity:.2}`, position: {}.",
+                        position_description(driver.session().open_position())
+                    ));
+                }
                 let _ = user_stream.shutdown().await;
                 break;
             }
@@ -629,6 +642,24 @@ async fn main() -> Result<()> {
                     let events = driver.on_idle(gateway.as_ref(), estimated_ms).await;
                     sink.handle(events, &mut stats, driver.session().wallet_equity()).await;
                 }
+                let now_ms = now_unix_ms();
+                if let Some(status) = feed.on_check(now_ms, *feed_failures.borrow()) {
+                    let text = status.message(&symbol_upper);
+                    eprintln!("[CRITICAL] {text}");
+                    if let Some(t) = &telegram {
+                        t.send(text);
+                    }
+                }
+                if let Some(t) = &telegram {
+                    if heartbeat.allow(now_ms) {
+                        t.send(heartbeat_message(
+                            &symbol_upper,
+                            current_equity,
+                            &position_description(driver.session().open_position()),
+                            last_trade.map(|(_, arrived)| arrived.elapsed().as_secs() as i64),
+                        ));
+                    }
+                }
                 let now_madrid = now_in_madrid();
                 if now_madrid.date_naive() != current_day {
                     current_day = now_madrid.date_naive();
@@ -638,10 +669,7 @@ async fn main() -> Result<()> {
                 if now_madrid.hour() == 20 && last_daily_report_date != Some(now_madrid.date_naive()) {
                     last_daily_report_date = Some(now_madrid.date_naive());
                     if let Some(t) = &telegram {
-                        let active_pos_desc = match driver.session().open_position() {
-                            Some((s, ep, q)) => format!("{:?} (qty: {}, entry: ${})", s, q, ep),
-                            None => "Flat (No open position)".to_string(),
-                        };
+                        let active_pos_desc = position_description(driver.session().open_position());
                         let dd = if peak_equity > Decimal::ZERO && peak_equity > current_equity {
                             (peak_equity - current_equity) / peak_equity
                         } else {
@@ -665,8 +693,8 @@ async fn main() -> Result<()> {
                             total_ticks,
                             total_bars,
                         );
-                        let _ = t.send_alert(&msg).await;
-                        tracing::info!(target: "telegram", "Dispatched 20:00 Madrid daily performance summary via Telegram");
+                        t.send(msg);
+                        tracing::info!(target: "telegram", "Queued 20:00 Madrid daily performance summary for Telegram");
                     }
                 }
             }
@@ -693,6 +721,16 @@ async fn main() -> Result<()> {
                             update.cumulative_filled_quantity,
                         );
 
+                        if update.status == "REJECTED" && rejections.first(&update.order_id.to_string()) {
+                            let text = format!(
+                                "🚫 *ATSNT ORDER REJECTED* `{symbol_upper}`: order {} ({}) {:?} was rejected by the exchange.",
+                                update.order_id, update.client_order_id, update.side
+                            );
+                            eprintln!("[CRITICAL] {text}");
+                            if let Some(t) = &telegram {
+                                t.send(text);
+                            }
+                        }
                         let report = ExecutionReport::from(&update);
                         let events = driver.on_execution(gateway.as_ref(), &report).await;
                         sink.handle(events, &mut stats, driver.session().wallet_equity()).await;
@@ -720,6 +758,15 @@ async fn main() -> Result<()> {
 
             // Ingest public market trade ticks
             trade_res = market_stream.next_trade() => {
+                if let Ok(Some(_)) = &trade_res {
+                    if let Some(status) = feed.on_trade(now_unix_ms()) {
+                        let text = status.message(&symbol_upper);
+                        println!("[OK] {text}");
+                        if let Some(t) = &telegram {
+                            t.send(text);
+                        }
+                    }
+                }
                 match trade_res {
                     Ok(Some(trade)) if trade.timestamp <= warmup_cutoff_ms => {
                         // Already part of the warm-up history; feeding it twice would repeat
@@ -846,7 +893,21 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Give queued alerts (the stop notice included) a moment to leave before the process exits.
+    drop(sink);
+    if let Some(alerts) = telegram {
+        alerts.shutdown(Duration::from_secs(5)).await;
+    }
+
     Ok(())
+}
+
+/// One-line description of the open position for operator messages.
+fn position_description(position: Option<(Side, Decimal, Decimal)>) -> String {
+    match position {
+        Some((side, entry, quantity)) => format!("{side:?} (qty: {quantity}, entry: ${entry})"),
+        None => "Flat (No open position)".to_string(),
+    }
 }
 
 /// Per-day trade statistics for the Telegram summary plus the lifetime count of recorded trades.
@@ -873,7 +934,7 @@ impl LiveStats {
 
 /// Turns the session's events into console output, Telegram alerts and BigQuery rows.
 struct EventSink<'a> {
-    telegram: &'a Option<TelegramNotifier>,
+    telegram: &'a Option<AlertQueue>,
     bq: &'a Option<BigQuerySink>,
     run_ctx: &'a RunContext,
     symbol: &'a str,
@@ -881,6 +942,8 @@ struct EventSink<'a> {
     fill_recorder: Option<FillRecorder>,
     /// Limits the Telegram alert of a timed-out entry that keeps failing to resolve.
     timeout_alerts: AlertThrottle,
+    /// Limits the Telegram alert of entries the exchange refuses (one a minute at most).
+    entry_failure_alerts: AlertThrottle,
 }
 
 impl EventSink<'_> {
@@ -954,12 +1017,10 @@ impl EventSink<'_> {
                         self.symbol
                     );
                     if let Some(t) = self.telegram {
-                        let _ = t
-                            .send_alert(&format!(
-                                "🚨 *ATSNT* `{}`: an entry order timed out ({detail}).",
-                                self.symbol
-                            ))
-                            .await;
+                        t.send(format!(
+                            "🚨 *ATSNT* `{}`: an entry order timed out ({detail}).",
+                            self.symbol
+                        ));
                     }
                 }
                 SessionEvent::EntryTimeoutFailed(reason) => {
@@ -971,18 +1032,26 @@ impl EventSink<'_> {
                     // The retry runs every few seconds: one Telegram message a minute is enough.
                     if self.timeout_alerts.allow(now_unix_ms()) {
                         if let Some(t) = self.telegram {
-                            let _ = t
-                                .send_alert(&format!(
-                                    "🚨 *ATSNT* `{}`: a timed-out entry could not be resolved ({reason}); retrying.",
-                                    self.symbol
-                                ))
-                                .await;
+                            t.send(format!(
+                                "🚨 *ATSNT* `{}`: a timed-out entry could not be resolved ({reason}); retrying.",
+                                self.symbol
+                            ));
                         }
                     }
                 }
                 SessionEvent::EntryFailed(reason) => {
                     error!(error = %reason, "Failed to submit live order to Binance");
                     eprintln!("[ERROR] Order placement failed: {reason}");
+                    // A refused entry has no exchange order id yet; a persistent cause (margin,
+                    // filters) repeats on every signal, so one message a minute is enough.
+                    if self.entry_failure_alerts.allow(now_unix_ms()) {
+                        if let Some(t) = self.telegram {
+                            t.send(format!(
+                                "🚫 *ATSNT ORDER REJECTED* `{}`: the entry order was refused ({reason}).",
+                                self.symbol
+                            ));
+                        }
+                    }
                 }
                 SessionEvent::PositionOpened {
                     side,
@@ -1000,7 +1069,8 @@ impl EventSink<'_> {
                             eprintln!("[WARN] Could not record the entry fill: {error}");
                         }
                     }
-                    announce_exit_event(self.telegram, self.symbol, &protection).await;
+                    self.entry_failure_alerts.reset();
+                    announce_exit_event(self.telegram, self.symbol, &protection);
                     if let Some(t) = self.telegram {
                         let side_str = match side {
                             Side::Buy => "Long",
@@ -1015,11 +1085,11 @@ impl EventSink<'_> {
                             take_profit,
                             wallet,
                         );
-                        let _ = t.send_alert(&msg).await;
+                        t.send(msg);
                     }
                 }
                 SessionEvent::Exit(exit) => {
-                    announce_exit_event(self.telegram, self.symbol, &exit).await;
+                    announce_exit_event(self.telegram, self.symbol, &exit);
                 }
                 SessionEvent::PositionClosed(trade) => {
                     stats.trades += 1;
@@ -1051,7 +1121,7 @@ impl EventSink<'_> {
                             trade.return_pct,
                             wallet,
                         );
-                        let _ = t.send_alert(&msg).await;
+                        t.send(msg);
                     }
 
                     stats.recorded_trades += 1;
@@ -1078,7 +1148,7 @@ impl EventSink<'_> {
                             drawdown * dec!(100),
                             self.monthly_limit_pct * dec!(100),
                         );
-                        let _ = t.send_alert(&msg).await;
+                        t.send(msg);
                     }
                 }
             }
@@ -1088,7 +1158,7 @@ impl EventSink<'_> {
 
 /// Appends a lifecycle row for the live run; failures are logged, never fatal.
 /// Prints an exit-lifecycle event and alerts on Telegram for the ones an operator must see.
-async fn announce_exit_event(telegram: &Option<TelegramNotifier>, symbol: &str, event: &ExitEvent) {
+fn announce_exit_event(telegram: &Option<AlertQueue>, symbol: &str, event: &ExitEvent) {
     let (critical, text) = match event {
         ExitEvent::Protected => (false, "Exchange-held stop loss and take profit are live".to_string()),
         ExitEvent::CleanedUp => (false, "Leftover orders cancelled after the exit".to_string()),
@@ -1121,10 +1191,8 @@ async fn announce_exit_event(telegram: &Option<TelegramNotifier>, symbol: &str, 
         println!("[EXITS] {symbol}: {text}");
     }
     if critical || matches!(event, ExitEvent::Halted) {
-        if let Some(notifier) = telegram {
-            let _ = notifier
-                .send_alert(&format!("🚨 *ATSNT EXITS* `{}`: {}", symbol, text))
-                .await;
+        if let Some(alerts) = telegram {
+            alerts.send(format!("🚨 *ATSNT EXITS* `{}`: {}", symbol, text));
         }
     }
 }

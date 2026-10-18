@@ -84,10 +84,23 @@ pub trait AlertNotifier: Send + Sync {
 
 ### 2.2 Telegram Mobile Alerting (`TelegramNotifier`)
 
-The notifier formats events with visual cues and dispatches them asynchronously:
-- 🟢 **Position Opened**: Symbol, Side, Entry Price, Size, Stop Loss, and Take Profit.
-- 🔴 **Position Closed**: Exit Reason (Stop Loss, Take Profit, Time Barrier), Net PnL in USDT, Holding Duration.
-- ⚠️ **Circuit Breaker / Risk Violation**: Session drawdown breach, order sizing rejection.
+`paper_trading` and `live_trading` never wait on Telegram: alerts go into a bounded queue (`backtest::operator_alerts::AlertQueue`, 64 messages) drained by its own task. When the queue is full a message is dropped and counted in the log; a slow or unreachable Telegram cannot delay a trade. Pending alerts get 5 seconds to leave at shutdown.
+
+What an operator is told (`paper` and `live` unless noted):
+
+| Alert | Trigger | Rate limit |
+|---|---|---|
+| 💓 Heartbeat | At start (doubles as the start notice) and every 12 h: equity, open position, age of the last market trade | 1 per 12 h |
+| 🛑 Stopped | Graceful shutdown (Ctrl+C / SIGINT): equity and open position | once |
+| ⚠️ Feed down | More than 60 s without a market trade, or 3 failed WebSocket reconnects in a row | 1 per 10 min |
+| ✅ Feed back | First market trade after a reported outage | once per outage |
+| 🟢 Position opened / 🔴 closed | Entry fill / exit with net PnL | none |
+| 🚨 Circuit breaker | Monthly breaker (live), daily or monthly breaker (paper) | once per trip |
+| 🚫 Order rejected (live) | An order reported `REJECTED` on the user data stream (once per order id), or an entry refused by the exchange REST API | per order id / 1 per min |
+| 🚨 Exits, entry timeouts, account drift (live) | Protective-order failures, unresolved entries, account profile mismatch or unverifiable account | as before |
+| 📊 Daily summary | 20:00 Madrid | 1 per day |
+
+A process crash cannot be reported by the process itself. Every restart sends a heartbeat, so a crash loop shows as repeated start notices; `docs/deployment/atsnt-alert@.service` (installed by hand) also sends a notice when systemd stops restarting the service.
 
 ---
 
