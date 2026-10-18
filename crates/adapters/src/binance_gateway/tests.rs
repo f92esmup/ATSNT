@@ -1,3 +1,4 @@
+use super::spot_preflight::parse_spot_lot_rules;
 use super::*;
 use domain::Side;
 use rust_decimal_macros::dec;
