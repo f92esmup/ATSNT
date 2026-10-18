@@ -37,7 +37,8 @@ fi
 UNIT_FILE="docs/deployment/atsnt.service"
 CONFIG_BASENAME="$(basename "${CONFIG_FILE}")"
 # Only the active ExecStart line counts (not comments), and the name is compared literally.
-EXEC_START="$(grep -E '^ExecStart=' "${UNIT_FILE}")"
+# `|| true`: under `set -e` a unit without ExecStart= must reach the error below, not exit silently.
+EXEC_START="$(grep -E '^ExecStart=' "${UNIT_FILE}" || true)"
 case " ${EXEC_START} " in
     *"/configs/${CONFIG_BASENAME} "*) ;;
     *)
