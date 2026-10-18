@@ -398,18 +398,23 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
 
-    /// A local port nobody listens on: every connection attempt is refused at once.
-    fn closed_local_url() -> String {
+    /// A local port this test owns that closes every connection before the WebSocket
+    /// handshake, so each attempt fails without another process ever taking the port.
+    fn failing_local_url() -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local port");
         let port = listener.local_addr().expect("local addr").port();
-        drop(listener);
+        std::thread::spawn(move || {
+            for connection in listener.incoming() {
+                drop(connection);
+            }
+        });
         format!("ws://127.0.0.1:{port}/ws/{{symbol}}@aggTrade")
     }
 
     #[tokio::test]
     async fn consecutive_connection_failures_are_published() {
         let config = BinanceWsConfig {
-            base_url: closed_local_url(),
+            base_url: failing_local_url(),
             initial_backoff_ms: 1,
             max_backoff_ms: 5,
             ..BinanceWsConfig::for_symbol("btcusdt")
@@ -420,7 +425,7 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(5), failures.wait_for(|n| *n >= 3))
             .await
-            .expect("three refused connections within 5 s")
+            .expect("three failed handshakes within 5 s")
             .expect("the connection manager is alive");
     }
 
