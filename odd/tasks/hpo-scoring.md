@@ -21,6 +21,23 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
 
 - S10 (added under L4, "arregla todo con el objetivo de tener un resultado ... que tenga sentido"): the search space must be able to trade. Rolling windows span intraday horizons (100 to 1,600 $1M bars), and the rolling window update is O(1) so these windows stay affordable.
 - S11 (L13): "Bloquea las estrategias perdedoras". paper_trading and live_trading refuse an artifact whose scorecard shows no edge: a pre-eligibility scorecard, fitness <= 0, or a non-significant DSR. `--allow-unproven-strategy` overrides it explicitly. Files without a scorecard pass.
+- S12 (L16, closeout plan approved: "Planifica la solución de todos esos pendientes. Quiero cerrar esta refactorizacuon de una vez" / "Lo apruebo"). Each item below is closed with a test or a stated reason:
+  - U1:
+    - the Batch launcher checks the run_metrics columns (R4-001/R3-001);
+    - the BigQuery and GCS sinks retry 5xx, 429 and timeouts, 3 attempts with backoff (R4-002);
+    - preflight step numbering (R2-006).
+  - U2: readability items R2-001, R2-002, R2-003 (rename to oos_profit_factor; the serialized key is kept), R2-005, R2-008, R2-009, R2-010.
+  - U3: gate polish:
+    - legacy marker constant;
+    - a Deployment enum instead of a bool;
+    - shared help text;
+    - notice when the override is unused;
+    - boundary tests at p = 0.05 and 0.0499;
+    - binary-level override test;
+    - shared fixture;
+    - doc for --min-trades-per-fold 0.
+  - U4: atomic holdout split directory; realpath in the symlink test; the 500 EUR contract asserts the cap values; capital-scaling.md:82-83 line.
+  - The stash odd-t2b-slice2-stage is dropped if its content is already on main.
 
 ## Tasks
 
@@ -31,6 +48,10 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
 - [x] T6 S10: O(1) RollingZScore (ecc8e28, equivalence test against the two-pass statistics over 5,000 prices) and window grid [100, 160, 250, 400, 650, 1000, 1600] (RED on the grid assertion, then GREEN). Workspace: 507 passed.
 - [x] T5 S9: docs (04, 10, 13 -> contract v2, capital-scaling), local comparison (L7, L8), relaunch (L9-L11). Route: inline.
 - [x] T8 S11: deployment gate (HpoScorecard::deployment_blocker, LoadedStrategy::ensure_deployable, a [GATE] line in the backtest, flag in both binaries, docs). RED: paper_trading kept running on the v3 artifact until killed, and the unit tests did not compile; then GREEN. Workspace: 517 passed.
+- [x] T9 S12-U1: sink retries (gcp/retry.rs; RED: 3 retry tests failed with 1 attempt), column preflight from the DDL (scripts/gcp/ddl_columns.py matches the live schema of all 4 tables), sub-step labels (a)-(d). Batch suite 51/51, pipeline 58/58. Route: inline.
+- [ ] T10 S12-U2: readability. Route: inline.
+- [ ] T11 S12-U3: gate polish. Route: inline.
+- [ ] T12 S12-U4: holdout leftovers and the stash. Route: inline.
 - [x] T7 (found in v2 results): DSR over eligible trials only, plus a fitness tie-break by OOS Sortino. Commit fce2b78; workspace 509 passed.
 
 ## Log
@@ -106,3 +127,4 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
   - The tracked legacy artifacts configs/hpo_btcusdt_2026.json and _1k.json (fake 80/100 Sortino) are now refused. The VM has been stopped since Phase 1.
 - L14 Gate review (lineage review-a0d51521d5eff978): approved and acknowledged. Follow-ups fixed in the next commit: R3-001 (the gate now checks the p-value, not only the flag), R3-002 (wording of the no-eligible-fold reason), R2-003, R2-006 and R3-006 (docs and banner wording). Still open: R3-003 (no binary-level test of the override; it needs the network after the gate) and R3-004 (the override flag gives no notice when unused).
 - L15 Follow-up review (lineage review-b132315f39d43f9d): approved and acknowledged; advisories R3-001..R3-004 are wording and boundary-test suggestions, left open. Delivered: fast-forward of main to this branch and push to origin (user: "haz puag").
+- L16 (2026-10-18) User: "Planifica la solución de todos esos pendientes. Quiero cerrar esta refactorizacuon de una vez" -> plan presented -> "Lo apruebo". Branch feat/hpo-closeout from main 170d79a.

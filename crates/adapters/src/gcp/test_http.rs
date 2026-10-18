@@ -54,3 +54,64 @@ impl OneShotServer {
         self.handle.join().expect("test server thread")
     }
 }
+
+/// Local endpoint that answers successive requests with the given `(status, body)` in order,
+/// one connection each, and records every request line.
+pub(crate) struct ScriptedServer {
+    /// Base URL (`http://127.0.0.1:<port>`) to use as the sink's API endpoint.
+    pub base_url: String,
+    handle: JoinHandle<Vec<String>>,
+}
+
+impl ScriptedServer {
+    /// Starts a server that replies to the n-th request with `responses[n]`.
+    pub fn start(responses: &[(&str, &str)]) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test port");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let responses: Vec<String> = responses
+            .iter()
+            .map(|(status, body)| {
+                format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            })
+            .collect();
+        let handle = std::thread::spawn(move || {
+            let mut lines = Vec::new();
+            for response in responses {
+                let (stream, _) = listener.accept().expect("accept test connection");
+                let mut reader = BufReader::new(stream);
+                let mut request_line = String::new();
+                reader
+                    .read_line(&mut request_line)
+                    .expect("read request line");
+                let mut content_length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).expect("read header");
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                    if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                reader.read_exact(&mut body).expect("read body");
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+                lines.push(request_line);
+            }
+            lines
+        });
+        Self { base_url, handle }
+    }
+
+    /// Waits until every scripted response was served and returns the request lines.
+    pub fn request_lines(self) -> Vec<String> {
+        self.handle.join().expect("test server thread")
+    }
+}

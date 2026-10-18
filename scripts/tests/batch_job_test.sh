@@ -13,6 +13,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORCHESTRATOR="${SCRIPT_DIR}/../gcp/run_ephemeral_batch_hpo.sh"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-${HOME}/.cache}/atsnt-batch-test.XXXXXX")"
 trap 'rm -rf "${WORK_DIR}"' EXIT
@@ -161,11 +162,21 @@ case "\$1" in
         f="${LIVE_STATE}/iam_\${target##*.}.json"
         if [ -e "\${f}" ]; then cat "\${f}"; else echo '{"etag": "ACAB", "version": 1}'; fi ;;
     show)
-        if [ -e "${LIVE_STATE}/dataset.json" ]; then cat "${LIVE_STATE}/dataset.json"; else echo '{"access": []}'; fi ;;
+        if [ "\$2" = "--schema" ]; then
+            f="${LIVE_STATE}/schema_\${target##*.}.json"
+            if [ -e "\${f}" ]; then cat "\${f}"; else ddl_schema "\${target##*.}"; fi
+        elif [ -e "${LIVE_STATE}/dataset.json" ]; then cat "${LIVE_STATE}/dataset.json"; else echo '{"access": []}'; fi ;;
 esac
 exit 0
 EOF
 printf '#!/usr/bin/env bash\necho "docker $*" >> "%s"\n' "${LIVE_CALLS}" > "${LIVE_STUBS}/docker"
+# By default a table's live schema is exactly what the DDL declares.
+ddl_schema() {
+    python3 -I "${REPO_ROOT}/scripts/gcp/ddl_columns.py" "${REPO_ROOT}/scripts/gcp/bigquery_schema.sql" "$1" \
+        | python3 -I -c 'import json,sys; print(json.dumps([{"name": n.strip(), "type": "STRING"} for n in sys.stdin if n.strip()]))'
+}
+export -f ddl_schema
+export REPO_ROOT
 chmod +x "${LIVE_STUBS}/gcloud" "${LIVE_STUBS}/bq" "${LIVE_STUBS}/docker"
 
 SA="atsnt-batch@my-proj.iam.gserviceaccount.com"
@@ -207,6 +218,16 @@ rm -f "${LIVE_STATE}/dataset.json"
 for t in runs run_metrics trades run_series; do grant_table "${t}"; done
 live --service-account other@my-proj.iam.gserviceaccount.com
 check "preflight: grants are checked for the --service-account in use" '[ "${STATUS}" -ne 0 ] && has "other@my-proj.iam.gserviceaccount.com lacks roles/bigquery.dataEditor on: runs run_metrics trades run_series"'
+
+for t in runs run_metrics trades run_series; do grant_table "${t}"; done
+ddl_schema run_metrics | python3 -I -c "import json,sys; print(json.dumps([c for c in json.load(sys.stdin) if c['name'] != 'rejected_orders']))" \
+    > "${LIVE_STATE}/schema_run_metrics.json"
+live
+check "preflight: a column the engine writes but the table lacks aborts before the build" '[ "${STATUS}" -ne 0 ] && has "[ERROR]" && has "run_metrics: rejected_orders" && has "bq query --use_legacy_sql=false" && has "bigquery_schema.sql" && ! grep -q "^docker" "${LIVE_CALLS}" && ! submitted'
+rm -f "${LIVE_STATE}/schema_run_metrics.json"
+live
+check "preflight: tables matching the DDL pass the column check" '[ "${STATUS}" -eq 0 ] && has "[OK] The tables have every column of scripts/gcp/bigquery_schema.sql" && submitted'
+check "preflight: the checks are labelled as sub-steps of step 1" 'has "[1/5] (a) Checking that" && has "[1/5] (b) Checking BigQuery write grants" && has "[1/5] (c) Checking the BigQuery columns" && has "[1/5] (d) Checking that"'
 
 echo ""
 echo "${PASSED} passed, ${FAILED} failed"

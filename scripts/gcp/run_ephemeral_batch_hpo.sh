@@ -325,7 +325,7 @@ command -v python3 >/dev/null 2>&1 || die "python3 not found (needed to read the
 # --- Preflight: the winner artifact does not exist yet -------------------------
 # run_hpo uploads create-only: with a reused job name the upload is refused and
 # the old artifact would be downloaded as if it were this run's winner.
-echo "[1/5] Checking that ${ARTIFACT_URI} does not exist..."
+echo "[1/5] (a) Checking that ${ARTIFACT_URI} does not exist..."
 if DESCRIBE_OUT="$(gcloud storage objects describe "${ARTIFACT_URI}" --project="${PROJECT_ID}" 2>&1)"; then
     die "Winner artifact ${ARTIFACT_URI} already exists (job name ${JOB_NAME} was used before). Pass a new --job-name."
 elif ! grep -qiE "not found|404|matched no objects|No URLs matched" <<< "${DESCRIBE_OUT}"; then
@@ -337,7 +337,7 @@ echo "      [OK] Not uploaded yet."
 # Accepted: roles/bigquery.dataEditor (or dataOwner) on each table, or a
 # dataset-level WRITER/OWNER/dataEditor/dataOwner entry. Project-level grants are
 # not inspected.
-echo "[1/5] Checking BigQuery write grants of ${SERVICE_ACCOUNT} on ${DATASET_ID}..."
+echo "[1/5] (b) Checking BigQuery write grants of ${SERVICE_ACCOUNT} on ${DATASET_ID}..."
 # Exit 0 when the JSON on stdin grants SA ($1) write access. Mode ($2): "table"
 # reads an IAM policy, "dataset" reads the access list of `bq show`.
 grants_write() {
@@ -384,8 +384,39 @@ else
     echo "      [OK] Table-level write access on: ${BATCH_WRITE_TABLES[*]}"
 fi
 
+# --- Preflight: the tables have every column the engine writes ------------------
+# A column added to the DDL (ALTER TABLE ... ADD COLUMN IF NOT EXISTS) reaches a deployed
+# dataset only when the DDL is re-run; until then the rows that carry it are rejected
+# after the whole search. The expected columns come from the DDL itself.
+SCHEMA_SQL="${SCRIPT_DIR}/bigquery_schema.sql"
+echo "[1/5] (c) Checking the BigQuery columns of ${DATASET_ID} against ${SCHEMA_SQL#"${PROJECT_ROOT}/"}..."
+MISSING_COLUMNS=()
+for table in "${BATCH_WRITE_TABLES[@]}"; do
+    LIVE_SCHEMA="$(bq show --schema --format=prettyjson "${DATASET_REF}.${table}" 2>&1)" \
+        || die "Could not read the schema of ${DATASET_REF}.${table}: ${LIVE_SCHEMA}"
+    EXPECTED="$(python3 -I "${SCRIPT_DIR}/ddl_columns.py" "${SCHEMA_SQL}" "${table}")" \
+        || die "Could not read the columns of ${table} from ${SCHEMA_SQL}"
+    MISSING="$(python3 -I -c '
+import json, sys
+live = {c["name"] for c in json.loads(sys.argv[1])}
+print(" ".join(n for n in sys.argv[2].split() if n not in live))
+' "${LIVE_SCHEMA}" "${EXPECTED}")" || die "Could not parse the schema of ${DATASET_REF}.${table}"
+    [ -n "${MISSING}" ] && MISSING_COLUMNS+=("${table}: ${MISSING}")
+done
+if [ "${#MISSING_COLUMNS[@]}" -gt 0 ]; then
+    {
+        echo "[ERROR] The deployed tables lack columns the engine writes:"
+        for entry in "${MISSING_COLUMNS[@]}"; do echo "        ${entry}"; done
+        echo "        Rows carrying them would be rejected after the whole search. Apply the"
+        echo "        idempotent DDL (it only adds columns and refreshes views):"
+        echo "  bq query --use_legacy_sql=false --project_id=${PROJECT_ID} < ${SCHEMA_SQL#"${PROJECT_ROOT}/"}"
+    } >&2
+    exit 1
+fi
+echo "      [OK] The tables have every column of ${SCHEMA_SQL#"${PROJECT_ROOT}/"}"
+
 # --- Preflight: machine type available in the region, CPU quota free ----------
-echo "[1/5] Checking that ${MACHINE_TYPE} exists in ${REGION}..."
+echo "[1/5] (d) Checking that ${MACHINE_TYPE} exists in ${REGION}..."
 # `machine-types list` omits custom types (e.g. n2-custom-30-30720), so describe
 # the type in each zone of the region instead.
 ZONES=""

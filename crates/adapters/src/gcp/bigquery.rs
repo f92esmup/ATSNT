@@ -9,6 +9,7 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use super::auth::GcpAuthResolver;
+use super::retry::{send_with_retry, RetryPolicy};
 use crate::analytics::{RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow};
 use crate::error::AdapterError;
 
@@ -81,6 +82,8 @@ pub struct BigQuerySink {
     strict: bool,
     /// Base URL of the BigQuery REST API.
     endpoint: String,
+    /// Retries of transient failures (5xx, 429, timeouts).
+    retry: RetryPolicy,
 }
 
 impl BigQuerySink {
@@ -97,7 +100,14 @@ impl BigQuerySink {
             ambient_auth: true,
             strict: false,
             endpoint: DEFAULT_ENDPOINT.to_string(),
+            retry: RetryPolicy::from_env(),
         }
+    }
+
+    /// Overrides how transient failures are retried.
+    pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
     }
 
     /// Makes write failures (unresolved credentials, HTTP errors, row
@@ -235,13 +245,10 @@ impl BigQuerySink {
             "rows": row_envelopes,
         });
 
-        let response = self
-            .client
-            .post(url)
-            .bearer_auth(token)
-            .json(&payload)
-            .send()
-            .await?;
+        let response = send_with_retry(self.retry, "BigQuery", || {
+            self.client.post(url).bearer_auth(token).json(&payload)
+        })
+        .await?;
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             warn!(
@@ -387,6 +394,58 @@ mod tests {
     fn configured_sink(base_url: &str) -> BigQuerySink {
         BigQuerySink::new(Some("p".into()), "atsnt_bi".into(), Some("t".into()))
             .with_endpoint(base_url)
+            .with_retry_policy(RetryPolicy::immediate(3))
+    }
+
+    const CLEAN: (&str, &str) = (
+        "200 OK",
+        r#"{"kind":"bigquery#tableDataInsertAllResponse"}"#,
+    );
+
+    #[tokio::test]
+    async fn a_transient_server_error_is_retried_until_the_insert_succeeds() {
+        let server = test_http::ScriptedServer::start(&[
+            ("503 Service Unavailable", "{}"),
+            ("500 Internal Server Error", "{}"),
+            CLEAN,
+        ]);
+        let sink = configured_sink(&server.base_url).with_strict(true);
+
+        assert!(sink.record_metrics(&[one_run_row()]).await.is_ok());
+        assert_eq!(server.request_lines().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_is_retried() {
+        let server = test_http::ScriptedServer::start(&[("429 Too Many Requests", "{}"), CLEAN]);
+        let sink = configured_sink(&server.base_url).with_strict(true);
+
+        assert!(sink.record_metrics(&[one_run_row()]).await.is_ok());
+        assert_eq!(server.request_lines().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_client_error_is_final_and_not_retried() {
+        let server = test_http::ScriptedServer::start(&[("403 Forbidden", "{}")]);
+        let sink = configured_sink(&server.base_url).with_strict(true);
+
+        let err = sink.record_metrics(&[one_run_row()]).await.unwrap_err();
+        assert!(err.to_string().contains("403"), "{err}");
+        assert_eq!(server.request_lines().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_server_error_that_persists_fails_after_the_last_attempt() {
+        let server = test_http::ScriptedServer::start(&[
+            ("503 Service Unavailable", "{}"),
+            ("503 Service Unavailable", "{}"),
+            ("503 Service Unavailable", "{}"),
+        ]);
+        let sink = configured_sink(&server.base_url).with_strict(true);
+
+        let err = sink.record_metrics(&[one_run_row()]).await.unwrap_err();
+        assert!(err.to_string().contains("503"), "{err}");
+        assert_eq!(server.request_lines().len(), 3);
     }
 
     fn one_run_row() -> RunMetricsRow {
@@ -406,7 +465,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_sink_tolerates_http_errors() {
-        let server = test_http::OneShotServer::start("500 Internal Server Error", "{}");
+        let server = test_http::OneShotServer::start("400 Bad Request", "{}");
         let sink = configured_sink(&server.base_url);
         assert!(sink.record_metrics(&[one_run_row()]).await.is_ok());
         assert!(server.request_line().starts_with(
@@ -416,10 +475,10 @@ mod tests {
 
     #[tokio::test]
     async fn strict_sink_fails_on_http_errors() {
-        let server = test_http::OneShotServer::start("500 Internal Server Error", "{}");
+        let server = test_http::OneShotServer::start("400 Bad Request", "{}");
         let sink = configured_sink(&server.base_url).with_strict(true);
         let err = sink.record_metrics(&[one_run_row()]).await;
-        assert!(err.unwrap_err().to_string().contains("500"));
+        assert!(err.unwrap_err().to_string().contains("400"));
         server.request_line();
     }
 

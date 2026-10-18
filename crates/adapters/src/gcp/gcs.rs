@@ -9,6 +9,7 @@ use std::path::Path;
 use tracing::{info, warn};
 
 use super::auth::GcpAuthResolver;
+use super::retry::{send_with_retry, RetryPolicy};
 use crate::error::AdapterError;
 
 /// Public Cloud Storage JSON API endpoint.
@@ -33,6 +34,8 @@ pub struct GcsArtifactSink {
     strict: bool,
     /// Base URL of the Cloud Storage JSON API.
     endpoint: String,
+    /// Retries of transient failures (5xx, 429, timeouts).
+    retry: RetryPolicy,
     /// Whether uploads only create new objects (`ifGenerationMatch=0`).
     create_only: bool,
 }
@@ -52,7 +55,14 @@ impl GcsArtifactSink {
             strict: false,
             endpoint: DEFAULT_ENDPOINT.to_string(),
             create_only: false,
+            retry: RetryPolicy::from_env(),
         }
+    }
+
+    /// Overrides how transient failures are retried.
+    pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
     }
 
     /// Makes uploads create-only (`ifGenerationMatch=0`): an object that already
@@ -181,14 +191,14 @@ impl GcsArtifactSink {
             self.endpoint, bucket, object_name, precondition
         );
 
-        let res = self
-            .client
-            .post(&url)
-            .bearer_auth(&token)
-            .header("Content-Type", content_type)
-            .body(bytes.clone())
-            .send()
-            .await?;
+        let res = send_with_retry(self.retry, "Cloud Storage", || {
+            self.client
+                .post(&url)
+                .bearer_auth(&token)
+                .header("Content-Type", content_type)
+                .body(bytes.clone())
+        })
+        .await?;
 
         if res.status() == reqwest::StatusCode::UNAUTHORIZED {
             warn!(
@@ -319,7 +329,25 @@ mod tests {
     }
 
     fn configured_sink(base_url: &str) -> GcsArtifactSink {
-        GcsArtifactSink::new(Some("bucket".into()), Some("t".into())).with_endpoint(base_url)
+        GcsArtifactSink::new(Some("bucket".into()), Some("t".into()))
+            .with_endpoint(base_url)
+            .with_retry_policy(RetryPolicy::immediate(3))
+    }
+
+    #[tokio::test]
+    async fn a_transient_server_error_is_retried_until_the_upload_succeeds() {
+        let server = test_http::ScriptedServer::start(&[
+            ("503 Service Unavailable", "{}"),
+            ("200 OK", "{}"),
+        ]);
+        let sink = configured_sink(&server.base_url).with_strict(true);
+
+        let result = sink
+            .upload_bytes(b"{}".to_vec(), "artifacts/test.json", "application/json")
+            .await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(server.request_lines().len(), 2);
     }
 
     #[tokio::test]

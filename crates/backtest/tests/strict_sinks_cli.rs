@@ -90,7 +90,9 @@ fn offline_cloud_env(cmd: &mut Command, server: &FailingServer) {
         .env("GCP_AUTH_TOKEN", "test-token")
         .env("GCS_BUCKET_NAME", "test-bucket")
         .env("ATSNT_BIGQUERY_ENDPOINT", &server.base_url)
-        .env("ATSNT_GCS_ENDPOINT", &server.base_url);
+        .env("ATSNT_GCS_ENDPOINT", &server.base_url)
+        // The fake server always fails: retry transient errors without waiting.
+        .env("ATSNT_GCP_RETRY_BASE_MS", "0");
 }
 
 fn run_backtest(data: &Path, server: &FailingServer, strict: bool) -> Output {

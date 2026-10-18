@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod bigquery;
 pub mod gcs;
+pub mod retry;
 pub mod secret_manager;
 pub mod telegram;
 #[cfg(test)]
@@ -16,6 +17,7 @@ mod test_http;
 pub use auth::GcpAuthResolver;
 pub use bigquery::{BigQueryRecord, BigQuerySink};
 pub use gcs::GcsArtifactSink;
+pub use retry::{RetryPolicy, RETRY_BASE_MS_ENV};
 pub use secret_manager::GcpSecretManager;
 pub use telegram::{datetime_in_madrid, now_in_madrid, TelegramNotifier};
 

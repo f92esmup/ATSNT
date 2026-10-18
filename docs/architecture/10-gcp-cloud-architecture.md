@@ -224,7 +224,7 @@ cargo run -p backtest --bin run_hpo -- \
     --machine-type n2-custom-30-30720 --year 2026 --month 1 -- --candidates 720 --capital 200
 ```
 
-The HPO search parallelizes across candidates, so use many more candidates than vCPUs. Before building the image, the script runs two read-only preflights with the submitting user's credentials (`--dry-run` only prints them):
+The HPO search parallelizes across candidates, so use many more candidates than vCPUs. Before building the image, the script runs three read-only preflights with the submitting user's credentials (steps `[1/5] (a)` to `(c)`; `--dry-run` only prints them), then the machine-type and quota check `(d)`:
 
 - **Winner artifact must not exist.** Because the upload is create-only, a job reusing a `--job-name` would keep the old `artifacts/hpo_<sym>_<period>-<job>.json` and the script would download it as this run's winner. If `gcloud storage objects describe` finds the object, the script aborts and asks for a new `--job-name`.
 - **BigQuery write grants.** The service account (`--service-account`, default `atsnt-batch@<project>.iam.gserviceaccount.com`) needs `roles/bigquery.dataEditor` on `runs`, `run_metrics`, `trades` and `run_series` (table IAM, `bq get-iam-policy`) or a dataset-level `WRITER`/`OWNER`/`dataEditor` entry (`bq show`). Project-level grants are not inspected. When a table lacks the grant, the script names it and prints the `bq add-iam-policy-binding` commands that fix it. **Recreating a table (for example in a schema migration) drops its table-level grants.** Re-apply them by re-running `scripts/gcp/setup_gcp_resources.sh` or with the printed commands:
@@ -235,6 +235,10 @@ for table in runs run_metrics trades run_series; do
     --role=roles/bigquery.dataEditor "${GCP_PROJECT_ID}:atsnt_bi.${table}"
 done
 ```
+
+- **BigQuery columns.** Every column that `scripts/gcp/bigquery_schema.sql` declares for the four tables must exist in the deployed table (`bq show --schema`). That includes the columns of the `CREATE TABLE` statements and those that an `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` adds later. The expected list is read from the DDL by `scripts/gcp/ddl_columns.py`, so a new column is checked as soon as it is declared. A missing column would make BigQuery reject the rows that carry it after the whole search. The script names `table: columns` and prints the idempotent fix, `bq query --use_legacy_sql=false --project_id=<project> < scripts/gcp/bigquery_schema.sql`, which only adds columns and refreshes the views.
+
+Inside the job, the BigQuery and GCS sinks retry a transient failure (HTTP 5xx, 429, a timeout or a refused connection) up to 3 attempts, waiting 1 s and then 2 s. A client error (4xx other than 429) is final. `ATSNT_GCP_RETRY_BASE_MS` overrides the base wait, and tests set it to 0. A retried insert is harmless: the views deduplicate by `insertId` and run keys, and the artifact upload is create-only.
 
 The script also checks that the machine type exists in the region (custom types included) and that `CPUS_ALL_REGIONS` and the regional family quota (`N2_CPUS`, `C2D_CPUS`, ... or `PREEMPTIBLE_CPUS` for Spot when granted) have enough free vCPU; without that quota Batch keeps the job `QUEUED` forever (`CODE_GCE_QUOTA_EXCEEDED`). `c2-standard-60` is not offered in `europe-southwest1`. The first submission after enabling the Batch API can fail within seconds while its service agent is granted its role; submit again.
 
