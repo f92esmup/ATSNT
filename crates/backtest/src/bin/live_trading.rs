@@ -17,8 +17,8 @@ use adapters::{
 use anyhow::{Context, Result};
 use backtest::driver::SessionDriver;
 use backtest::operator_alerts::{
-    heartbeat_message, AlertQueue, FeedMonitor, RejectionAlerts, DEFAULT_ALERT_QUEUE_CAPACITY,
-    HEARTBEAT_INTERVAL_MS,
+    escape_markdown, heartbeat_message, AlertQueue, FeedMonitor, RejectionAlerts,
+    DEFAULT_ALERT_QUEUE_CAPACITY, HEARTBEAT_INTERVAL_MS,
 };
 use backtest::parity::FillRecorder;
 use backtest::session::{SessionConfig, SessionEvent, SkipReason, TradingSession};
@@ -733,7 +733,10 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                         if update.status == "REJECTED" && rejections.first(&update.order_id.to_string()) {
                             let text = format!(
                                 "🚫 *ATSNT ORDER REJECTED* `{symbol_upper}`: order {} ({}) {:?}, status {}. Reason: not reported by the user data stream; check the order history on the exchange.",
-                                update.order_id, update.client_order_id, update.side, update.status
+                                update.order_id,
+                                escape_markdown(&update.client_order_id),
+                                update.side,
+                                escape_markdown(&update.status)
                             );
                             eprintln!("[CRITICAL] {text}");
                             if let Some(t) = &telegram {
@@ -1050,8 +1053,9 @@ impl EventSink<'_> {
                     if self.entry_failure_alerts.allow(now_unix_ms()) {
                         if let Some(t) = self.telegram {
                             t.send(format!(
-                                "🚫 *ATSNT ENTRY FAILED* `{}`: the entry order could not be placed ({reason}).",
-                                self.symbol
+                                "🚫 *ATSNT ENTRY FAILED* `{}`: the entry order could not be placed ({}).",
+                                self.symbol,
+                                escape_markdown(&reason)
                             ));
                         }
                     }

@@ -196,6 +196,19 @@ impl RejectionAlerts {
     }
 }
 
+/// Escapes text that the exchange controls (order ids, error messages) for Telegram's legacy
+/// Markdown, where an unpaired `_`, `*`, `` ` `` or `[` makes the API refuse the whole message.
+pub fn escape_markdown(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if matches!(character, '_' | '*' | '`' | '[') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 /// Interval between two heartbeats.
 pub const HEARTBEAT_INTERVAL_MS: i64 = 12 * 60 * 60 * 1_000;
 
@@ -413,6 +426,14 @@ mod tests {
 
         let back = FeedStatus::Recovered { silent_secs: 120 }.message("BTCUSDT");
         assert!(back.contains("BTCUSDT") && back.contains("120 s"));
+    }
+
+    /// Exchange-controlled text must not break Telegram's Markdown: an unpaired `_` or `*` makes
+    /// the API refuse the whole message, and the alert would be lost.
+    #[test]
+    fn exchange_text_is_escaped_for_telegram_markdown() {
+        assert_eq!(escape_markdown("web_x*1 [a] `b`"), r"web\_x\*1 \[a] \`b\`");
+        assert_eq!(escape_markdown("plain text 42"), "plain text 42");
     }
 
     #[test]
