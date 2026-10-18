@@ -2,6 +2,12 @@
 //!
 //! The domain knows nothing; contracts (`ports`) and strategies know only the domain; adapters
 //! implement contracts; the application crate (`backtest`) wires everything together.
+//!
+//! Checked here: the dependency direction between workspace crates; no I/O crate and no I/O
+//! API in the core (`domain`, `strategies`, `ports`); ports hold only traits and plain data;
+//! network clients stay in adapters (one documented exception); runners resolve strategies
+//! through the registry. Not checked: determinism, and business logic placed in adapters or
+//! binaries, which need review.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -9,8 +15,11 @@ use std::path::PathBuf;
 
 const WORKSPACE_CRATES: [&str; 5] = ["domain", "ports", "strategies", "adapters", "backtest"];
 
-/// Workspace crates listed in the `[dependencies]` section of `crates/<name>/Cargo.toml`.
-fn internal_dependencies(name: &str) -> BTreeSet<String> {
+/// Crates of the pure core: no I/O, no network, no runtime.
+const CORE_CRATES: [&str; 3] = ["domain", "strategies", "ports"];
+
+/// Every crate listed in the `[dependencies]` section of `crates/<name>/Cargo.toml`.
+fn dependencies(name: &str) -> BTreeSet<String> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join(name)
@@ -26,7 +35,7 @@ fn internal_dependencies(name: &str) -> BTreeSet<String> {
             in_dependencies = line == "[dependencies]";
             continue;
         }
-        if !in_dependencies {
+        if !in_dependencies || line.is_empty() || line.starts_with('#') {
             continue;
         }
         let dependency = line
@@ -34,11 +43,49 @@ fn internal_dependencies(name: &str) -> BTreeSet<String> {
             .next()
             .unwrap_or_default()
             .trim();
-        if WORKSPACE_CRATES.contains(&dependency) {
+        if !dependency.is_empty() {
             found.insert(dependency.to_string());
         }
     }
     found
+}
+
+/// Workspace crates listed in the `[dependencies]` section of `crates/<name>/Cargo.toml`.
+fn internal_dependencies(name: &str) -> BTreeSet<String> {
+    dependencies(name)
+        .into_iter()
+        .filter(|dependency| WORKSPACE_CRATES.contains(&dependency.as_str()))
+        .collect()
+}
+
+/// Production code of every source file of `crates/<name>/src`: the part before the first
+/// `#[cfg(test)]`, since unit tests may use anything.
+fn production_sources(name: &str) -> Vec<(PathBuf, String)> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(name)
+        .join("src");
+    let mut paths = Vec::new();
+    rust_sources(&root, &mut paths);
+    paths
+        .into_iter()
+        // A file that is a test module of its parent (`mod foo_tests;`) is not production code.
+        .filter(|path| {
+            !path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.ends_with("tests"))
+        })
+        .map(|path| {
+            let content = fs::read_to_string(&path).expect("readable source");
+            let production = content
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            (path, production)
+        })
+        .collect()
 }
 
 fn assert_depends_only_on(name: &str, allowed: &[&str]) {
@@ -73,6 +120,125 @@ fn adapters_depend_only_on_the_domain_and_the_ports() {
 #[test]
 fn the_application_crate_may_wire_every_other_crate() {
     assert_depends_only_on("backtest", &["domain", "ports", "strategies", "adapters"]);
+}
+
+/// The core never pulls in an async runtime, a network client or a storage format.
+#[test]
+fn the_core_crates_depend_on_no_io_crate() {
+    let io_crates = [
+        "tokio",
+        "reqwest",
+        "tokio-tungstenite",
+        "futures-util",
+        "parquet",
+        "arrow-array",
+        "arrow-schema",
+        "zip",
+        "ring",
+        "tempfile",
+    ];
+    let mut offenders = Vec::new();
+    for name in CORE_CRATES {
+        for dependency in dependencies(name) {
+            if io_crates.contains(&dependency.as_str()) {
+                offenders.push(format!("{name} depends on {dependency}"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the core must stay free of I/O crates:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The application crate reaches the network through adapters. The one exception is the testnet
+/// harness, which observes the exchange with its own raw REST and WebSocket clients so that it
+/// checks the gateway it drives instead of trusting it.
+#[test]
+fn only_the_testnet_harness_talks_to_the_network_from_the_application_crate() {
+    let allowed = "testnet_exit_check.rs";
+    let network = ["reqwest", "tokio_tungstenite", "futures_util"];
+    let mut offenders = Vec::new();
+    for (path, production) in production_sources("backtest") {
+        if path.file_name().and_then(|name| name.to_str()) == Some(allowed) {
+            continue;
+        }
+        for (number, line) in production.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if let Some(api) = network.iter().find(|api| trimmed.contains(*api)) {
+                offenders.push(format!("{}:{}: {api}", path.display(), number + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "network clients belong in adapters (only {allowed} is exempt):\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Domain, strategies and ports are pure: no file system, no sockets, no runtime, no HTTP.
+#[test]
+fn the_core_crates_perform_no_io() {
+    let forbidden = ["std::fs", "std::net", "tokio", "reqwest"];
+    let mut offenders = Vec::new();
+    for name in CORE_CRATES {
+        for (path, production) in production_sources(name) {
+            for (number, line) in production.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                if let Some(api) = forbidden.iter().find(|api| trimmed.contains(*api)) {
+                    offenders.push(format!("{}:{}: {api}", path.display(), number + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "I/O found in the core crates:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Ports are contracts: traits plus the plain data they exchange. Behaviour (an `impl` block
+/// or a free function) belongs to the domain or to an adapter.
+#[test]
+fn ports_declare_traits_and_plain_data_only() {
+    let mut offenders = Vec::new();
+    for (path, production) in production_sources("ports") {
+        for (number, line) in production.lines().enumerate() {
+            // Only module-level items: methods declared inside a trait are indented.
+            let behaviour = [
+                "impl",
+                "fn ",
+                "pub fn ",
+                "pub(crate) fn ",
+                "async fn ",
+                "pub async fn ",
+            ]
+            .iter()
+            .any(|item| line.starts_with(item));
+            if behaviour {
+                offenders.push(format!(
+                    "{}:{}: {}",
+                    path.display(),
+                    number + 1,
+                    line.trim()
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "ports may declare only traits and plain data:\n{}",
+        offenders.join("\n")
+    );
 }
 
 /// Source files under `dir`, recursively.
