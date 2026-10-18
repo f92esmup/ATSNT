@@ -1,4 +1,7 @@
-pub mod contract;
+// Test-only: the generic strategy contract suite, run by the registry tests. Its panics are
+// assertions, so it is never compiled into production code.
+#[cfg(test)]
+mod contract;
 pub mod dollar_bars_cusum;
 pub mod order_flow_imbalance;
 pub mod registry;
