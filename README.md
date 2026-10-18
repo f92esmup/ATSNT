@@ -51,7 +51,7 @@ cargo fmt --check
 
 ### CLI Tools & Binaries Index
 
-The repository provides 6 specialized CLI binaries built with `clap` (run any with `--help` for full parameter documentation):
+The repository provides 9 specialized CLI binaries built with `clap` (run any with `--help` for full parameter documentation):
 
 | Binary / Tool | Crate | Purpose | Quick Command | Detailed Guide |
 | :--- | :--- | :--- | :--- | :--- |
@@ -61,6 +61,9 @@ The repository provides 6 specialized CLI binaries built with `clap` (run any wi
 | `stream_trades`| `adapters` | Live Binance WebSocket feed accumulating and printing Dollar Bars | `cargo run -p adapters --bin stream_trades -- --symbol btcusdt --threshold 50000` | [Step 5](#step-5-live-market-data-ingestion--dollar-bar-streaming) |
 | `paper_trading`| `backtest` | Real-time simulated execution with continuous mark-to-market PnL, BigQuery & Telegram alerts | `cargo run -p backtest --bin paper_trading -- --symbol btcusdt --spot --capital 1000 --gcp-bigquery --telegram-alerts` | [Step 6](#step-6-run-real-time-paper-trading-engine) |
 | `live_gateway` | `adapters` | Authenticated live order gateway with HMAC signing and circuit breakers | `cargo run -p adapters --bin live_gateway -- --testnet --check-balance` | [Step 8](#step-8-live-execution-gateway-binance-testnet--production) |
+| `live_trading` | `backtest` | Live execution engine on Binance USD-M (testnet or `--production`): same `TradingSession` as paper, exchange-held exits, deployment gate, Telegram alerts | `cargo run -p backtest --bin live_trading -- --config configs/hpo_results.json --testnet --telegram-alerts` | [Live gateway guide](docs/architecture/08-live-execution-gateway.md) |
+| `parity_check` | `backtest` | Measures how far simulated market fills sit from the fills a live run recorded, across a latency sweep | `cargo run --release -p backtest --bin parity_check -- --tape <TAPE> --fills fills.jsonl` | [Step 2c](#step-2c-calibrate-the-simulator-against-live-fills) |
+| `testnet_exit_check` | `backtest` | Testnet-only harness for exchange-held exits and the emergency close (`inspect`, `scenario`, `verify-account`, `cleanup`, ...) | `cargo run -p backtest --bin testnet_exit_check -- inspect` | [Live gateway guide](docs/architecture/08-live-execution-gateway.md) |
 
 
 ---
@@ -311,7 +314,7 @@ cargo run -p backtest -- \
   --gcp-bigquery
 ```
 - **BI consumers** (for example the `/trading` module of Econoweb): read the run-centric views in BigQuery dataset `atsnt_bi` (`v_runs`, `v_run_metrics`, `v_trades`, `v_series`, `v_equity`, `v_hpo_trials`, `v_hpo_folds`, `v_monte_carlo`); the contract is in `docs/architecture/13-bi-data-contract.md`.
-- **Telegram Bot Webhook**: Dispatches instant push notifications (<200ms) for position entries, exits, stop loss triggers, and circuit breakers.
+- **Telegram alerts**: entries, exits, circuit breakers, rejected orders, feed outages and recoveries, a 12 h heartbeat and the stop notice, delivered from a bounded queue so Telegram never delays a trade. The full list, triggers and rate limits are in [`docs/architecture/07-web-telemetry-dashboard.md`](docs/architecture/07-web-telemetry-dashboard.md#22-telegram-mobile-alerting-telegramnotifier).
 - **Fail-Open / Offline Safe**: If GCP/Telegram environment variables (`GCP_PROJECT_ID`, `TELEGRAM_BOT_TOKEN`, etc.) are omitted, sinks safely log information and continue without interruption.
 
 ---
