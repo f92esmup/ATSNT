@@ -262,7 +262,8 @@ fn runners_do_not_dispatch_on_strategy_names() {
     let mut sources = Vec::new();
     rust_sources(&root, &mut sources);
 
-    let names = ["dollar_bars_cusum", "cusum", "order_flow_imbalance", "ofi"];
+    // Every registered id and alias, so a new strategy is guarded without editing this test.
+    let names = strategies::registry::strategy_names();
     let mut offenders = Vec::new();
     for path in sources {
         let content = fs::read_to_string(&path).expect("readable source");

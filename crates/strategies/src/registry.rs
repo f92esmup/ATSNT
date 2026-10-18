@@ -3,7 +3,8 @@
 //! Adding a strategy to ATSNT means implementing [`OptimizableStrategy`] and adding **one line**
 //! to the `register_strategies!` call below. That line makes it selectable by name (and alias)
 //! in the backtest CLI and the HPO runner, loadable from deployment artifacts, available to
-//! paper and live trading, and puts it under the generic [contract](crate::contract) test.
+//! paper and live trading, and puts it under the generic contract test suite
+//! (`crates/strategies/src/contract.rs`, compiled only in tests).
 //!
 //! Callers stay generic over the strategy through a [`StrategyVisitor`]: the registry calls
 //! `visit::<S>()` with the concrete strategy type, so nothing downstream matches on strategy
