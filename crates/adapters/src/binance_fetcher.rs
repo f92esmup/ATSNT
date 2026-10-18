@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -74,6 +74,20 @@ pub struct FetchSummary {
     pub parquet_size_bytes: u64,
 }
 
+/// Feeds everything written to it into a running SHA-256 digest.
+struct DigestWriter(ring::digest::Context);
+
+impl Write for DigestWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Checks `archive` against the SHA-256 digest in a Binance `.CHECKSUM` file
 /// (`<hex digest>  <file name>`). Only the first token is read.
 pub(crate) fn verify_archive_sha256(
@@ -90,16 +104,11 @@ pub(crate) fn verify_archive_sha256(
         })?;
 
     let mut file = File::open(archive)?;
-    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut buffer = [0u8; 65536];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        context.update(&buffer[..read]);
-    }
-    let actual: String = context
+    let mut digest = DigestWriter(ring::digest::Context::new(&ring::digest::SHA256));
+    // `io::copy` retries reads interrupted by a signal, so a valid archive never fails on EINTR.
+    std::io::copy(&mut file, &mut digest)?;
+    let actual: String = digest
+        .0
         .finish()
         .as_ref()
         .iter()
