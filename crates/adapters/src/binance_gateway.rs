@@ -23,6 +23,13 @@ pub use exits::{ExitKind, PositionClosureReport, ProtectiveExitReport};
 #[path = "binance_gateway/account_check.rs"]
 mod account_check;
 pub use account_check::{AccountFix, AccountReport, Finding, FindingStatus};
+mod json_fields;
+use json_fields::{
+    futures_decimal_field, is_valid_asset, matching_futures_symbol, parse_decimal_field,
+    required_asset_field, required_futures_array, required_futures_bool,
+    required_futures_bool_or_string, required_futures_string, required_futures_timestamp,
+    required_futures_u32,
+};
 mod listen_key;
 
 #[cfg(test)]
@@ -1590,13 +1597,6 @@ fn parse_futures_order_report(
     })
 }
 
-fn is_valid_asset(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-}
-
 /// Reads LOT_SIZE and (MIN_)NOTIONAL from a Spot symbol; `None` unless every bound is valid.
 fn parse_spot_lot_rules(item: &serde_json::Value) -> Option<(Decimal, Decimal, Decimal)> {
     let filters = item.get("filters")?.as_array()?;
@@ -1623,182 +1623,6 @@ fn parse_spot_lot_rules(item: &serde_json::Value) -> Option<(Decimal, Decimal, D
         field(lot, "stepSize")?,
         field(notional, "minNotional")?,
     ))
-}
-
-fn required_asset_field(
-    body: &serde_json::Value,
-    key: &str,
-    context: &str,
-) -> Result<String, GatewayError> {
-    let asset = body
-        .get(key)
-        .and_then(|value| value.as_str())
-        .filter(|value| is_valid_asset(value))
-        .ok_or_else(|| {
-            GatewayError::SpotPreflight(format!(
-                "{context} response is missing or has an invalid {key}"
-            ))
-        })?;
-    Ok(asset.to_string())
-}
-
-fn parse_decimal_field(
-    body: &serde_json::Value,
-    key: &str,
-    context: &str,
-) -> Result<Decimal, GatewayError> {
-    let value = body.get(key).ok_or_else(|| {
-        GatewayError::SpotPreflight(format!("{context} response is missing {key}"))
-    })?;
-    let raw = value
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| value.as_number().map(ToString::to_string))
-        .ok_or_else(|| {
-            GatewayError::SpotPreflight(format!("{context} response has malformed {key}"))
-        })?;
-    Decimal::from_str(&raw)
-        .or_else(|_| Decimal::from_scientific(&raw))
-        .map_err(GatewayError::Decimal)
-}
-
-fn futures_decimal_field(
-    body: &serde_json::Value,
-    key: &str,
-    context: &str,
-) -> Result<Decimal, GatewayError> {
-    let value = body.get(key).ok_or_else(|| {
-        GatewayError::FuturesPreflight(format!("{context} response is missing {key}"))
-    })?;
-    let raw = value
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| value.as_number().map(ToString::to_string))
-        .ok_or_else(|| {
-            GatewayError::FuturesPreflight(format!("{context} response has malformed {key}"))
-        })?;
-    Decimal::from_str(&raw)
-        .or_else(|_| Decimal::from_scientific(&raw))
-        .map_err(|error| {
-            GatewayError::FuturesPreflight(format!("{context} response has invalid {key}: {error}"))
-        })
-}
-
-fn required_futures_bool(
-    body: &serde_json::Value,
-    key: &str,
-    context: &str,
-) -> Result<bool, GatewayError> {
-    body.get(key)
-        .and_then(|value| value.as_bool())
-        .ok_or_else(|| {
-            GatewayError::FuturesPreflight(format!(
-                "{context} response is missing or has malformed {key}"
-            ))
-        })
-}
-
-fn required_futures_bool_or_string(
-    body: &serde_json::Value,
-    key: &str,
-    context: &str,
-) -> Result<bool, GatewayError> {
-    body.get(key)
-        .and_then(|value| {
-            value
-                .as_bool()
-                .or_else(|| value.as_str().and_then(|raw| raw.parse::<bool>().ok()))
-        })
-        .ok_or_else(|| {
-            GatewayError::FuturesPreflight(format!(
-                "{context} response is missing or has malformed {key}"
-            ))
-        })
-}
-
-fn required_futures_u32(
-    body: &serde_json::Value,
-    key: &str,
-    context: &str,
-) -> Result<u32, GatewayError> {
-    body.get(key)
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str().and_then(|raw| raw.parse::<u64>().ok()))
-        })
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| {
-            GatewayError::FuturesPreflight(format!(
-                "{context} response is missing or has malformed {key}"
-            ))
-        })
-}
-
-fn required_futures_timestamp(
-    body: &serde_json::Value,
-    key: &str,
-    context: &str,
-) -> Result<u64, GatewayError> {
-    body.get(key)
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str().and_then(|raw| raw.parse::<u64>().ok()))
-        })
-        .ok_or_else(|| {
-            GatewayError::FuturesPreflight(format!(
-                "{context} response is missing or has malformed {key}"
-            ))
-        })
-}
-
-fn required_futures_string<'a>(
-    body: &'a serde_json::Value,
-    key: &str,
-    context: &str,
-) -> Result<&'a str, GatewayError> {
-    body.get(key)
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            GatewayError::FuturesPreflight(format!(
-                "{context} response is missing or has malformed {key}"
-            ))
-        })
-}
-
-fn required_futures_array<'a>(
-    body: &'a serde_json::Value,
-    key: &str,
-    context: &str,
-) -> Result<&'a Vec<serde_json::Value>, GatewayError> {
-    body.get(key)
-        .and_then(|value| value.as_array())
-        .ok_or_else(|| {
-            GatewayError::FuturesPreflight(format!(
-                "{context} response is missing or has malformed {key}"
-            ))
-        })
-}
-
-fn matching_futures_symbol<'a>(
-    items: &'a [serde_json::Value],
-    symbol: &str,
-    context: &str,
-) -> Result<&'a serde_json::Value, GatewayError> {
-    let mut matches = items
-        .iter()
-        .filter(|item| item.get("symbol").and_then(|value| value.as_str()) == Some(symbol));
-    let item = matches.next().ok_or_else(|| {
-        GatewayError::FuturesPreflight(format!("{context} response is missing {symbol}"))
-    })?;
-    if matches.next().is_some() {
-        return Err(GatewayError::FuturesPreflight(format!(
-            "{context} response contains duplicate entries for {symbol}"
-        )));
-    }
-    Ok(item)
 }
 
 fn parse_futures_symbol_rules(
