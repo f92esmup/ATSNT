@@ -153,6 +153,7 @@ impl TryFrom<BinanceAggTradePayload> for Trade {
 pub struct BinanceWebSocketStream {
     receiver: mpsc::Receiver<Trade>,
     shutdown_tx: Option<watch::Sender<bool>>,
+    failures_rx: watch::Receiver<u32>,
     task_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -186,16 +187,23 @@ impl BinanceWebSocketStream {
 
         let (trade_tx, trade_rx) = mpsc::channel(config.channel_capacity);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (failures_tx, failures_rx) = watch::channel(0);
 
         let task_handle = tokio::spawn(async move {
-            run_connection_manager(config, trade_tx, shutdown_rx).await;
+            run_connection_manager(config, trade_tx, shutdown_rx, failures_tx).await;
         });
 
         Ok(Self {
             receiver: trade_rx,
             shutdown_tx: Some(shutdown_tx),
+            failures_rx,
             task_handle,
         })
+    }
+
+    /// Connection attempts that failed in a row; back to 0 once a connection succeeds.
+    pub fn connection_failures(&self) -> watch::Receiver<u32> {
+        self.failures_rx.clone()
     }
 
     /// Explicitly shuts down the streaming background task and disconnects from the feed.
@@ -225,6 +233,7 @@ async fn run_connection_manager(
     config: BinanceWsConfig,
     trade_tx: mpsc::Sender<Trade>,
     mut shutdown_rx: watch::Receiver<bool>,
+    failures_tx: watch::Sender<u32>,
 ) {
     let mut current_backoff = Duration::from_millis(config.initial_backoff_ms);
     let max_backoff = Duration::from_millis(config.max_backoff_ms);
@@ -253,9 +262,11 @@ async fn run_connection_manager(
                     Ok((stream, response)) => {
                         tracing::info!(status = %response.status(), "Connected to Binance WebSocket");
                         current_backoff = Duration::from_millis(config.initial_backoff_ms);
+                        failures_tx.send_replace(0);
                         stream
                     }
                     Err(err) => {
+                        failures_tx.send_modify(|failures| *failures = failures.saturating_add(1));
                         tracing::warn!(
                             error = %err,
                             backoff_ms = current_backoff.as_millis(),
@@ -386,6 +397,32 @@ async fn run_connection_manager(
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    /// A local port nobody listens on: every connection attempt is refused at once.
+    fn closed_local_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        format!("ws://127.0.0.1:{port}/ws/{{symbol}}@aggTrade")
+    }
+
+    #[tokio::test]
+    async fn consecutive_connection_failures_are_published() {
+        let config = BinanceWsConfig {
+            base_url: closed_local_url(),
+            initial_backoff_ms: 1,
+            max_backoff_ms: 5,
+            ..BinanceWsConfig::for_symbol("btcusdt")
+        };
+        let stream = BinanceWebSocketStream::connect(config).expect("valid config");
+        let mut failures = stream.connection_failures();
+        assert_eq!(*failures.borrow(), 0);
+
+        tokio::time::timeout(Duration::from_secs(5), failures.wait_for(|n| *n >= 3))
+            .await
+            .expect("three refused connections within 5 s")
+            .expect("the connection manager is alive");
+    }
 
     #[test]
     fn test_deserialize_valid_agg_trade_payload() {
