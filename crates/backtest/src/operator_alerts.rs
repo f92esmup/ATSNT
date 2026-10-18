@@ -118,7 +118,8 @@ impl FeedStatus {
 #[derive(Debug)]
 pub struct FeedMonitor {
     last_trade_ms: i64,
-    down: bool,
+    /// An outage alert went out and its recovery has not been announced yet.
+    reported: bool,
     repeats: AlertThrottle,
 }
 
@@ -134,7 +135,7 @@ impl FeedMonitor {
     pub fn new(now_ms: i64) -> Self {
         Self {
             last_trade_ms: now_ms,
-            down: false,
+            reported: false,
             repeats: AlertThrottle::new(Self::REPEAT_MS),
         }
     }
@@ -143,12 +144,12 @@ impl FeedMonitor {
     pub fn on_trade(&mut self, now_ms: i64) -> Option<FeedStatus> {
         let silent_secs = (now_ms - self.last_trade_ms) / 1_000;
         self.last_trade_ms = now_ms;
-        if !self.down {
+        // Only an outage the operator was told about gets a recovery message. The repeat limit
+        // is not reset: a flapping feed still gets one outage alert per REPEAT_MS.
+        if !self.reported {
             return None;
         }
-        // The repeat limit is not reset: a flapping feed still gets one outage alert per
-        // REPEAT_MS, not one per flap.
-        self.down = false;
+        self.reported = false;
         Some(FeedStatus::Recovered { silent_secs })
     }
 
@@ -158,8 +159,11 @@ impl FeedMonitor {
         if silent_ms <= Self::STALE_AFTER_MS && failed_reconnects < Self::FAILED_RECONNECTS {
             return None;
         }
-        self.down = true;
-        self.repeats.allow(now_ms).then_some(FeedStatus::Down {
+        if !self.repeats.allow(now_ms) {
+            return None;
+        }
+        self.reported = true;
+        Some(FeedStatus::Down {
             silent_secs: silent_ms / 1_000,
             failed_reconnects,
         })
@@ -392,7 +396,8 @@ mod tests {
         assert!(feed.on_trade(62_000).is_some());
 
         assert_eq!(feed.on_check(124_000, 0), None);
-        assert!(feed.on_trade(125_000).is_some());
+        // That second outage was never reported, so its end is not announced either.
+        assert_eq!(feed.on_trade(125_000), None);
         assert_eq!(feed.on_check(660_999, 0), None);
         assert!(feed.on_check(661_000, 0).is_some());
     }

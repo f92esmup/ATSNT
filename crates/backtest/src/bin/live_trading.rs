@@ -1050,7 +1050,7 @@ impl EventSink<'_> {
                     if self.entry_failure_alerts.allow(now_unix_ms()) {
                         if let Some(t) = self.telegram {
                             t.send(format!(
-                                "🚫 *ATSNT ORDER REJECTED* `{}`: the entry order was refused ({reason}).",
+                                "🚫 *ATSNT ENTRY FAILED* `{}`: the entry order could not be placed ({reason}).",
                                 self.symbol
                             ));
                         }

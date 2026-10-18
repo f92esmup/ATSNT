@@ -93,10 +93,10 @@ What an operator is told (`paper` and `live` unless noted):
 | 💓 Heartbeat | At start (doubles as the start notice) and every 12 h: equity, open position, age of the last market trade | 1 per 12 h |
 | 🛑 Stopped | Graceful shutdown (Ctrl+C / SIGINT): equity and open position | once |
 | ⚠️ Feed down | More than 60 s without a market trade, or 3 failed WebSocket reconnects in a row | 1 per 10 min |
-| ✅ Feed back | First market trade after a reported outage | once per outage |
+| ✅ Feed back | First market trade after a reported outage (an outage held back by the rate limit gets no recovery message either) | once per reported outage |
 | 🟢 Position opened / 🔴 closed | Entry fill / exit with net PnL | none |
 | 🚨 Circuit breaker | Monthly breaker (live), daily or monthly breaker (paper) | once per trip |
-| 🚫 Order rejected (live) | An order reported `REJECTED` on the user data stream (once per order id; the stream carries no reason), or an entry refused by the exchange REST API (with its error) | per order id / 1 per min |
+| 🚫 Order rejected / entry failed (live) | An order reported `REJECTED` on the user data stream (once per order id; the stream carries no reason), or an entry order that could not be placed: refused by the REST API or lost to a transport error (with its error) | per order id / 1 per min |
 | 🚨 Exits, entry timeouts, account drift (live) | Protective-order failures, unresolved entries, account profile mismatch or unverifiable account | as before |
 | 📊 Daily summary | 20:00 Madrid | 1 per day |
 

@@ -44,6 +44,56 @@ fn rejects_a_checksum_file_without_a_sha256_digest() {
     assert!(matches!(error, AdapterError::ChecksumUnreadable(_)));
 }
 
+fn monthly_params(output: &std::path::Path) -> FetchParams {
+    FetchParams {
+        symbol: "BTCUSDT".to_string(),
+        year: 2024,
+        month: 1,
+        day: None,
+        output_dir: output.to_path_buf(),
+    }
+}
+
+/// An unpublished archive has no `.CHECKSUM` either: the 404 must still read as "not archived"
+/// so `fetch_data` skips unpublished days, and the archive itself is never requested.
+#[test]
+fn a_missing_checksum_reads_as_not_archived_and_writes_nothing() {
+    let server = ScriptedServer::start(&[("404 Not Found", "")]);
+    let output = tempfile::tempdir().expect("output dir");
+    let fetcher = BinanceDataFetcher::new().with_base_url(server.base_url.clone());
+    let params = monthly_params(output.path());
+
+    let error = fetcher
+        .fetch_and_convert(&params)
+        .expect_err("no checksum, no conversion");
+
+    assert!(crate::fetch_plan::is_not_archived(&error), "{error}");
+    assert!(!params.target_parquet_path().exists());
+    let requests = server.request_lines();
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the checksum is requested: {requests:?}"
+    );
+    assert!(requests[0].contains(".zip.CHECKSUM"), "{requests:?}");
+}
+
+/// Any other failure to fetch the checksum is a real failure, never a skipped archive.
+#[test]
+fn a_refused_checksum_is_a_failure_not_a_skip() {
+    let server = ScriptedServer::start(&[("403 Forbidden", "")]);
+    let output = tempfile::tempdir().expect("output dir");
+    let fetcher = BinanceDataFetcher::new().with_base_url(server.base_url.clone());
+    let params = monthly_params(output.path());
+
+    let error = fetcher
+        .fetch_and_convert(&params)
+        .expect_err("a refused checksum fails the archive");
+
+    assert!(!crate::fetch_plan::is_not_archived(&error), "{error}");
+    assert!(!params.target_parquet_path().exists());
+}
+
 #[test]
 fn a_corrupt_archive_fails_before_any_parquet_is_written() {
     // The fetcher downloads the `.CHECKSUM` first, then the archive (n-th request, n-th reply).
