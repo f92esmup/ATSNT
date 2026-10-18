@@ -336,9 +336,11 @@ pub fn datetime_in_madrid(
     };
 
     let offset_secs = if is_dst { 2 * 3600 } else { 3600 };
-    let offset =
-        FixedOffset::east_opt(offset_secs).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
-    utc.with_timezone(&offset)
+    // Both offsets are valid; should that ever change, fall back to UTC rather than panic.
+    match FixedOffset::east_opt(offset_secs) {
+        Some(offset) => utc.with_timezone(&offset),
+        None => utc.fixed_offset(),
+    }
 }
 
 /// Returns the current date and time in the `Europe/Madrid` timezone (CET / CEST).
