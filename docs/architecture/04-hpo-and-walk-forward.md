@@ -87,9 +87,15 @@ Only **eligible** trials (section 2.4) get a p-value and enter $V[\widehat{\text
 
 $N$ still counts every candidate tried, because the selection bias comes from all of them.
 
-A candidate is significant at $p < 0.05$. Significance is **reported, not used to filter**:
-- The winner's significance is printed, stored in the artifact scorecard and recorded in BigQuery.
-- A winner that is not significant can still be deployed, but its edge may be the luck of selection. Treat it as such.
+A candidate is significant at $p < 0.05$. Significance does not change the ranking. The winner's significance is printed, stored in the artifact scorecard and recorded in BigQuery.
+
+#### Deployment gate
+`paper_trading` and `live_trading` refuse at start-up an artifact whose scorecard shows no deployable edge (`HpoScorecard::deployment_blocker`):
+- The scorecard predates the minimum-trades rule (`min_fold_trades` = 0): re-run the HPO.
+- `fitness` <= 0: no positive out-of-sample edge.
+- The Deflated Sharpe Ratio is not significant.
+
+The search still writes such a winner, so its holdout backtest can be run and inspected. The backtest prints a `[GATE]` line when paper and live trading would refuse it. `--allow-unproven-strategy` runs it anyway, for instance to test the mechanics on testnet. Files without a scorecard (hand-written configurations) carry no evidence either way, and the gate lets them pass.
 
 ---
 

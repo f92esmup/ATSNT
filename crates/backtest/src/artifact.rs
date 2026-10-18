@@ -56,6 +56,35 @@ pub struct HpoScorecard {
     pub trials_evaluated: usize,
 }
 
+impl HpoScorecard {
+    /// Why paper and live trading must not run this artifact, or `None` when its search
+    /// measured a deployable edge: eligible folds, a positive out-of-sample fitness and a
+    /// significant Deflated Sharpe Ratio.
+    pub fn deployment_blocker(&self) -> Option<String> {
+        if self.min_fold_trades == 0 {
+            return Some(
+                "the scorecard predates the minimum-trades rule (its ratios may be the old 100 \
+                 cap): re-run the HPO"
+                    .to_string(),
+            );
+        }
+        if self.fitness <= Decimal::ZERO {
+            return Some(format!(
+                "no positive out-of-sample edge (fitness {:.4}, mean OOS Sortino {:.4})",
+                self.fitness, self.mean_oos_sortino
+            ));
+        }
+        if !self.is_statistically_significant {
+            return Some(format!(
+                "Deflated Sharpe p = {:.4} >= 0.05: the edge is indistinguishable from the luck \
+                 of picking the best of {} trials",
+                self.dsr_p_value, self.trials_evaluated
+            ));
+        }
+        None
+    }
+}
+
 /// Canonical, authoritative deployment manifest for an optimized trading strategy.
 ///
 /// Encapsulates the complete quantitative environment required to faithfully
@@ -182,6 +211,69 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use strategies::DollarBarsCusumConfig;
+
+    fn scorecard() -> HpoScorecard {
+        HpoScorecard {
+            mean_is_sortino: dec!(0.21),
+            mean_oos_sortino: dec!(0.14),
+            mean_oos_profit_factor: Some(dec!(1.3)),
+            oos_sharpe: Some(dec!(0.08)),
+            total_oos_trades: 412,
+            min_fold_trades: 37,
+            stability_score: dec!(0.78),
+            fitness: dec!(0.109),
+            dsr_p_value: dec!(0.012),
+            is_statistically_significant: true,
+            trials_evaluated: 120,
+        }
+    }
+
+    #[test]
+    fn a_profitable_and_significant_scorecard_is_deployable() {
+        assert_eq!(scorecard().deployment_blocker(), None);
+    }
+
+    #[test]
+    fn a_scorecard_without_an_out_of_sample_edge_is_not_deployable() {
+        let losing = HpoScorecard {
+            fitness: Decimal::ZERO,
+            mean_oos_sortino: dec!(-0.32),
+            ..scorecard()
+        };
+
+        let reason = losing.deployment_blocker().expect("blocked");
+        assert!(
+            reason.contains("no positive out-of-sample edge"),
+            "{reason}"
+        );
+        assert!(reason.contains("-0.32"), "{reason}");
+    }
+
+    #[test]
+    fn a_scorecard_whose_edge_may_be_selection_luck_is_not_deployable() {
+        let lucky = HpoScorecard {
+            dsr_p_value: dec!(0.31),
+            is_statistically_significant: false,
+            ..scorecard()
+        };
+
+        let reason = lucky.deployment_blocker().expect("blocked");
+        assert!(reason.contains("Deflated Sharpe p = 0.3100"), "{reason}");
+    }
+
+    #[test]
+    fn a_scorecard_from_before_the_minimum_trades_rule_is_not_deployable() {
+        // The legacy scoring capped Sortino at 100 and called it significant (fitness 80).
+        let legacy: HpoScorecard = serde_json::from_value(serde_json::json!({
+            "mean_is_sortino": "80", "mean_oos_sortino": "20", "mean_oos_profit_factor": "20",
+            "stability_score": "1", "fitness": "80", "dsr_p_value": "0.0000",
+            "is_statistically_significant": true, "trials_evaluated": 720
+        }))
+        .unwrap();
+
+        let reason = legacy.deployment_blocker().expect("blocked");
+        assert!(reason.contains("re-run the HPO"), "{reason}");
+    }
 
     #[test]
     fn artifact_round_trip_serialization() {

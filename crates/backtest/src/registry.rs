@@ -61,6 +61,32 @@ pub struct LoadedStrategy {
 }
 
 impl LoadedStrategy {
+    /// Refuses a deployment artifact whose HPO scorecard shows no deployable edge (see
+    /// [`HpoScorecard::deployment_blocker`]), unless `allow_unproven` is set. Files without a
+    /// scorecard (hand-written or bare configurations) carry no evidence either way and pass.
+    pub fn ensure_deployable(&self, allow_unproven: bool) -> Result<()> {
+        let ConfigSource::Artifact {
+            scorecard: Some(card),
+            ..
+        } = &self.source
+        else {
+            return Ok(());
+        };
+        match card.deployment_blocker() {
+            None => Ok(()),
+            Some(reason) if allow_unproven => {
+                println!(
+                    "[WARNING] Running an unproven strategy (--allow-unproven-strategy): {reason}"
+                );
+                Ok(())
+            }
+            Some(reason) => anyhow::bail!(
+                "the deployment artifact is not deployable: {reason}. Pass \
+                 --allow-unproven-strategy to run it anyway (e.g. to test the mechanics on testnet)"
+            ),
+        }
+    }
+
     /// Human-readable lines describing the configuration source, for runner start-up output.
     pub fn report_lines(&self) -> Vec<String> {
         match &self.source {
@@ -218,6 +244,62 @@ mod tests {
         let path = std::env::temp_dir().join(format!("atsnt-{}-{name}", std::process::id()));
         std::fs::write(&path, content).unwrap();
         path
+    }
+
+    fn artifact_with_scorecard(
+        name: &str,
+        scorecard: Option<serde_json::Value>,
+    ) -> std::path::PathBuf {
+        let mut artifact = serde_json::json!({
+            "schema_version": "1.0",
+            "strategy_id": "dollar_bars_cusum",
+            "symbol": "BTCUSDT",
+            "market_type": "usd_m_perpetual",
+            "sampling": {"type": "dollar_bar", "threshold": "1000000"},
+            "strategy_config": serde_json::to_value(DollarBarsCusumConfig::default()).unwrap(),
+            "execution_context": serde_json::to_value(crate::BacktestConfig::default()).unwrap(),
+        });
+        if let Some(card) = scorecard {
+            artifact["hpo_scorecard"] = card;
+        }
+        temp_file(name, &artifact.to_string())
+    }
+
+    fn losing_scorecard() -> serde_json::Value {
+        serde_json::json!({
+            "mean_is_sortino": "-0.3", "mean_oos_sortino": "-0.32", "mean_oos_profit_factor": "0.56",
+            "oos_sharpe": "-0.29", "total_oos_trades": 778, "min_fold_trades": 100,
+            "stability_score": "0", "fitness": "0", "dsr_p_value": "1.0000",
+            "is_statistically_significant": false, "trials_evaluated": 120
+        })
+    }
+
+    #[test]
+    fn a_losing_artifact_is_refused_unless_explicitly_allowed() {
+        let path = artifact_with_scorecard("losing.json", Some(losing_scorecard()));
+        let loaded = load_strategy("cusum", Some(&path)).unwrap();
+
+        let refused = loaded.ensure_deployable(false).unwrap_err().to_string();
+        assert!(refused.contains("not deployable"), "{refused}");
+        assert!(loaded.ensure_deployable(true).is_ok());
+    }
+
+    #[test]
+    fn a_file_without_a_scorecard_carries_no_verdict_and_is_not_blocked() {
+        let artifact = artifact_with_scorecard("no-card.json", None);
+        let bare = temp_file(
+            "bare-gate.json",
+            &serde_json::to_string(&DollarBarsCusumConfig::default()).unwrap(),
+        );
+
+        for path in [artifact, bare] {
+            let loaded = load_strategy("cusum", Some(&path)).unwrap();
+            assert!(loaded.ensure_deployable(false).is_ok());
+        }
+        assert!(load_strategy("cusum", None)
+            .unwrap()
+            .ensure_deployable(false)
+            .is_ok());
     }
 
     #[test]

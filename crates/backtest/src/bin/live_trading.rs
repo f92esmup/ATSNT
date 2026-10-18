@@ -124,6 +124,12 @@ struct Args {
     /// --production: a real account holding foreign collateral must be fixed, not tolerated.
     #[arg(long, default_value_t = false)]
     allow_foreign_collateral: bool,
+
+    /// Run an artifact whose HPO scorecard shows no deployable edge (fitness 0, a
+    /// non-significant Deflated Sharpe Ratio or a pre-eligibility scorecard). Without it such an
+    /// artifact is refused at start-up.
+    #[arg(long, default_value_t = false)]
+    allow_unproven_strategy: bool,
 }
 
 /// Seconds between account profile re-verifications while the bot runs.
@@ -223,6 +229,7 @@ async fn main() -> Result<()> {
     for line in loaded.report_lines() {
         println!("{line}");
     }
+    loaded.ensure_deployable(args.allow_unproven_strategy)?;
 
     // Contract validation
     if let Some(artifact_sym) = loaded.symbol.as_deref() {

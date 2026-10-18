@@ -20,6 +20,7 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
 - S9 Docs: the HPO guide, capital scaling, the BI contract and the GCP architecture describe the new behaviour. A local comparison on one month runs before the relaunch.
 
 - S10 (added under L4, "arregla todo con el objetivo de tener un resultado ... que tenga sentido"): the search space must be able to trade. Rolling windows span intraday horizons (100 to 1,600 $1M bars), and the rolling window update is O(1) so these windows stay affordable.
+- S11 (L13): "Bloquea las estrategias perdedoras". paper_trading and live_trading refuse an artifact whose scorecard shows no edge: a pre-eligibility scorecard, fitness <= 0, or a non-significant DSR. `--allow-unproven-strategy` overrides it explicitly. Files without a scorecard pass.
 
 ## Tasks
 
@@ -29,6 +30,7 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
 - [x] T4 S2-S5: optimizer eligibility, fitness, stability, DSR, run_hpo selection, report and recording. Route: inline. Commit 34836a9. Workspace: 505 passed, 0 failed. Clippy -D warnings clean.
 - [x] T6 S10: O(1) RollingZScore (ecc8e28, equivalence test against the two-pass statistics over 5,000 prices) and window grid [100, 160, 250, 400, 650, 1000, 1600] (RED on the grid assertion, then GREEN). Workspace: 507 passed.
 - [x] T5 S9: docs (04, 10, 13 -> contract v2, capital-scaling), local comparison (L7, L8), relaunch (L9-L11). Route: inline.
+- [x] T8 S11: deployment gate (HpoScorecard::deployment_blocker, LoadedStrategy::ensure_deployable, a [GATE] line in the backtest, flag in both binaries, docs). RED: paper_trading kept running on the v3 artifact until killed, and the unit tests did not compile; then GREEN. Workspace: 517 passed.
 - [x] T7 (found in v2 results): DSR over eligible trials only, plus a fitness tie-break by OOS Sortino. Commit fce2b78; workspace 509 passed.
 
 ## Log
@@ -99,3 +101,6 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
     - Reliability R3-001 (analytics.rs:127-130).
     - Resilience R4-001: a run_metrics insert with rejected_orders fails on a dataset without the DDL. The deployed dataset has the DDL; a column preflight in the Batch launcher is follow-up work.
     - Resilience R4-002: retrying only on 50001 also stops retrying transient sink 5xx errors after the search.
+- L13 (2026-10-18) User: "Quitando el slipage que no puedo verlo ahora. Quiero aplicar el resto. Bloquea las estrategias perdedoras, y haz puag. Lo del las órdenes límite dependerá del tipo de estrategia no? De momento creo que no hace falta"
+  - Decisions: the gate applies to both paper and live, and testnet uses the explicit flag. Slippage calibration and limit orders are deferred.
+  - The tracked legacy artifacts configs/hpo_btcusdt_2026.json and _1k.json (fake 80/100 Sortino) are now refused. The VM has been stopped since Phase 1.

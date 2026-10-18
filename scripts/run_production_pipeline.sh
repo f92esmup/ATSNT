@@ -593,7 +593,8 @@ echo " Winning Parameters:   ${CONFIG_PATH}"
 if [ "${GCP_BIGQUERY}" = "true" ]; then
     echo " Run Analytics:        BigQuery atsnt_bi (v_runs, v_trades, v_equity)"
 fi
-echo " Next Production Step: Run real-time paper trading:"
+echo " Next Production Step: Run real-time paper trading (it refuses an artifact whose"
+echo "   scorecard shows no edge; see any [GATE] line in the backtest above):"
 echo "   cargo run --release -p backtest --bin paper_trading -- \\"
 echo "     --symbol ${SYMBOL,,} --config ${CONFIG_PATH}"
 echo "   (Add --baseline-run-id <backtest run id> to record which backtest justifies the session)"
