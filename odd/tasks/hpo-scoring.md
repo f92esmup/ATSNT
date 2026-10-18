@@ -91,3 +91,11 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
   - (c) Strategy direction: maker entries, or a longer horizon (the optimum sits at the grid edge).
   - (d) Push/PR of feat/hpo-scoring (about 1,600 changed lines in 15 commits; slicing to be decided).
   - (e) RDD review consent for the branch.
+- L12 RDD review (user granted consent):
+  - Lineage review-6a4a483426ff051a, four lenses, approved and acknowledged; authority burned.
+  - Risk: no findings.
+  - Advisory findings, all non-blocking:
+    - Readability R2-001..R2-010.
+    - Reliability R3-001 (analytics.rs:127-130).
+    - Resilience R4-001: a run_metrics insert with rejected_orders fails on a dataset without the DDL. The deployed dataset has the DDL; a column preflight in the Batch launcher is follow-up work.
+    - Resilience R4-002: retrying only on 50001 also stops retrying transient sink 5xx errors after the search.
