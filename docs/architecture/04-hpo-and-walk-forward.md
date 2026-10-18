@@ -91,11 +91,11 @@ A candidate is significant at $p < 0.05$. Significance does not change the ranki
 
 #### Deployment gate
 `paper_trading` and `live_trading` refuse at start-up an artifact whose scorecard shows no deployable edge (`HpoScorecard::deployment_blocker`):
-- The scorecard predates the minimum-trades rule (`min_fold_trades` = 0): re-run the HPO.
+- The scorecard records no eligible fold (`min_fold_trades` = 0): it predates the minimum-trades rule, or the search ran with `--min-trades-per-fold 0`. Re-run the HPO with the minimum.
 - `fitness` <= 0: no positive out-of-sample edge.
 - The Deflated Sharpe Ratio is not significant.
 
-The search still writes such a winner, so its holdout backtest can be run and inspected. The backtest prints a `[GATE]` line when paper and live trading would refuse it. `--allow-unproven-strategy` runs it anyway, for instance to test the mechanics on testnet. Files without a scorecard (hand-written configurations) carry no evidence either way, and the gate lets them pass.
+The search still writes such a winner, so its holdout backtest can be run and inspected. The backtest prints a `[GATE]` line when paper and live trading would refuse it. `--allow-unproven-strategy` runs it anyway, for instance to test the mechanics on testnet. It prints a warning with the reason, or a notice that it had no effect when nothing was refused. Files without a scorecard (hand-written configurations) carry no evidence either way, and the gate lets them pass.
 
 ---
 

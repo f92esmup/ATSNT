@@ -58,12 +58,17 @@ pub struct HpoScorecard {
     pub trials_evaluated: usize,
 }
 
+/// `min_fold_trades` of a scorecard whose search recorded no fold with enough trades. Scorecards
+/// written before the minimum-trades rule lack the field, so it deserializes to this value;
+/// a search run with `--min-trades-per-fold 0` can also produce it.
+pub const NO_ELIGIBLE_FOLD_TRADES: usize = 0;
+
 impl HpoScorecard {
     /// Why paper and live trading must not run this artifact, or `None` when its search
     /// measured a deployable edge: eligible folds, a positive out-of-sample fitness and a
     /// significant Deflated Sharpe Ratio.
     pub fn deployment_blocker(&self) -> Option<String> {
-        if self.min_fold_trades == 0 {
+        if self.min_fold_trades == NO_ELIGIBLE_FOLD_TRADES {
             return Some(
                 "the scorecard records no fold with enough trades: either it predates the \
                  minimum-trades rule (its ratios may be the old 100 cap) or the search ran with \
@@ -272,6 +277,18 @@ mod tests {
 
         let reason = lucky.deployment_blocker().expect("blocked");
         assert!(reason.contains("Deflated Sharpe p = 0.3100"), "{reason}");
+    }
+
+    #[test]
+    fn the_significance_boundary_is_strict_at_five_percent() {
+        let at = |p| HpoScorecard {
+            dsr_p_value: p,
+            is_statistically_significant: p < dec!(0.05),
+            ..scorecard()
+        };
+
+        assert!(at(dec!(0.05)).deployment_blocker().is_some());
+        assert_eq!(at(dec!(0.0499)).deployment_blocker(), None);
     }
 
     #[test]

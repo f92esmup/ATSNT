@@ -145,8 +145,8 @@ async fn main() -> Result<()> {
     }
     // The backtest still runs (it is how a candidate is judged); it only says what paper and
     // live trading will do with this artifact.
-    if let Err(refusal) = loaded.ensure_deployable(false) {
-        println!("[GATE] paper_trading and live_trading will refuse it: {refusal}");
+    if let Some(reason) = loaded.deployment_blocker() {
+        println!("[GATE] paper_trading and live_trading will refuse it: {reason}");
     }
     let mut strategy = loaded.strategy;
     let strat_config_val = loaded.config_json;

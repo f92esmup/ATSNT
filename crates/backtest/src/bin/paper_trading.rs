@@ -41,10 +41,7 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Run an artifact whose HPO scorecard shows no deployable edge (fitness <= 0, a
-    /// Deflated Sharpe p-value >= 0.05, or no fold with enough trades). Without it such an
-    /// artifact is refused at start-up.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, help = backtest::ALLOW_UNPROVEN_STRATEGY_HELP)]
     allow_unproven_strategy: bool,
 
     /// Strategy to run, by id or alias (inferred from the --config artifact if omitted; the
@@ -116,7 +113,10 @@ async fn main() -> Result<()> {
     for line in loaded.report_lines() {
         println!("{line}");
     }
-    loaded.ensure_deployable(args.allow_unproven_strategy)?;
+    let policy = backtest::DeploymentPolicy::from_allow_unproven(args.allow_unproven_strategy);
+    if let Some(notice) = loaded.ensure_deployable(policy)? {
+        println!("{notice}");
+    }
     if let Some(artifact_sym) = loaded.symbol.as_deref() {
         if !artifact_sym.eq_ignore_ascii_case(&args.symbol) {
             println!(

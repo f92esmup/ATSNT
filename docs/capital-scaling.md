@@ -147,7 +147,8 @@ sections 2.2 to 2.4.
 - **DSR p-value.** It says whether the winner beats the best result expected from luck among all
   candidates. A winner with p ≥ 0.05 is reported as not significant.
 - **Deployment gate.** `paper_trading` and `live_trading` refuse a winner with fitness ≤ 0, a DSR
-  p-value ≥ 0.05, or a scorecard without eligible folds (from before the minimum-trades rule). Only `--allow-unproven-strategy` overrides them, for instance to test the
+  p-value ≥ 0.05, or a scorecard without eligible folds (written before the minimum-trades rule,
+  or by a search run with `--min-trades-per-fold 0`). Only `--allow-unproven-strategy` overrides them, for instance to test the
   mechanics on testnet. The pipeline still runs the holdout backtest of such a winner, so the
   evidence is complete.
 - **Rejected signals** (`rejected_orders`). On a small account, `OrderSizeExceeded` means a stop

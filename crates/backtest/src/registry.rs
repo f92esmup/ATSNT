@@ -38,6 +38,31 @@ pub enum ConfigSource {
     },
 }
 
+/// Whether start-up refuses a configuration whose HPO scorecard shows no deployable edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentPolicy {
+    /// Refuse it (the default).
+    Enforce,
+    /// Run it anyway, with a warning (`--allow-unproven-strategy`).
+    AllowUnproven,
+}
+
+impl DeploymentPolicy {
+    /// The policy selected by the `--allow-unproven-strategy` flag.
+    pub fn from_allow_unproven(allow_unproven: bool) -> Self {
+        if allow_unproven {
+            Self::AllowUnproven
+        } else {
+            Self::Enforce
+        }
+    }
+}
+
+/// Help of `--allow-unproven-strategy`, shared by the paper and live binaries.
+pub const ALLOW_UNPROVEN_STRATEGY_HELP: &str = "Run an artifact whose HPO scorecard shows no \
+deployable edge (fitness <= 0, a Deflated Sharpe p-value >= 0.05, or no fold with enough \
+trades). Without it such an artifact is refused at start-up";
+
 /// A strategy resolved from the registry together with what its configuration file declared.
 pub struct LoadedStrategy {
     /// The strategy, ready for `on_bar`.
@@ -61,29 +86,44 @@ pub struct LoadedStrategy {
 }
 
 impl LoadedStrategy {
-    /// Refuses a deployment artifact whose HPO scorecard shows no deployable edge (see
-    /// [`HpoScorecard::deployment_blocker`]), unless `allow_unproven` is set. Files without a
-    /// scorecard (hand-written or bare configurations) carry no evidence either way and pass.
-    pub fn ensure_deployable(&self, allow_unproven: bool) -> Result<()> {
-        let ConfigSource::Artifact {
-            scorecard: Some(card),
-            ..
-        } = &self.source
-        else {
-            return Ok(());
-        };
-        match card.deployment_blocker() {
-            None => Ok(()),
-            Some(reason) if allow_unproven => {
-                println!(
-                    "[WARNING] Running an unproven strategy (--allow-unproven-strategy): {reason}"
-                );
-                Ok(())
-            }
-            Some(reason) => anyhow::bail!(
+    /// Why paper and live trading would refuse this configuration (see
+    /// [`HpoScorecard::deployment_blocker`]), or `None`. Files without a scorecard
+    /// (hand-written or bare configurations) carry no evidence either way and are not blocked.
+    pub fn deployment_blocker(&self) -> Option<String> {
+        match &self.source {
+            ConfigSource::Artifact {
+                scorecard: Some(card),
+                ..
+            } => card.deployment_blocker(),
+            _ => None,
+        }
+    }
+
+    /// Applies the deployment gate at start-up. A refused configuration is an error under
+    /// [`DeploymentPolicy::Enforce`]. The returned notice, when there is one, is for the
+    /// operator: the warning of an overridden refusal, or that the override changed nothing.
+    pub fn ensure_deployable(&self, policy: DeploymentPolicy) -> Result<Option<String>> {
+        let blocker = self.deployment_blocker();
+        match (policy, blocker) {
+            (DeploymentPolicy::Enforce, None) => Ok(None),
+            (DeploymentPolicy::Enforce, Some(reason)) => anyhow::bail!(
                 "the deployment artifact is not deployable: {reason}. Pass \
                  --allow-unproven-strategy to run it anyway (e.g. to test the mechanics on testnet)"
             ),
+            (DeploymentPolicy::AllowUnproven, Some(reason)) => Ok(Some(format!(
+                "[WARNING] Running an unproven strategy (--allow-unproven-strategy): {reason}"
+            ))),
+            (DeploymentPolicy::AllowUnproven, None) => {
+                let why = match &self.source {
+                    ConfigSource::Artifact {
+                        scorecard: Some(_), ..
+                    } => "the artifact passes the deployment gate",
+                    _ => "the configuration has no HPO scorecard to gate",
+                };
+                Ok(Some(format!(
+                    "[*] --allow-unproven-strategy has no effect: {why}"
+                )))
+            }
         }
     }
 
@@ -265,13 +305,11 @@ mod tests {
         temp_file(name, &artifact.to_string())
     }
 
+    /// Shared with the binary-level gate tests.
     fn losing_scorecard() -> serde_json::Value {
-        serde_json::json!({
-            "mean_is_sortino": "-0.3", "mean_oos_sortino": "-0.32", "mean_oos_profit_factor": "0.56",
-            "oos_sharpe": "-0.29", "total_oos_trades": 778, "min_fold_trades": 100,
-            "stability_score": "0", "fitness": "0", "dsr_p_value": "1.0000",
-            "is_statistically_significant": false, "trials_evaluated": 120
-        })
+        let artifact: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/losing_artifact.json")).unwrap();
+        artifact["hpo_scorecard"].clone()
     }
 
     #[test]
@@ -279,9 +317,19 @@ mod tests {
         let path = artifact_with_scorecard("losing.json", Some(losing_scorecard()));
         let loaded = load_strategy("cusum", Some(&path)).unwrap();
 
-        let refused = loaded.ensure_deployable(false).unwrap_err().to_string();
+        let refused = loaded
+            .ensure_deployable(DeploymentPolicy::Enforce)
+            .unwrap_err()
+            .to_string();
         assert!(refused.contains("not deployable"), "{refused}");
-        assert!(loaded.ensure_deployable(true).is_ok());
+        let notice = loaded
+            .ensure_deployable(DeploymentPolicy::AllowUnproven)
+            .unwrap()
+            .expect("a warning");
+        assert!(
+            notice.starts_with("[WARNING] Running an unproven strategy"),
+            "{notice}"
+        );
     }
 
     #[test]
@@ -294,12 +342,33 @@ mod tests {
 
         for path in [artifact, bare] {
             let loaded = load_strategy("cusum", Some(&path)).unwrap();
-            assert!(loaded.ensure_deployable(false).is_ok());
+            assert_eq!(
+                loaded.ensure_deployable(DeploymentPolicy::Enforce).unwrap(),
+                None
+            );
         }
-        assert!(load_strategy("cusum", None)
+        let default = load_strategy("cusum", None).unwrap();
+        assert_eq!(
+            default
+                .ensure_deployable(DeploymentPolicy::Enforce)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn an_override_that_changes_nothing_says_so() {
+        let loaded = load_strategy("cusum", None).unwrap();
+
+        let notice = loaded
+            .ensure_deployable(DeploymentPolicy::AllowUnproven)
             .unwrap()
-            .ensure_deployable(false)
-            .is_ok());
+            .expect("a notice");
+        assert!(
+            notice.contains("--allow-unproven-strategy has no effect"),
+            "{notice}"
+        );
+        assert!(notice.contains("no HPO scorecard"), "{notice}");
     }
 
     #[test]

@@ -3,31 +3,12 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// The v3 HPO winner of the 500 EUR account: eligible, but no edge (fitness 0, DSR p = 1).
+const LOSING_ARTIFACT: &str = include_str!("fixtures/losing_artifact.json");
+
 fn losing_artifact(dir: &Path) -> PathBuf {
     let path = dir.join("losing.json");
-    let artifact = serde_json::json!({
-        "schema_version": "1.0",
-        "strategy_id": "dollar_bars_cusum",
-        "symbol": "BTCUSDT",
-        "market_type": "usd_m_perpetual",
-        "sampling": {"type": "dollar_bar", "threshold": "1000000"},
-        "strategy_config": {
-            "rolling_window_len": 1600, "cusum_vol_multiplier": "0.8", "z_entry_threshold": "1.7",
-            "z_stop_threshold": "5.0", "time_barrier_bars": 2000, "min_take_profit_pct": "0.005"
-        },
-        "execution_context": {
-            "initial_capital": "562", "maker_fee_pct": "0.0002", "taker_fee_pct": "0.0005",
-            "slippage_pct": "0.0005", "risk_per_trade_pct": "0.005", "max_daily_drawdown_pct": "0.03",
-            "max_order_notional": "1700", "max_position_notional": "1700"
-        },
-        "hpo_scorecard": {
-            "mean_is_sortino": "-0.3092", "mean_oos_sortino": "-0.3226",
-            "mean_oos_profit_factor": "0.56", "oos_sharpe": "-0.29", "total_oos_trades": 778,
-            "min_fold_trades": 100, "stability_score": "0", "fitness": "0",
-            "dsr_p_value": "1.0000", "is_statistically_significant": false, "trials_evaluated": 120
-        }
-    });
-    std::fs::write(&path, serde_json::to_string_pretty(&artifact).unwrap()).unwrap();
+    std::fs::write(&path, LOSING_ARTIFACT).unwrap();
     path
 }
 
@@ -84,4 +65,57 @@ fn live_trading_refuses_a_losing_artifact() {
         &config,
         &["--api-key", "test-key", "--secret-key", "test-secret"],
     ));
+}
+
+/// With the override the binary gets past the gate: it warns, then stops at the next offline
+/// check (an option conflict chosen for it), never at the gate and never on the network.
+fn assert_passes_the_gate(out: &Output, next_check: &str) {
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(
+        !out.status.success(),
+        "the chosen option conflict must stop it; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("[WARNING] Running an unproven strategy (--allow-unproven-strategy)"),
+        "stdout: {stdout}"
+    );
+    assert!(!stderr.contains("not deployable"), "stderr: {stderr}");
+    assert!(stderr.contains(next_check), "stderr: {stderr}");
+}
+
+#[test]
+fn paper_trading_runs_a_losing_artifact_past_the_gate_only_when_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = losing_artifact(dir.path());
+
+    let out = run(
+        env!("CARGO_BIN_EXE_paper_trading"),
+        &config,
+        &["--allow-unproven-strategy", "--spot"],
+    );
+
+    // The futures-only strategy refuses a Spot session: the first offline check after the gate.
+    assert_passes_the_gate(&out, "does not support the selected Spot market");
+}
+
+#[test]
+fn live_trading_runs_a_losing_artifact_past_the_gate_only_when_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = losing_artifact(dir.path());
+
+    let out = run(
+        env!("CARGO_BIN_EXE_live_trading"),
+        &config,
+        &[
+            "--api-key",
+            "test-key",
+            "--secret-key",
+            "test-secret",
+            "--allow-unproven-strategy",
+            "--risk-pct",
+            "2",
+        ],
+    );
+
+    assert_passes_the_gate(&out, "--risk-pct must be greater than 0 and at most 1");
 }

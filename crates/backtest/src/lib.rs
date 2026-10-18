@@ -57,7 +57,8 @@ pub use recording::{
     record_run_status, DataWindow, RunContext, RunStatus, GIT_SHA,
 };
 pub use registry::{
-    load_strategy, resolve_strategy_id, ConfigSource, LoadedStrategy, DEFAULT_STRATEGY_ID,
+    load_strategy, resolve_strategy_id, ConfigSource, DeploymentPolicy, LoadedStrategy,
+    ALLOW_UNPROVEN_STRATEGY_HELP, DEFAULT_STRATEGY_ID,
 };
 pub use run::{FillModel, InvalidRunId, RunId, RunSpec, RunType};
 pub use sinks::{artifact_object_name, artifact_run_suffix, SinkFailures, StrictSinkError};
