@@ -459,21 +459,50 @@ fn schema_columns(table: &str) -> Vec<(String, bool)> {
         .split("\n)")
         .next()
         .unwrap();
-    body.lines()
+    let mut columns: Vec<(String, bool)> = body
+        .lines()
         .map(|line| line.split("--").next().unwrap_or_default().trim())
         .filter(|line| !line.is_empty())
         .map(|line| {
             let name = line.split_whitespace().next().unwrap().to_string();
             (name, line.contains("NOT NULL"))
         })
-        .collect()
+        .collect();
+    // Columns added to datasets created before them (always nullable).
+    let alter = format!("ALTER TABLE `atsnt_bi.{table}` ADD COLUMN IF NOT EXISTS ");
+    for added in sql
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(&alter))
+    {
+        let name = added.split_whitespace().next().unwrap().to_string();
+        if !columns.iter().any(|(existing, _)| *existing == name) {
+            columns.push((name, false));
+        }
+    }
+    columns
 }
 
 /// Every field a row sends must be a column, and every required column must be sent: BigQuery
 /// rejects the whole batch otherwise, which would lose a run's records silently in a cloud job.
-fn assert_row_matches_schema(table: &str, row: &serde_json::Value) {
+/// The other way round, every column must be sent too, except the optional ones listed in
+/// `omitted_when_empty` (skipped when `None`): a column no row writes is schema drift.
+fn assert_row_matches_schema(table: &str, row: &serde_json::Value, omitted_when_empty: &[&str]) {
     let columns = schema_columns(table);
     let sent: Vec<&String> = row.as_object().expect("a JSON object").keys().collect();
+    for optional in omitted_when_empty {
+        assert!(
+            columns
+                .iter()
+                .any(|(name, required)| name == optional && !required),
+            "{table}: `{optional}` is listed as optional but is not a nullable column"
+        );
+    }
+    for (name, _) in &columns {
+        assert!(
+            sent.contains(&name) || omitted_when_empty.contains(&name.as_str()),
+            "{table}: the schema declares `{name}` but no row field writes it"
+        );
+    }
     for key in &sent {
         assert!(
             columns.iter().any(|(name, _)| name == *key),
@@ -497,7 +526,11 @@ fn run_rows_match_the_bigquery_runs_table() {
         .run_row(&spec(), RunStatus::Running, None, &DataWindow::default())
         .unwrap();
 
-    assert_row_matches_schema("runs", &serde_json::to_value(row).unwrap());
+    assert_row_matches_schema(
+        "runs",
+        &serde_json::to_value(row).unwrap(),
+        &["baseline_run_id"],
+    );
 }
 
 #[test]
@@ -510,6 +543,7 @@ fn metrics_rows_match_the_bigquery_run_metrics_table() {
     assert_row_matches_schema(
         "run_metrics",
         &serde_json::to_value(ctx.metrics_row("full", &metrics, None)).unwrap(),
+        &["rejected_orders"],
     );
 }
 
@@ -518,7 +552,7 @@ fn trade_rows_match_the_bigquery_trades_table() {
     let ctx = RunContext::new(RunType::Paper, &spec(), 0);
     let rows = ctx.trade_rows(&[closed_trade()], 1);
 
-    assert_row_matches_schema("trades", &serde_json::to_value(&rows[0]).unwrap());
+    assert_row_matches_schema("trades", &serde_json::to_value(&rows[0]).unwrap(), &[]);
 }
 
 #[test]
@@ -526,7 +560,11 @@ fn series_rows_match_the_bigquery_run_series_table() {
     let ctx = RunContext::new(RunType::Paper, &spec(), 0);
     let points = ctx.equity_points(&[closed_trade()], 1);
 
-    assert_row_matches_schema("run_series", &serde_json::to_value(&points[0]).unwrap());
+    assert_row_matches_schema(
+        "run_series",
+        &serde_json::to_value(&points[0]).unwrap(),
+        &[],
+    );
 }
 
 #[test]
