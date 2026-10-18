@@ -35,11 +35,17 @@ fi
 # The unit, not this argument, decides what the VM runs: deploying one artifact while the unit
 # starts another would silently trade the wrong configuration.
 UNIT_FILE="docs/deployment/atsnt.service"
-if ! grep -q -- "--config [^ ]*/configs/$(basename "${CONFIG_FILE}")\( \|$\)" "${UNIT_FILE}"; then
-    echo "[-] Error: ${UNIT_FILE} does not start '$(basename "${CONFIG_FILE}")'."
-    echo "    Point its --config at the artifact you deploy, then re-run."
-    exit 1
-fi
+CONFIG_BASENAME="$(basename "${CONFIG_FILE}")"
+# Only the active ExecStart line counts (not comments), and the name is compared literally.
+EXEC_START="$(grep -E '^ExecStart=' "${UNIT_FILE}")"
+case " ${EXEC_START} " in
+    *"/configs/${CONFIG_BASENAME} "*) ;;
+    *)
+        echo "[-] Error: the ExecStart of ${UNIT_FILE} does not start '${CONFIG_BASENAME}'."
+        echo "    Point its --config at the artifact you deploy, then re-run."
+        exit 1
+        ;;
+esac
 
 echo "[*] Step 1: Compiling 'paper_trading' locally in release mode..."
 cargo build --release -p backtest --bin paper_trading
@@ -56,7 +62,6 @@ echo "[*] Step 3: Gracefully stopping running engine (KillSignal=SIGINT liquidat
 gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command="sudo systemctl stop atsnt.service"
 
 echo "[*] Step 4: Backing up previous binary and preparing remote directories..."
-CONFIG_BASENAME=$(basename "${CONFIG_FILE}")
 gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command="
     mkdir -p ${REMOTE_DIR}/configs
     if [ -f ${REMOTE_DIR}/paper_trading ]; then
