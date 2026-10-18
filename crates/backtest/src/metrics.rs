@@ -131,8 +131,9 @@ pub struct BacktestMetrics {
     /// True when the monthly kill-switch stopped the run before the data ended.
     #[serde(default)]
     pub halted: bool,
-    /// Signals the engine did not turn into orders, per reason (a `RiskError` variant such as
-    /// "OrderSizeExceeded", or "DailyHalt" while the daily circuit breaker is tripped).
+    /// Signals the engine did not turn into orders, per reason: a [`domain::RiskError::kind`]
+    /// such as "OrderSizeExceeded", or [`DAILY_HALT_REJECTION`] while the daily circuit
+    /// breaker is tripped.
     #[serde(default)]
     pub rejected_orders: BTreeMap<String, usize>,
 }
@@ -216,7 +217,7 @@ impl BacktestMetrics {
         let loss_rate = Decimal::from(losing_trades) / n;
         let mathematical_expectancy = (win_rate * avg_win) - (loss_rate * avg_loss);
 
-        let sortino_ratio = sortino_ratio(&trade_returns(initial_capital, trades));
+        let sortino = sortino_ratio(&trade_returns(initial_capital, trades));
 
         let fee_drag_pct = if positive_gross_pnl > Decimal::ZERO {
             total_fees / positive_gross_pnl
@@ -239,7 +240,7 @@ impl BacktestMetrics {
             mathematical_expectancy,
             max_drawdown_amount,
             max_drawdown_pct,
-            sortino_ratio,
+            sortino_ratio: sortino,
             fee_drag_pct,
             exit_reason_counts,
             avg_holding_seconds: holding_seconds_sum / n,
@@ -278,6 +279,10 @@ impl BacktestMetrics {
     }
 }
 
+/// Rejection reason counted while the daily circuit breaker is tripped. It sits in the same
+/// namespace as [`domain::RiskError::kind`], so it must not match any of its names.
+pub const DAILY_HALT_REJECTION: &str = "DailyHalt";
+
 /// Two-decimal rendering of a ratio for reports, `n/a` where it is undefined.
 pub fn format_ratio(ratio: Option<Decimal>) -> String {
     ratio.map_or_else(|| "n/a".to_string(), |r| format!("{r:.2}"))
@@ -298,7 +303,9 @@ pub fn format_rejections(rejected: &BTreeMap<String, usize>) -> String {
 /// Net return of each trade on the account equity it was opened with.
 ///
 /// Sizing risks a fraction of equity, so this is the return the account experiences. A trade
-/// without a recorded equity path is measured on `initial_capital`.
+/// without a recorded equity path is measured on `initial_capital`. A trade with no positive
+/// base at all (both are zero or negative, which a valid run never produces) is left out, so
+/// the series can be shorter than the trade list.
 pub fn trade_returns(initial_capital: Decimal, trades: &[ClosedTrade]) -> Vec<Decimal> {
     trades
         .iter()

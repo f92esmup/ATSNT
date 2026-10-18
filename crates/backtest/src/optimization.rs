@@ -67,7 +67,8 @@ pub struct CandidateEvaluation<C> {
     pub mean_oos_sortino: Decimal,
     /// Out-of-sample gross profit over gross loss, pooled over all folds; `None` without
     /// out-of-sample losses.
-    pub mean_oos_profit_factor: Option<Decimal>,
+    #[serde(rename = "mean_oos_profit_factor")]
+    pub oos_profit_factor: Option<Decimal>,
     /// Total Out-of-Sample executed trades across all folds.
     pub total_oos_trades: usize,
     /// Fewest closed trades in any in-sample or out-of-sample fold.
@@ -432,9 +433,11 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
                     .min()
                     .unwrap_or(0);
                 let eligible = min_fold_trades >= min_trades;
+                // Only these can win; the rest keep fitness and stability at 0.
+                let rankable = eligible && mean_is_sortino > Decimal::ZERO;
 
                 // Stability costs up to 12 extra backtests: only candidates that can win pay it.
-                let stability_score = if eligible && mean_is_sortino > Decimal::ZERO {
+                let stability_score = if rankable {
                     calculate_parameter_stability::<S>(
                         &self.parameter_space,
                         candidate,
@@ -446,7 +449,7 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
                 } else {
                     Decimal::ZERO
                 };
-                let fitness = if eligible && mean_is_sortino > Decimal::ZERO {
+                let fitness = if rankable {
                     mean_oos_sortino.max(Decimal::ZERO) * stability_score
                 } else {
                     Decimal::ZERO
@@ -460,7 +463,7 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
                         config: candidate.clone(),
                         mean_is_sortino,
                         mean_oos_sortino,
-                        mean_oos_profit_factor: (oos_gross_loss > Decimal::ZERO)
+                        oos_profit_factor: (oos_gross_loss > Decimal::ZERO)
                             .then(|| oos_gross_profit / oos_gross_loss),
                         total_oos_trades,
                         min_fold_trades,
@@ -735,7 +738,7 @@ mod tests {
             },
             mean_is_sortino: Decimal::ZERO,
             mean_oos_sortino: Decimal::ZERO,
-            mean_oos_profit_factor: None,
+            oos_profit_factor: None,
             total_oos_trades: 0,
             min_fold_trades: 0,
             eligible,

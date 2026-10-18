@@ -293,7 +293,7 @@ mod persistence {
             },
             mean_is_sortino: dec!(1.5),
             mean_oos_sortino: dec!(0.8),
-            mean_oos_profit_factor: Some(dec!(1.3)),
+            oos_profit_factor: Some(dec!(1.3)),
             total_oos_trades: 4,
             min_fold_trades: 2,
             eligible: true,

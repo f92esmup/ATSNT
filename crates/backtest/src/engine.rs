@@ -516,7 +516,7 @@ impl BacktestEngine {
     fn submit_entry(&mut self, intent: domain::OrderIntent, mark_price: Decimal) {
         // If daily circuit breaker is tripped, halt trading for the remainder of today
         if self.daily_circuit_breaker_tripped {
-            self.count_rejection("DailyHalt");
+            self.count_rejection(crate::metrics::DAILY_HALT_REJECTION);
             return;
         }
 

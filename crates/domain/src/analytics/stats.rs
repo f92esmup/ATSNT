@@ -24,8 +24,10 @@ pub struct RollingZScore {
     window_size: usize,
     window: VecDeque<Decimal>,
     running_sum: Decimal,
-    /// Sum of the squares of the window. With `Decimal` the running sums stay exact, so the
-    /// variance needs no pass over the window (O(1) per update at any window size).
+    /// Sum of the squares of the window, so the variance needs no pass over the window (O(1) per
+    /// update at any window size). The running sums are exact while they fit in the 28
+    /// significant digits of `Decimal`: prices with cents up to about 10^6 over windows of up
+    /// to about 10^6 values; beyond that the last digits round like any other `Decimal` sum.
     running_sum_sq: Decimal,
 }
 
@@ -90,8 +92,9 @@ impl RollingZScore {
         let n = Decimal::from(self.window_size);
         let mean = self.running_sum / n;
 
-        // Population variance (n * sum(x^2) - (sum x)^2) / n^2: the numerator is exact, so the
-        // only rounding is the final division (no cancellation against a rounded mean).
+        // Population variance (n * sum(x^2) - (sum x)^2) / n^2. Within the range above the
+        // numerator is exact, so the only rounding is the final division (no cancellation
+        // against a rounded mean).
         let variance = ((n * self.running_sum_sq - self.running_sum * self.running_sum) / (n * n))
             .max(Decimal::ZERO);
         let std_dev = variance.sqrt().unwrap_or(Decimal::ZERO);

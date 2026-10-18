@@ -35,7 +35,8 @@ pub struct HpoScorecard {
     /// Mean Out-of-Sample Sortino Ratio across all validation folds.
     pub mean_oos_sortino: Decimal,
     /// Out-of-Sample profit factor pooled over all folds; `None` without out-of-sample losses.
-    pub mean_oos_profit_factor: Option<Decimal>,
+    #[serde(rename = "mean_oos_profit_factor")]
+    pub oos_profit_factor: Option<Decimal>,
     /// Per-trade Sharpe ratio of all out-of-sample trades.
     #[serde(default)]
     pub oos_sharpe: Option<Decimal>,
@@ -219,7 +220,7 @@ mod tests {
         HpoScorecard {
             mean_is_sortino: dec!(0.21),
             mean_oos_sortino: dec!(0.14),
-            mean_oos_profit_factor: Some(dec!(1.3)),
+            oos_profit_factor: Some(dec!(1.3)),
             oos_sharpe: Some(dec!(0.08)),
             total_oos_trades: 412,
             min_fold_trades: 37,
@@ -229,6 +230,15 @@ mod tests {
             is_statistically_significant: true,
             trials_evaluated: 120,
         }
+    }
+
+    #[test]
+    fn the_pooled_profit_factor_keeps_its_serialized_name() {
+        // Artifacts and the BI contract read it as `mean_oos_profit_factor`.
+        let json = serde_json::to_value(scorecard()).unwrap();
+
+        assert_eq!(json["mean_oos_profit_factor"], serde_json::json!("1.3"));
+        assert!(json.get("oos_profit_factor").is_none());
     }
 
     #[test]
@@ -316,7 +326,7 @@ mod tests {
             hpo_scorecard: Some(HpoScorecard {
                 mean_is_sortino: dec!(2.45),
                 mean_oos_sortino: dec!(2.10),
-                mean_oos_profit_factor: Some(dec!(1.80)),
+                oos_profit_factor: Some(dec!(1.80)),
                 oos_sharpe: None,
                 total_oos_trades: 0,
                 min_fold_trades: 0,

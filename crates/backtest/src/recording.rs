@@ -424,7 +424,7 @@ pub async fn record_hpo<R: RunRecorder, S: Serialize, C: Serialize + Clone>(
             "rank": rank + 1,
             "mean_is_sortino": eval.mean_is_sortino,
             "mean_oos_sortino": eval.mean_oos_sortino,
-            "mean_oos_profit_factor": eval.mean_oos_profit_factor,
+            "mean_oos_profit_factor": eval.oos_profit_factor,
             "total_oos_trades": eval.total_oos_trades,
             "min_fold_trades": eval.min_fold_trades,
             "eligible": eval.eligible,

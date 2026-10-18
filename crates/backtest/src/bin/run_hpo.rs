@@ -434,96 +434,94 @@ where
             evaluations.len()
         );
     };
-    {
-        println!("\n[WINNER] Selected Robust Parameter Configuration:");
-        println!("  • Strategy:                  {}", S::id());
-        println!("  • Configuration:             {}", winner.config);
-        println!(
-            "  • Mean In-Sample Sortino:    {:.2}",
-            winner.mean_is_sortino
-        );
-        println!(
-            "  • Mean Out-of-Sample Sortino: {:.2}",
-            winner.mean_oos_sortino
-        );
-        println!(
-            "  • Parameter Stability Score: {:.2}",
-            winner.stability_score
-        );
-        println!(
-            "  • OOS trades / fewest per fold: {} / {}",
-            winner.total_oos_trades, winner.min_fold_trades
-        );
-        println!(
-            "  • OOS Sharpe per trade:      {}",
-            backtest::format_ratio(winner.oos_sharpe)
-        );
-        println!(
-            "  • Deflated Sharpe Ratio p:   {:.4} ({})",
-            winner.dsr_p_value,
-            if winner.is_statistically_significant {
-                "significant at 5%"
-            } else {
-                "not significant: the edge may be selection luck"
-            }
-        );
-
-        // Serialize Winner to output_config as authoritative StrategyDeploymentArtifact
-        let scorecard = HpoScorecard {
-            mean_is_sortino: winner.mean_is_sortino,
-            mean_oos_sortino: winner.mean_oos_sortino,
-            mean_oos_profit_factor: winner.mean_oos_profit_factor,
-            oos_sharpe: winner.oos_sharpe,
-            total_oos_trades: winner.total_oos_trades,
-            min_fold_trades: winner.min_fold_trades,
-            stability_score: winner.stability_score,
-            fitness: winner.fitness,
-            dsr_p_value: winner.dsr_p_value,
-            is_statistically_significant: winner.is_statistically_significant,
-            trials_evaluated: evaluations.len(),
-        };
-
-        let deployment_artifact = StrategyDeploymentArtifact {
-            schema_version: "1.0".to_string(),
-            spec: sweep_spec.with_config(winner.config.clone()),
-            hpo_scorecard: Some(scorecard),
-        };
-
-        if let Some(parent) = args.output_config.parent() {
-            fs::create_dir_all(parent)?;
+    println!("\n[WINNER] Selected Robust Parameter Configuration:");
+    println!("  • Strategy:                  {}", S::id());
+    println!("  • Configuration:             {}", winner.config);
+    println!(
+        "  • Mean In-Sample Sortino:    {:.2}",
+        winner.mean_is_sortino
+    );
+    println!(
+        "  • Mean Out-of-Sample Sortino: {:.2}",
+        winner.mean_oos_sortino
+    );
+    println!(
+        "  • Parameter Stability Score: {:.2}",
+        winner.stability_score
+    );
+    println!(
+        "  • OOS trades / fewest per fold: {} / {}",
+        winner.total_oos_trades, winner.min_fold_trades
+    );
+    println!(
+        "  • OOS Sharpe per trade:      {}",
+        backtest::format_ratio(winner.oos_sharpe)
+    );
+    println!(
+        "  • Deflated Sharpe Ratio p:   {:.4} ({})",
+        winner.dsr_p_value,
+        if winner.is_statistically_significant {
+            "significant at 5%"
+        } else {
+            "not significant: the edge may be selection luck"
         }
-        let artifact_json = serde_json::to_string_pretty(&deployment_artifact)?;
-        fs::write(&args.output_config, artifact_json)?;
-        println!(
-            "\n[SAVED] Strategy Deployment Artifact saved to: {}",
-            args.output_config.display()
-        );
-        println!(
-            "        • Strategy:     {}",
-            deployment_artifact.spec.strategy_id
-        );
-        println!(
-            "        • Symbol:       {}",
-            deployment_artifact.spec.symbol
-        );
-        println!("        • Sampling:     DollarBar(${})", args.dollar_bar);
+    );
 
-        if args.gcs_upload {
-            let upload_start = Instant::now();
-            // Create-only: a retried Batch task re-uploading the same name keeps the
-            // first attempt's artifact instead of failing on overwrite.
-            let gcs = GcsArtifactSink::from_env()
-                .with_strict(args.strict_sinks)
-                .with_create_only(true);
-            let suffix = artifact_run_suffix(args.artifact_suffix.as_deref(), Utc::now());
-            let object_name = artifact_object_name(&args.output_config, &suffix);
-            println!("[*] Uploading Strategy Deployment Artifact to GCS ({object_name})...");
-            let uploaded = gcs
-                .upload_file(&args.output_config, &object_name, "application/json")
-                .await;
-            sinks.record("upload Strategy Deployment Artifact", uploaded);
-            print_phase_timing("upload_artifact", upload_start);
-        }
+    // Serialize Winner to output_config as authoritative StrategyDeploymentArtifact
+    let scorecard = HpoScorecard {
+        mean_is_sortino: winner.mean_is_sortino,
+        mean_oos_sortino: winner.mean_oos_sortino,
+        oos_profit_factor: winner.oos_profit_factor,
+        oos_sharpe: winner.oos_sharpe,
+        total_oos_trades: winner.total_oos_trades,
+        min_fold_trades: winner.min_fold_trades,
+        stability_score: winner.stability_score,
+        fitness: winner.fitness,
+        dsr_p_value: winner.dsr_p_value,
+        is_statistically_significant: winner.is_statistically_significant,
+        trials_evaluated: evaluations.len(),
+    };
+
+    let deployment_artifact = StrategyDeploymentArtifact {
+        schema_version: "1.0".to_string(),
+        spec: sweep_spec.with_config(winner.config.clone()),
+        hpo_scorecard: Some(scorecard),
+    };
+
+    if let Some(parent) = args.output_config.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let artifact_json = serde_json::to_string_pretty(&deployment_artifact)?;
+    fs::write(&args.output_config, artifact_json)?;
+    println!(
+        "\n[SAVED] Strategy Deployment Artifact saved to: {}",
+        args.output_config.display()
+    );
+    println!(
+        "        • Strategy:     {}",
+        deployment_artifact.spec.strategy_id
+    );
+    println!(
+        "        • Symbol:       {}",
+        deployment_artifact.spec.symbol
+    );
+    println!("        • Sampling:     DollarBar(${})", args.dollar_bar);
+
+    if args.gcs_upload {
+        let upload_start = Instant::now();
+        // Create-only: a retried Batch task re-uploading the same name keeps the
+        // first attempt's artifact instead of failing on overwrite.
+        let gcs = GcsArtifactSink::from_env()
+            .with_strict(args.strict_sinks)
+            .with_create_only(true);
+        let suffix = artifact_run_suffix(args.artifact_suffix.as_deref(), Utc::now());
+        let object_name = artifact_object_name(&args.output_config, &suffix);
+        println!("[*] Uploading Strategy Deployment Artifact to GCS ({object_name})...");
+        let uploaded = gcs
+            .upload_file(&args.output_config, &object_name, "application/json")
+            .await;
+        sinks.record("upload Strategy Deployment Artifact", uploaded);
+        print_phase_timing("upload_artifact", upload_start);
     }
 
     sinks.finish()?;
