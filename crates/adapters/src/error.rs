@@ -37,6 +37,18 @@ pub enum AdapterError {
     #[error("domain error: {0}")]
     DomainError(#[from] domain::DomainError),
 
+    /// A downloaded archive does not hash to the digest published next to it.
+    #[error("checksum mismatch for {file}: expected {expected}, got {actual}")]
+    ChecksumMismatch {
+        file: String,
+        expected: String,
+        actual: String,
+    },
+
+    /// A published checksum file carries no usable SHA-256 digest.
+    #[error("unreadable checksum file: {0}")]
+    ChecksumUnreadable(String),
+
     #[error("{0}")]
     General(String),
 }

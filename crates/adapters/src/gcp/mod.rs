@@ -12,7 +12,7 @@ pub mod retry;
 pub mod secret_manager;
 pub mod telegram;
 #[cfg(test)]
-mod test_http;
+pub(crate) mod test_http;
 
 pub use auth::GcpAuthResolver;
 pub use bigquery::{BigQueryRecord, BigQuerySink};

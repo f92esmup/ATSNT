@@ -1,6 +1,6 @@
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -9,6 +9,12 @@ use zip::ZipArchive;
 
 use crate::binance_parquet::BinanceParquetWriter;
 use crate::error::AdapterError;
+
+#[cfg(test)]
+mod checksum_tests;
+
+/// Origin of the public Binance Vision archives.
+const BINANCE_VISION_BASE_URL: &str = "https://data.binance.vision";
 
 /// Parameters defining which Binance historical dataset to fetch.
 #[derive(Debug, Clone)]
@@ -21,20 +27,25 @@ pub struct FetchParams {
 }
 
 impl FetchParams {
-    /// Constructs the official Binance Vision public download URL.
-    pub fn download_url(&self) -> String {
+    /// Path of the archive on the Binance Vision host, without the origin.
+    pub fn archive_path(&self) -> String {
         let sym = self.symbol.to_uppercase();
         if let Some(day) = self.day {
             format!(
-                "https://data.binance.vision/data/futures/um/daily/aggTrades/{sym}/{sym}-aggTrades-{:04}-{:02}-{:02}.zip",
+                "/data/futures/um/daily/aggTrades/{sym}/{sym}-aggTrades-{:04}-{:02}-{:02}.zip",
                 self.year, self.month, day
             )
         } else {
             format!(
-                "https://data.binance.vision/data/futures/um/monthly/aggTrades/{sym}/{sym}-aggTrades-{:04}-{:02}.zip",
+                "/data/futures/um/monthly/aggTrades/{sym}/{sym}-aggTrades-{:04}-{:02}.zip",
                 self.year, self.month
             )
         }
+    }
+
+    /// Constructs the official Binance Vision public download URL.
+    pub fn download_url(&self) -> String {
+        format!("{BINANCE_VISION_BASE_URL}{}", self.archive_path())
     }
 
     /// Computes the target Parquet file path on disk.
@@ -63,10 +74,54 @@ pub struct FetchSummary {
     pub parquet_size_bytes: u64,
 }
 
+/// Checks `archive` against the SHA-256 digest in a Binance `.CHECKSUM` file
+/// (`<hex digest>  <file name>`). Only the first token is read.
+pub(crate) fn verify_archive_sha256(
+    archive: &Path,
+    checksum_file: &str,
+) -> Result<(), AdapterError> {
+    let expected = checksum_file
+        .split_whitespace()
+        .next()
+        .filter(|digest| digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| {
+            AdapterError::ChecksumUnreadable(format!("no SHA-256 digest for {}", archive.display()))
+        })?;
+
+    let mut file = File::open(archive)?;
+    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = [0u8; 65536];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        context.update(&buffer[..read]);
+    }
+    let actual: String = context
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(AdapterError::ChecksumMismatch {
+            file: archive.display().to_string(),
+            expected,
+            actual,
+        })
+    }
+}
+
 /// Automated Binance historical market data ETL downloader and Parquet converter.
 pub struct BinanceDataFetcher {
     client: Client,
     show_progress: bool,
+    base_url: String,
 }
 
 impl Default for BinanceDataFetcher {
@@ -85,12 +140,19 @@ impl BinanceDataFetcher {
         Self {
             client,
             show_progress: true,
+            base_url: BINANCE_VISION_BASE_URL.to_string(),
         }
     }
 
     /// Enables or disables terminal progress bars (disable when fetching concurrently).
     pub fn with_progress(mut self, show_progress: bool) -> Self {
         self.show_progress = show_progress;
+        self
+    }
+
+    /// Points the fetcher at another origin serving the same layout (local test servers).
+    pub fn with_base_url(mut self, base_url: String) -> Self {
+        self.base_url = base_url;
         self
     }
 
@@ -105,7 +167,7 @@ impl BinanceDataFetcher {
     /// Downloads the official ZIP archive and streams it directly into a compressed Parquet file.
     pub fn fetch_and_convert(&self, params: &FetchParams) -> Result<FetchSummary, AdapterError> {
         let start_time = Instant::now();
-        let url = params.download_url();
+        let url = format!("{}{}", self.base_url, params.archive_path());
         let target_parquet = params.target_parquet_path();
 
         if let Some(parent) = target_parquet.parent() {
@@ -113,6 +175,17 @@ impl BinanceDataFetcher {
         }
 
         println!("Connecting to: {url}");
+
+        // Step 0: the published digest comes first, so an archive is never converted unchecked
+        let checksum_url = format!("{url}.CHECKSUM");
+        let checksum_response = self.client.get(&checksum_url).send()?;
+        if !checksum_response.status().is_success() {
+            return Err(AdapterError::General(format!(
+                "Failed to download checksum from {checksum_url} (HTTP {})",
+                checksum_response.status()
+            )));
+        }
+        let checksum = checksum_response.text()?;
 
         // Step 1: Stream download ZIP to a temporary file
         let mut response = self.client.get(&url).send()?;
@@ -148,7 +221,10 @@ impl BinanceDataFetcher {
         temp_zip_writer.flush()?;
         download_pb.finish_with_message("Download complete");
 
-        // Step 2: Open ZIP archive and stream CSV into Parquet
+        // Step 2: a corrupt or truncated archive stops here; the temporary file is removed on drop
+        verify_archive_sha256(temp_zip_file.path(), &checksum)?;
+
+        // Step 3: Open ZIP archive and stream CSV into Parquet
         let zip_reader = File::open(temp_zip_file.path())?;
         let mut archive = ZipArchive::new(zip_reader)?;
 
