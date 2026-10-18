@@ -15,7 +15,7 @@ INSTANCE_NAME="${GCP_VM_INSTANCE:-atsnt-engine}"
 ZONE="${GCP_VM_ZONE:-europe-west1-b}"
 REMOTE_USER="${GCP_VM_USER:-f92esmup}"
 REMOTE_DIR="/home/${REMOTE_USER}/atsnt"
-CONFIG_FILE="${1:-configs/hpo_btcusdt_2026.json}"
+CONFIG_FILE="${1:-configs/hpo_btcusdt_2026-hpo-btcusdt-2026-500eur-v3.json}"
 
 echo "=============================================================================="
 echo " ATSNT - Safe Cloud Deployment Pipeline -> VM: ${INSTANCE_NAME} (${ZONE})"
@@ -29,6 +29,15 @@ fi
 
 if [ ! -f "${CONFIG_FILE}" ]; then
     echo "[-] Error: Configuration artifact '${CONFIG_FILE}' not found."
+    exit 1
+fi
+
+# The unit, not this argument, decides what the VM runs: deploying one artifact while the unit
+# starts another would silently trade the wrong configuration.
+UNIT_FILE="docs/deployment/atsnt.service"
+if ! grep -q -- "--config [^ ]*/configs/$(basename "${CONFIG_FILE}")\( \|$\)" "${UNIT_FILE}"; then
+    echo "[-] Error: ${UNIT_FILE} does not start '$(basename "${CONFIG_FILE}")'."
+    echo "    Point its --config at the artifact you deploy, then re-run."
     exit 1
 fi
 
