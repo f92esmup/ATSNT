@@ -10,11 +10,14 @@ Everything below lives in `RiskPolicy::size_order` (`crates/domain/src/risk.rs`)
 **current marked-to-market equity** at the moment of the signal, not on the initial capital.
 
 1. `risk_usdt = equity * risk_per_trade_pct`
-2. `stop_distance = |entry_price - stop_loss|` (the stop comes from the strategy)
+2. `stop_distance = execution_price - stop_loss` for a long, `stop_loss - execution_price` for a
+   short (the stop comes from the strategy); a stop on the wrong side of the price is rejected
 3. `quantity = risk_usdt / stop_distance`
 4. The quantity is **clamped** to `max_leverage` and floored to the lot step.
 5. The order is **rejected** (never clamped) when it breaks `min_order_quantity`,
-   `min_order_notional`, `max_order_notional` or `max_position_notional`.
+   `min_order_notional`, `max_order_notional` (`OrderSizeExceeded`) or `max_position_notional`
+   (`PositionLimitExceeded`). Before any sizing, a session drawdown at or above
+   `max_daily_drawdown_pct` rejects the order with `CircuitBreakerTriggered`.
 
 Consequence: a tight stop produces a large notional (`notional = risk_usdt / stop_pct`). The
 notional caps are the last line against that and against a balance-reading bug; they reject.
@@ -78,8 +81,8 @@ reference values (0.05% and 0.05%) `c = 0.2%`.
   With `t = s = 0.5%` you need 70%; with `t = 1%, s = 0.5%` you need about 47%.
 
 That is why `min_take_profit_pct` is a searched hyperparameter (`min_take_profit_pcts` in the
-space file). The slippage value is a placeholder until it is measured from real fills (roadmap
-phase 4). `live_trading --record-fills` records them; `parity_check` uses them today to recommend
+space file). The slippage value is a placeholder until it is measured from real fills (future work:
+slippage calibration from `--record-fills`, out of the current scope). `live_trading --record-fills` records them; `parity_check` uses them today to recommend
 the simulator's order latency, not the slippage.
 
 ## 5. Hyperparameter search
@@ -130,7 +133,8 @@ prints the commands that re-grant it. A failed job is retried only after a Spot 
 January to August and the backtest of the winner reads only the held-out months, so that backtest is
 an honest out-of-sample check. `--capital` still overrides the capital of the file.
 
-Candidates: the space has 41,160 combinations and the HPO samples them at random. More candidates are
+Candidates: the space has 41,160 combinations and the HPO evaluates a fixed-seed random subset (a
+shuffle with seed 42, so the same `--candidates` always gives the same subset). More candidates are
 not better on their own: every extra trial raises the chance that the winner is luck, which the
 Deflated Sharpe ratio penalizes. 120 candidates still try each value of each parameter dozens of
 times. The cost grows linearly with candidates times bars.
@@ -140,11 +144,13 @@ times. The cost grows linearly with candidates times bars.
 The search ranks by out-of-sample quality. See `docs/architecture/04-hpo-and-walk-forward.md`,
 sections 2.2 to 2.4.
 
-- **Eligible.** Only a candidate with at least 30 closed trades in every fold can win
-  (`--min-trades-per-fold`). The job fails, and deploys nothing, when none reaches it.
-- **Fitness.** Fitness is the mean out-of-sample Sortino per trade times the stability (the share
-  of the edge that one-step neighbours keep). Per-trade Sortino values are small fractions: 0.1 is
-  a good figure, not a poor one.
+- **Eligible.** Only a candidate with at least 30 closed trades in every in-sample and every
+  out-of-sample fold can win (`--min-trades-per-fold`). The job fails, and deploys nothing, when
+  none reaches it.
+- **Fitness.** Fitness is non-zero only for an eligible candidate with a positive mean in-sample
+  Sortino; it is the mean out-of-sample Sortino per trade times the stability, the share of the
+  edge that one-step neighbours keep, measured on the first fold's in-sample bars. Per-trade
+  Sortino values are small fractions: 0.1 is a good figure, not a poor one.
 - **DSR p-value.** It says whether the winner beats the best result expected from luck among all
   candidates. A winner with p ≥ 0.05 is reported as not significant.
 - **Deployment gate.** `paper_trading` and `live_trading` refuse a winner with fitness ≤ 0, a DSR
@@ -152,8 +158,9 @@ sections 2.2 to 2.4.
   or by a search run with `--min-trades-per-fold 0`). Only `--allow-unproven-strategy` overrides them, for instance to test the
   mechanics on testnet. The pipeline still runs the holdout backtest of such a winner, so the
   evidence is complete.
-- **Rejected signals** (`rejected_orders`). On a small account, `OrderSizeExceeded` means a stop
-  so tight that the risk-based size exceeds the notional cap (section 2). Many of them mean that
+- **Rejected signals** (`rejected_orders`). On a small account, `OrderSizeExceeded` (order cap)
+  or `PositionLimitExceeded` (position cap) means a stop so tight that the risk-based size
+  exceeds the notional cap (section 2). Many of them mean that
   the account size, not the market, limits the strategy.
 
 ## 7. Checklist before raising the capital

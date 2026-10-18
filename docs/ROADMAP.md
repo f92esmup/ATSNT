@@ -8,8 +8,9 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 ## Roadmap Milestones
 
 ### Milestone 1: Core Domain, CUSUM Strategy & 1:1 Backtest Engine
-- [x] Cargo Workspace multi-crate setup (`domain`, `strategies`, `adapters`, `backtest`; `web` decommissioned in Milestone 5).
-- [x] Zero floating-point rule enforced with `rust_decimal::Decimal`.
+- [x] Cargo Workspace multi-crate setup (`domain`, `ports`, `strategies`, `adapters`, `backtest`; `web` decommissioned in Milestone 5).
+- [x] Zero floating-point rule enforced with `rust_decimal::Decimal` for prices, quantities and money (statistics such as Sharpe, DSR and the walk-forward ratios use `f64`).
+- [x] Hexagonal rules enforced by `crates/backtest/tests/architecture_contract.rs`: dependency direction between crates, no I/O crate or I/O API in `domain`/`strategies`/`ports`, ports hold only traits and plain data, network clients stay in `adapters` (the testnet harness is the one documented exception), runners resolve strategies through the registry.
 - [x] Domain models (`Trade`, `DollarBar`, `DollarBarAggregator` with continuous rollover).
 - [x] Mathematical indicators: `RollingZScore` and symmetric `CusumFilter`.
 - [x] Execution lifecycle state machine (`OrderIntent` $\rightarrow$ `Order` FSM $\rightarrow$ `Position`).
@@ -22,6 +23,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 
 ### Milestone 2: Real Market Data ETL, HPO Engine & Monte Carlo Validation
 - [x] Binance data fetcher utility to download official `aggTrades` daily/monthly datasets and convert to Parquet.
+- [x] Every archive is verified against its published `.CHECKSUM` (SHA-256) before conversion; a mismatch never produces a Parquet file.
 - [x] Multi-threaded CPU parallelism engine powered by `rayon`.
 - [x] Walk-Forward Optimization (WFO) with Purged & Embargoed temporal splits (AFML Ch. 7).
 - [x] Parameter Stability Plateau scoring (anti-overfitting).
@@ -33,7 +35,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 ---
 
 ### Milestone 3: Live Market Data Ingestion (WebSocket Adapter)
-- [x] Implement asynchronous Binance WebSocket client in `crates/adapters` (`wss://fstream.binance.com/ws/{symbol}@aggTrade`).
+- [x] Implement asynchronous Binance WebSocket client in `crates/adapters` (production `wss://fstream.binance.com/ws/{symbol}@aggTrade`, testnet `wss://fstream.binancefuture.com/ws/{symbol}@aggTrade`, the default).
 - [x] Reconnection state machine with exponential backoff and heartbeat ping/pong.
 - [x] Stream real-time `Trade` events directly into `DollarBarAggregator`.
 
@@ -70,7 +72,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 *(Architecture specification: [`docs/architecture/10-gcp-cloud-architecture.md`](architecture/10-gcp-cloud-architecture.md))*
 - [x] **De-risking & Zero-Trust**: In-process web servers are retired to ensure the trading engine runs headless, air-gapped in private VPC networks without public open ports.
 - [x] **Reporting & Business Intelligence**: Post-trade auditing, Monte Carlo trajectories, and HPO parameter evaluations stream to BigQuery for visualization by downstream consumers (the engine ships no frontend).
-- [x] **Proactive Mobile Alerts**: Execution fills, risk threshold breaches, and circuit breakers trigger outbound webhooks (Telegram/Discord) directly to operators' devices.
+- [x] **Proactive Mobile Alerts**: Telegram alerts for position entries and exits, circuit breakers, rejected or failed orders, account drift, feed outages and recoveries, a 12 h heartbeat and the stop notice, delivered from a bounded queue so a slow Telegram never delays a trade (list in [07-web-telemetry-dashboard.md](architecture/07-web-telemetry-dashboard.md)).
 
 ---
 
@@ -95,7 +97,7 @@ ATSNT is a modular, high-reliability algorithmic trading engine built 100% in Ru
 - [x] Paper trading runs the live `TradingSession` on the tick-level `SimulatedVenue`.
 - [x] Perpetual funding at every settlement and isolated-margin liquidation in both the bar-level engine and the tick-level venue (shared rules in `domain::futures`).
 - [x] Tick-level `SimulatedVenue` (`--fill-model tick`): order latency, tape-walk market fills and tape-armed conditional exits, driven through the live `TradingSession`; used to validate finalists, while the bar-level engine stays the optimizer loop.
-- [ ] Known gaps, not yet modeled by the simulator: real mark-price stop triggers (last trade price is the proxy), bid/ask spread, notional-bracket maintenance margins, and live warm-up of rolling strategy windows.
+- [ ] Known gaps, not yet modeled by the simulator: real mark-price stop triggers (last trade price is the proxy), bid/ask spread and notional-bracket maintenance margins. The warm-up does not backfill the seconds between its REST fetch and the stream connect.
 - [x] Strategy warm-up from recent trades (`--warmup-minutes` in live and paper) and a parity harness (`live_trading --record-fills` + `parity_check`) that recommends the simulator's order latency from real fills.
 - [x] One session core shared by simulation, paper and live: `ExecutionVenue` port, `TradingSession` and the `SessionDriver` loop. Separate `Clock` and `MarketData` venue ports were judged unnecessary (time comes from the trade stream and market data already has `MarketDataStream`).
 - [x] Single strategy registry (`strategies::registry`, one line per strategy) and a generic contract suite; backtest, HPO, paper and live resolve strategies through it.
