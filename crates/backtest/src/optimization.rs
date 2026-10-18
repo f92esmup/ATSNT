@@ -13,9 +13,6 @@ use crate::error::BacktestError;
 use crate::metrics::{trade_returns, BacktestMetrics, ClosedTrade};
 use crate::walk_forward::WalkForwardFold;
 
-/// Backwards-compatibility alias for DollarBarsCusumSpace.
-pub type ParameterSpace = strategies::DollarBarsCusumSpace;
-
 /// Closed trades a candidate needs in every in-sample and out-of-sample fold to be ranked.
 ///
 /// Below it a ratio says more about luck than about the rule: a fold with two winning trades
@@ -543,7 +540,7 @@ mod tests {
     use super::*;
     use crate::walk_forward::WalkForwardConfig;
     use crate::walk_forward::WalkForwardSplitter;
-    use strategies::DollarBarsCusumStrategy;
+    use strategies::{DollarBarsCusumSpace, DollarBarsCusumStrategy};
 
     fn generate_synthetic_bars(count: usize) -> Vec<DollarBar> {
         let mut bars = Vec::with_capacity(count);
@@ -813,13 +810,13 @@ mod tests {
             ..BacktestConfig::default()
         };
 
-        let param_space = ParameterSpace {
+        let param_space = DollarBarsCusumSpace {
             rolling_window_lens: vec![5, 10],
             cusum_vol_multipliers: vec![dec!(1.0), dec!(1.5)],
             z_entry_thresholds: vec![dec!(1.0), dec!(1.5)],
             z_stop_thresholds: vec![dec!(2.5)],
             time_barrier_bars: vec![5],
-            ..ParameterSpace::default()
+            ..DollarBarsCusumSpace::default()
         };
 
         let optimizer =

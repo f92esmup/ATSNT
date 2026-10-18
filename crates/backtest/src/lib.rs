@@ -47,7 +47,7 @@ pub use monthly_guard::{marked_equity, utc_month_key, MonthlyGuard};
 pub use optimization::{
     calculate_parameter_stability, deflated_sharpe_p_value, expected_max_sharpe, plateau_stability,
     run_backtest_slice, run_backtest_slice_with_trades, CandidateEvaluation, FoldMetrics,
-    ParameterSpace, ReturnMoments, WalkForwardOptimizer, DEFAULT_MIN_TRADES_PER_FOLD,
+    ReturnMoments, WalkForwardOptimizer, DEFAULT_MIN_TRADES_PER_FOLD,
 };
 pub use paper::{
     PaperSessionOwner, PaperSessionRuntime, PaperTradingConfig, PaperTradingEvent,
