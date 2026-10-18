@@ -82,7 +82,7 @@ pub struct BigQuerySink {
     strict: bool,
     /// Base URL of the BigQuery REST API.
     endpoint: String,
-    /// Retries of transient failures (5xx, 429, timeouts).
+    /// Retries of transient failures (5xx, 429, timeouts, refused connections).
     retry: RetryPolicy,
 }
 
@@ -416,6 +416,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tolerant_sink_survives_a_persisting_server_error_after_its_retries() {
+        let server = test_http::ScriptedServer::start(&[
+            ("503 Service Unavailable", "{}"),
+            ("503 Service Unavailable", "{}"),
+            ("503 Service Unavailable", "{}"),
+        ]);
+        let sink = configured_sink(&server.base_url);
+
+        assert!(sink.record_metrics(&[one_run_row()]).await.is_ok());
+        assert_eq!(server.request_lines().len(), 3);
+    }
+
+    #[test]
+    fn every_row_kind_carries_an_insert_id_so_a_retried_insert_is_deduplicated() {
+        // A retry after a lost response resends committed rows; BigQuery drops rows whose
+        // insertId it has just seen, and the v_* views deduplicate by the same keys.
+        let run = crate::analytics::RunRow {
+            run_id: "r1".into(),
+            parent_run_id: None,
+            baseline_run_id: None,
+            run_type: "backtest".into(),
+            status: "completed".into(),
+            recorded_at: "t".into(),
+            started_at: "t".into(),
+            finished_at: None,
+            strategy_id: "s".into(),
+            symbol: "BTCUSDT".into(),
+            market_type: "usd_m_perpetual".into(),
+            sampling: "{}".into(),
+            params: "{}".into(),
+            execution_context: "{}".into(),
+            fill_model: "bar".into(),
+            data_source: None,
+            data_start: None,
+            data_end: None,
+            git_sha: None,
+        };
+        assert!(run.insert_id().is_some());
+        assert!(one_run_row().insert_id().is_some());
+        assert!(equity_point("entry", "t1").insert_id().is_some());
+    }
+
+    #[tokio::test]
     async fn a_rate_limit_is_retried() {
         let server = test_http::ScriptedServer::start(&[("429 Too Many Requests", "{}"), CLEAN]);
         let sink = configured_sink(&server.base_url).with_strict(true);
@@ -465,6 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_sink_tolerates_http_errors() {
+        // A client error is final (no retry); the persisting 5xx case is tested above.
         let server = test_http::OneShotServer::start("400 Bad Request", "{}");
         let sink = configured_sink(&server.base_url);
         assert!(sink.record_metrics(&[one_run_row()]).await.is_ok());

@@ -77,10 +77,31 @@ impl ScriptedServer {
                 )
             })
             .collect();
+        // Without a deadline, a sink that sends fewer requests than scripted (a regression)
+        // would leave the test waiting forever; the missing requests show up in the count.
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking test listener");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let handle = std::thread::spawn(move || {
             let mut lines = Vec::new();
             for response in responses {
-                let (stream, _) = listener.accept().expect("accept test connection");
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break Some(stream),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            if std::time::Instant::now() >= deadline {
+                                break None;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("accept test connection: {e}"),
+                    }
+                };
+                let Some(stream) = stream else { break };
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking test connection");
                 let mut reader = BufReader::new(stream);
                 let mut request_line = String::new();
                 reader
@@ -110,7 +131,8 @@ impl ScriptedServer {
         Self { base_url, handle }
     }
 
-    /// Waits until every scripted response was served and returns the request lines.
+    /// Waits until every scripted response was served, or 10 s passed, and returns the request
+    /// lines received.
     pub fn request_lines(self) -> Vec<String> {
         self.handle.join().expect("test server thread")
     }

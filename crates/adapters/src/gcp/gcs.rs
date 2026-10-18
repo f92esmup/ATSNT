@@ -34,7 +34,7 @@ pub struct GcsArtifactSink {
     strict: bool,
     /// Base URL of the Cloud Storage JSON API.
     endpoint: String,
-    /// Retries of transient failures (5xx, 429, timeouts).
+    /// Retries of transient failures (5xx, 429, timeouts, refused connections).
     retry: RetryPolicy,
     /// Whether uploads only create new objects (`ifGenerationMatch=0`).
     create_only: bool,

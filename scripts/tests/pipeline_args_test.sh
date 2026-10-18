@@ -161,6 +161,15 @@ touch "${SPLIT}/train/stale.parquet"
 OUT="$(cd "${WORK_DIR}" && bash "${PIPELINE}" --no-inhibit --skip-fetch --year 2026 --output-dir "${DATA_ROOT}" --bin-dir "${STUBS}" --holdout-from-month 2 --config "${WORK_DIR}/winner.json" 2>&1)"
 STATUS=$?
 check "holdout (real): a rerun leaves no stale entry" '[ "${STATUS}" -eq 0 ] && [ ! -e "${SPLIT}/train/stale.parquet" ] && [ -L "${SPLIT}/train/BTCUSDT-aggTrades-2026-01.parquet" ]'
+# A link that fails while building the split stops the run and keeps the previous split.
+FAIL_LN="${WORK_DIR}/fail-ln"
+mkdir -p "${FAIL_LN}"
+printf '#!/usr/bin/env bash\ncase "$*" in *-01.parquet*) exit 1 ;; esac\nexec env PATH=/usr/bin:/bin ln "$@"\n' > "${FAIL_LN}/ln"
+chmod +x "${FAIL_LN}/ln"
+OUT="$(cd "${WORK_DIR}" && PATH="${FAIL_LN}:${PATH}" bash "${PIPELINE}" --no-inhibit --skip-fetch --year 2026 --output-dir "${DATA_ROOT}" --bin-dir "${STUBS}" --holdout-from-month 2 --config "${WORK_DIR}/winner.json" 2>&1)"
+STATUS=$?
+check "holdout (real): a failed link stops the run and keeps the previous split" '[ "${STATUS}" -ne 0 ] && has "could not link the split" && [ -L "${SPLIT}/train/BTCUSDT-aggTrades-2026-01.parquet" ] && [ -z "$(ls -d "${SPLIT}".staging.* 2>/dev/null)" ]'
+
 check "holdout (real): the split is built aside and moved into place" '[ -z "$(ls -d "${SPLIT}".staging.* 2>/dev/null)" ] && has "[*] Holdout split:"'
 rm -rf "${DATA_ROOT}/splits" "${WORK_DIR}/winner.json"
 rm -f "${DATA_ROOT}/BTCUSDT/BTCUSDT-aggTrades-2026-02-15.parquet"

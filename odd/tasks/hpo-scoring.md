@@ -134,3 +134,10 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
 - L14 Gate review (lineage review-a0d51521d5eff978): approved and acknowledged. Follow-ups fixed in the next commit: R3-001 (the gate now checks the p-value, not only the flag), R3-002 (wording of the no-eligible-fold reason), R2-003, R2-006 and R3-006 (docs and banner wording). Still open: R3-003 (no binary-level test of the override; it needs the network after the gate) and R3-004 (the override flag gives no notice when unused).
 - L15 Follow-up review (lineage review-b132315f39d43f9d): approved and acknowledged; advisories R3-001..R3-004 are wording and boundary-test suggestions, left open. Delivered: fast-forward of main to this branch and push to origin (user: "haz puag").
 - L16 (2026-10-18) User: "Planifica la solución de todos esos pendientes. Quiero cerrar esta refactorizacuon de una vez" -> plan presented -> "Lo apruebo". Branch feat/hpo-closeout from main 170d79a.
+- L17 Closeout review (lineage review-1d4d207c63b61f6b, 4 lenses): approved and acknowledged. Its findings were fixed in the next commit:
+  - R3-001/R2-003/R4: `set -e` is ignored inside `if !`, so a failed link went unnoticed. RED: the run continued; each link now checks its own status.
+  - R4: retry-delay env validation (0-60,000 ms), saturating doubling, Retry-After on 429 (RED, then GREEN).
+  - R4/R1: duplicate inserts on retry. Verified: every row kind has an insertId; a test pins it, and the docs state it.
+  - R4: tolerant 5xx path tested again.
+  - R2: wording (refused connections), the reason for logging to both stdout and tracing, the 400-vs-500 test comment.
+  - R3-002: ScriptedServer accept deadline (10 s).

@@ -451,12 +451,17 @@ prepare_holdout_split() {
     mkdir -p "$(dirname "${SPLIT_ROOT}")"
     local staging
     staging="$(mktemp -d "${SPLIT_ROOT}.staging.XXXXXX")"
-    if ! (
-        set -e
-        mkdir -p "${staging}/train" "${staging}/holdout"
-        for file in "${train[@]}"; do ln -s "$(cd "$(dirname "${file}")" && pwd)/$(basename "${file}")" "${staging}/train/"; done
-        for file in "${holdout[@]}"; do ln -s "$(cd "$(dirname "${file}")" && pwd)/$(basename "${file}")" "${staging}/holdout/"; done
-    ); then
+    # Every step checks its own status: bash ignores `set -e` inside an `if` condition.
+    link_into() {
+        local dir="$1" file absolute
+        shift
+        mkdir -p "${dir}" || return 1
+        for file in "$@"; do
+            absolute="$(cd "$(dirname "${file}")" && pwd)/$(basename "${file}")" || return 1
+            ln -s "${absolute}" "${dir}/" || return 1
+        done
+    }
+    if ! link_into "${staging}/train" "${train[@]}" || ! link_into "${staging}/holdout" "${holdout[@]}"; then
         rm -rf "${staging}"
         echo "[ERROR] --holdout-from-month ${HOLDOUT_PADDED}: could not link the split into ${SPLIT_ROOT}"
         exit 1

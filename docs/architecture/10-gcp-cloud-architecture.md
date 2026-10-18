@@ -238,7 +238,11 @@ done
 
 - **BigQuery columns.** Every column that `scripts/gcp/bigquery_schema.sql` declares for the four tables must exist in the deployed table (`bq show --schema`). That includes the columns of the `CREATE TABLE` statements and those that an `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` adds later. The expected list is read from the DDL by `scripts/gcp/ddl_columns.py`, so a new column is checked as soon as it is declared. A missing column would make BigQuery reject the rows that carry it after the whole search. The script names `table: columns` and prints the idempotent fix, `bq query --use_legacy_sql=false --project_id=<project> < scripts/gcp/bigquery_schema.sql`, which only adds columns and refreshes the views.
 
-Inside the job, the BigQuery and GCS sinks retry a transient failure (HTTP 5xx, 429, a timeout or a refused connection) up to 3 attempts, waiting 1 s and then 2 s. A client error (4xx other than 429) is final. `ATSNT_GCP_RETRY_BASE_MS` overrides the base wait, and tests set it to 0. A retried insert is harmless: the views deduplicate by `insertId` and run keys, and the artifact upload is create-only.
+Inside the job, the BigQuery and GCS sinks retry a transient failure (HTTP 5xx, 429, a timeout or a refused connection) up to 3 attempts, waiting 1 s and then 2 s. A 429 waits at least its `Retry-After`, up to 30 s. A client error (4xx other than 429) is final.
+
+`ATSNT_GCP_RETRY_BASE_MS` overrides the base wait with whole milliseconds from 0 to 60,000, and tests set it to 0. An invalid value is reported and the default is kept.
+
+A retried insert is harmless. Every row kind carries an `insertId`: `run_id_status`, `run_id_scope`, `trade_id` or the series point key. BigQuery drops a row whose `insertId` it has just seen, and the `v_*` views deduplicate by the same keys. The artifact upload is create-only.
 
 The script also checks that the machine type exists in the region (custom types included) and that `CPUS_ALL_REGIONS` and the regional family quota (`N2_CPUS`, `C2D_CPUS`, ... or `PREEMPTIBLE_CPUS` for Spot when granted) have enough free vCPU; without that quota Batch keeps the job `QUEUED` forever (`CODE_GCE_QUOTA_EXCEEDED`). `c2-standard-60` is not offered in `europe-southwest1`. The first submission after enabling the Batch API can fail within seconds while its service agent is granted its role; submit again.
 
