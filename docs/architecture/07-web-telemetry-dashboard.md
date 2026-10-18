@@ -84,7 +84,7 @@ pub trait AlertNotifier: Send + Sync {
 
 ### 2.2 Telegram Mobile Alerting (`TelegramNotifier`)
 
-`paper_trading` and `live_trading` never wait on Telegram: alerts go into a bounded queue (`backtest::operator_alerts::AlertQueue`, 64 messages) drained by its own task. When the queue is full a message is dropped and counted in the log; a slow or unreachable Telegram cannot delay a trade. Pending alerts get 5 seconds to leave at shutdown.
+`paper_trading` and `live_trading` never wait on Telegram: alerts go into a bounded queue (`backtest::operator_alerts::AlertQueue`, 64 messages) drained by its own task. A delivery that takes longer than 10 s is abandoned so later alerts still go out; when the queue is full a new message is dropped and counted in the log. A slow or unreachable Telegram cannot delay a trade. Pending alerts get 5 seconds to leave when the process exits, on an error exit too.
 
 What an operator is told (`paper` and `live` unless noted):
 
@@ -96,11 +96,11 @@ What an operator is told (`paper` and `live` unless noted):
 | ✅ Feed back | First market trade after a reported outage | once per outage |
 | 🟢 Position opened / 🔴 closed | Entry fill / exit with net PnL | none |
 | 🚨 Circuit breaker | Monthly breaker (live), daily or monthly breaker (paper) | once per trip |
-| 🚫 Order rejected (live) | An order reported `REJECTED` on the user data stream (once per order id), or an entry refused by the exchange REST API | per order id / 1 per min |
+| 🚫 Order rejected (live) | An order reported `REJECTED` on the user data stream (once per order id; the stream carries no reason), or an entry refused by the exchange REST API (with its error) | per order id / 1 per min |
 | 🚨 Exits, entry timeouts, account drift (live) | Protective-order failures, unresolved entries, account profile mismatch or unverifiable account | as before |
 | 📊 Daily summary | 20:00 Madrid | 1 per day |
 
-A process crash cannot be reported by the process itself. Every restart sends a heartbeat, so a crash loop shows as repeated start notices; `docs/deployment/atsnt-alert@.service` (installed by hand) also sends a notice when systemd stops restarting the service.
+A process crash cannot be reported by the process itself. Every restart sends a heartbeat, so a crash loop shows as repeated start notices; `docs/deployment/atsnt-alert@.service` (installed by hand, with an `ExecStopPost=` hook in `atsnt.service`) also sends a notice on every unexpected stop.
 
 ---
 

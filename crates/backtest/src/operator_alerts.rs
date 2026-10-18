@@ -19,6 +19,9 @@ use crate::alert_throttle::AlertThrottle;
 /// Alerts waiting for delivery before new ones are dropped.
 pub const DEFAULT_ALERT_QUEUE_CAPACITY: usize = 64;
 
+/// Longest a single delivery may take before it is abandoned and the next alert goes out.
+pub const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Bounded, non-blocking alert outbox drained by a dedicated task.
 pub struct AlertQueue {
     sender: mpsc::Sender<String>,
@@ -32,8 +35,16 @@ impl AlertQueue {
         let (sender, mut receiver) = mpsc::channel::<String>(capacity.max(1));
         let drain = tokio::spawn(async move {
             while let Some(message) = receiver.recv().await {
-                if let Err(error) = notifier.send_alert(&message).await {
-                    tracing::warn!(target: "telegram", %error, "Alert could not be delivered");
+                // A delivery that never answers would hold every later alert, critical ones
+                // included, behind it; past the deadline it is abandoned.
+                match tokio::time::timeout(DELIVERY_TIMEOUT, notifier.send_alert(&message)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(target: "telegram", %error, "Alert could not be delivered");
+                    }
+                    Err(_) => {
+                        tracing::warn!(target: "telegram", "Alert delivery timed out; abandoned");
+                    }
                 }
             }
         });
@@ -101,8 +112,9 @@ impl FeedStatus {
 /// Decides when a quiet or failing market feed must be reported.
 ///
 /// Down after more than [`FeedMonitor::STALE_AFTER_MS`] without a trade or after
-/// [`FeedMonitor::FAILED_RECONNECTS`] failed reconnects in a row; repeated at most once per
-/// [`FeedMonitor::REPEAT_MS`]; the first trade afterwards reports the recovery once.
+/// [`FeedMonitor::FAILED_RECONNECTS`] failed reconnects in a row; outage alerts go out at most
+/// once per [`FeedMonitor::REPEAT_MS`], recoveries in between included; the first trade after
+/// an outage reports the recovery once.
 #[derive(Debug)]
 pub struct FeedMonitor {
     last_trade_ms: i64,
@@ -134,8 +146,9 @@ impl FeedMonitor {
         if !self.down {
             return None;
         }
+        // The repeat limit is not reset: a flapping feed still gets one outage alert per
+        // REPEAT_MS, not one per flap.
         self.down = false;
-        self.repeats.reset();
         Some(FeedStatus::Recovered { silent_secs })
     }
 
@@ -212,11 +225,13 @@ mod tests {
 
     use super::*;
 
-    /// Records every alert it is asked to send; fails the ones listed in `fail`.
+    /// Records every alert it is asked to send; fails the ones listed in `fail` and never
+    /// answers the ones listed in `hang`.
     #[derive(Clone, Default)]
     struct Recorder {
         sent: Arc<Mutex<Vec<String>>>,
         fail: Vec<String>,
+        hang: Vec<String>,
     }
 
     impl AlertNotifier for Recorder {
@@ -225,8 +240,12 @@ mod tests {
         fn send_alert(&self, message: &str) -> impl Future<Output = Result<(), String>> + Send {
             let sent = Arc::clone(&self.sent);
             let fails = self.fail.iter().any(|f| f == message);
+            let hangs = self.hang.iter().any(|h| h == message);
             let message = message.to_string();
             async move {
+                if hangs {
+                    std::future::pending::<()>().await;
+                }
                 if fails {
                     return Err("channel down".to_string());
                 }
@@ -289,6 +308,25 @@ mod tests {
         assert_eq!(*recorder.sent.lock().expect("lock"), vec!["after"]);
     }
 
+    /// A request that never answers must not hold the queue: later (possibly critical)
+    /// alerts are still delivered once the delivery deadline passes.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_delivery_is_abandoned_so_later_alerts_still_go_out() {
+        let recorder = Recorder {
+            hang: vec!["stuck".to_string()],
+            ..Recorder::default()
+        };
+        let queue = AlertQueue::spawn(recorder.clone(), 8);
+
+        queue.send("stuck");
+        queue.send("critical");
+        queue
+            .shutdown(DELIVERY_TIMEOUT + Duration::from_secs(5))
+            .await;
+
+        assert_eq!(*recorder.sent.lock().expect("lock"), vec!["critical"]);
+    }
+
     #[test]
     fn a_flowing_feed_raises_nothing() {
         let mut feed = FeedMonitor::new(0);
@@ -343,8 +381,20 @@ mod tests {
             Some(FeedStatus::Recovered { silent_secs: 120 })
         );
         assert_eq!(feed.on_trade(121_000), None);
-        // The repeat limit restarts: a new outage alerts at once.
-        assert!(feed.on_check(182_000, 0).is_some());
+    }
+
+    /// "At most once per 10 min": a feed that flaps (down, one trade, down again) does not
+    /// get a new outage alert before 10 minutes have passed since the previous one.
+    #[test]
+    fn a_flapping_feed_alerts_at_most_once_per_ten_minutes() {
+        let mut feed = FeedMonitor::new(0);
+        assert!(feed.on_check(61_000, 0).is_some());
+        assert!(feed.on_trade(62_000).is_some());
+
+        assert_eq!(feed.on_check(124_000, 0), None);
+        assert!(feed.on_trade(125_000).is_some());
+        assert_eq!(feed.on_check(660_999, 0), None);
+        assert!(feed.on_check(661_000, 0).is_some());
     }
 
     #[test]

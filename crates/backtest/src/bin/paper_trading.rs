@@ -100,6 +100,16 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Owned here so queued alerts are flushed on every exit path, early errors included.
+    let mut alerts = None;
+    let result = run(&mut alerts).await;
+    if let Some(alerts) = alerts {
+        alerts.shutdown(Duration::from_secs(5)).await;
+    }
+    result
+}
+
+async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let args = Args::parse();
     let started_at_ms = now_unix_ms();
@@ -185,7 +195,7 @@ async fn main() -> Result<()> {
     };
 
     let secret_manager = GcpSecretManager::from_env();
-    let telegram = if args.telegram_alerts {
+    if args.telegram_alerts {
         let t = TelegramNotifier::from_gcp_or_env(&secret_manager).await;
         println!(
             " Telegram Alerts:      {}",
@@ -196,10 +206,9 @@ async fn main() -> Result<()> {
             }
         );
         // Alerts are delivered from their own task: the trading loop only enqueues them.
-        Some(AlertQueue::spawn(t, DEFAULT_ALERT_QUEUE_CAPACITY))
-    } else {
-        None
-    };
+        *alerts = Some(AlertQueue::spawn(t, DEFAULT_ALERT_QUEUE_CAPACITY));
+    }
+    let telegram: &Option<AlertQueue> = alerts;
 
     let market_type = if args.spot {
         MarketType::Spot
@@ -750,11 +759,6 @@ async fn main() -> Result<()> {
         args.capital + metrics.net_profit
     );
     println!("============================================================");
-
-    // Give queued alerts (the stop notice included) a moment to leave before the process exits.
-    if let Some(alerts) = telegram {
-        alerts.shutdown(Duration::from_secs(5)).await;
-    }
 
     Ok(())
 }

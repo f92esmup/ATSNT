@@ -174,6 +174,16 @@ fn validate_collateral_tolerance(is_testnet: bool, allow_foreign_collateral: boo
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Owned here so queued alerts are flushed on every exit path, early errors included.
+    let mut alerts = None;
+    let result = run(&mut alerts).await;
+    if let Some(alerts) = alerts {
+        alerts.shutdown(Duration::from_secs(5)).await;
+    }
+    result
+}
+
+async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -338,7 +348,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    let telegram = if args.telegram_alerts {
+    if args.telegram_alerts {
         let t = TelegramNotifier::from_gcp_or_env(&secret_manager).await;
         println!(
             " Telegram Alerts:      {}",
@@ -349,10 +359,9 @@ async fn main() -> Result<()> {
             }
         );
         // Alerts are delivered from their own task: the trading loop only enqueues them.
-        Some(AlertQueue::spawn(t, DEFAULT_ALERT_QUEUE_CAPACITY))
-    } else {
-        None
-    };
+        *alerts = Some(AlertQueue::spawn(t, DEFAULT_ALERT_QUEUE_CAPACITY));
+    }
+    let telegram: &Option<AlertQueue> = alerts;
 
     let strategy = loaded.strategy;
     validate_strategy_market(&strategy, MarketType::UsdMPerpetual)?;
@@ -539,7 +548,7 @@ async fn main() -> Result<()> {
         println!("[*] Warm-up: {trade_count} trades formed {bars} dollar bars");
     }
     let sink = EventSink {
-        telegram: &telegram,
+        telegram,
         bq: &bq_sink,
         run_ctx: &run_ctx,
         symbol: &symbol_upper,
@@ -723,8 +732,8 @@ async fn main() -> Result<()> {
 
                         if update.status == "REJECTED" && rejections.first(&update.order_id.to_string()) {
                             let text = format!(
-                                "🚫 *ATSNT ORDER REJECTED* `{symbol_upper}`: order {} ({}) {:?} was rejected by the exchange.",
-                                update.order_id, update.client_order_id, update.side
+                                "🚫 *ATSNT ORDER REJECTED* `{symbol_upper}`: order {} ({}) {:?}, status {}. Reason: not reported by the user data stream; check the order history on the exchange.",
+                                update.order_id, update.client_order_id, update.side, update.status
                             );
                             eprintln!("[CRITICAL] {text}");
                             if let Some(t) = &telegram {
@@ -891,12 +900,6 @@ async fn main() -> Result<()> {
         {
             println!("[WARN] Failed to record live run metrics: {e}");
         }
-    }
-
-    // Give queued alerts (the stop notice included) a moment to leave before the process exits.
-    drop(sink);
-    if let Some(alerts) = telegram {
-        alerts.shutdown(Duration::from_secs(5)).await;
     }
 
     Ok(())
