@@ -103,9 +103,13 @@ fn retry_after(response: &reqwest::Response) -> Option<Duration> {
     Some(Duration::from_secs(seconds).min(MAX_RETRY_AFTER))
 }
 
-/// The wait before the attempt after one that waited `delay`: twice as long, saturating.
+/// Longest wait between two attempts, whatever the base delay and the attempt count.
+const MAX_WAIT: Duration = Duration::from_secs(120);
+
+/// The wait before the attempt after one that waited `delay`: twice as long, at most
+/// [`MAX_WAIT`] (so it never reaches a duration the timer cannot represent).
 fn next_delay(delay: Duration) -> Duration {
-    delay.checked_mul(2).unwrap_or(Duration::MAX)
+    delay.checked_mul(2).unwrap_or(MAX_WAIT).min(MAX_WAIT)
 }
 
 /// Sends the request built by `build` until it gets a non-transient answer or the attempts
@@ -126,7 +130,10 @@ where
         let outcome = build().send().await;
         let (reason, asked) = match &outcome {
             Ok(response) if is_transient(response.status()) => {
-                (format!("HTTP {}", response.status()), retry_after(response))
+                let asked = (response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS)
+                    .then(|| retry_after(response))
+                    .flatten();
+                (format!("HTTP {}", response.status()), asked)
             }
             Err(error) if error.is_timeout() || error.is_connect() => (error.to_string(), None),
             _ => return outcome,
@@ -171,7 +178,33 @@ mod tests {
     fn the_doubling_wait_saturates_instead_of_overflowing() {
         assert_eq!(next_delay(Duration::from_secs(1)), Duration::from_secs(2));
         assert_eq!(next_delay(Duration::ZERO), Duration::ZERO);
-        assert_eq!(next_delay(Duration::MAX), Duration::MAX);
+        assert_eq!(next_delay(Duration::from_secs(100)), MAX_WAIT);
+        assert_eq!(next_delay(Duration::MAX), MAX_WAIT);
+    }
+
+    #[tokio::test]
+    async fn a_server_error_keeps_the_backoff_schedule_even_with_a_retry_after() {
+        // Retry-After is honoured for 429 only, as documented; a 503 keeps the 1 s/2 s schedule.
+        let server = ScriptedServer::start(&[
+            ("503 Service Unavailable\r\nRetry-After: 30", "{}"),
+            ("200 OK", "{}"),
+        ]);
+        let client = reqwest::Client::new();
+        let started = std::time::Instant::now();
+
+        let response = send_with_retry(RetryPolicy::immediate(3), "test", || {
+            client.get(&server.base_url)
+        })
+        .await
+        .unwrap();
+
+        assert!(response.status().is_success());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(server.request_lines().len(), 2);
     }
 
     #[tokio::test]

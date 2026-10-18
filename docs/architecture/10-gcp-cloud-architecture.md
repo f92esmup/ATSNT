@@ -242,7 +242,9 @@ Inside the job, the BigQuery and GCS sinks retry a transient failure (HTTP 5xx, 
 
 `ATSNT_GCP_RETRY_BASE_MS` overrides the base wait with whole milliseconds from 0 to 60,000, and tests set it to 0. An invalid value is reported and the default is kept.
 
-A retried insert is harmless. Every row kind carries an `insertId`: `run_id_status`, `run_id_scope`, `trade_id` or the series point key. BigQuery drops a row whose `insertId` it has just seen, and the `v_*` views deduplicate by the same keys. The artifact upload is create-only.
+A retried insert does not change what consumers read. Every row kind carries a stable `insertId`: `run_id_status`, `run_id_scope`, `trade_id` or the series point key. BigQuery's deduplication of a recently seen `insertId` is best-effort, so a duplicate row can still land in the table. The `v_*` views keep one row per key, and consumers read only them.
+
+The artifact upload is create-only. A retry after a first attempt that timed out but was committed gets `412 Precondition Failed`, which counts as already uploaded.
 
 The script also checks that the machine type exists in the region (custom types included) and that `CPUS_ALL_REGIONS` and the regional family quota (`N2_CPUS`, `C2D_CPUS`, ... or `PREEMPTIBLE_CPUS` for Spot when granted) have enough free vCPU; without that quota Batch keeps the job `QUEUED` forever (`CODE_GCE_QUOTA_EXCEEDED`). `c2-standard-60` is not offered in `europe-southwest1`. The first submission after enabling the Batch API can fail within seconds while its service agent is granted its role; submit again.
 

@@ -102,6 +102,10 @@ impl ScriptedServer {
                 stream
                     .set_nonblocking(false)
                     .expect("blocking test connection");
+                // A client that connects and then stalls must not hang the test either.
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                    .expect("test connection read timeout");
                 let mut reader = BufReader::new(stream);
                 let mut request_line = String::new();
                 reader

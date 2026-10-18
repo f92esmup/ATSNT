@@ -141,3 +141,12 @@ Branch: `feat/hpo-scoring`. Delivery: ask-on-risk (forecast about 700 authored l
   - R4: tolerant 5xx path tested again.
   - R2: wording (refused connections), the reason for logging to both stdout and tracing, the 400-vs-500 test comment.
   - R3-002: ScriptedServer accept deadline (10 s).
+- L18 Fix review (lineage of 1f1c52a, 2 lenses): approved and acknowledged.
+  - Fixed in the final commit:
+    - Retry-After honoured for 429 only, as documented (R4-001/R3-001; RED: a 503 with Retry-After 30 waited 30 s);
+    - backoff capped at 120 s (R3-006);
+    - read timeout on the scripted server (R3-004);
+    - the insertId test checks stable key values (R3-003);
+    - the docs say BigQuery deduplication is best-effort, the views dedupe, and a GCS retry gets 412 (R3-002/R4-003).
+  - Kept by decision: the 0-60,000 ms bound of ATSNT_GCP_RETRY_BASE_MS (R4-002/R3-005). It is the requested validation, and an invalid value is reported.
+- Closed: S12 complete. Slippage calibration and maker entries stay out of scope by the user's decision. The stash odd-t2b-slice2-stage is kept: it is not on main.

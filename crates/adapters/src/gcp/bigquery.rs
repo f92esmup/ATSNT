@@ -453,9 +453,13 @@ mod tests {
             data_end: None,
             git_sha: None,
         };
-        assert!(run.insert_id().is_some());
-        assert!(one_run_row().insert_id().is_some());
-        assert!(equity_point("entry", "t1").insert_id().is_some());
+        // The same row always yields the same key, so a resend is recognised as a duplicate.
+        assert_eq!(run.insert_id().as_deref(), Some("r1_completed"));
+        assert_eq!(run.clone().insert_id(), run.insert_id());
+        assert_eq!(one_run_row().insert_id().as_deref(), Some("r1_full"));
+        let point = equity_point("entry", "t1");
+        assert!(point.insert_id().is_some());
+        assert_eq!(point.clone().insert_id(), point.insert_id());
     }
 
     #[tokio::test]
