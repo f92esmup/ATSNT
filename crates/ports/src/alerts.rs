@@ -1,9 +1,13 @@
+use std::future::Future;
+
 /// Outbound alerting port for immediate push notifications (Telegram, Discord, Webhooks).
 pub trait AlertNotifier: Send + Sync {
     /// Error reported by the notification channel.
     type Error: std::fmt::Display;
 
     /// Dispatches an alert message to the configured notification channel.
-    #[allow(async_fn_in_trait)]
-    async fn send_alert(&self, message: &str) -> Result<(), Self::Error>;
+    ///
+    /// The future is `Send` so that a dedicated task can deliver alerts without the trading
+    /// loop ever waiting on the messaging service.
+    fn send_alert(&self, message: &str) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
