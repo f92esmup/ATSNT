@@ -4,6 +4,7 @@
 //! endpoint rejects `STOP_MARKET` / `TAKE_PROFIT_MARKET`. Only the one-way, USDT-margined
 //! profile accepted by the entry preflight is supported.
 
+use super::futures_preflight::{parse_futures_symbol_rules, FuturesSymbolRules};
 use super::*;
 
 /// Which protective barrier an exchange-held conditional order implements.

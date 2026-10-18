@@ -4,6 +4,9 @@
 //! without a network. Leverage is deliberately never set here: it is an output of risk
 //! sizing, chosen per order by the preflight.
 
+use super::futures_preflight::{
+    bracket_for_notional, minimum_sufficient_leverage, parse_futures_leverage_brackets,
+};
 use super::*;
 
 /// Outcome of one profile check.
