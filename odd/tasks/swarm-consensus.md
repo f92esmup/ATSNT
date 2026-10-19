@@ -1,0 +1,372 @@
+# Swarm consensus strategy (TFM port) on a unified execution model
+
+Objective: port, correct, and extend the thesis's 100-agent CLIPS swarm into a 100% Rust ATSNT strategy with shorts, 16 bar feeds, and target positions. To do it, generalise the repository's execution model so that triple-barrier entries and target positions share one decision type, one strategy contract, one optimiser, one execution core, one trade ledger, and one venue contract. Nothing is duplicated, and the change is the minimum.
+The full behaviour is in `docs/strategy/03-swarm-consensus.md` (the "strategy spec"). This file defines what is implemented, in which order, and how each step is proved.
+Branch: `feat/swarm-consensus`. Delivery: ask-on-risk. The forecast is about 6,500 authored lines (goldens 300, domain 1,350, strategy contract 400, execution core 1,200, swarm 1,600, optimiser and runners 700, venue and session 700, docs 300), so the chain strategy is asked before the first code commit. Test runner: `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`.
+
+## Specs
+
+- S1 Port the thesis strategy as an idea, not as a replica. User: "quiero inspirarme en esa estrategia para crearla en mi repo actual" and "no quiero una paridad exacta. quiero utilizar la idea, corregirla y mejorarla."
+  - Acceptance: every section of the strategy spec is implemented, including the corrections C1–C16 (spec §13).
+- S2 Short selling. User: "añadir tambien la capacidad de shorts".
+  - Acceptance: mirrored rules are generated from one table (spec §8.3). There is a short axis in the policy (spec §10.3). `allow_short = false` reproduces the long-only thesis axis.
+- S3 All the thesis bar types. User: "quiero añadir todos esos tipos de velas también".
+  - Acceptance: 16 feeds built from aggTrades, with calibrated thresholds (spec §5), as general-purpose domain components.
+- S4 100% Rust and no bias. User: "quiero saber como se traduce a 100% rust y como se haría para que no haya sesgo, que es lo que ocurre si se hace con un if else".
+  - Acceptance: no FFI, no rule-engine runtime, and no `f32`/`f64`. Every rule is evaluated with explicit resolution (spec §8.4). Every control in spec §12 has its proof test.
+- S5 Conflict policy. User: "la opción correcta es esperar".
+  - Acceptance: entry and exit on one axis give 0 on that axis. Opposite entries give `(0, 0)` (spec §8.4).
+- S6 No triple barrier for this strategy. User: "sigo tu recomendación fundamentada de no usar la triple barrera".
+  - Acceptance: `Decision::Target` gives scale-in, scale-out, flip, an aggregate stop, no take profit, and no time barrier (spec §11).
+- S7 Scope. User: "me parece bien empezar con backtest + hpo".
+  - Acceptance: `backtest` (bar and tick fill models) and `run_hpo` run the strategy. `paper_trading` and `live_trading` refuse it through one product gate, with the message in spec §17.1.
+- S8 Documentation first, in phases. User: "quiero que gastes mucho esfuerzo en declarar con pelos y señales todo todo el funcionamiento de la estrategia en su .md correspondiente y luego otr oarchivo (el de odd) que defina exactamente en cada bloque lo que se va a implementar. Hay que dividirlos en fases porque hay que ser detallistas."
+  - Acceptance: the strategy spec and this file. Every task names its files, types, tests, and regression guards.
+- S9 Repository philosophy. User: "Ya sabes la filosofía del repo."
+  - Acceptance (AGENTS.md): `Decimal` everywhere money or thresholds live; no `unwrap`/`expect` outside tests; `thiserror`; doc comments on public items; fmt and clippy clean; deterministic synthetic tests and no network; zero-toy fills.
+- S10 One engine, no duplication, minimal change. User: "esa es la idea, que no se duplique nada y que todo el motor sea único con el mínimo cambio posible. COn los venues por ejemplo. asi qeu si, rehaz el plan con esta filosofía. se muy exhaustivo."
+  - Acceptance:
+    - exactly one of each component in spec §3.1;
+    - no second engine, registry, optimiser, ledger, or venue path;
+    - `dollar_bars_cusum` and `order_flow_imbalance` produce **byte-identical** trades, metrics, rejections, HPO rankings, and recording rows before and after every phase, proved by the golden tests of T1.2;
+    - pre-existing duplication not needed by this feature is listed (spec §17.2) and left untouched.
+
+Assumptions. These were proposed in the conversation and not objected to; each one is revisable:
+
+- A1 6 agents per feed (96 in total), with stratified assignment.
+- A2 Adimensional indicators and the converted genome priors of spec §7.1.
+- A3 Clock-aligned time bars. Calibration to the mean duration of 5m, 1h, 4h, and 1d, on a period that ends before the evaluated data.
+- A4 Trade only on level change. One aggregate stop at 3 × ATR(1h). Re-arm after a forced exit.
+- A5 Campaigns (flat to flat) count as closed trades. Fill count and peak level go to the audit, so the `ClosedTrade` schema is unchanged.
+- A6 HPO searches only the 5 policy parameters. The genome is frozen (seed 123456).
+- A7 HPO price events are 1 s buckets. Embargo is 1 day. The swarm runs with 100 ms latency. The data starts at least 70 days before the first evaluation.
+- A8 Level-3 risk cap `max_level_risk = 0.05` in the search space.
+- A9 `BacktestConfig.latency_ms` is a new optional field that defaults to 0, so existing execution contexts and artifacts behave as before.
+- A10 New exit-reason strings `TargetExit` and `TargetFlip`, additive to the BI string domain.
+- A11 The Binance gateway gets `submit_order` and an optional take profit. Both are unit-tested against the existing scripted server and never exercised live in this feature.
+
+## Tasks
+
+Legend: `[ ]` pending, `[x]` done with evidence. Each task line has its ID, its linked `S#`, its route, and its status. The route is inline unless a Writer-trigger reason is named.
+
+Every behaviour task follows the test-first policy: RED, then GREEN. The **byte-identity guard** applies after every task from Phase 3 on. It means three things: the golden tests of T1.2 pass unchanged, every existing test passes unchanged, and no existing test file is edited except where the task says so.
+
+### Phase 0: Specification
+
+- [x] T0 S8, S10: strategy spec and this file. Route: inline. Commit: `docs(swarm): specify the swarm consensus strategy on a unified execution model` (docs only, as the user asked; structural readback of both files done).
+
+### Phase 1: Safety net (S10)
+
+No refactor starts before this phase is committed. **RED exception**: characterisation tests pass at the baseline by construction. Their proof is a mutation check: alter one fee or slippage operation locally, and every relevant golden must fail.
+
+- [ ] T1.1 S10: deterministic synthetic market fixtures. Route: inline.
+  - `crates/backtest/tests/support/market.rs` (a new test-support module) provides `synthetic_trades(seed, n)`, a seeded random walk with buy/sell sides and volume bursts.
+  - It produces enough dollar bars at a small threshold for CUSUM and OFI to open and close trades through every exit kind: stop loss, take profit, time barrier, and end of simulation. Liquidation and the monthly kill switch are reached with a dedicated crash segment.
+  - Tests:
+    - the fixture is deterministic;
+    - each exit reason appears at least once for CUSUM and for OFI on the golden configs (asserted, so the goldens cover every branch).
+- [ ] T1.2 S10: golden snapshots. Route: inline.
+  - New file `crates/backtest/tests/golden_execution.rs`. Snapshots are JSON files under `crates/backtest/tests/golden/`, written once with `UPDATE_GOLDEN=1` and compared byte for byte otherwise.
+  - Each snapshot holds the full `Vec<ClosedTrade>`, the `BacktestMetrics`, `rejected_orders`, and the equity curve points:
+    - (a) the bar engine via `run_backtest_slice_with_trades` (`optimization.rs:35`), for CUSUM and for OFI;
+    - (b) `TickSimulation` (session + `SimulatedVenue`), for CUSUM and for OFI;
+    - (c) a 2-fold, 6-candidate `WalkForwardOptimizer` run for CUSUM: the full ranked candidate list with metrics, fitness, stability, and DSR;
+    - (d) the recording rows (`recording.rs` `trade_rows`, `equity_points`, `record_hpo` rows) built from (a) and (c).
+  - Proof: the mutation check of the phase header, recorded in the Log.
+
+### Phase 2: General-purpose domain pieces (S3, S1)
+
+**Writer trigger (a)**: two independent units with disjoint edit surfaces, each heavier than starting a worker, launched together. The parent owns git, adds the `pub mod` lines and re-exports in `crates/domain/src/analytics/mod.rs` and `crates/domain/src/lib.rs` after both return, and runs the seam check (the full suite, once).
+
+- [ ] T2.1 S3: bar feeds in `crates/domain/src/analytics/feeds.rs`. Route: delegated writer A. Surface: that file only.
+  - `FeedBar { start_time, end_time, open, high, low, close, volume, trade_count }`.
+  - `trait BarAggregator { fn process_trade(&mut self, &Trade) -> Option<FeedBar>; fn reset(&mut self); }`.
+  - `TimeBarAggregator`, `TickBarAggregator`, `VolumeBarAggregator`, `RangeBarAggregator`, with the rules of spec §5.3. Constructors reject non-positive thresholds with `DomainError`.
+  - Tests:
+    - a time-bar closing trade at exactly `(b+1)·Δ` opens the next bar; `(b+1)·Δ - 1` stays in `b`;
+    - empty buckets emit nothing;
+    - exact OHLCV and `trade_count`;
+    - tick, volume, and range close exactly at the threshold;
+    - no volume carry-over;
+    - a range jump keeps the true high and low;
+    - a flat price never closes a range bar;
+    - `reset()` equals fresh;
+    - no bar is emitted at the end of input.
+- [ ] T2.2 S3: calibration in `crates/domain/src/analytics/calibration.rs`. Route: delegated writer A, after T2.1. Surface: that file only.
+  - `FeedThresholds { tick: [u64; 4], volume: [Decimal; 4], range: [Decimal; 4], calibration_end_ms }`.
+  - `calibrate(trades: &[Trade], horizons_ms: [i64; 4]) -> Result<FeedThresholds, DomainError>`, following spec §5.4.
+  - Tests:
+    - exact tick and volume thresholds on uniform synthetic trades;
+    - the range threshold hits the target count within 1% on a seeded random walk;
+    - deterministic;
+    - errors on fewer than 2 trades or a zero duration.
+- [ ] T2.3 S1: indicators in `crates/domain/src/analytics/indicators.rs`. Route: delegated writer B. Surface: that file only.
+  - `WilderRsi(14)`, `WilderAtr(14)`, `AtrRatio(50)`, `AlmaSlope(9, 0.85, 6)`, `VwapDeviation(50)`. Each has `update(&FeedBar) -> Option<Decimal>` and `reset()`.
+  - `FeedIndicators::update(&FeedBar) -> Option<IndicatorSnapshot>`, warm at bar 64 (spec §6). ALMA weights are precomputed in `Decimal` with `MathematicalOps::exp`.
+  - Tests:
+    - hand-computed reference vectors on a 20-bar fixture, with the computation in comments;
+    - RSI = 100 without losses;
+    - ATR uses the previous close across gaps;
+    - the ATR ratio is 1 on a constant-range series;
+    - ALMA weights against hand values;
+    - VWAP deviation is 0 at the VWAP;
+    - prices × 10 leave RSI, the ATR ratio, the ALMA slope, and the VWAP deviation identical;
+    - warm exactly at bar 64.
+
+### Phase 3: Domain contract types (S6, S10)
+
+Risk: item 3 (shared domain contracts consumed by every runner). The byte-identity guard applies.
+
+- [ ] T3.1 S6: decision types in the new file `crates/domain/src/decision.rs`, re-exported from `lib.rs`. Route: inline.
+  - `Decision`, `TargetPosition`, `ProtectiveExits`, `MarketEvent<'a>`, `InputKind` (spec §3.2–3.3).
+  - `TargetPosition::new` validates `-3 ≤ level ≤ 3`, `risk_fraction = 0 ⇔ level = 0`, `0 ≤ risk_fraction ≤ 1`, and `stop_distance > 0` when `level ≠ 0`.
+  - `ProtectiveExits::from_intent(&OrderIntent)` and `ProtectiveExits::for_target(side, fill_price, stop_distance)`.
+  - Tests: every validation, accepted and rejected; `from_intent` copies SL, TP, and max bars exactly.
+- [ ] T3.2 S6, S10: one sizing core in `crates/domain/src/risk.rs`. Route: inline.
+  - A private `quantity_for_risk(equity, risk, stop_distance, price, policy)` is extracted from `size_order`, keeping its operation order (`risk.rs:254-259`). `size_order` calls it, with no behaviour change.
+  - New `size_target(target, price, equity, current_qty, session_dd, policy) -> Result<TargetSizing { quantity, clipped }, RiskError>`. It applies the clip semantics of spec §11.3 and the existing breaker check.
+  - Tests:
+    - every existing `risk.rs` test passes unchanged;
+    - a new property test checks that `size_order` equals the pre-refactor formula over 1,000 seeded random inputs (the old formula copied into the test as the oracle);
+    - `size_target` sizes, clips, floors, and returns 0 for level 0.
+
+### Phase 4: One strategy contract (S10, S6, S7)
+
+Risk: item 3 (the strategy trait, the registry, and every runner call site). The byte-identity guard applies.
+
+- [ ] T4.1 S10: the unified traits in `crates/strategies/src/strategy.rs`. Route: inline.
+  - `Strategy` with `input_kind` and `on_event(&MarketEvent) -> Option<Decision>` (spec §3.3). `FeatureExtractor`, `FeaturePolicy`, and the two-stage `OptimizableStrategy` (spec §3.4).
+  - `Pipeline<S>` implements `Strategy`. `BarPassThrough` implements `FeatureExtractor<Features = DollarBar>`.
+  - The `Box<S>` forwarder is updated for every method.
+- [ ] T4.2 S10: migrate CUSUM and OFI. Route: inline.
+  - `dollar_bars_cusum.rs` and `order_flow_imbalance.rs` keep their inherent `on_bar(&DollarBar) -> Option<OrderIntent>` and their tests untouched.
+  - New: `impl FeaturePolicy` wraps the result in `Decision::Entry`, and `impl OptimizableStrategy` sets `SharedConfig = ()`, `Features = DollarBar`, `Extractor = BarPassThrough`, `Policy = Self`, `input_kind = DollarBars`.
+- [ ] T4.3 S10: call sites and registry. Route: inline.
+  - Every consumer of `on_bar` or `Option<OrderIntent>` moves to `on_event` / `Decision`: `engine.rs:295`, `session.rs:222` and `:344`, `driver.rs:73`, `optimization.rs:46`, `paper.rs:235`, and `contract.rs:86`.
+  - Anything that is not `Decision::Entry` is ignored at this phase and counted under the rejection kind `"unsupported_decision"`, so behaviour stays identical.
+  - `registry.rs`: the `StrategyVisitor` bound becomes the new `OptimizableStrategy`. `backtest/src/registry.rs` `Loader` builds `Pipeline<S>`.
+  - `contract.rs`:
+    - `assert_strategy_contract` runs `Entry` decisions through `assert_valid_intent` and `Target` decisions through `TargetPosition` validation;
+    - it feeds `synthetic_bars` or a new `synthetic_trades` according to `input_kind`;
+    - the "candidates and neighbours build" check now builds `policy(shared, config)`.
+  - Tests:
+    - every existing strategies and backtest test passes;
+    - the goldens are identical;
+    - `architecture_contract.rs` passes (no name dispatch; strategies depend only on the domain).
+
+### Phase 5: One execution core (S6, S10)
+
+Risk: item 3 and item 1-adjacent (the accounting every runner reports). An independent verifier runs at the end of this phase, because it is really high risk. The byte-identity guard applies.
+
+- [ ] T5.1 S10: pure extraction from `BacktestEngine` into the new file `crates/backtest/src/execution_core.rs`. Route: inline. **No behaviour change.**
+  - `ExecutionCore` owns the position, the pending order, `ProtectiveExits`, margin, entry fee and slippage, accrued funding, and the `TradeLedger`.
+  - It holds the helpers the map identified, with their operation shapes preserved:
+    - `market_fill_price`;
+    - the entry fill math (`engine.rs:552-595`);
+    - `barrier_exit` (`:453-501`), with `take_profit` and `max_bars` now `Option`;
+    - `liquidate_if_due` (`:396-437`), reading `exits.stop`;
+    - `settle_funding` (`:354`);
+    - the close accounting (`:622-688`).
+  - `BacktestEngine` keeps its loop and its breaker, kill-switch, MTM, and excursion code, and delegates to the core.
+  - Tests: every `engine.rs` test (`:789-1809`) and `tests/trade_excursion.rs` pass unchanged; the goldens are identical.
+- [ ] T5.2 S6: price events and decision scheduling. Route: inline.
+  - `PriceEvent { start_ms, open, high, low, close }`, `From<&DollarBar>`, `From<&Trade>`, and `bucket_trades(iter, bucket_ms)`.
+  - `BacktestEngine::process_event(&PriceEvent, decide: &mut dyn FnMut() -> Option<Decision>)`. `process_bar` becomes `process_event(bar.into(), || strategy.on_event(Bar))`, with the same steps in the same order (spec §11.2).
+  - New optional `BacktestConfig.latency_ms`, with serde default 0 and validation `≥ 0`. The pending order carries `due_ms`.
+  - Tests:
+    - a decision is never filled on its own event;
+    - with `latency_ms = 100` the fill is at the first event `≥ ts + 100`;
+    - with the default 0, the bar path is unchanged (goldens);
+    - old execution-context JSON files without the field still parse (`configs/execution_*.json` round-trip test).
+- [ ] T5.3 S6: `Decision::Target` in the core (spec §11.3–11.9). Route: inline.
+  - Sizing at decision time through `size_target`. Target replaces pending. `Δ` at fill.
+  - Dust counted under the existing `RiskError` kinds. Flip in two fills. Scale-in and scale-out through `Position::apply_fill`, with margin recomputed.
+  - The stop recomputed after each fill. The liquidation clip. Re-arm.
+  - Breakers: a daily halt allows reductions only (`DAILY_HALT_REJECTION`); the kill switch keeps today's behaviour.
+  - `TradeLedger` campaigns with `TargetExit` and `TargetFlip`. Counters: `position_cap_clip`, `stop_beyond_liquidation`, `rearm_ignored`, `daily_halt_ignored`, `dust`.
+  - Tests (each asserts cash, the position, the `ClosedTrade` fields, and the counters):
+    - sizing equals `equity · risk / stop` floored;
+    - the cap clips;
+    - dust is skipped, but 0 always closes;
+    - scale-in averages the entry;
+    - scale-out realises PnL;
+    - a flip produces 2 fills and 2 campaigns;
+    - the stop is recomputed;
+    - a gap fill at the open;
+    - liquidation comes before the stop;
+    - the liquidation clip;
+    - re-arm ignores same-sign targets until 0 or the opposite sign;
+    - a daily halt blocks increases and allows reductions;
+    - a 3-fill campaign is 1 `ClosedTrade` with VWAP entry and exit, peak quantity, and summed costs;
+    - cash reconciles to the cent on a hand-computed scenario.
+
+### Phase 6: The swarm strategy (S1–S5)
+
+New module `crates/strategies/src/swarm_consensus/` with `mod.rs`, `genome.rs`, `agent.rs`, `rules.rs`, `ensemble.rs`, `audit.rs`, and `policy.rs`. Route: inline. It is one coherent unit, with no parallel reason.
+
+- [ ] T6.1 S1, S4: genome (spec §7).
+  - `GenePrior` table, `sample_swarm(seed, agents_per_feed)`, Box–Muller in `Decimal` from `StdRng`, clamps (including `atr_contraction < atr_expansion`), and per-gene clamp-hit counters.
+  - Tests:
+    - the same seed gives the same swarm, and a different seed a different one;
+    - exactly `agents_per_feed` agents per feed, by id range;
+    - every gene within its clamp;
+    - over 20,000 draws the sample mean is within 4 standard errors;
+    - a source-scan test finds no `f32`/`f64` in the module.
+- [ ] T6.2 S1, S4: macro and micro detectors in `agent.rs` (spec §8.1–8.2).
+  - Tests:
+    - one positive and one negative case per state and per pattern;
+    - an equal-to-threshold value does not fire;
+    - a flat bar is no pin bar (C10);
+    - the break of structure needs an earlier bar and uses its margin in ATR units.
+- [ ] T6.3 S2, S4, S5: rule table, mirror, and resolution in `rules.rs` (spec §8.3–8.4).
+  - Tests:
+    - E1–X4 and their mirrors fire on their minimal inputs;
+    - X2 and X2′ fire together;
+    - permutations (every rotation, plus a reversal) never change a vote over 500 seeded inputs;
+    - reflection symmetry over the same inputs;
+    - entry and exit together give 0 on the axis;
+    - opposite entries give `(0, 0)`;
+    - the noise veto;
+    - long-only never votes short.
+- [ ] T6.4 S1, S3: ensemble and audit in `ensemble.rs` and `audit.rs` (spec §9, §16).
+  - `SwarmEnsemble` implements `FeatureExtractor<Features = ConsensusSample>`.
+  - Tests:
+    - one sample per trade even when several feeds close on it;
+    - votes persist;
+    - no sample before every feed is warm;
+    - `atr_stop_reference` is feed 1's ATR;
+    - prices × 10 give identical votes;
+    - deterministic replay;
+    - `reset()` equals fresh;
+    - the audit counters sum to the number of agent evaluations.
+- [ ] T6.5 S2, S6: `ConsensusPolicy` and `SwarmPolicySpace` in `policy.rs` (spec §10, §14.2).
+  - Tests:
+    - the worked example of spec §18, table-driven;
+    - a jump from 0 to 3;
+    - a cascade from 3 to 0;
+    - `H > L1` keeps level 1;
+    - long-only never goes negative;
+    - the grid count after the A8 filter is pinned;
+    - every neighbour is on the grid;
+    - it emits only on change.
+- [ ] T6.6 S1, S10: `SwarmConsensusStrategy` in `mod.rs`. Route: inline.
+  - It implements `OptimizableStrategy` with id `swarm_consensus` and alias `swarm`, `input_kind = Trades`. It is registered with **one line** in the existing `register_strategies!` macro, plus `pub mod` in `lib.rs`.
+  - `Strategy::audit()` is a new trait method that defaults to `None` and returns `serde_json::Value`. The swarm overrides it with its audit.
+  - Tests: the generic contract suite passes for the swarm through the existing `every_registered_strategy_honours_the_contract`; the `SharedConfig` and `Config` JSON round-trip.
+
+### Phase 7: One optimiser and the runners (S6, S7, S10)
+
+Risk: item 3 (CLI flags, artifact schema). The byte-identity guard applies.
+
+- [ ] T7.1 S10: the tape in `crates/backtest/src/optimization.rs`. Route: inline.
+  - `Tape<F> { features: Vec<(i64, F)>, prices: Vec<PriceEvent> }`. `WalkForwardOptimizer::run_optimization` takes a tape and, per candidate and slice, replays a fresh `S::policy` through `BacktestEngine::process_event`.
+  - `run_backtest_slice_with_trades` and `calculate_parameter_stability` follow.
+  - For `DollarBars` strategies the tape holds the bars once (the prices are derived from the same slice without copying them).
+  - Tests:
+    - golden (c) is identical;
+    - `hpo_fold_metrics.rs`, `param_space_contract.rs`, and `recording_contract.rs` pass unchanged;
+    - the extractor runs exactly once per run (a counter on a test strategy).
+- [ ] T7.2 S6, S7: `run_hpo` input preparation. Route: inline.
+  - `DollarBars`: today's code, unchanged.
+  - `Trades`: stream the trades through the extractor and `bucket_trades`. New flags `--price-bucket-ms` (default 1000) and `--embargo-ms` (default 86,400,000, `Trades` strategies only). The 70-day lead check and the calibration check (spec §15.2) apply.
+  - The artifact adds `SamplingConfig::Trades { price_bucket_ms }` and stores the `SharedConfig`. The `DollarBar` variant is unchanged, and an old-artifact round-trip test covers it.
+  - Tests:
+    - a synthetic `Trades` run ranks deterministically;
+    - the fold ranges respect the embargo;
+    - both checks refuse bad inputs with explicit messages;
+    - the artifact round-trips;
+    - the `run_hpo --help` text lists the new flags.
+- [ ] T7.3 S7: the `backtest` CLI. Route: inline.
+  - `--strategy swarm_consensus --strategy-config <json>` with `--fill-model bar` runs at trade resolution (each trade is a price event).
+  - The report gains `strategy_audit` from `Strategy::audit()`, and nothing for strategies that return `None`.
+  - Tests:
+    - an end-to-end run on a synthetic fixture produces campaigns and an audit;
+    - the `run_contract.rs` output for CUSUM and OFI is unchanged.
+- [ ] T7.4 S3: the `calibrate_feeds` binary in `crates/backtest/src/bin/calibrate_feeds.rs`. Route: inline.
+  - Flags: `--data`, `--from`, `--to` (exclusive), and `-o`. It writes a swarm `SharedConfig` JSON.
+  - Tests: the output parses; `calibration_end_ms` is the last trade before `--to`.
+
+### Phase 8: One venue contract and the session (S10, S7)
+
+Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placement code). An independent verifier runs at the end of this phase. The byte-identity guard applies to golden (b) and to every session, venue, live-exit, and Binance test.
+
+- [ ] T8.1 S10: ports and adapters. Route: inline.
+  - `crates/ports`:
+    - `OrderRequest { side, quantity, reduce_only }`;
+    - `ExecutionVenue::submit_order`;
+    - `ExitGateway::place_exits(.., take_profit: Option<Decimal>)`. Existing callers pass `Some`.
+  - `SimulatedVenue::submit_order` generalises `submit_market_order_at` (`:187`) with `WorkingOrder.reduce_only`, plus the existing latency. `place_exits` with `None` arms only the stop leg.
+  - Binance:
+    - `submit_order` generalises the private `submit_futures_order` (`MARKET`, `reduceOnly`);
+    - `place_protective_exits` skips the take-profit algo order on `None`.
+  - Tests:
+    - every `simulated_venue.rs` (`:600-1040`) and `binance_gateway/exits.rs` (`:464-663`) test passes unchanged;
+    - new tests: a reduce-only order never flips or exceeds the position (sim);
+    - a stop-only `place_exits` arms one leg (sim, and Binance on the scripted server);
+    - Binance `submit_order` sends the exact query parameters (scripted server).
+- [ ] T8.2 S6, S10: `TradingSession` executes targets (spec §11.10). Route: inline.
+  - A new phase, `Adjusting { delta }`. Sizing through the same planner. Delta orders through `submit_order`. A flip closes reduce-only first. The stop is re-placed after each fill.
+  - The close accounting moves to the shared `TradeLedger`; session fee semantics (`FeeLedger`, fallback) are passed in, so golden (b) stays identical.
+  - `SessionDriver` feeds `MarketEvent::Trade` to `Trades` strategies and keeps the dollar-bar path for the others.
+  - Tests:
+    - every `session.rs` (`:1033-1942`), `driver.rs`, `live_exits.rs`, and `tick_simulation.rs` test passes unchanged;
+    - golden (b) is identical;
+    - new: a scale-in, a scale-out, a flip, and a stop-out on `SimulatedVenue` produce the same campaigns as the bar engine on the same synthetic tape within the tick model's documented differences (tape slippage and latency), asserted on side, quantities, and exit reasons.
+- [ ] T8.3 S7: the product gate. Route: inline.
+  - One check in the shared strategy loader, alongside `ensure_deployable`. `paper_trading` and `live_trading` refuse a strategy that can emit `Decision::Target`, with the message of spec §17.1.
+  - The capability is declared by `Strategy::emits_targets()`, which defaults to false.
+  - Tests:
+    - binary-level refusal for paper and live, offline and before any network;
+    - CUSUM and OFI still start as before (existing binary tests).
+  - `backtest --fill-model tick --strategy swarm_consensus` runs on the synthetic fixture.
+
+### Phase 9: Documentation, data, and verification (S1, S8)
+
+- [ ] T9.1 S8, S10: architecture docs. Route: inline.
+  - `12-adding-a-strategy.md`: rewritten for the unified contract, including two-stage strategies.
+  - `04-hpo-and-walk-forward.md`: the tape.
+  - `06-paper-trading-and-realtime-execution.md` and `08-live-execution-gateway.md`: decisions, `submit_order`, the optional take profit, and the gate.
+  - `13-bi-data-contract.md`: `TargetExit` and `TargetFlip`.
+  - `README.md`: calibrate, then HPO, then the trade-resolution and tick backtests.
+  - The strategy spec, wherever the implementation changed a detail.
+- [ ] T9.2 S1: data, calibration, and a local run. Route: inline. Operational task, no code.
+  - The period is decided with the user before fetching. Fetch with `fetch_data`, then `calibrate_feeds`, a local `run_hpo`, and the bar and tick backtests of the finalists.
+  - Record the audit, the scorecard, and an honest verdict in the Log.
+- [ ] T9.3 S1–S10: independent verifier over the whole feature. Route: delegated verifier.
+  - It receives this whole document, the baseline commit, and the probe forms. It returns a verdict per `S#`.
+  - Then the native review, under the receipt-driven development policy.
+
+## Log
+
+- L1 (2026-10-19) User: "/home/f92esmup/Downloads/TFM_presentacion (1).pdf esta es la presentación de mi tfm y estaba hecho en metatrader 5. quiero inspirarme en esa estrategia para crearla en mi repo actual. Es posible? que cabios recoemiendas o mejoras? se puede?"
+- L2 (2026-10-19) User: "Vale, vamos a describir y hacer lacorresponencia de todas las partes. Primero que van a ser los nuevos agentes? el consenso lo hacemos igual no? yo quiero replicar el tfm al detalle. Pero añadir tambien la capacidad de shorts. Y quiero añadir todos esos tipos de velas también. quiero saber como se traduce a 100% rust y como se haría para que no haya sesgo, que es lo que ocurre si se hace con un if else"
+  - Evidence from `github.com/f92esmup/tfm-clips` `files/0*_*.clp`:
+    - several decision rules can fire together, and `obtener-voto` returns the first `voto` fact, so the CLIPS agenda order decides (C3);
+    - `feed = i % 16` overweights feeds 0–3 (C4).
+- L3 (2026-10-19) User: "Estoy de acuerdo contigo. la opción correcta es esperar"
+  - Evidence:
+    - `Ensamble.mqh` formats the ATR genes with `%.2f`, so most thresholds become `0.00` (C1);
+    - time bars drift (C2);
+    - the warm-up checks only M5 (C8);
+    - votes persist per feed.
+- L4 (2026-10-19) User: "no quiero una paridad exacta. quiero utilizar la idea, corregirla y mejorarla. asi que vamos por el buen camnino. QUeda algo mas que decidir?"
+- L5 (2026-10-19) User: "creo que voy a seguir tu recomendación. Pero no te neitendo con lo del TP? te refieres a usar las triple barrera de lopez del prado?"
+- L6 (2026-10-19) User: "me parece perfecto sigo tu recomendación fundamentada de no usar la triple barrera. Que mas queda por determinar?"
+- L7 (2026-10-19) User: "me parece bien empezar con backtest + hpo. entonces ya solo queda definir todo bein no? quiero que gastes mucho esfuerzo en declarar con pelos y señales todo todo el funcionamiento de la estrategia en su .md correspondiente y luego otr oarchivo (el de odd) que defina exactamente en cada bloque lo que se va a implementar. Hay que dividirlos en fases porque hay que ser detallistas. Ya sabes la filosofía del repo. Puedes hacerlo?"
+  - First plan: separate target traits, `TargetEngine`, and a separate HPO path.
+- L8 (2026-10-19) User: "vale, pues ya lo decidiremos mas adelante que periodo descargar. Me preocupa una cosa, actualmente tenemos un repo hexagonal que pretender que todo se pueda reutilizar y sea accesible. com piezas de un puzzle.Lo que he leido es que este va a tener su diseño indepnediente no es asi? esto no hay otra forma de hacerlo no?"
+  - Analysis: the first plan duplicated the strategy contract, the registry, the engine (fills, fees, funding, liquidation, breakers), and the HPO path. Alternative: the triple barrier is a special case of a target position.
+- L9 (2026-10-19) User: "esa es la idea, que no se duplique nada y que todo el motor sea único con el mínimo cambio posible. COn los venues por ejemplo. asi qeu si, rehaz el plan con esta filosofía. se muy exhaustivo. Al acabar haz commit solo con los docuemntos que has creado aqui"
+  - Evidence from the execution map:
+    - there are two execution stacks today: `BacktestEngine` (HPO and the bar backtest), and `TradingSession` + `ExecutionVenue` (tick, paper, live);
+    - position, fills, fees, funding, liquidation, barriers, breakers, closed-trade accounting, equity, and excursion are each implemented in both;
+    - `domain::Position::apply_fill` is unused by both;
+    - exit reasons are free strings (`metrics.rs:26`);
+    - no end-to-end golden test pins CUSUM or OFI;
+    - `ExecutionReport` has no order id, so the session attributes fills by phase;
+    - Binance exits are native `STOP_MARKET` / `TAKE_PROFIT_MARKET` orders with `closePosition=true`.
+  - Decision: the plan is rewritten as one decision type, one strategy contract with two stages, one sizing core, one execution core with a shared trade ledger, one optimiser tape, and one venue contract (`submit_order`, optional take profit). Golden tests come first. Pre-existing duplication not needed here is listed in spec §17.2.
+- Next:
+  - commit T0 (documents only, as asked);
+  - ask the chain strategy (stacked-to-main or feature-branch-chain) before the first code commit;
+  - start Phase 1.
