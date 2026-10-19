@@ -2,7 +2,7 @@
 
 Objective: port, correct, and extend the thesis's 100-agent CLIPS swarm into a 100% Rust ATSNT strategy with shorts, 16 bar feeds, and target positions. To do it, generalise the repository's execution model so that triple-barrier entries and target positions share one decision type, one strategy contract, one optimiser, one execution core, one trade ledger, and one venue contract. Nothing is duplicated, and the change is the minimum.
 The full behaviour is in `docs/strategy/03-swarm-consensus.md` (the "strategy spec"). This file defines what is implemented, in which order, and how each step is proved.
-Branch: `feat/swarm-consensus`. Delivery: ask-on-risk. The forecast is about 6,500 authored lines (goldens 300, domain 1,350, strategy contract 400, execution core 1,200, swarm 1,600, optimiser and runners 700, venue and session 700, docs 300), so the chain strategy is asked before the first code commit. Test runner: `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`.
+Branch: `feat/swarm-consensus`. Delivery: ask-on-risk. The forecast is about 6,500 authored lines (goldens 300, domain 1,350, strategy contract 400, execution core 1,200, swarm 1,600, optimiser and runners 700, venue and session 700, docs 300), Chain strategy: `feature-branch-chain` (L10). Each phase is a reviewable slice of pull requests chained on `feat/swarm-consensus`; the slice boundaries are recorded in the Log. Test runner: `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`.
 
 ## Specs
 
@@ -366,7 +366,7 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
     - `ExecutionReport` has no order id, so the session attributes fills by phase;
     - Binance exits are native `STOP_MARKET` / `TAKE_PROFIT_MARKET` orders with `closePosition=true`.
   - Decision: the plan is rewritten as one decision type, one strategy contract with two stages, one sizing core, one execution core with a shared trade ledger, one optimiser tape, and one venue contract (`submit_order`, optional take profit). Golden tests come first. Pre-existing duplication not needed here is listed in spec §17.2.
-- Next:
-  - commit T0 (documents only, as asked);
-  - ask the chain strategy (stacked-to-main or feature-branch-chain) before the first code commit;
-  - start Phase 1.
+- T0 committed as b729269. Native review: low risk (non-executable only), approved and acknowledged, lineage review-c98e13ee95dae050.
+- L10 (2026-10-19) User: "sobre esa rama de feature."
+  - Decision: the chain strategy is `feature-branch-chain`.
+- Next: start Phase 1 (T1.1 synthetic market fixtures).
