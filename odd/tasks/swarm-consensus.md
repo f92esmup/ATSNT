@@ -134,17 +134,17 @@ Risk: item 3 (shared domain contracts consumed by every runner). The byte-identi
 
 Risk: item 3 (the strategy trait, the registry, and every runner call site). The byte-identity guard applies.
 
-- [ ] T4.1 S10: the unified traits in `crates/strategies/src/strategy.rs`. Route: inline.
+- [x] T4.1 S10: the unified traits in `crates/strategies/src/strategy.rs`. Route: inline. Done (design amended, see L14): `input_kind`, a defaulted `on_bar`, a defaulted `on_event`, `FeatureExtractor`, `BarPassThrough`, a two-stage `OptimizableStrategy` (`SharedConfig`, `Extractor`, `from_config(shared, config)`, `extractor`, `on_features`), and `Box` forwarding. RED: 17 compile errors, then 4 contract tests green.
   - `Strategy` with `input_kind` and `on_event(&MarketEvent) -> Option<Decision>` (spec §3.3). `FeatureExtractor`, `FeaturePolicy`, and the two-stage `OptimizableStrategy` (spec §3.4).
-  - `Pipeline<S>` implements `Strategy`. `BarPassThrough` implements `FeatureExtractor<Features = DollarBar>`.
+  - ~~`Pipeline<S>` implements `Strategy`.~~ Dropped (L14): the strategy is its own decision stage. `BarPassThrough` implements `FeatureExtractor<Features = DollarBar>`.
   - The `Box<S>` forwarder is updated for every method.
-- [ ] T4.2 S10: migrate CUSUM and OFI. Route: inline.
+- [x] T4.2 S10: migrate CUSUM and OFI. Route: inline. Done: only the `OptimizableStrategy` impls changed (shared `()`, `BarPassThrough`, `on_features` wraps `on_bar`); signal code and unit tests untouched.
   - `dollar_bars_cusum.rs` and `order_flow_imbalance.rs` keep their inherent `on_bar(&DollarBar) -> Option<OrderIntent>` and their tests untouched.
   - New: `impl FeaturePolicy` wraps the result in `Decision::Entry`, and `impl OptimizableStrategy` sets `SharedConfig = ()`, `Features = DollarBar`, `Extractor = BarPassThrough`, `Policy = Self`, `input_kind = DollarBars`.
-- [ ] T4.3 S10: call sites and registry. Route: inline.
+- [x] T4.3 S10: call sites and registry. Route: inline. Done: engine and session call `on_event`; an unsupported `Target` is counted under `UnsupportedDecision` in the engine (RED: an empty rejection map, then GREEN) and is ignored with a warning in the session (behaviour guard, no RED: the session already ignored non-entries). The contract suite now covers decisions, `synthetic_trades`, and two-stage equivalence (`Faulty<3>` proves the check). Workspace: 629 passed, goldens unchanged.
   - Every consumer of `on_bar` or `Option<OrderIntent>` moves to `on_event` / `Decision`: `engine.rs:295`, `session.rs:222` and `:344`, `driver.rs:73`, `optimization.rs:46`, `paper.rs:235`, and `contract.rs:86`.
   - Anything that is not `Decision::Entry` is ignored at this phase and counted under the rejection kind `"unsupported_decision"`, so behaviour stays identical.
-  - `registry.rs`: the `StrategyVisitor` bound becomes the new `OptimizableStrategy`. `backtest/src/registry.rs` `Loader` builds `Pipeline<S>`.
+  - `registry.rs`: the `StrategyVisitor` bound becomes the new `OptimizableStrategy`. `backtest/src/registry.rs` `Loader` calls `S::from_config(&S::SharedConfig::default(), config)` (L14).
   - `contract.rs`:
     - `assert_strategy_contract` runs `Entry` decisions through `assert_valid_intent` and `Target` decisions through `TargetPosition` validation;
     - it feeds `synthetic_bars` or a new `synthetic_trades` according to `input_kind`;
@@ -406,4 +406,11 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
   - Design notes:
     - `size_target` takes the signed current quantity, so the daily breaker can allow reductions and block increases and flips.
     - Order-level limits (minimum lot and notional, maximum order notional) are left to the order that moves the position (Phase 5).
-- Next: Phase 4 (T4.1–T4.3, the unified strategy contract).
+- L14 (2026-10-19) User: "sigue con la fase 4"
+  - Design amendment (spec §3.3–3.4 updated):
+    - `Pipeline<S>` is dropped; the strategy is its own decision stage.
+    - `Strategy::on_bar` keeps a default and `on_event` defaults to `on_bar` wrapped in `Decision::Entry`, so no existing strategy or test strategy needed edits.
+  - Rationale: a smaller change with the same single path. The two stages cannot drift, because the contract suite asserts that extractor + `on_features` decide exactly what `on_event` decides.
+  - Known interim: `run_backtest_slice` and the strategy loader pass `S::SharedConfig::default()`. Phase 7 (T7.2/T7.3) threads the real shared configuration, which the swarm needs.
+  - Phase 4 evidence: fmt clean, clippy clean, `cargo test --workspace` 629 passed, 0 failed, goldens unchanged, `architecture_contract.rs` green.
+- Next: Phase 5 (T5.1 pure extraction of the execution core; independent verifier at the end of the phase).

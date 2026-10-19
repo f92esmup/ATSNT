@@ -140,9 +140,12 @@ pub trait Strategy: Send {
 
 - Runners prepare the input the strategy declares. `DollarBars` keeps today's
   `DollarBarAggregator` path, byte for byte. `Trades` passes raw trades.
-- `dollar_bars_cusum` and `order_flow_imbalance` declare `DollarBars`. Their signal code is **not
-  edited**: each keeps its inherent `on_bar(&DollarBar) -> Option<OrderIntent>` and its unit tests,
-  and the trait impl wraps the result in `Decision::Entry`.
+- `Strategy::on_bar` stays, with a default that decides nothing. The default `on_event` sends a
+  dollar bar to `on_bar` and wraps its intent in `Decision::Entry`, and ignores raw trades. The
+  default `input_kind` is `DollarBars`.
+- `dollar_bars_cusum`, `order_flow_imbalance`, and every existing test strategy therefore keep
+  their `on_bar` code **unedited**. Only a strategy that consumes trades or emits targets
+  overrides `input_kind` and `on_event`.
 - Runners select behaviour by `input_kind()` and by the `Decision` variant, never by strategy name
   (`architecture_contract.rs` keeps enforcing this).
 
@@ -150,43 +153,47 @@ pub trait Strategy: Send {
 
 ```rust
 pub trait FeatureExtractor: Send {
-    type Features: Clone + Send + Sync;
+    type Features: Clone + Send + Sync + 'static;
     fn on_event(&mut self, event: &MarketEvent) -> Option<Self::Features>;
     fn reset(&mut self);
 }
 
-pub trait FeaturePolicy: Send + Sync {
-    type Features;
-    fn on_features(&mut self, features: &Self::Features) -> Option<Decision>;
-    fn reset(&mut self);
-}
-
-pub trait OptimizableStrategy: Sized + Sync {
-    type SharedConfig; // frozen for a whole HPO run (config bounds + Default)
-    type Config;       // searched (config bounds + Default)
-    type Space: HyperparameterSpace<Config = Self::Config> + Serialize + DeserializeOwned;
-    type Features: Clone + Send + Sync;
-    type Extractor: FeatureExtractor<Features = Self::Features>;
-    type Policy: FeaturePolicy<Features = Self::Features>;
+pub trait OptimizableStrategy: Strategy + Sync + Sized {
+    type SharedConfig; // frozen for a whole HPO run (config bounds + Default); () when none
+    type Config;       // searched (config bounds)
+    type Space: HyperparameterSpace<Config = Self::Config>;
+    type Extractor: FeatureExtractor;
     fn id() -> &'static str;
-    fn input_kind() -> InputKind;
-    fn compatible_market_types() -> &'static [MarketType];
+    fn from_config(shared: &Self::SharedConfig, config: Self::Config) -> Result<Self, DomainError>;
     fn extractor(shared: &Self::SharedConfig) -> Result<Self::Extractor, DomainError>;
-    fn policy(shared: &Self::SharedConfig, config: &Self::Config) -> Result<Self::Policy, DomainError>;
+    fn on_features(&mut self, features: &<Self::Extractor as FeatureExtractor>::Features)
+        -> Option<Decision>;
     fn default_space() -> Self::Space;
 }
 ```
 
-- `Pipeline<S>` composes an extractor and a policy and implements `Strategy`. It is the only
-  strategy object the engine and the session ever hold.
-- **CUSUM and OFI**: `SharedConfig = ()`, `Features = DollarBar`, `Extractor = BarPassThrough`
-  (returns the bar it receives), and `Policy` is the existing strategy struct. Their HPO tape is the
-  bar vector, which is exactly what `run_hpo` builds today.
-- **Swarm**: `SharedConfig` is the structural configuration (Section 14.1), `Features` is
-  `ConsensusSample`, `Extractor` is `SwarmEnsemble`, and `Policy` is `ConsensusPolicy`.
-- The HPO runs the extractor **once per run** and replays only the policies per candidate (Section
-  15). A future machine-learning strategy fits the same shape: frozen model as the extractor,
-  thresholds as the policy.
+The strategy **is** its own decision stage: there is no wrapper type. One instance serves both
+uses:
+
+- **Engines and sessions** call `Strategy::on_event`.
+- **The HPO** builds the extractor once and calls `on_features` on fresh instances, one per
+  candidate.
+
+Concretely:
+
+- **CUSUM and OFI**: `SharedConfig = ()`, `Extractor = BarPassThrough` (returns the bar it
+  receives), and `on_features(bar) = on_bar(bar)` wrapped in `Decision::Entry`. Their HPO tape is
+  the bar vector, which is exactly what `run_hpo` builds today.
+- **Swarm**:
+  - `SharedConfig` is the structural configuration (Section 14.1);
+  - `Extractor` is `SwarmEnsemble`;
+  - `on_features` runs the `ConsensusPolicy` on a `ConsensusSample`;
+  - `on_event` is the extractor followed by `on_features`, so the two stages cannot drift.
+- **The contract suite enforces it.** It checks that extractor + `on_features` decide exactly what
+  `on_event` decides on the same synthetic input (`crates/strategies/src/contract.rs`).
+- **The HPO** runs the extractor **once per run** and replays only `on_features` per candidate
+  (Section 15). A future machine-learning strategy fits the same shape: a frozen model as the
+  extractor, thresholds as the decision stage.
 
 ### 3.5 One execution core
 

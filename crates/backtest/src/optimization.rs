@@ -38,8 +38,8 @@ pub fn run_backtest_slice_with_trades<S: OptimizableStrategy>(
     bars: &[DollarBar],
 ) -> Result<(BacktestMetrics, Vec<ClosedTrade>), BacktestError> {
     config.validate()?;
-    let mut strategy =
-        S::from_config(strat_config.clone()).map_err(|e| BacktestError::Strategy(e.to_string()))?;
+    let mut strategy = S::from_config(&S::SharedConfig::default(), strat_config.clone())
+        .map_err(|e| BacktestError::Strategy(e.to_string()))?;
     let mut engine = BacktestEngine::new(config);
 
     for bar in bars {
@@ -918,15 +918,25 @@ mod tests {
     }
 
     impl OptimizableStrategy for MockStrategy {
+        type SharedConfig = ();
         type Config = MockConfig;
         type Space = MockSpace;
+        type Extractor = strategies::BarPassThrough;
 
         fn id() -> &'static str {
             "mock_strategy"
         }
 
-        fn from_config(config: Self::Config) -> Result<Self, domain::DomainError> {
+        fn from_config(_: &(), config: Self::Config) -> Result<Self, domain::DomainError> {
             Ok(Self { config, counter: 0 })
+        }
+
+        fn extractor(_: &()) -> Result<Self::Extractor, domain::DomainError> {
+            Ok(strategies::BarPassThrough)
+        }
+
+        fn on_features(&mut self, bar: &DollarBar) -> Option<strategies::Decision> {
+            strategies::Strategy::on_bar(self, bar).map(strategies::Decision::Entry)
         }
 
         fn default_space() -> Self::Space {

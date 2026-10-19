@@ -37,7 +37,7 @@ pub use excursion::ExcursionTracker;
 pub use live_exits::{ExitEvent, ExitGateway, ExitManager, HaltState};
 pub use metrics::{
     format_ratio, format_rejections, sortino_ratio, trade_returns, BacktestMetrics, ClosedTrade,
-    TradeExcursion, DAILY_HALT_REJECTION,
+    TradeExcursion, DAILY_HALT_REJECTION, UNSUPPORTED_DECISION_REJECTION,
 };
 pub use monte_carlo::{
     FanChartTrajectory, MonteCarloConfig, MonteCarloMetrics, MonteCarloReport, MonteCarloSimulator,

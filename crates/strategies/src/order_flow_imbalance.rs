@@ -5,7 +5,9 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
-use crate::strategy::{HyperparameterSpace, MarketType, OptimizableStrategy, Strategy};
+use crate::strategy::{
+    BarPassThrough, Decision, HyperparameterSpace, MarketType, OptimizableStrategy, Strategy,
+};
 
 /// Hyperparameters governing the Order Flow Imbalance (OFI) & Volume Toxicity Strategy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,6 +346,7 @@ impl Strategy for OrderFlowImbalanceStrategy {
 }
 
 impl OptimizableStrategy for OrderFlowImbalanceStrategy {
+    type SharedConfig = ();
     type Config = OrderFlowImbalanceConfig;
     type Space = OrderFlowImbalanceSpace;
 
@@ -351,8 +354,18 @@ impl OptimizableStrategy for OrderFlowImbalanceStrategy {
         "order_flow_imbalance"
     }
 
-    fn from_config(config: Self::Config) -> Result<Self, domain::DomainError> {
+    type Extractor = BarPassThrough;
+
+    fn from_config(_shared: &(), config: Self::Config) -> Result<Self, domain::DomainError> {
         Self::new(config)
+    }
+
+    fn extractor(_shared: &()) -> Result<BarPassThrough, domain::DomainError> {
+        Ok(BarPassThrough)
+    }
+
+    fn on_features(&mut self, bar: &DollarBar) -> Option<Decision> {
+        self.on_bar(bar).map(Decision::Entry)
     }
 
     fn default_space() -> Self::Space {

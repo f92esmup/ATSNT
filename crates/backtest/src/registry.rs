@@ -251,7 +251,7 @@ impl StrategyVisitor for Loader<'_> {
         };
         let config_json = serde_json::to_value(&config)?;
         let config_display = config.to_string();
-        let strategy = S::from_config(config)
+        let strategy = S::from_config(&S::SharedConfig::default(), config)
             .map_err(|error| anyhow::anyhow!("Failed to initialize strategy: {error}"))?;
         Ok(LoadedStrategy {
             strategy: Box::new(strategy),

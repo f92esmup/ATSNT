@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use domain::{DollarBar, DollarBarAggregator, DomainError, OrderIntent, PositionSide, Side, Trade};
 use ports::{EntryAck, ExecutionReport, ExecutionVenue};
 use rust_decimal::Decimal;
-use strategies::Strategy;
+use strategies::{Decision, MarketEvent, Strategy};
 
 use crate::daily_watermark::DailyWatermark;
 use crate::excursion::ExcursionTracker;
@@ -219,7 +219,7 @@ impl<S: Strategy> TradingSession<S> {
     /// Feeds one historical dollar bar to the strategy so its rolling windows are as warm as in
     /// a backtest. Nothing trades: a signal raised on history is discarded.
     pub fn warm_up(&mut self, bar: &DollarBar) {
-        let _ = self.strategy.on_bar(bar);
+        let _ = self.strategy.on_event(&MarketEvent::DollarBar(bar));
     }
 
     /// Warms the strategy up from historical trades, aggregated with a dedicated aggregator of
@@ -341,7 +341,15 @@ impl<S: Strategy> TradingSession<S> {
             marked_equity(self.wallet, open_position, bar.close),
         );
 
-        if let Some(intent) = self.strategy.on_bar(bar) {
+        let decision = self.strategy.on_event(&MarketEvent::DollarBar(bar));
+        if let Some(Decision::Target(target)) = &decision {
+            // Target execution on venues arrives with odd swarm-consensus T8.2.
+            tracing::warn!(
+                level = target.level(),
+                "target decision ignored: not supported yet"
+            );
+        }
+        if let Some(Decision::Entry(intent)) = decision {
             events.push(SessionEvent::Signal(intent.clone()));
             events.extend(self.dispatch(venue, intent, day_peak, bar.end_time).await);
         }
@@ -1027,6 +1035,49 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, SessionEvent::PositionOpened { .. })));
+    }
+
+    /// Asks for a long target on every bar; sessions cannot execute targets yet.
+    struct TargetOnly;
+
+    impl Strategy for TargetOnly {
+        fn name(&self) -> &str {
+            "target_only"
+        }
+
+        fn compatible_market_types(&self) -> &'static [MarketType] {
+            &[MarketType::UsdMPerpetual]
+        }
+
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<Decision> {
+            let target =
+                domain::TargetPosition::new(event.timestamp(), 1, dec!(0.01), dec!(5)).unwrap();
+            Some(Decision::Target(target))
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn a_target_decision_never_reaches_the_venue() {
+        let venue = FakeVenue::default();
+        let mut session = TradingSession::new(
+            SessionConfig {
+                symbol: "BTCUSDT".to_string(),
+                initial_equity: dec!(1000),
+                fallback_fee_pct: dec!(0.0005),
+                max_monthly_drawdown_pct: dec!(0.15),
+                halt_retry_ms: 5_000,
+                entry_timeout_ms: 30_000,
+            },
+            TargetOnly,
+        );
+
+        let events = session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+
+        assert!(events.is_empty());
+        assert!(venue.entries.borrow().is_empty());
+        assert!(venue.calls.borrow().is_empty());
     }
 
     #[tokio::test]

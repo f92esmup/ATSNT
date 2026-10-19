@@ -283,6 +283,11 @@ impl BacktestMetrics {
 /// namespace as [`domain::RiskError::kind`], so it must not match any of its names.
 pub const DAILY_HALT_REJECTION: &str = "DailyHalt";
 
+/// Rejection reason counted when a runner receives a decision kind it cannot execute yet
+/// (`Decision::Target` before the target-position execution exists). Same namespace as
+/// [`DAILY_HALT_REJECTION`].
+pub const UNSUPPORTED_DECISION_REJECTION: &str = "UnsupportedDecision";
+
 /// Two-decimal rendering of a ratio for reports, `n/a` where it is undefined.
 pub fn format_ratio(ratio: Option<Decimal>) -> String {
     ratio.map_or_else(|| "n/a".to_string(), |r| format!("{r:.2}"))

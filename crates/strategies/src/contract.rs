@@ -3,14 +3,18 @@
 //! A strategy that implements [`OptimizableStrategy`] and is listed in the
 //! [registry](crate::registry) is checked by [`assert_strategy_contract`] automatically, so a new
 //! strategy gets the same guarantees as the existing ones without writing these tests again.
-//! The suite uses deterministic synthetic bars and makes no assumption about when a strategy
-//! signals: it pins what must hold whenever it does.
+//! The suite feeds deterministic synthetic bars or trades (whichever the strategy declares it
+//! consumes) and makes no assumption about when a strategy decides: it pins what must hold
+//! whenever it does.
 
-use domain::{DollarBar, OrderIntent, Side};
+use domain::{DollarBar, OrderIntent, Side, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
-use crate::strategy::{HyperparameterSpace, OptimizableStrategy, Strategy};
+use crate::strategy::{
+    Decision, FeatureExtractor, HyperparameterSpace, InputKind, MarketEvent, OptimizableStrategy,
+    Strategy,
+};
 
 /// Candidates requested from the search space when checking it.
 const CANDIDATE_BUDGET: usize = 25;
@@ -82,8 +86,97 @@ pub fn flat_bars(count: usize) -> Vec<DollarBar> {
         .collect()
 }
 
-fn replay<T: Strategy>(strategy: &mut T, bars: &[DollarBar]) -> Vec<Option<OrderIntent>> {
-    bars.iter().map(|bar| strategy.on_bar(bar)).collect()
+/// Trades that rebuild [`synthetic_bars`]: open, high, low and close of each bar, in that
+/// order, a quarter of the bar's volume each, inside the bar's time span.
+pub fn synthetic_trades(bar_count: usize) -> Vec<Trade> {
+    synthetic_bars(bar_count)
+        .iter()
+        .flat_map(|bar| {
+            let quarter = bar.volume / dec!(4);
+            let step = (bar.end_time - bar.start_time) / 4;
+            [bar.open, bar.high, bar.low, bar.close]
+                .into_iter()
+                .enumerate()
+                .map(move |(i, price)| {
+                    let side = if i % 2 == 0 { Side::Buy } else { Side::Sell };
+                    Trade::new(bar.start_time + step * i as i64, price, quarter, side)
+                        .expect("synthetic bars have positive prices and volume")
+                })
+        })
+        .collect()
+}
+
+/// The synthetic input of the kind a strategy consumes.
+enum Input {
+    Bars(Vec<DollarBar>),
+    Trades(Vec<Trade>),
+}
+
+impl Input {
+    fn synthetic(kind: InputKind, bar_count: usize) -> Self {
+        match kind {
+            InputKind::DollarBars => Input::Bars(synthetic_bars(bar_count)),
+            InputKind::Trades => Input::Trades(synthetic_trades(bar_count)),
+        }
+    }
+
+    fn flat(kind: InputKind, bar_count: usize) -> Self {
+        let bars = flat_bars(bar_count);
+        match kind {
+            InputKind::DollarBars => Input::Bars(bars),
+            InputKind::Trades => Input::Trades(
+                bars.iter()
+                    .map(|bar| {
+                        Trade::new(bar.end_time, bar.close, bar.volume, Side::Buy)
+                            .expect("flat bars have positive prices and volume")
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    fn events(&self) -> Vec<MarketEvent<'_>> {
+        match self {
+            Input::Bars(bars) => bars.iter().map(MarketEvent::DollarBar).collect(),
+            Input::Trades(trades) => trades.iter().map(MarketEvent::Trade).collect(),
+        }
+    }
+}
+
+fn replay<T: Strategy>(strategy: &mut T, input: &Input) -> Vec<Option<Decision>> {
+    input
+        .events()
+        .iter()
+        .map(|event| strategy.on_event(event))
+        .collect()
+}
+
+/// The same input decided in two stages, as the optimizer does: the extractor once, then the
+/// strategy's decision stage on every feature it produced.
+fn replay_in_two_stages<S: OptimizableStrategy>(
+    extractor: &mut S::Extractor,
+    strategy: &mut S,
+    input: &Input,
+) -> Vec<Decision> {
+    input
+        .events()
+        .iter()
+        .filter_map(|event| extractor.on_event(event))
+        .filter_map(|features| strategy.on_features(&features))
+        .collect()
+}
+
+fn assert_valid_decision(id: &str, decision: &Decision) {
+    match decision {
+        Decision::Entry(intent) => assert_valid_intent(id, intent),
+        // TargetPosition::new already enforces the level, risk and stop invariants; the side
+        // must agree with the level.
+        Decision::Target(target) => assert_eq!(
+            target.side().is_some(),
+            target.level() != 0,
+            "{id}: a target's side must follow its level"
+        ),
+    }
 }
 
 fn assert_valid_intent(id: &str, intent: &OrderIntent) {
@@ -128,8 +221,9 @@ where
     );
 
     // The default configuration builds and the strategy describes itself.
+    let shared = S::SharedConfig::default();
     let default_config = S::Config::default();
-    let strategy = S::from_config(default_config.clone())
+    let strategy = S::from_config(&shared, default_config.clone())
         .unwrap_or_else(|error| panic!("{id}: the default configuration must build: {error}"));
     assert!(
         !strategy.name().is_empty(),
@@ -155,8 +249,12 @@ where
         .unwrap_or_else(|error| panic!("{id}: the configuration must serialize: {error}"));
     let restored: S::Config = serde_json::from_str(&json)
         .unwrap_or_else(|error| panic!("{id}: the configuration must deserialize: {error}"));
-    S::from_config(restored)
+    S::from_config(&shared, restored)
         .unwrap_or_else(|error| panic!("{id}: a round-tripped configuration must build: {error}"));
+    let shared_json = serde_json::to_string(&shared)
+        .unwrap_or_else(|error| panic!("{id}: the shared configuration must serialize: {error}"));
+    let _: S::SharedConfig = serde_json::from_str(&shared_json)
+        .unwrap_or_else(|error| panic!("{id}: the shared configuration must deserialize: {error}"));
 
     // The search space only proposes buildable configurations, within its budget.
     let space = S::default_space();
@@ -171,43 +269,55 @@ where
         candidates.len()
     );
     for candidate in &candidates {
-        S::from_config(candidate.clone())
+        S::from_config(&shared, candidate.clone())
             .unwrap_or_else(|error| panic!("{id}: candidate {candidate} must build: {error}"));
     }
     for neighbor in space.perturb_neighbors(&default_config) {
-        S::from_config(neighbor.clone())
+        S::from_config(&shared, neighbor.clone())
             .unwrap_or_else(|error| panic!("{id}: neighbor {neighbor} must build: {error}"));
     }
 
-    // Behaviour on bars: deterministic, resettable and well-formed.
-    let bars = synthetic_bars(400);
-    let build =
-        || S::from_config(default_config.clone()).expect("the default configuration builds");
+    // Behaviour on its input: deterministic, resettable and well-formed.
+    let kind = strategy.input_kind();
+    let input = Input::synthetic(kind, 400);
+    let build = || {
+        S::from_config(&shared, default_config.clone()).expect("the default configuration builds")
+    };
 
-    let first = replay(&mut build(), &bars);
-    let second = replay(&mut build(), &bars);
+    let first = replay(&mut build(), &input);
+    let second = replay(&mut build(), &input);
     assert_eq!(
         first, second,
-        "{id}: two fresh instances must emit the same intents"
+        "{id}: two fresh instances must emit the same decisions"
     );
 
     let mut reused = build();
-    replay(&mut reused, &bars);
+    replay(&mut reused, &input);
     reused.reset();
     assert_eq!(
-        replay(&mut reused, &bars),
+        replay(&mut reused, &input),
         first,
         "{id}: reset() must restore the state of a fresh instance"
     );
 
-    for intent in first.iter().flatten() {
-        assert_valid_intent(id, intent);
+    for decision in first.iter().flatten() {
+        assert_valid_decision(id, decision);
     }
+
+    // The optimizer decides in two stages; they must agree with the one-stage run.
+    let mut extractor = S::extractor(&shared)
+        .unwrap_or_else(|error| panic!("{id}: the extractor must build: {error}"));
+    let staged = replay_in_two_stages(&mut extractor, &mut build(), &input);
+    let direct: Vec<Decision> = first.iter().flatten().cloned().collect();
+    assert_eq!(
+        staged, direct,
+        "{id}: extractor + on_features must decide exactly what on_event decides"
+    );
 
     // Quiet markets must not break it.
     let mut quiet = build();
-    for intent in replay(&mut quiet, &flat_bars(200)).iter().flatten() {
-        assert_valid_intent(id, intent);
+    for decision in replay(&mut quiet, &Input::flat(kind, 200)).iter().flatten() {
+        assert_valid_decision(id, decision);
     }
 }
 
@@ -234,7 +344,8 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     /// A small strategy with a switchable defect: `0` is well behaved, `1` forgets to clear its
-    /// state on `reset`, `2` emits a long whose stop sits above the entry.
+    /// state on `reset`, `2` emits a long whose stop sits above the entry, `3` decides nothing
+    /// in its two-stage form.
     #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
     struct FaultyConfig;
 
@@ -301,15 +412,30 @@ mod tests {
     }
 
     impl<const MODE: u8> OptimizableStrategy for Faulty<MODE> {
+        type SharedConfig = ();
         type Config = FaultyConfig;
         type Space = FaultySpace;
+        type Extractor = crate::strategy::BarPassThrough;
 
         fn id() -> &'static str {
             "faulty"
         }
 
-        fn from_config(_: FaultyConfig) -> Result<Self, domain::DomainError> {
+        fn from_config(_: &(), _: FaultyConfig) -> Result<Self, domain::DomainError> {
             Ok(Self { seen: 0 })
+        }
+
+        fn extractor(_: &()) -> Result<Self::Extractor, domain::DomainError> {
+            Ok(crate::strategy::BarPassThrough)
+        }
+
+        fn on_features(&mut self, bar: &DollarBar) -> Option<Decision> {
+            let decision = self.on_bar(bar).map(Decision::Entry);
+            if MODE == 3 {
+                None
+            } else {
+                decision
+            }
         }
 
         fn default_space() -> FaultySpace {
@@ -332,5 +458,23 @@ mod tests {
     #[should_panic(expected = "a long needs stop < price < target")]
     fn an_intent_with_the_stop_on_the_wrong_side_is_rejected() {
         assert_strategy_contract::<Faulty<2>>();
+    }
+
+    #[test]
+    #[should_panic(expected = "extractor + on_features must decide exactly what on_event decides")]
+    fn a_strategy_whose_two_stages_disagree_is_rejected() {
+        assert_strategy_contract::<Faulty<3>>();
+    }
+
+    #[test]
+    fn the_synthetic_trades_rebuild_the_synthetic_bars() {
+        let bars = synthetic_bars(50);
+        let trades = synthetic_trades(50);
+        assert_eq!(trades.len(), 200);
+        for (bar, chunk) in bars.iter().zip(trades.chunks(4)) {
+            let prices: Vec<_> = chunk.iter().map(|t| t.price).collect();
+            assert_eq!(prices, vec![bar.open, bar.high, bar.low, bar.close]);
+        }
+        assert!(trades.windows(2).all(|w| w[0].timestamp <= w[1].timestamp));
     }
 }

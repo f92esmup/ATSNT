@@ -4,11 +4,13 @@ use domain::futures;
 use domain::{DollarBar, Position, PositionSide, RiskPolicy, Side};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use strategies::Strategy;
+use strategies::{Decision, MarketEvent, Strategy};
 
 use crate::config::BacktestConfig;
 use crate::daily_watermark::DailyWatermark;
-use crate::metrics::{BacktestMetrics, ClosedTrade, TradeExcursion};
+use crate::metrics::{
+    BacktestMetrics, ClosedTrade, TradeExcursion, UNSUPPORTED_DECISION_REJECTION,
+};
 use crate::monthly_guard::utc_month_key;
 
 /// A submitted entry: the strategy intent and the quantity sized when it was signalled.
@@ -292,7 +294,15 @@ impl BacktestEngine {
         //    signal only becomes an order when flat. A time-barrier close is sent at the end of
         //    the bar and is still settling live, so that bar cannot open a new trade.
         if !self.halted {
-            let signal = strategy.on_bar(bar);
+            let signal = match strategy.on_event(&MarketEvent::DollarBar(bar)) {
+                Some(Decision::Entry(intent)) => Some(intent),
+                Some(Decision::Target(_)) => {
+                    // Target execution arrives with the execution core (odd swarm-consensus T5.3).
+                    self.count_rejection(UNSUPPORTED_DECISION_REJECTION);
+                    None
+                }
+                None => None,
+            };
             let closed_by_time_barrier = self.closed_trades.len() > trades_before
                 && self
                     .closed_trades
@@ -807,6 +817,51 @@ mod tests {
         assert_eq!(
             metrics.rejected_orders,
             std::collections::BTreeMap::from([("OrderSizeExceeded".to_string(), 2)])
+        );
+    }
+
+    /// Asks for a long target on every bar; the bar engine cannot execute targets yet.
+    struct TargetOnly;
+
+    impl Strategy for TargetOnly {
+        fn name(&self) -> &str {
+            "target_only"
+        }
+
+        fn compatible_market_types(&self) -> &'static [MarketType] {
+            &[MarketType::UsdMPerpetual]
+        }
+
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<Decision> {
+            let target =
+                domain::TargetPosition::new(event.timestamp(), 1, dec!(0.01), dec!(5)).unwrap();
+            Some(Decision::Target(target))
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    #[test]
+    fn a_target_decision_is_counted_as_unsupported_and_never_trades() {
+        let mut engine = realistic_engine();
+        let mut strategy = TargetOnly;
+
+        for t in [1000, 2000, 3000] {
+            engine.process_bar(
+                &mut strategy,
+                &ohlc_bar(t, dec!(100), dec!(100), dec!(100), dec!(100)),
+            );
+        }
+
+        assert!(engine.active_position().is_none());
+        let metrics = engine.finish(Some(dec!(100)));
+        assert_eq!(metrics.total_trades, 0);
+        assert_eq!(
+            metrics.rejected_orders,
+            std::collections::BTreeMap::from([(
+                crate::metrics::UNSUPPORTED_DECISION_REJECTION.to_string(),
+                3
+            )])
         );
     }
 
