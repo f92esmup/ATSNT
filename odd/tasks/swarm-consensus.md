@@ -59,13 +59,13 @@ Every behaviour task follows the test-first policy: RED, then GREEN. The **byte-
 
 No refactor starts before this phase is committed. **RED exception**: characterisation tests pass at the baseline by construction. Their proof is a mutation check: alter one fee or slippage operation locally, and every relevant golden must fail.
 
-- [ ] T1.1 S10: deterministic synthetic market fixtures. Route: inline.
+- [x] T1.1 S10: deterministic synthetic market fixtures. Route: inline. Done: `crates/backtest/tests/support/mod.rs` (`synthetic_trades`, `dollar_bars`); determinism test `the_tape_is_deterministic`; coverage test `the_goldens_cover_every_reachable_exit_and_rejection`. Liquidation was not reached (see the Log).
   - `crates/backtest/tests/support/market.rs` (a new test-support module) provides `synthetic_trades(seed, n)`, a seeded random walk with buy/sell sides and volume bursts.
   - It produces enough dollar bars at a small threshold for CUSUM and OFI to open and close trades through every exit kind: stop loss, take profit, time barrier, and end of simulation. Liquidation and the monthly kill switch are reached with a dedicated crash segment.
   - Tests:
     - the fixture is deterministic;
     - each exit reason appears at least once for CUSUM and for OFI on the golden configs (asserted, so the goldens cover every branch).
-- [ ] T1.2 S10: golden snapshots. Route: inline.
+- [x] T1.2 S10: golden snapshots. Route: inline. Done: `crates/backtest/tests/golden_execution.rs` with 12 snapshots in `crates/backtest/tests/golden/`; stable over 3 runs; mutation check passed (see the Log).
   - New file `crates/backtest/tests/golden_execution.rs`. Snapshots are JSON files under `crates/backtest/tests/golden/`, written once with `UPDATE_GOLDEN=1` and compared byte for byte otherwise.
   - Each snapshot holds the full `Vec<ClosedTrade>`, the `BacktestMetrics`, `rejected_orders`, and the equity curve points:
     - (a) the bar engine via `run_backtest_slice_with_trades` (`optimization.rs:35`), for CUSUM and for OFI;
@@ -369,4 +369,17 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
 - T0 committed as b729269. Native review: low risk (non-executable only), approved and acknowledged, lineage review-c98e13ee95dae050.
 - L10 (2026-10-19) User: "sobre esa rama de feature."
   - Decision: the chain strategy is `feature-branch-chain`.
-- Next: start Phase 1 (T1.1 synthetic market fixtures).
+- L11 (2026-10-19) User: "Si ejecuta la fase 1"
+  - Phase 1 evidence:
+    - The synthetic tape (seed 7, 60,000 aggTrades, $1M bars, 1,947 bars) reaches these exits:
+      - bar engine: StopLoss, TakeProfit, TimeBarrier, MonthlyCircuitBreaker (stress scenario: risk 5%, monthly limit 3%), and EndOfSimulation (a 45,379-trade prefix that ends inside an order-flow trade);
+      - tick path: the same, except EndOfSimulation, because `TickSimulation::finish` never force-closes;
+      - rejections: DailyHalt and OrderSizeExceeded.
+    - Liquidation was not reached with any valid configuration probed. The stop-before-liquidation rule closes at the stop first. Liquidation stays pinned by the existing engine (`engine.rs` liquidation tests) and venue unit tests.
+    - The snapshots match over 3 consecutive runs, including the rayon-parallel walk-forward ranking. Recorded rows are normalised: run ids become `<run-N>` and wall-clock fields `<wall-clock>`.
+    - Mutation check:
+      - +1e-8 on the bar engine's entry fee fails 3 tests (bar outcomes, backtest recording rows, walk-forward ranking and recording);
+      - +1e-8 on the simulated venue's commission fails the tick test;
+      - both mutations were reverted.
+    - `cargo fmt`: clean. `cargo clippy --all-targets -D warnings`: clean. `cargo test --workspace`: all green.
+- Next: Phase 2 (T2.1–T2.3, two parallel writers).

@@ -1,0 +1,138 @@
+{
+  "metrics": {
+    "total_trades": 4,
+    "winning_trades": 3,
+    "losing_trades": 1,
+    "win_rate": "0.75",
+    "gross_profit": "298.327058452527500",
+    "gross_loss": "102.306624788550625",
+    "net_profit": "196.020433663976875",
+    "total_fees": "13.355035239773125",
+    "total_slippage": "16.18483859625",
+    "profit_factor": "2.9160091936286220123772640005",
+    "payoff_ratio": "0.9720030645428740041257546669",
+    "mathematical_expectancy": "49.005108415994218750000000002",
+    "max_drawdown_amount": "102.306624788550625",
+    "max_drawdown_pct": "0.0102306624788550625",
+    "sortino_ratio": "0.9476486275674554791574060611",
+    "fee_drag_pct": "0.043094539331040743567892041",
+    "exit_reason_counts": {
+      "EndOfSimulation": 1,
+      "StopLoss": 1,
+      "TakeProfit": 2
+    },
+    "avg_holding_seconds": "364.25",
+    "avg_mae_pct": "0.0019566642135960362059859197",
+    "avg_mfe_pct": "0.0037075952367906952476001122",
+    "halted": false,
+    "rejected_orders": {
+      "OrderSizeExceeded": 53
+    }
+  },
+  "trades": [
+    {
+      "entry_time": 1767255340857,
+      "exit_time": 1767255857704,
+      "entry_price": "15318.23705",
+      "exit_price": "16207.84237125",
+      "quantity": "0.113",
+      "side": "Short",
+      "pnl_gross": "-100.52540130125",
+      "fees_paid": "1.781223487300625",
+      "funding_paid": "0",
+      "slippage_paid": "1.78119880125",
+      "pnl_net": "-102.306624788550625",
+      "return_pct": "-0.0591039528899720872252724409",
+      "exit_reason": "StopLoss",
+      "holding_duration_seconds": 516,
+      "excursion": {
+        "entry_equity": "9975.770306256675",
+        "trough_equity": "9897.693375211449375",
+        "trough_time": 1767255857704,
+        "peak_equity": "9975.770306256675",
+        "peak_time": 1767255453557,
+        "exit_equity": "9897.693375211449375",
+        "max_drawdown_amount": "102.306624788550625",
+        "max_drawdown_pct": "0.0102306624788550625"
+      }
+    },
+    {
+      "entry_time": 1767255859538,
+      "exit_time": 1767256327721,
+      "entry_price": "16291.04145",
+      "exit_price": "17230.63037500",
+      "quantity": "0.137",
+      "side": "Long",
+      "pnl_gross": "128.72368272500",
+      "fees_paid": "2.296234520012500",
+      "funding_paid": "0",
+      "slippage_paid": "2.51546727500",
+      "pnl_net": "126.427448204987500",
+      "return_pct": "0.0566463532684400603498556564",
+      "exit_reason": "TakeProfit",
+      "holding_duration_seconds": 468,
+      "excursion": {
+        "entry_equity": "9918.765760222124375",
+        "trough_equity": "9918.765760222124375",
+        "trough_time": 1767255963995,
+        "peak_equity": "10024.120823416436875",
+        "peak_time": 1767256327721,
+        "exit_equity": "10024.120823416436875",
+        "max_drawdown_amount": "81.234239777875625",
+        "max_drawdown_pct": "0.0081234239777875625"
+      }
+    },
+    {
+      "entry_time": 1767295676405,
+      "exit_time": 1767295741617,
+      "entry_price": "25723.53180",
+      "exit_price": "25327.81758000",
+      "quantity": "0.309",
+      "side": "Short",
+      "pnl_gross": "122.27569398000",
+      "fees_paid": "7.887433479210000",
+      "funding_paid": "0",
+      "slippage_paid": "11.07016602000",
+      "pnl_net": "114.388260500790000",
+      "return_pct": "0.0143910466178676133422705198",
+      "exit_reason": "TakeProfit",
+      "holding_duration_seconds": 65,
+      "excursion": {
+        "entry_equity": "10138.509083917226875",
+        "trough_equity": "10138.509083917226875",
+        "trough_time": 1767295676405,
+        "peak_equity": "10138.509083917226875",
+        "peak_time": 1767295676405,
+        "exit_equity": "10138.509083917226875",
+        "max_drawdown_amount": "0",
+        "max_drawdown_pct": "0"
+      }
+    },
+    {
+      "entry_time": 1767297920559,
+      "exit_time": 1767298329301,
+      "entry_price": "11832.11310",
+      "exit_price": "12344.3",
+      "quantity": "0.115",
+      "side": "Long",
+      "pnl_gross": "58.90149350",
+      "fees_paid": "1.390143753250",
+      "funding_paid": "0",
+      "slippage_paid": "0.81800650",
+      "pnl_net": "57.511349746750",
+      "return_pct": "0.0422662198394638401487220402",
+      "exit_reason": "EndOfSimulation",
+      "holding_duration_seconds": 408,
+      "excursion": {
+        "entry_equity": "10153.996230913976875",
+        "trough_equity": "10153.996230913976875",
+        "trough_time": 1767298061932,
+        "peak_equity": "10196.730230913976875",
+        "peak_time": 1767298329301,
+        "exit_equity": "10196.020433663976875",
+        "max_drawdown_amount": "0",
+        "max_drawdown_pct": "0"
+      }
+    }
+  ]
+}
