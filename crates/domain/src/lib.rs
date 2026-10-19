@@ -4,6 +4,7 @@
 
 pub mod analytics;
 pub mod bar;
+pub mod decision;
 pub mod error;
 pub mod futures;
 pub mod order;
@@ -24,8 +25,11 @@ pub use analytics::{
     VwapDeviation, WilderAtr, WilderRsi, ZScoreResult,
 };
 pub use bar::DollarBar;
+pub use decision::{
+    Decision, InputKind, MarketEvent, ProtectiveExits, TargetPosition, MAX_TARGET_LEVEL,
+};
 pub use error::DomainError;
 pub use order::{Order, OrderIntent, OrderStatus, OrderType, TimeInForce};
 pub use position::{Position, PositionSide};
-pub use risk::{RiskError, RiskPolicy};
+pub use risk::{RiskError, RiskPolicy, TargetSizing};
 pub use trade::{Side, Trade};

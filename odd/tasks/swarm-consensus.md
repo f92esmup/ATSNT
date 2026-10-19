@@ -117,12 +117,12 @@ No refactor starts before this phase is committed. **RED exception**: characteri
 
 Risk: item 3 (shared domain contracts consumed by every runner). The byte-identity guard applies.
 
-- [ ] T3.1 S6: decision types in the new file `crates/domain/src/decision.rs`, re-exported from `lib.rs`. Route: inline.
+- [x] T3.1 S6: decision types in the new file `crates/domain/src/decision.rs`, re-exported from `lib.rs`. Route: inline. Done: 10 tests; RED was 26 compile errors (types missing), then GREEN. `TargetPosition` fields are private with getters so the invariants cannot be bypassed; `DomainError::InvalidTarget` added.
   - `Decision`, `TargetPosition`, `ProtectiveExits`, `MarketEvent<'a>`, `InputKind` (spec §3.2–3.3).
   - `TargetPosition::new` validates `-3 ≤ level ≤ 3`, `risk_fraction = 0 ⇔ level = 0`, `0 ≤ risk_fraction ≤ 1`, and `stop_distance > 0` when `level ≠ 0`.
   - `ProtectiveExits::from_intent(&OrderIntent)` and `ProtectiveExits::for_target(side, fill_price, stop_distance)`.
   - Tests: every validation, accepted and rejected; `from_intent` copies SL, TP, and max bars exactly.
-- [ ] T3.2 S6, S10: one sizing core in `crates/domain/src/risk.rs`. Route: inline.
+- [x] T3.2 S6, S10: one sizing core in `crates/domain/src/risk.rs`. Route: inline. Done: `quantity_for_risk` extracted (same operation order); `size_target` + `TargetSizing`; 9 new tests (oracle property test over 1,000 LCG inputs, plus 8 `size_target` cases); RED was 14 compile errors (`size_target` missing). Every existing `risk.rs` test and every golden unchanged; workspace 621 passed.
   - A private `quantity_for_risk(equity, risk, stop_distance, price, policy)` is extracted from `size_order`, keeping its operation order (`risk.rs:254-259`). `size_order` calls it, with no behaviour change.
   - New `size_target(target, price, equity, current_qty, session_dd, policy) -> Result<TargetSizing { quantity, clipped }, RiskError>`. It applies the clip semantics of spec §11.3 and the existing breaker check.
   - Tests:
@@ -400,4 +400,10 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
     - Range bisection checks the rounded candidate.
     - A volume threshold that rounds to 0 is `InsufficientData`.
   - Found during the seam check: the HPO recording golden stored the build's `git_sha`, so it changed with every commit. It is now normalised to `<build>`, and the only lines changed in the snapshot are those 7 `git_sha` lines (commit "test(backtest): normalize the build revision in golden recording rows"). A mismatch now writes a `.actual.json` next to the snapshot.
-- Next: Phase 3 (T3.1 decision types, T3.2 shared sizing core).
+- L13 (2026-10-19) User: "Vale pues ignora la herramienta para el main completo y ya esta. no me lo vuelvas a preguntar. SIque con la fase 3"
+  - Decision: whole-branch-vs-main review consents are declined without asking; per-commit review consents are still relayed.
+  - Phase 3 evidence: fmt clean, clippy clean, `cargo test --workspace` 621 passed, 0 failed, goldens unchanged (byte-identity guard).
+  - Design notes:
+    - `size_target` takes the signed current quantity, so the daily breaker can allow reductions and block increases and flips.
+    - Order-level limits (minimum lot and notional, maximum order notional) are left to the order that moves the position (Phase 5).
+- Next: Phase 4 (T4.1–T4.3, the unified strategy contract).

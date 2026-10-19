@@ -17,4 +17,6 @@ pub enum DomainError {
     OverfillError,
     #[error("not enough data: {0}")]
     InsufficientData(String),
+    #[error("invalid target position: {0}")]
+    InvalidTarget(String),
 }

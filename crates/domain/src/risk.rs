@@ -7,6 +7,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::decision::TargetPosition;
 use crate::order::OrderIntent;
 
 /// Errors emitted when pre-trade risk constraints are violated.
@@ -72,6 +73,15 @@ fn default_quantity_step_size() -> Decimal {
 
 fn default_min_order_notional() -> Decimal {
     Decimal::new(5, 0)
+}
+
+/// Signed position size for a [`TargetPosition`] (see [`RiskPolicy::size_target`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetSizing {
+    /// Target quantity in base units: positive long, negative short, 0 flat.
+    pub quantity: Decimal,
+    /// Whether `max_position_notional` reduced the quantity.
+    pub clipped: bool,
 }
 
 /// Pre-trade risk policy configuration.
@@ -252,12 +262,12 @@ impl RiskPolicy {
             });
         }
 
-        let risk_quantity = (mark_to_market_equity * risk_per_trade_pct) / stop_distance;
-        // Leverage cap: tight stops must not inflate the position beyond max_leverage.
-        let max_quantity = (mark_to_market_equity * self.max_leverage) / execution_price;
-        let capped = risk_quantity.min(max_quantity);
-        // Exchange LOT_SIZE: floor to a whole number of steps.
-        let quantity = (capped / self.quantity_step_size).floor() * self.quantity_step_size;
+        let quantity = self.quantity_for_risk(
+            mark_to_market_equity,
+            risk_per_trade_pct,
+            stop_distance,
+            execution_price,
+        );
 
         if quantity < self.min_order_quantity {
             return Err(RiskError::OrderBelowMinLotSize {
@@ -281,6 +291,97 @@ impl RiskPolicy {
         )?;
 
         Ok(quantity)
+    }
+
+    /// Sizes the position a [`TargetPosition`] asks for, signed: positive long, negative short.
+    ///
+    /// The quantity uses the same core as [`RiskPolicy::size_order`]
+    /// (`equity * risk / stop_distance`, capped by `max_leverage`, floored to the lot step).
+    /// Unlike an entry it is **clipped**, not rejected, at `max_position_notional`, and
+    /// `clipped` reports it. Order-level limits (minimum lot and notional, maximum order
+    /// notional) apply to the order that moves the position, not here.
+    ///
+    /// With the session breaker tripped, a target may only reduce exposure: a larger absolute
+    /// quantity or a flip to the other side is rejected. A flat target is always 0.
+    pub fn size_target(
+        &self,
+        target: &TargetPosition,
+        execution_price: Decimal,
+        mark_to_market_equity: Decimal,
+        current_quantity: Decimal,
+        current_session_drawdown_pct: Decimal,
+    ) -> Result<TargetSizing, RiskError> {
+        if execution_price <= Decimal::ZERO {
+            return Err(RiskError::InvalidParameters(
+                "execution_price must be positive".to_string(),
+            ));
+        }
+        if mark_to_market_equity <= Decimal::ZERO {
+            return Err(RiskError::InvalidParameters(
+                "mark_to_market_equity must be positive".to_string(),
+            ));
+        }
+        if current_session_drawdown_pct < Decimal::ZERO {
+            return Err(RiskError::InvalidParameters(
+                "current_session_drawdown_pct cannot be negative".to_string(),
+            ));
+        }
+        let Some(side) = target.side() else {
+            return Ok(TargetSizing {
+                quantity: Decimal::ZERO,
+                clipped: false,
+            });
+        };
+
+        let mut quantity = self.quantity_for_risk(
+            mark_to_market_equity,
+            target.risk_fraction(),
+            target.stop_distance(),
+            execution_price,
+        );
+        let mut clipped = false;
+        if quantity * execution_price > self.max_position_notional {
+            quantity = (self.max_position_notional / execution_price / self.quantity_step_size)
+                .floor()
+                * self.quantity_step_size;
+            clipped = true;
+        }
+        let signed = match side {
+            crate::trade::Side::Buy => quantity,
+            crate::trade::Side::Sell => -quantity,
+        };
+
+        let flips = !current_quantity.is_zero()
+            && current_quantity.is_sign_negative() != signed.is_sign_negative();
+        let adds_exposure = flips || signed.abs() > current_quantity.abs();
+        if adds_exposure && current_session_drawdown_pct >= self.max_daily_drawdown_pct {
+            return Err(RiskError::CircuitBreakerTriggered {
+                current_pct: current_session_drawdown_pct.to_string(),
+                limit_pct: self.max_daily_drawdown_pct.to_string(),
+            });
+        }
+
+        Ok(TargetSizing {
+            quantity: signed,
+            clipped,
+        })
+    }
+
+    /// Quantity whose loss at `stop_distance` is `equity * risk`, capped by `max_leverage`
+    /// and floored to a whole number of lot steps. Shared by entries and targets.
+    fn quantity_for_risk(
+        &self,
+        equity: Decimal,
+        risk: Decimal,
+        stop_distance: Decimal,
+        price: Decimal,
+    ) -> Decimal {
+        let risk_quantity = (equity * risk) / stop_distance;
+        // Leverage cap: tight stops must not inflate the position beyond max_leverage.
+        let max_quantity = (equity * self.max_leverage) / price;
+        let capped = risk_quantity.min(max_quantity);
+        // Exchange LOT_SIZE: floor to a whole number of steps.
+        (capped / self.quantity_step_size).floor() * self.quantity_step_size
     }
 
     /// Evaluates if an intended order satisfies all pre-trade risk criteria.
@@ -670,5 +771,235 @@ mod tests {
         let policy: RiskPolicy = serde_json::from_str(json).unwrap();
 
         assert_eq!(policy, RiskPolicy::default());
+    }
+
+    /// The quantity formula `size_order` used before the shared core was extracted, kept as
+    /// the oracle that proves the extraction changed no result.
+    fn legacy_quantity(
+        policy: &RiskPolicy,
+        equity: Decimal,
+        risk: Decimal,
+        stop_distance: Decimal,
+        price: Decimal,
+    ) -> Decimal {
+        let risk_quantity = (equity * risk) / stop_distance;
+        let max_quantity = (equity * policy.max_leverage) / price;
+        let capped = risk_quantity.min(max_quantity);
+        (capped / policy.quantity_step_size).floor() * policy.quantity_step_size
+    }
+
+    /// Deterministic pseudo-random integers (64-bit LCG) for property tests without `rand`.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, bound: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 33) % bound
+        }
+    }
+
+    #[test]
+    fn size_order_quantity_is_unchanged_over_random_inputs() {
+        let policy = RiskPolicy {
+            max_position_notional: dec!(1_000_000_000),
+            max_order_notional: dec!(1_000_000_000),
+            ..RiskPolicy::default()
+        };
+        let mut rng = Lcg(7);
+        let mut checked = 0;
+        for _ in 0..1_000 {
+            let price = Decimal::new(1_000_000 + rng.next(9_000_000) as i64, 2);
+            let equity = Decimal::new(10_000 + rng.next(10_000_000) as i64, 2);
+            let risk = Decimal::new(1 + rng.next(500) as i64, 4);
+            let stop_distance = Decimal::new(1 + rng.next(500_000) as i64, 2);
+            let intent = OrderIntent::new(
+                1,
+                Side::Buy,
+                price,
+                price - stop_distance,
+                price * dec!(2),
+                5,
+            );
+            let Ok(intent) = intent else { continue };
+            let expected = legacy_quantity(&policy, equity, risk, stop_distance, price);
+            match policy.size_order(&intent, price, equity, risk, Decimal::ZERO, Decimal::ZERO) {
+                Ok(quantity) => assert_eq!(quantity, expected),
+                Err(RiskError::OrderBelowMinLotSize { .. })
+                | Err(RiskError::OrderBelowMinNotional { .. }) => {
+                    assert!(
+                        expected < policy.min_order_quantity
+                            || expected * price < policy.min_order_notional
+                    );
+                }
+                Err(other) => panic!("unexpected rejection {other:?}"),
+            }
+            checked += 1;
+        }
+        assert!(checked > 900);
+    }
+
+    fn open_target(level: i8, risk: Decimal, stop: Decimal) -> TargetPosition {
+        TargetPosition::new(1, level, risk, stop).unwrap()
+    }
+
+    #[test]
+    fn a_target_is_sized_like_an_entry_from_risk_over_stop_distance() {
+        let sizing = RiskPolicy::default()
+            .size_target(
+                &open_target(1, dec!(0.01), dec!(2)),
+                dec!(100),
+                dec!(10_000),
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+        assert_eq!(
+            sizing,
+            TargetSizing {
+                quantity: dec!(50),
+                clipped: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_short_target_has_a_negative_quantity() {
+        let sizing = RiskPolicy::default()
+            .size_target(
+                &open_target(-2, dec!(0.01), dec!(2)),
+                dec!(100),
+                dec!(10_000),
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+        assert_eq!(sizing.quantity, dec!(-50));
+    }
+
+    #[test]
+    fn a_flat_target_is_zero_even_with_a_tripped_breaker() {
+        let flat = TargetPosition::new(1, 0, Decimal::ZERO, Decimal::ZERO).unwrap();
+        let sizing = RiskPolicy::default()
+            .size_target(&flat, dec!(100), dec!(10_000), dec!(3), dec!(0.5))
+            .unwrap();
+        assert_eq!(
+            sizing,
+            TargetSizing {
+                quantity: Decimal::ZERO,
+                clipped: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_target_is_clipped_to_the_position_cap_instead_of_rejected() {
+        let policy = RiskPolicy {
+            max_position_notional: dec!(2_000),
+            ..RiskPolicy::default()
+        };
+        let sizing = policy
+            .size_target(
+                &open_target(1, dec!(0.01), dec!(2)),
+                dec!(300),
+                dec!(10_000),
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+        // 2,000 / 300 = 6.666..., floored to the 0.001 step.
+        assert_eq!(
+            sizing,
+            TargetSizing {
+                quantity: dec!(6.666),
+                clipped: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_tight_target_stop_is_capped_at_max_leverage() {
+        let sizing = RiskPolicy::default()
+            .size_target(
+                &open_target(1, dec!(0.01), dec!(0.01)),
+                dec!(100),
+                dec!(1_000),
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+        // Risk sizing asks 1,000 units; leverage 20 allows 1,000 * 20 / 100 = 200.
+        assert_eq!(sizing.quantity, dec!(200));
+        assert!(!sizing.clipped);
+    }
+
+    #[test]
+    fn a_tripped_breaker_blocks_a_target_that_adds_exposure() {
+        let result = RiskPolicy::default().size_target(
+            &open_target(2, dec!(0.01), dec!(2)),
+            dec!(100),
+            dec!(10_000),
+            dec!(10),
+            dec!(0.06),
+        );
+        assert!(matches!(
+            result,
+            Err(RiskError::CircuitBreakerTriggered { .. })
+        ));
+    }
+
+    #[test]
+    fn a_tripped_breaker_allows_a_target_that_reduces_exposure() {
+        let sizing = RiskPolicy::default()
+            .size_target(
+                &open_target(1, dec!(0.01), dec!(2)),
+                dec!(100),
+                dec!(10_000),
+                dec!(80),
+                dec!(0.06),
+            )
+            .unwrap();
+        assert_eq!(sizing.quantity, dec!(50));
+    }
+
+    #[test]
+    fn a_tripped_breaker_blocks_a_flip_to_the_other_side() {
+        let result = RiskPolicy::default().size_target(
+            &open_target(-1, dec!(0.01), dec!(2)),
+            dec!(100),
+            dec!(10_000),
+            dec!(80),
+            dec!(0.06),
+        );
+        assert!(matches!(
+            result,
+            Err(RiskError::CircuitBreakerTriggered { .. })
+        ));
+    }
+
+    #[test]
+    fn target_sizing_rejects_invalid_inputs() {
+        let policy = RiskPolicy::default();
+        let t = open_target(1, dec!(0.01), dec!(2));
+        assert!(matches!(
+            policy.size_target(
+                &t,
+                Decimal::ZERO,
+                dec!(10_000),
+                Decimal::ZERO,
+                Decimal::ZERO
+            ),
+            Err(RiskError::InvalidParameters(_))
+        ));
+        assert!(matches!(
+            policy.size_target(&t, dec!(100), Decimal::ZERO, Decimal::ZERO, Decimal::ZERO),
+            Err(RiskError::InvalidParameters(_))
+        ));
+        assert!(matches!(
+            policy.size_target(&t, dec!(100), dec!(10_000), Decimal::ZERO, dec!(-0.1)),
+            Err(RiskError::InvalidParameters(_))
+        ));
     }
 }
