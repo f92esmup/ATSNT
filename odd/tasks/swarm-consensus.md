@@ -78,7 +78,7 @@ No refactor starts before this phase is committed. **RED exception**: characteri
 
 **Writer trigger (a)**: two independent units with disjoint edit surfaces, each heavier than starting a worker, launched together. The parent owns git, adds the `pub mod` lines and re-exports in `crates/domain/src/analytics/mod.rs` and `crates/domain/src/lib.rs` after both return, and runs the seam check (the full suite, once).
 
-- [ ] T2.1 S3: bar feeds in `crates/domain/src/analytics/feeds.rs`. Route: delegated writer A. Surface: that file only.
+- [x] T2.1 S3: bar feeds in `crates/domain/src/analytics/feeds.rs`. Route: delegated writer A. Surface: that file only. Done: 14 tests; RED against stubs (10 failed by assertion, 4 negative guards passed vacuously).
   - `FeedBar { start_time, end_time, open, high, low, close, volume, trade_count }`.
   - `trait BarAggregator { fn process_trade(&mut self, &Trade) -> Option<FeedBar>; fn reset(&mut self); }`.
   - `TimeBarAggregator`, `TickBarAggregator`, `VolumeBarAggregator`, `RangeBarAggregator`, with the rules of spec §5.3. Constructors reject non-positive thresholds with `DomainError`.
@@ -92,7 +92,7 @@ No refactor starts before this phase is committed. **RED exception**: characteri
     - a flat price never closes a range bar;
     - `reset()` equals fresh;
     - no bar is emitted at the end of input.
-- [ ] T2.2 S3: calibration in `crates/domain/src/analytics/calibration.rs`. Route: delegated writer A, after T2.1. Surface: that file only.
+- [x] T2.2 S3: calibration in `crates/domain/src/analytics/calibration.rs`. Route: delegated writer A, after T2.1. Surface: that file only. Done: 7 tests; RED against an always-error stub (5 failed, 2 error cases passed vacuously).
   - `FeedThresholds { tick: [u64; 4], volume: [Decimal; 4], range: [Decimal; 4], calibration_end_ms }`.
   - `calibrate(trades: &[Trade], horizons_ms: [i64; 4]) -> Result<FeedThresholds, DomainError>`, following spec §5.4.
   - Tests:
@@ -100,7 +100,7 @@ No refactor starts before this phase is committed. **RED exception**: characteri
     - the range threshold hits the target count within 1% on a seeded random walk;
     - deterministic;
     - errors on fewer than 2 trades or a zero duration.
-- [ ] T2.3 S1: indicators in `crates/domain/src/analytics/indicators.rs`. Route: delegated writer B. Surface: that file only.
+- [x] T2.3 S1: indicators in `crates/domain/src/analytics/indicators.rs`. Route: delegated writer B. Surface: that file only. Done: 14 tests. RED was not observed before GREEN (written in one pass); a mutation check is used instead: 10 single-rule mutations each turned the suite RED.
   - `WilderRsi(14)`, `WilderAtr(14)`, `AtrRatio(50)`, `AlmaSlope(9, 0.85, 6)`, `VwapDeviation(50)`. Each has `update(&FeedBar) -> Option<Decimal>` and `reset()`.
   - `FeedIndicators::update(&FeedBar) -> Option<IndicatorSnapshot>`, warm at bar 64 (spec §6). ALMA weights are precomputed in `Decimal` with `MathematicalOps::exp`.
   - Tests:
@@ -385,4 +385,19 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
   - Phase 1 committed as d2209de. Review assessment: tier high, review due (`high_risk`). The user granted consent; one lens (reliability), lineage review-44f793ef2e34b514.
   - The single capture returned `correction_required` without exposing findings. The bound STATUS then stopped with `corrupted_or_unverifiable_authority`. This is a Gentle AI defect, equivalent to the open issue Gentleman-Programming/gentle-ai#5209.
   - The user chose to report it and continue. One occurrence comment was posted on #5209. The captured decline invocation was run once: `declined_this_candidate`. No review receipt exists for d2209de.
-- Next: Phase 2 (T2.1–T2.3, two parallel writers).
+- L12 (2026-10-19) User: "continua con la fase 2"
+  - Phase 2 evidence:
+    - The parent added `DomainError::InsufficientData` before launch.
+    - Two parallel writers, each within its declared surface (checked against `git status`).
+    - The parent wired `analytics/mod.rs` and `lib.rs` re-exports and added `impl From<&FeedBar> for BarInput`.
+    - Seam check: fmt clean, clippy clean, `cargo test --workspace` 601 passed, 0 failed.
+  - Deviations accepted from the writers:
+    - Indicators take a `BarInput` and the current ATR instead of `&FeedBar`.
+    - Lookbacks below 2 are rejected.
+    - RSI is computed as `100·G/(G+L)`, one rounding less than the textbook form.
+    - Window sums are recomputed per update instead of running sums, to avoid drift.
+    - Rounding uses `MidpointAwayFromZero`.
+    - Range bisection checks the rounded candidate.
+    - A volume threshold that rounds to 0 is `InsufficientData`.
+  - Found during the seam check: the HPO recording golden stored the build's `git_sha`, so it changed with every commit. It is now normalised to `<build>`, and the only lines changed in the snapshot are those 7 `git_sha` lines (commit "test(backtest): normalize the build revision in golden recording rows"). A mismatch now writes a `.actual.json` next to the snapshot.
+- Next: Phase 3 (T3.1 decision types, T3.2 shared sizing core).

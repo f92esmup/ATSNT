@@ -15,4 +15,6 @@ pub enum DomainError {
     InvalidStateTransition { from: String, to: String },
     #[error("fill quantity exceeds remaining order quantity")]
     OverfillError,
+    #[error("not enough data: {0}")]
+    InsufficientData(String),
 }

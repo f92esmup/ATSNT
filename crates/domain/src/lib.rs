@@ -17,7 +17,12 @@ pub use analytics::sampling as aggregator;
 pub use analytics::stats;
 
 // Re-exports of core domain and analytical types
-pub use analytics::{CusumEvent, CusumFilter, DollarBarAggregator, RollingZScore, ZScoreResult};
+pub use analytics::{
+    calibrate, AlmaSlope, AtrRatio, BarAggregator, BarInput, CusumEvent, CusumFilter,
+    DollarBarAggregator, FeedBar, FeedIndicators, FeedThresholds, IndicatorSnapshot,
+    RangeBarAggregator, RollingZScore, TickBarAggregator, TimeBarAggregator, VolumeBarAggregator,
+    VwapDeviation, WilderAtr, WilderRsi, ZScoreResult,
+};
 pub use bar::DollarBar;
 pub use error::DomainError;
 pub use order::{Order, OrderIntent, OrderStatus, OrderType, TimeInForce};
