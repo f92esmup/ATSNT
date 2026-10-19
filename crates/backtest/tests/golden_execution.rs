@@ -116,10 +116,14 @@ fn assert_golden<T: Serialize>(name: &str, value: &T) {
             path.display()
         )
     });
-    assert!(
-        expected == actual,
-        "golden {name} changed; review with UPDATE_GOLDEN=1 and git diff"
-    );
+    if expected != actual {
+        let actual_path = path.with_extension("actual.json");
+        let _ = std::fs::write(&actual_path, &actual);
+        panic!(
+            "golden {name} changed; compare with {} or review with UPDATE_GOLDEN=1 and git diff",
+            actual_path.display()
+        );
+    }
 }
 
 fn bar_run<S: OptimizableStrategy>(
@@ -154,13 +158,16 @@ fn exit_reasons(trades: &[ClosedTrade]) -> BTreeSet<String> {
 }
 
 /// Replaces every run id (a UUID inside any string) by its order of first appearance, and the
-/// wall-clock timestamps by a constant, so recorded rows compare across runs.
+/// wall-clock timestamps and the build's git revision by constants, so recorded rows compare
+/// across runs and commits.
 fn normalize(value: &mut Value, ids: &mut BTreeMap<String, String>) {
     match value {
         Value::Object(map) => {
             for (key, field) in map.iter_mut() {
                 if matches!(key.as_str(), "recorded_at" | "finished_at") && field.is_string() {
                     *field = Value::String("<wall-clock>".to_string());
+                } else if key == "git_sha" && field.is_string() {
+                    *field = Value::String("<build>".to_string());
                 } else {
                     normalize(field, ids);
                 }
