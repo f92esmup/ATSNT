@@ -382,4 +382,7 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
       - +1e-8 on the simulated venue's commission fails the tick test;
       - both mutations were reverted.
     - `cargo fmt`: clean. `cargo clippy --all-targets -D warnings`: clean. `cargo test --workspace`: all green.
+  - Phase 1 committed as d2209de. Review assessment: tier high, review due (`high_risk`). The user granted consent; one lens (reliability), lineage review-44f793ef2e34b514.
+  - The single capture returned `correction_required` without exposing findings. The bound STATUS then stopped with `corrupted_or_unverifiable_authority`. This is a Gentle AI defect, equivalent to the open issue Gentleman-Programming/gentle-ai#5209.
+  - The user chose to report it and continue. One occurrence comment was posted on #5209. The captured decline invocation was run once: `declined_this_candidate`. No review receipt exists for d2209de.
 - Next: Phase 2 (T2.1–T2.3, two parallel writers).
