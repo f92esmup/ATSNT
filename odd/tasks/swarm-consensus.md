@@ -158,7 +158,7 @@ Risk: item 3 (the strategy trait, the registry, and every runner call site). The
 
 Risk: item 3 and item 1-adjacent (the accounting every runner reports). An independent verifier runs at the end of this phase, because it is really high risk. The byte-identity guard applies.
 
-- [ ] T5.1 S10: pure extraction from `BacktestEngine` into the new file `crates/backtest/src/execution_core.rs`. Route: inline. **No behaviour change.**
+- [x] T5.1 S10: pure extraction from `BacktestEngine` into the new file `crates/backtest/src/execution_core.rs`. Route: delegated writer (context backstop, L15). **No behaviour change.** Done: `ExecutionCore`, `TradeLedger`, `PendingEntry`, `market_fill_price`, and a pure `barrier_exit` over `ProtectiveExits` with optional TP and time limit. Engine fields moved into the core; the engine lends `&mut equity`. 5 new core tests; goldens byte-identical.
   - `ExecutionCore` owns the position, the pending order, `ProtectiveExits`, margin, entry fee and slippage, accrued funding, and the `TradeLedger`.
   - It holds the helpers the map identified, with their operation shapes preserved:
     - `market_fill_price`;
@@ -413,4 +413,10 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
   - Rationale: a smaller change with the same single path. The two stages cannot drift, because the contract suite asserts that extractor + `on_features` decide exactly what `on_event` decides.
   - Known interim: `run_backtest_slice` and the strategy loader pass `S::SharedConfig::default()`. Phase 7 (T7.2/T7.3) threads the real shared configuration, which the swarm needs.
   - Phase 4 evidence: fmt clean, clippy clean, `cargo test --workspace` 629 passed, 0 failed, goldens unchanged, `architecture_contract.rs` green.
-- Next: Phase 5 (T5.1 pure extraction of the execution core; independent verifier at the end of the phase).
+- L15 (2026-10-20) User: "Continúa"
+  - Route: the parent context passed the ~150k backstop, so T5.1 went to a bounded writer (Writer trigger b).
+  - The writer stopped on one blocker, as instructed. The engine's own unit tests read and write the moved private field `active_position`.
+  - Parent decision: a mechanical migration of those 18 lines (`engine.active_position.` → `engine.active_position().`, and one write → `engine.core.set_position_for_test(..)`). A normalised diff proved that only the access path changed and no assertion changed.
+  - The goldens also normalise `git_sha` when it is `null` (a tree without `.git`), as found by the writer.
+  - Evidence: fmt clean, clippy clean, `cargo test --workspace` 634 passed, 0 failed, goldens unchanged.
+- Next: T5.2 (price events and decision scheduling with `latency_ms`).

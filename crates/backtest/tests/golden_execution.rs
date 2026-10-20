@@ -166,7 +166,8 @@ fn normalize(value: &mut Value, ids: &mut BTreeMap<String, String>) {
             for (key, field) in map.iter_mut() {
                 if matches!(key.as_str(), "recorded_at" | "finished_at") && field.is_string() {
                     *field = Value::String("<wall-clock>".to_string());
-                } else if key == "git_sha" && field.is_string() {
+                } else if key == "git_sha" {
+                    // Absent (null) outside a git checkout, a short revision inside one.
                     *field = Value::String("<build>".to_string());
                 } else {
                     normalize(field, ids);

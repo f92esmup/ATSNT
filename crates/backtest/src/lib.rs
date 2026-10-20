@@ -6,6 +6,7 @@ pub mod driver;
 pub mod engine;
 pub mod error;
 pub mod excursion;
+pub mod execution_core;
 pub mod fee_ledger;
 pub mod live_exits;
 pub mod metrics;
@@ -34,6 +35,9 @@ pub use driver::{DriverStep, SessionDriver};
 pub use engine::BacktestEngine;
 pub use error::BacktestError;
 pub use excursion::ExcursionTracker;
+pub use execution_core::{
+    barrier_exit, market_fill_price, BarrierExit, ExecutionCore, PendingEntry, TradeLedger,
+};
 pub use live_exits::{ExitEvent, ExitGateway, ExitManager, HaltState};
 pub use metrics::{
     format_ratio, format_rejections, sortino_ratio, trade_returns, BacktestMetrics, ClosedTrade,
