@@ -6,9 +6,10 @@ use strategies::{Decision, MarketEvent, Strategy};
 
 use crate::config::BacktestConfig;
 use crate::daily_watermark::DailyWatermark;
-use crate::execution_core::{market_fill_price, ExecutionCore, PendingEntry};
+use crate::execution_core::{market_fill_price, ExecutionCore, PendingEntry, PendingTarget};
 use crate::metrics::{
-    BacktestMetrics, ClosedTrade, TradeExcursion, UNSUPPORTED_DECISION_REJECTION,
+    BacktestMetrics, ClosedTrade, TradeExcursion, DAILY_HALT_REJECTION, POSITION_CAP_CLIP,
+    REARM_IGNORED_REJECTION, UNSUPPORTED_DECISION_REJECTION,
 };
 use crate::monthly_guard::utc_month_key;
 use crate::price_event::PriceEvent;
@@ -27,6 +28,13 @@ use crate::price_event::PriceEvent;
 /// that bar's open) and runs on isolated margin: when a bar reaches the liquidation price
 /// before the stop does, or gaps through it, the exchange closes the position at its
 /// bankruptcy price and the whole margin is lost.
+///
+/// A [`Decision::Target`] is a signed exposure (strategy spec §11): it is sized when decided,
+/// replaces any pending target, and fills as the delta to the current position (scale-in,
+/// scale-out, or a flip in two fills) with one aggregate stop and no take profit or time limit.
+/// Each flat-to-flat (or flip) campaign is one [`ClosedTrade`]. An `Entry` is ignored while a
+/// target is open or pending, and a target is ignored (counted as
+/// [`UNSUPPORTED_DECISION_REJECTION`]) while a triple-barrier entry is open or pending.
 ///
 /// Position accounting (fills, exits, margin, funding, closed trades) lives in
 /// [`ExecutionCore`]; the engine owns the loop, the cash balance, the breakers, and the
@@ -168,6 +176,19 @@ impl BacktestEngine {
         self.core.intent()
     }
 
+    /// Returns the protective exits of the open position (the one aggregate stop for a target
+    /// position), if any.
+    #[inline]
+    pub fn active_exits(&self) -> Option<&domain::ProtectiveExits> {
+        self.core.exits()
+    }
+
+    /// Returns the target waiting to fill, if any.
+    #[inline]
+    pub fn pending_target(&self) -> Option<&crate::execution_core::PendingTarget> {
+        self.core.pending_target()
+    }
+
     /// Returns the slice of all closed trades recorded during the simulation.
     #[inline]
     pub fn closed_trades(&self) -> &[ClosedTrade] {
@@ -256,6 +277,10 @@ impl BacktestEngine {
                 .settle_funding(previous_end, *bar, &self.config, &mut self.equity);
         }
 
+        // A target fill may close a campaign on this event (a flip or a flat target), so the
+        // trade count is taken before the fills. Entry fills never close a trade.
+        let trades_before = self.closed_trades().len();
+
         // 0. A market order submitted on an earlier event fills at this event's open once due.
         if let Some(pending) = self.core.take_due_pending(bar.start_ms) {
             if !self.halted {
@@ -263,9 +288,20 @@ impl BacktestEngine {
                     .fill_entry(pending, *bar, &self.config, &mut self.equity);
             }
         }
+        if let Some(pending) = self.core.take_due_target(bar.start_ms) {
+            let counted = self.core.fill_target(
+                pending,
+                *bar,
+                &self.config,
+                &mut self.equity,
+                &mut self.open_excursion,
+            );
+            for reason in counted {
+                self.count_rejection(reason);
+            }
+        }
 
         let had_position = self.core.position().is_some();
-        let trades_before = self.closed_trades().len();
 
         // 1. If an active position exists, evaluate liquidation and the protective exits.
         if had_position {
@@ -299,9 +335,9 @@ impl BacktestEngine {
         if !self.halted {
             let signal = match decide() {
                 Some(Decision::Entry(intent)) => Some(intent),
-                Some(Decision::Target(_)) => {
-                    // Target execution arrives with the execution core (odd swarm-consensus T5.3).
-                    self.count_rejection(UNSUPPORTED_DECISION_REJECTION);
+                Some(Decision::Target(target)) => {
+                    let due_ms = bar.end_ms.saturating_add(self.config.latency_ms);
+                    self.submit_target(target, bar.close, due_ms);
                     None
                 }
                 None => None,
@@ -314,6 +350,7 @@ impl BacktestEngine {
             if let Some(intent) = signal {
                 if self.core.position().is_none()
                     && self.core.pending().is_none()
+                    && self.core.pending_target().is_none()
                     && !closed_by_time_barrier
                 {
                     let due_ms = bar.end_ms.saturating_add(self.config.latency_ms);
@@ -369,7 +406,7 @@ impl BacktestEngine {
     fn submit_entry(&mut self, intent: domain::OrderIntent, mark_price: Decimal, due_ms: i64) {
         // If daily circuit breaker is tripped, halt trading for the remainder of today
         if self.daily_circuit_breaker_tripped {
-            self.count_rejection(crate::metrics::DAILY_HALT_REJECTION);
+            self.count_rejection(DAILY_HALT_REJECTION);
             return;
         }
 
@@ -390,6 +427,68 @@ impl BacktestEngine {
             Ok(quantity) => self
                 .core
                 .submit_due(PendingEntry { intent, quantity }, due_ms),
+            Err(error) => self.count_rejection(error.kind()),
+        }
+    }
+
+    /// Gates and sizes a target at the decision price (strategy spec §11.3, §11.7, §11.8) and
+    /// queues it in place of any pending target; it fills at the first event starting at or
+    /// after `due_ms`.
+    ///
+    /// The re-arm rule drops a target on the side of the last forced exit until a flat or
+    /// opposite target arrives. While the daily breaker is tripped a target may only reduce the
+    /// position: an increase or a flip is counted as [`DAILY_HALT_REJECTION`], as an entry is.
+    fn submit_target(&mut self, target: domain::TargetPosition, mark_price: Decimal, due_ms: i64) {
+        if self.core.intent().is_some() || self.core.pending().is_some() {
+            self.count_rejection(UNSUPPORTED_DECISION_REJECTION);
+            return;
+        }
+        if let Some(blocked) = self.core.rearm_blocked_side() {
+            let same_side = matches!(
+                (blocked, target.side()),
+                (PositionSide::Long, Some(Side::Buy)) | (PositionSide::Short, Some(Side::Sell))
+            );
+            if same_side {
+                self.count_rejection(REARM_IGNORED_REJECTION);
+                return;
+            }
+            self.core.clear_rearm();
+        }
+        let tripped = self.daily_circuit_breaker_tripped;
+        let sized = self
+            .current_daily_drawdown_pct_at(mark_price)
+            .and_then(|drawdown| {
+                let risk_policy = self.config.risk_policy()?;
+                // A tripped breaker is applied through the policy, which lets reductions pass.
+                let drawdown = if tripped {
+                    drawdown.max(risk_policy.max_daily_drawdown_pct)
+                } else {
+                    drawdown
+                };
+                risk_policy.size_target(
+                    &target,
+                    mark_price,
+                    self.total_equity(mark_price),
+                    self.core.signed_quantity(),
+                    drawdown,
+                )
+            });
+        match sized {
+            Ok(sizing) => {
+                if sizing.clipped {
+                    self.count_rejection(POSITION_CAP_CLIP);
+                }
+                self.core.submit_target_due(
+                    PendingTarget {
+                        target,
+                        quantity: sizing.quantity,
+                    },
+                    due_ms,
+                );
+            }
+            Err(domain::RiskError::CircuitBreakerTriggered { .. }) if tripped => {
+                self.count_rejection(DAILY_HALT_REJECTION)
+            }
             Err(error) => self.count_rejection(error.kind()),
         }
     }
@@ -542,7 +641,7 @@ mod tests {
         );
     }
 
-    /// Asks for a long target on every bar; the bar engine cannot execute targets yet.
+    /// Asks for a long target (1% risk, stop 5 away) on every bar.
     struct TargetOnly;
 
     impl Strategy for TargetOnly {
@@ -563,8 +662,10 @@ mod tests {
         fn reset(&mut self) {}
     }
 
+    /// Supersedes `a_target_decision_is_counted_as_unsupported_and_never_trades` (odd
+    /// swarm-consensus T5.3): the bar engine now executes targets.
     #[test]
-    fn a_target_decision_is_counted_as_unsupported_and_never_trades() {
+    fn a_target_decision_from_a_strategy_now_trades_through_process_bar() {
         let mut engine = realistic_engine();
         let mut strategy = TargetOnly;
 
@@ -575,15 +676,24 @@ mod tests {
             );
         }
 
-        assert!(engine.active_position().is_none());
+        // Sized at 10_000 * 1% / 5 = 20 and filled at the second bar's open, 100 + 1% slippage.
+        let position = engine
+            .active_position()
+            .expect("the target opened a position");
+        assert_eq!(position.quantity, dec!(20));
+        assert_eq!(position.entry_price, dec!(101));
+        assert_eq!(engine.active_exits().map(|e| e.stop), Some(dec!(96)));
+        assert_eq!(
+            engine.active_exits().map(|e| (e.take_profit, e.max_bars)),
+            Some((None, None))
+        );
+        // The second bar re-sizes on 9_978.99 of marked equity: 19.957, a 0.043 delta worth 4.3,
+        // below the 5 minimum notional, so no order is sent.
         let metrics = engine.finish(Some(dec!(100)));
-        assert_eq!(metrics.total_trades, 0);
+        assert_eq!(metrics.total_trades, 1);
         assert_eq!(
             metrics.rejected_orders,
-            std::collections::BTreeMap::from([(
-                crate::metrics::UNSUPPORTED_DECISION_REJECTION.to_string(),
-                3
-            )])
+            std::collections::BTreeMap::from([("OrderBelowMinNotional".to_string(), 1)])
         );
     }
 
@@ -1667,5 +1777,551 @@ mod tests {
             positions[4].as_ref().map(|p| p.entry_price),
             Some(dec!(103))
         );
+    }
+
+    // ---- Decision::Target execution (odd swarm-consensus T5.3, strategy spec §11) ----
+
+    /// Frictionless-slippage config for target tests: 0.05% taker fee, no slippage, loose
+    /// breakers, and notional caps far above every test order.
+    fn target_config() -> BacktestConfig {
+        BacktestConfig {
+            initial_capital: dec!(10_000),
+            slippage_pct: Decimal::ZERO,
+            taker_fee_pct: dec!(0.0005),
+            max_daily_drawdown_pct: dec!(0.50),
+            max_monthly_drawdown_pct: dec!(0.95),
+            max_order_notional: Some(dec!(1_000_000)),
+            max_position_notional: Some(dec!(1_000_000)),
+            ..BacktestConfig::default()
+        }
+    }
+
+    /// Event `i` of a scripted tape: it starts at `i` seconds and ends 500 ms later.
+    fn ev(i: i64, open: Decimal, high: Decimal, low: Decimal, close: Decimal) -> PriceEvent {
+        PriceEvent {
+            start_ms: i * 1_000,
+            end_ms: i * 1_000 + 500,
+            open,
+            high,
+            low,
+            close,
+        }
+    }
+
+    fn flat_ev(i: i64, price: Decimal) -> PriceEvent {
+        ev(i, price, price, price, price)
+    }
+
+    fn target(level: i8, risk: Decimal, stop_distance: Decimal) -> Option<Decision> {
+        Some(Decision::Target(
+            domain::TargetPosition::new(0, level, risk, stop_distance).unwrap(),
+        ))
+    }
+
+    fn flat_target() -> Option<Decision> {
+        target(0, Decimal::ZERO, Decimal::ZERO)
+    }
+
+    /// Feeds each event with the decision scripted for it.
+    fn run(engine: &mut BacktestEngine, script: Vec<(PriceEvent, Option<Decision>)>) {
+        for (event, decision) in script {
+            let mut decision = decision;
+            engine.process_event(&event, &mut || decision.take());
+        }
+    }
+
+    fn counters(pairs: &[(&str, usize)]) -> BTreeMap<String, usize> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn a_target_is_sized_as_equity_times_risk_over_stop_floored_to_the_step() {
+        let mut engine = BacktestEngine::new(target_config());
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(3))),
+                (flat_ev(2, dec!(100)), None),
+            ],
+        );
+        // 10_000 * 1% / 3 = 33.333..., floored to 33.333; filled at the next open, 100.
+        let position = engine.active_position().unwrap();
+        assert_eq!(position.side, PositionSide::Long);
+        assert_eq!(position.quantity, dec!(33.333));
+        assert_eq!(position.entry_price, dec!(100));
+        // Fee 100 * 33.333 * 0.0005 = 1.66665.
+        assert_eq!(engine.cash_equity(), dec!(9998.33335));
+        assert_eq!(engine.active_exits().map(|e| e.stop), Some(dec!(97)));
+        assert!(engine.closed_trades().is_empty());
+        assert!(engine.rejected_orders.is_empty());
+    }
+
+    #[test]
+    fn the_position_cap_clips_a_target_and_the_clipped_target_still_trades() {
+        let mut engine = BacktestEngine::new(BacktestConfig {
+            max_position_notional: Some(dec!(1_000)),
+            ..target_config()
+        });
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(3))),
+                (flat_ev(2, dec!(100)), None),
+            ],
+        );
+        // 33.333 * 100 = 3_333.3 > 1_000: clipped to 1_000 / 100 = 10.
+        assert_eq!(engine.active_position().unwrap().quantity, dec!(10));
+        assert_eq!(engine.cash_equity(), dec!(9999.5));
+        assert_eq!(
+            engine.rejected_orders,
+            counters(&[(crate::metrics::POSITION_CAP_CLIP, 1)])
+        );
+    }
+
+    #[test]
+    fn a_dust_delta_is_skipped_but_a_flat_target_always_closes() {
+        let mut engine = BacktestEngine::new(BacktestConfig {
+            min_order_notional: dec!(50),
+            ..target_config()
+        });
+        run(
+            &mut engine,
+            vec![
+                // 10_000 * 1% / 90 = 1.111 (notional 111.1).
+                (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(90))),
+                // Equity 9_999.94445 * 1.01% / 90 = 1.122: a delta of 0.011, worth 1.1 < 50.
+                (flat_ev(2, dec!(100)), target(1, dec!(0.0101), dec!(90))),
+                // The price falls to 40 (stop at 10): the position is worth 44.44 < 50.
+                (
+                    ev(3, dec!(100), dec!(100), dec!(40), dec!(40)),
+                    flat_target(),
+                ),
+                (flat_ev(4, dec!(40)), None),
+            ],
+        );
+        assert!(engine.active_position().is_none());
+        // 10_000 - 0.05555 (fee at 100) - 66.66 (1.111 * -60) - 0.02222 (fee at 40).
+        assert_eq!(engine.cash_equity(), dec!(9933.26223));
+        let trade = &engine.closed_trades()[0];
+        assert_eq!(engine.closed_trades().len(), 1);
+        assert_eq!(trade.exit_reason, "TargetExit");
+        assert_eq!(trade.side, PositionSide::Long);
+        assert_eq!(trade.entry_price, dec!(100));
+        assert_eq!(trade.exit_price, dec!(40));
+        assert_eq!(trade.quantity, dec!(1.111));
+        assert_eq!(trade.pnl_gross, dec!(-66.66));
+        assert_eq!(trade.fees_paid, dec!(0.07777));
+        assert_eq!(trade.pnl_net, dec!(-66.73777));
+        assert_eq!(trade.entry_time, 2_000);
+        assert_eq!(trade.exit_time, 4_000);
+        assert_eq!(
+            engine.rejected_orders,
+            counters(&[("OrderBelowMinNotional", 1)])
+        );
+    }
+
+    #[test]
+    fn a_scale_in_averages_the_entry_and_moves_the_stop_to_the_last_fill() {
+        let mut engine = BacktestEngine::new(target_config());
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(4))),
+                (flat_ev(2, dec!(100)), None),
+                // Equity 9_998.75 + 4 * 25 = 10_098.75; * 2% / 4 = 50.493.
+                (flat_ev(3, dec!(104)), target(2, dec!(0.02), dec!(4))),
+                (flat_ev(4, dec!(104)), None),
+            ],
+        );
+        let position = engine.active_position().unwrap();
+        assert_eq!(position.quantity, dec!(50.493));
+        // (25 * 100 + 25.493 * 104) / 50.493.
+        assert_eq!(position.entry_price, dec!(5151.272) / dec!(50.493));
+        assert_eq!(engine.active_exits().map(|e| e.stop), Some(dec!(100)));
+        // 10_000 - 1.25 - 104 * 25.493 * 0.0005 (1.325636).
+        assert_eq!(engine.cash_equity(), dec!(9997.424364));
+        assert!(engine.closed_trades().is_empty());
+    }
+
+    #[test]
+    fn a_scale_out_realises_pnl_and_the_campaign_closes_once() {
+        let mut engine = BacktestEngine::new(target_config());
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(4))),
+                (flat_ev(2, dec!(100)), None),
+                // Equity 9_998.75 + 250 = 10_248.75; * 0.5% / 4 = 12.810: sell 12.19.
+                (flat_ev(3, dec!(110)), target(1, dec!(0.005), dec!(4))),
+                (flat_ev(4, dec!(110)), None),
+            ],
+        );
+        let position = engine.active_position().unwrap();
+        assert_eq!(position.quantity, dec!(12.810));
+        assert_eq!(position.entry_price, dec!(100));
+        assert_eq!(engine.active_exits().map(|e| e.stop), Some(dec!(106)));
+        // 9_998.75 + 12.19 * 10 (121.9) - 110 * 12.19 * 0.0005 (0.67045).
+        assert_eq!(engine.cash_equity(), dec!(10119.97955));
+        assert!(engine.closed_trades().is_empty());
+
+        let (metrics, trades) = engine.finish_with_trades(Some(dec!(110)));
+        assert_eq!(metrics.total_trades, 1);
+        let trade = &trades[0];
+        assert_eq!(trade.exit_reason, "EndOfSimulation");
+        assert_eq!(trade.quantity, dec!(25));
+        assert_eq!(trade.entry_price, dec!(100));
+        assert_eq!(trade.exit_price, dec!(110));
+        assert_eq!(trade.pnl_gross, dec!(250));
+        // 1.25 + 0.67045 + 110 * 12.81 * 0.0005 (0.70455).
+        assert_eq!(trade.fees_paid, dec!(2.625));
+        assert_eq!(trade.pnl_net, dec!(247.375));
+        assert_eq!(trade.return_pct, dec!(247.375) / dec!(2500));
+    }
+
+    #[test]
+    fn a_flip_is_two_fills_and_two_campaigns() {
+        let mut engine = BacktestEngine::new(target_config());
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(4))),
+                // Equity 9_998.75 * 1% / 4 = 24.996: short 24.996.
+                (flat_ev(2, dec!(100)), target(-1, dec!(0.01), dec!(4))),
+                (flat_ev(3, dec!(100)), flat_target()),
+                (flat_ev(4, dec!(100)), None),
+            ],
+        );
+        let trades = engine.closed_trades();
+        assert_eq!(trades.len(), 2);
+        assert_eq!(trades[0].exit_reason, "TargetFlip");
+        assert_eq!(trades[0].side, PositionSide::Long);
+        assert_eq!(trades[0].quantity, dec!(25));
+        assert_eq!(trades[0].fees_paid, dec!(2.5));
+        assert_eq!(trades[0].pnl_net, dec!(-2.5));
+        assert_eq!(trades[0].exit_time, 3_000);
+        assert_eq!(trades[1].exit_reason, "TargetExit");
+        assert_eq!(trades[1].side, PositionSide::Short);
+        assert_eq!(trades[1].quantity, dec!(24.996));
+        assert_eq!(trades[1].entry_time, 3_000);
+        // Opening and closing 24.996 at 100: 1.2498 each.
+        assert_eq!(trades[1].fees_paid, dec!(2.4996));
+        assert!(engine.active_position().is_none());
+        assert_eq!(
+            engine.cash_equity(),
+            dec!(10_000) - dec!(2.5) - dec!(2.4996)
+        );
+    }
+
+    #[test]
+    fn the_flip_opens_the_new_side_with_its_own_stop_on_the_same_event() {
+        let mut engine = BacktestEngine::new(target_config());
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(4))),
+                (flat_ev(2, dec!(100)), target(-1, dec!(0.01), dec!(4))),
+                (flat_ev(3, dec!(100)), None),
+            ],
+        );
+        let position = engine.active_position().unwrap();
+        assert_eq!(position.side, PositionSide::Short);
+        assert_eq!(position.quantity, dec!(24.996));
+        assert_eq!(engine.active_exits().map(|e| e.stop), Some(dec!(104)));
+        assert_eq!(engine.closed_trades().len(), 1);
+    }
+
+    #[test]
+    fn a_stop_gapped_through_fills_a_target_at_the_open() {
+        let mut engine = BacktestEngine::new(target_config());
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(4))),
+                (flat_ev(2, dec!(100)), None),
+                // Stop 96; the event opens at 95, through it.
+                (ev(3, dec!(95), dec!(95), dec!(94), dec!(95)), None),
+            ],
+        );
+        assert!(engine.active_position().is_none());
+        let trade = &engine.closed_trades()[0];
+        assert_eq!(trade.exit_reason, "StopLoss");
+        assert_eq!(trade.exit_price, dec!(95));
+        assert_eq!(trade.pnl_gross, dec!(-125));
+        // 1.25 + 95 * 25 * 0.0005 (1.1875).
+        assert_eq!(trade.fees_paid, dec!(2.4375));
+        assert_eq!(engine.cash_equity(), dec!(9872.5625));
+    }
+
+    #[test]
+    fn a_target_gapping_through_its_liquidation_price_is_liquidated_before_the_stop() {
+        let mut engine = BacktestEngine::new(BacktestConfig {
+            initial_capital: dec!(1_000),
+            ..target_config()
+        });
+        run(
+            &mut engine,
+            vec![
+                // 1_000 * 10% / 1 = 100 units (10_000 notional): 11x, margin 909.09, liq 91.31.
+                (flat_ev(1, dec!(100)), target(1, dec!(0.1), dec!(1))),
+                (flat_ev(2, dec!(100)), None),
+                (ev(3, dec!(80), dec!(81), dec!(79), dec!(80)), None),
+            ],
+        );
+        let trade = &engine.closed_trades()[0];
+        assert_eq!(trade.exit_reason, "Liquidation");
+        assert_eq!(trade.exit_price.round_dp(4), dec!(90.9091));
+        assert_eq!(trade.fees_paid, dec!(5));
+        let margin = dec!(10_000) / dec!(11);
+        assert_eq!(trade.pnl_gross.round_dp(6), (-margin).round_dp(6));
+        assert_eq!(
+            engine.cash_equity().round_dp(6),
+            (dec!(995) - margin).round_dp(6)
+        );
+    }
+
+    #[test]
+    fn a_target_whose_liquidation_lies_before_its_stop_is_reduced_until_it_does_not() {
+        let mut engine = BacktestEngine::new(BacktestConfig {
+            initial_capital: dec!(1_000),
+            ..target_config()
+        });
+        run(
+            &mut engine,
+            vec![
+                // 1_000 * 100% / 10 = 100 units: 11x puts the liquidation at 91.31, above the
+                // stop at 90. The largest size at 9x (liquidation 89.29) is 89.596.
+                (flat_ev(1, dec!(100)), target(1, dec!(1), dec!(10))),
+                (flat_ev(2, dec!(100)), None),
+            ],
+        );
+        let position = engine.active_position().unwrap();
+        assert_eq!(position.quantity, dec!(89.596));
+        assert_eq!(engine.active_exits().map(|e| e.stop), Some(dec!(90)));
+        // Fee 100 * 89.596 * 0.0005 = 4.4798.
+        assert_eq!(engine.cash_equity(), dec!(995.5202));
+        assert_eq!(
+            engine.rejected_orders,
+            counters(&[(crate::metrics::STOP_BEYOND_LIQUIDATION_CLIP, 1)])
+        );
+    }
+
+    /// Opens 25 long at 100 (stop 96) and stops it out at 95 on event 3.
+    fn stopped_out_script() -> Vec<(PriceEvent, Option<Decision>)> {
+        vec![
+            (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(4))),
+            (flat_ev(2, dec!(100)), None),
+            (ev(3, dec!(95), dec!(95), dec!(94), dec!(95)), None),
+        ]
+    }
+
+    #[test]
+    fn after_a_stop_same_side_targets_are_ignored_until_an_opposite_target() {
+        let mut engine = BacktestEngine::new(target_config());
+        let mut script = stopped_out_script();
+        script.extend([
+            (flat_ev(4, dec!(95)), target(1, dec!(0.01), dec!(4))),
+            (flat_ev(5, dec!(95)), target(2, dec!(0.02), dec!(4))),
+            (flat_ev(6, dec!(95)), target(-1, dec!(0.01), dec!(4))),
+            (flat_ev(7, dec!(95)), None),
+        ]);
+        run(&mut engine, script);
+        let position = engine.active_position().unwrap();
+        assert_eq!(position.side, PositionSide::Short);
+        assert_eq!(engine.closed_trades().len(), 1);
+        assert_eq!(
+            engine.rejected_orders,
+            counters(&[(crate::metrics::REARM_IGNORED_REJECTION, 2)])
+        );
+        // Re-armed: a long target is accepted again (it flips the short).
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(8, dec!(95)), target(1, dec!(0.01), dec!(4))),
+                (flat_ev(9, dec!(95)), None),
+            ],
+        );
+        assert_eq!(
+            engine.active_position().map(|p| p.side),
+            Some(PositionSide::Long)
+        );
+    }
+
+    #[test]
+    fn after_a_stop_a_flat_target_re_arms_the_same_side() {
+        let mut engine = BacktestEngine::new(target_config());
+        let mut script = stopped_out_script();
+        script.extend([
+            (flat_ev(4, dec!(95)), flat_target()),
+            (flat_ev(5, dec!(95)), target(1, dec!(0.01), dec!(4))),
+            (flat_ev(6, dec!(95)), None),
+        ]);
+        run(&mut engine, script);
+        let position = engine.active_position().unwrap();
+        assert_eq!(position.side, PositionSide::Long);
+        assert_eq!(position.entry_price, dec!(95));
+        assert!(engine.rejected_orders.is_empty());
+    }
+
+    #[test]
+    fn a_daily_halt_blocks_target_increases_and_flips_but_allows_reductions() {
+        let mut engine = BacktestEngine::new(BacktestConfig {
+            max_daily_drawdown_pct: dec!(0.02),
+            ..target_config()
+        });
+        run(
+            &mut engine,
+            vec![
+                // 10_000 * 5% / 4 = 125 units at 100 (fee 6.25).
+                (flat_ev(1, dec!(100)), target(1, dec!(0.05), dec!(4))),
+                (flat_ev(2, dec!(100)), None),
+                // Marked at 98: 9_743.75, 2.56% below the day's peak: the breaker trips.
+                (flat_ev(3, dec!(98)), None),
+                (flat_ev(4, dec!(98)), target(2, dec!(0.08), dec!(4))),
+                (flat_ev(5, dec!(98)), target(-1, dec!(0.01), dec!(4))),
+                // 9_743.75 * 2% / 4 = 48.718: a reduction of 76.282.
+                (flat_ev(6, dec!(98)), target(1, dec!(0.02), dec!(4))),
+                (flat_ev(7, dec!(98)), None),
+            ],
+        );
+        let position = engine.active_position().unwrap();
+        assert_eq!(position.side, PositionSide::Long);
+        assert_eq!(position.quantity, dec!(48.718));
+        assert_eq!(engine.active_exits().map(|e| e.stop), Some(dec!(94)));
+        // 9_993.75 - 76.282 * 2 (152.564) - 98 * 76.282 * 0.0005 (3.737818).
+        assert_eq!(engine.cash_equity(), dec!(9837.448182));
+        assert_eq!(
+            engine.rejected_orders,
+            counters(&[(crate::metrics::DAILY_HALT_REJECTION, 2)])
+        );
+    }
+
+    /// Four fills, one campaign, 0.1% slippage and 0.05% taker fee. Hand arithmetic:
+    ///
+    /// - e2 buys 25 at 100.1 (slip 0.1): fee 2_502.5 * 0.0005 = 1.25125; cash 9_998.74875.
+    ///   Marked at 100: 9_996.24875; * 2% / 4 = 49.981.
+    /// - e3 buys 24.981 at 102.102 (slip 0.102): 2_550.610062, fee 1.275305031; cash
+    ///   9_997.473444969. Cost of the 49.981: 5_053.110062. Marked at 102 the equity sizes
+    ///   0.5% / 4 to 12.553.
+    /// - e4 sells 37.428 at 103.896 (slip 0.104): 3_888.619488, fee 1.944309744.
+    /// - e5 sells 12.553 at 105.894 (slip 0.106): 1_329.287382, fee 0.664643691.
+    /// - PnL = 3_888.619488 + 1_329.287382 - 5_053.110062 = 164.796808; fees 5.135508466;
+    ///   cash = 10_000 + 164.796808 - 5.135508466 = 10_159.661299534.
+    /// - Slippage: 2.5 + 2.548062 + 3.892512 + 1.330618 = 10.271192.
+    #[test]
+    fn a_multi_fill_campaign_is_one_trade_and_cash_reconciles_to_the_cent() {
+        let mut engine = BacktestEngine::new(BacktestConfig {
+            slippage_pct: dec!(0.001),
+            ..target_config()
+        });
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(4))),
+                (flat_ev(2, dec!(100)), target(2, dec!(0.02), dec!(4))),
+                (flat_ev(3, dec!(102)), target(1, dec!(0.005), dec!(4))),
+                (flat_ev(4, dec!(104)), flat_target()),
+                (flat_ev(5, dec!(106)), None),
+            ],
+        );
+        assert!(engine.active_position().is_none());
+        let trades = engine.closed_trades();
+        assert_eq!(trades.len(), 1);
+        let trade = &trades[0];
+        assert_eq!(trade.exit_reason, "TargetExit");
+        assert_eq!(trade.side, PositionSide::Long);
+        assert_eq!(trade.entry_time, 2_000);
+        assert_eq!(trade.exit_time, 5_000);
+        assert_eq!(trade.holding_duration_seconds, 3);
+        assert_eq!(trade.quantity, dec!(49.981));
+        assert_eq!(trade.entry_price, dec!(5053.110062) / dec!(49.981));
+        assert_eq!(trade.exit_price, dec!(5217.906870) / dec!(49.981));
+        assert_eq!(trade.pnl_gross.round_dp(9), dec!(164.796808));
+        assert_eq!(trade.fees_paid, dec!(5.135508466));
+        assert_eq!(trade.slippage_paid, dec!(10.271192));
+        assert_eq!(trade.funding_paid, Decimal::ZERO);
+        assert_eq!(trade.pnl_net.round_dp(9), dec!(159.661299534));
+        assert_eq!(engine.cash_equity().round_dp(2), dec!(10159.66));
+        assert_eq!(engine.cash_equity().round_dp(9), dec!(10159.661299534));
+        assert_eq!(engine.cash_equity(), dec!(10_000) + trade.pnl_net);
+    }
+
+    #[test]
+    fn an_entry_is_ignored_while_a_target_is_pending_or_open() {
+        let mut engine = BacktestEngine::new(target_config());
+        let entry = || {
+            Some(Decision::Entry(
+                domain::OrderIntent::new(0, Side::Buy, dec!(100), dec!(95), dec!(110), 5).unwrap(),
+            ))
+        };
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(4))),
+                (flat_ev(2, dec!(100)), entry()),
+                (flat_ev(3, dec!(100)), None),
+            ],
+        );
+        assert!(engine.pending_intent().is_none());
+        assert!(engine.active_intent().is_none());
+        assert_eq!(engine.active_position().unwrap().quantity, dec!(25));
+        assert_eq!(engine.active_exits().map(|e| e.take_profit), Some(None));
+
+        // An entry decided while a target is still pending (100 ms latency) is ignored too.
+        let mut engine = BacktestEngine::new(BacktestConfig {
+            latency_ms: 10_000,
+            ..target_config()
+        });
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(4))),
+                (flat_ev(2, dec!(100)), entry()),
+            ],
+        );
+        assert!(engine.pending_intent().is_none());
+        assert!(engine.pending_target().is_some());
+    }
+
+    #[test]
+    fn a_newer_target_replaces_the_pending_one() {
+        let mut engine = BacktestEngine::new(BacktestConfig {
+            latency_ms: 2_000,
+            ..target_config()
+        });
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(1, dec!(100)), target(1, dec!(0.01), dec!(4))),
+                (flat_ev(2, dec!(100)), target(1, dec!(0.01), dec!(2))),
+                (flat_ev(3, dec!(100)), None),
+                (flat_ev(4, dec!(100)), None),
+                (flat_ev(5, dec!(100)), None),
+            ],
+        );
+        // Only the second target (10_000 * 1% / 2 = 50) fills, at its own due time.
+        assert_eq!(engine.active_position().unwrap().quantity, dec!(50));
+        assert_eq!(engine.active_exits().map(|e| e.stop), Some(dec!(98)));
+    }
+
+    #[test]
+    fn the_monthly_kill_switch_flattens_a_target_campaign() {
+        let mut engine = BacktestEngine::new(BacktestConfig {
+            max_monthly_drawdown_pct: dec!(0.01),
+            ..target_config()
+        });
+        run(
+            &mut engine,
+            vec![
+                (flat_ev(1, dec!(100)), target(1, dec!(0.05), dec!(10))),
+                (flat_ev(2, dec!(100)), None),
+                // 50 units marked at 97: -150, 1.5% of the month's open equity.
+                (ev(3, dec!(100), dec!(100), dec!(97), dec!(97)), None),
+            ],
+        );
+        assert!(engine.is_halted());
+        let trade = &engine.closed_trades()[0];
+        assert_eq!(trade.exit_reason, "MonthlyCircuitBreaker");
+        assert_eq!(trade.exit_price, dec!(97));
+        assert_eq!(trade.quantity, dec!(50));
     }
 }

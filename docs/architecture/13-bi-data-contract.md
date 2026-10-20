@@ -30,7 +30,7 @@ section 8 for what changed). Source of truth for the DDL:
 | Money-like values | `NUMERIC` (9 decimals), in the run's quote currency. **The currency is not recorded** (gap G2); `BTCUSDT` implies USDT. Never summed across runs without normalising by `initial_capital`. |
 | Percentages | Fractions: `0.154` is 15.4 %. Columns ending in `_pct`. |
 | Nullability | **Every column is `NULLABLE` in BigQuery**, including keys. A consumer enforces *required* per column (section 4); a null in a required cell makes that row an issue shown on the page, never a zero. |
-| Enumerations | `run_type`: `backtest`, `hpo`, `hpo_trial`, `monte_carlo`, `paper`, `live`. `status`: `running`, `completed`, `failed`, `stopped`. `side`: `Long`, `Short`. `event` (equity): `entry`, `trough`, `peak`, `exit`. `sample`: `is`, `oos`. An unknown value is an issue on that row. `exit_reason` is an open set and is shown as text. |
+| Enumerations | `run_type`: `backtest`, `hpo`, `hpo_trial`, `monte_carlo`, `paper`, `live`. `status`: `running`, `completed`, `failed`, `stopped`. `side`: `Long`, `Short`. `event` (equity): `entry`, `trough`, `peak`, `exit`. `sample`: `is`, `oos`. An unknown value is an issue on that row. `exit_reason` is an open set and is shown as text; known values are `StopLoss`, `TakeProfit`, `TimeBarrier`, `Liquidation`, `MonthlyCircuitBreaker`, `EndOfSimulation`, and, for target-position strategies, `TargetExit` (the target returned to flat) and `TargetFlip` (the campaign ended because the target flipped side; the next trade opens on the same fill time). A target-position trade is one campaign from flat to flat or to a flip: `entry_price` and `exit_price` are the VWAPs of its increasing and reducing fills and `quantity` is its peak absolute quantity. |
 | Location | Dataset `atsnt_bi` in `europe-southwest1`. Jobs must name the location. |
 
 ## 3. Views and semantics consumers rely on
@@ -69,7 +69,13 @@ Formulas (version 2):
 - `profit_factor = gross_profit / gross_loss`; NULL without a losing trade.
 - `rejected_orders` (JSON, `run_metrics`, through `v_runs` and `v_hpo_folds`) counts the signals the
   risk policy did not turn into orders, per reason (`OrderSizeExceeded`, `OrderBelowMinLotSize`,
-  `DailyHalt`, ...). It is NULL when nothing was rejected.
+  `DailyHalt`, ...). It is NULL when nothing was rejected. Target-position strategies add
+  `RearmIgnored` (a target ignored after a forced exit on its side) and two **adjustment
+  counters** that count orders that were reduced and still traded, not rejections:
+  `PositionCapClip` (clipped at `max_position_notional`) and `StopBeyondLiquidation` (reduced
+  so the stop trades before the liquidation price). A target delta below the minimum lot or
+  notional is counted under `OrderBelowMinLotSize` / `OrderBelowMinNotional`, and one above
+  `max_order_notional` under `OrderSizeExceeded`, as entries are.
 
 ## 4. Required columns
 

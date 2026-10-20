@@ -13,12 +13,17 @@
 use domain::futures;
 #[cfg(test)]
 use domain::DollarBar;
-use domain::{OrderIntent, Position, PositionSide, ProtectiveExits, Side};
+use domain::{
+    OrderIntent, Position, PositionSide, ProtectiveExits, RiskError, Side, TargetPosition,
+};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
 use crate::config::BacktestConfig;
-use crate::metrics::{ClosedTrade, TradeExcursion};
+use crate::metrics::{
+    ClosedTrade, TradeExcursion, REARM_IGNORED_REJECTION, STOP_BEYOND_LIQUIDATION_CLIP,
+    UNSUPPORTED_DECISION_REJECTION,
+};
 use crate::price_event::PriceEvent;
 
 /// A submitted entry: the strategy intent and the quantity sized when it was signalled.
@@ -28,6 +33,60 @@ pub struct PendingEntry {
     pub intent: OrderIntent,
     /// Quantity sized at the signal price.
     pub quantity: Decimal,
+}
+
+/// A submitted target: the strategy's target and the signed quantity sized when it was decided.
+///
+/// The order that moves the position (`quantity - current`) is only computed when it fills, so
+/// fills that happened in between are taken into account (strategy spec §11.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingTarget {
+    /// The strategy's target position.
+    pub target: TargetPosition,
+    /// Target quantity sized at the decision price: positive long, negative short, 0 flat.
+    pub quantity: Decimal,
+}
+
+/// Exit reason of a target campaign that ended because the target reached 0.
+pub const TARGET_EXIT_REASON: &str = "TargetExit";
+
+/// Exit reason of a target campaign that ended because the target flipped to the other side.
+pub const TARGET_FLIP_REASON: &str = "TargetFlip";
+
+/// Running sums of one target campaign: from the fill that leaves flat to the fill that
+/// returns to flat or flips (strategy spec §11.9).
+#[derive(Debug, Clone, Copy, Default)]
+struct Campaign {
+    entry_time: i64,
+    increase_notional: Decimal,
+    increase_quantity: Decimal,
+    reduce_notional: Decimal,
+    reduce_quantity: Decimal,
+    peak_quantity: Decimal,
+    realized_pnl: Decimal,
+    fees: Decimal,
+    slippage: Decimal,
+}
+
+/// The state an increasing target fill would leave, before it is committed.
+#[derive(Debug, Clone)]
+struct IncreasePlan {
+    quantity: Decimal,
+    position: Position,
+    margin: Decimal,
+    exits: ProtectiveExits,
+    fee: Decimal,
+}
+
+/// Why an increasing target fill cannot be placed as planned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanFailure {
+    /// No supported leverage margins the new aggregate notional.
+    Unmarginable,
+    /// The stop price would not be a positive price.
+    InvalidStop,
+    /// The liquidation price would lie between the entry and the stop.
+    LiquidationBeforeStop,
 }
 
 /// A barrier exit decided on one bar: a market order to close the whole position.
@@ -206,6 +265,14 @@ pub struct ExecutionCore {
     margin: Decimal,
     /// Funding paid by the open position so far.
     funding_accrued: Decimal,
+    /// Target waiting for its due time to fill.
+    pending_target: Option<PendingTarget>,
+    /// Earliest event start, in Unix milliseconds, at which `pending_target` may fill.
+    pending_target_due_ms: i64,
+    /// Sums of the open target campaign; `Some` exactly while a target position is open.
+    campaign: Option<Campaign>,
+    /// Side of the last target campaign closed by a forced exit, until re-armed (§11.7).
+    rearm_blocked: Option<PositionSide>,
     ledger: TradeLedger,
 }
 
@@ -264,6 +331,55 @@ impl ExecutionCore {
         } else {
             None
         }
+    }
+
+    /// The target waiting to fill, if any.
+    pub fn pending_target(&self) -> Option<&PendingTarget> {
+        self.pending_target.as_ref()
+    }
+
+    /// Queues a target, replacing any pending target; it may fill on the first event starting
+    /// at or after `due_ms`.
+    pub fn submit_target_due(&mut self, pending: PendingTarget, due_ms: i64) {
+        self.pending_target = Some(pending);
+        self.pending_target_due_ms = due_ms;
+    }
+
+    /// Removes and returns the pending target when it is due on an event starting at
+    /// `event_start_ms`; otherwise leaves it pending.
+    pub fn take_due_target(&mut self, event_start_ms: i64) -> Option<PendingTarget> {
+        if self.pending_target_due_ms <= event_start_ms {
+            self.pending_target.take()
+        } else {
+            None
+        }
+    }
+
+    /// Signed quantity of the open position: positive long, negative short, 0 flat.
+    pub fn signed_quantity(&self) -> Decimal {
+        match &self.position {
+            Some(position) => match position.side {
+                PositionSide::Long => position.quantity,
+                PositionSide::Short => -position.quantity,
+            },
+            None => Decimal::ZERO,
+        }
+    }
+
+    /// Whether the open position is a target campaign (as opposed to a triple-barrier entry).
+    pub fn has_target_position(&self) -> bool {
+        self.campaign.is_some()
+    }
+
+    /// Side on which targets are ignored after a forced exit, until a flat or opposite target
+    /// re-arms it (strategy spec §11.7).
+    pub fn rearm_blocked_side(&self) -> Option<PositionSide> {
+        self.rearm_blocked
+    }
+
+    /// Re-arms targets after a forced exit.
+    pub fn clear_rearm(&mut self) {
+        self.rearm_blocked = None;
     }
 
     /// Bars the open position has been held.
@@ -375,6 +491,288 @@ impl ExecutionCore {
             self.margin = notional / Decimal::from(leverage);
             self.funding_accrued = Decimal::ZERO;
         }
+    }
+
+    /// Fills a due target at the event's open (strategy spec §11.4–11.7) and returns the
+    /// counters to add to `rejected_orders` (rejections and adjustment counters).
+    ///
+    /// The order is `delta = target - current`, a taker market order at the open plus adverse
+    /// slippage. A target of 0 closes the whole position whatever its size ([`TARGET_EXIT_REASON`]).
+    /// A flip is two fills on this event: the whole position is closed ([`TARGET_FLIP_REASON`]),
+    /// then the new side opens as a new campaign. Any other delta below the minimum lot or
+    /// notional is skipped and counted under the [`RiskError`] kind, and one above
+    /// `max_order_notional` is rejected as `OrderSizeExceeded`; closes of the whole position are
+    /// exempt, as barrier exits are. An increase the balance cannot margin is dropped, as an
+    /// unmarginable entry is. An increase whose liquidation price would lie between the entry and
+    /// the stop is reduced, in whole lot steps, to the largest quantity whose stop trades first,
+    /// and [`STOP_BEYOND_LIQUIDATION_CLIP`] is counted. After every fill that leaves a position
+    /// open, margin is recomputed on the aggregate notional and the one stop is placed
+    /// `stop_distance` from that fill price. A target on the side blocked by the re-arm rule is
+    /// dropped and counted as [`REARM_IGNORED_REJECTION`].
+    pub fn fill_target(
+        &mut self,
+        pending: PendingTarget,
+        event: impl Into<PriceEvent>,
+        config: &BacktestConfig,
+        equity: &mut Decimal,
+        excursion: &mut Option<TradeExcursion>,
+    ) -> Vec<&'static str> {
+        let bar = event.into();
+        let mut counters = Vec::new();
+        if self.position.is_some() && self.campaign.is_none() {
+            // A triple-barrier entry is open: targets never manage it.
+            counters.push(UNSUPPORTED_DECISION_REJECTION);
+            return counters;
+        }
+        let target = pending.quantity;
+        if let (Some(blocked), Some(side)) = (self.rearm_blocked, signed_side(target)) {
+            if blocked == side {
+                counters.push(REARM_IGNORED_REJECTION);
+                return counters;
+            }
+        }
+        let current = self.signed_quantity();
+        if target == current {
+            return counters;
+        }
+        if target.is_zero() {
+            self.close_target_at_open(&bar, TARGET_EXIT_REASON, config, equity, excursion);
+            return counters;
+        }
+        if !current.is_zero() && current.is_sign_negative() != target.is_sign_negative() {
+            self.close_target_at_open(&bar, TARGET_FLIP_REASON, config, equity, excursion);
+        }
+
+        let current = self.signed_quantity();
+        let delta = target - current;
+        let side = if delta.is_sign_positive() {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
+        let quantity = delta.abs();
+        if let Some(kind) = order_limit_rejection(quantity, bar.open, config) {
+            counters.push(kind);
+            return counters;
+        }
+        let (fill_price, slip) = market_fill_price(side, bar.open, config.slippage_pct);
+        let stop_distance = pending.target.stop_distance();
+        // After a flip `current` is 0, so it is flat or on the target's side here.
+        if target.abs() > current.abs() {
+            let plan = match self.plan_increase(
+                side,
+                quantity,
+                fill_price,
+                stop_distance,
+                config,
+                *equity,
+            ) {
+                Ok(plan) => plan,
+                Err(PlanFailure::Unmarginable) => return counters,
+                Err(PlanFailure::InvalidStop) => {
+                    counters.push(invalid_stop_kind());
+                    return counters;
+                }
+                Err(PlanFailure::LiquidationBeforeStop) => {
+                    counters.push(STOP_BEYOND_LIQUIDATION_CLIP);
+                    let Some(plan) = self.largest_safe_increase(
+                        side,
+                        quantity,
+                        fill_price,
+                        stop_distance,
+                        config,
+                        *equity,
+                    ) else {
+                        return counters;
+                    };
+                    if let Some(kind) = order_limit_rejection(plan.quantity, bar.open, config) {
+                        counters.push(kind);
+                        return counters;
+                    }
+                    plan
+                }
+            };
+            *equity -= plan.fee;
+            let campaign = self.campaign.get_or_insert_with(|| Campaign {
+                entry_time: bar.start_ms,
+                ..Campaign::default()
+            });
+            if self.position.is_none() {
+                self.bars_held = 0;
+                self.funding_accrued = Decimal::ZERO;
+            }
+            campaign.increase_notional += fill_price * plan.quantity;
+            campaign.increase_quantity += plan.quantity;
+            campaign.fees += plan.fee;
+            campaign.slippage += slip * plan.quantity;
+            campaign.peak_quantity = campaign.peak_quantity.max(plan.position.quantity);
+            self.position = Some(plan.position);
+            self.margin = plan.margin;
+            self.exits = Some(plan.exits);
+        } else {
+            let Some(mut position) = self.position.clone() else {
+                return counters;
+            };
+            let Ok(exits) =
+                ProtectiveExits::for_target(opening_side(position.side), fill_price, stop_distance)
+            else {
+                counters.push(invalid_stop_kind());
+                return counters;
+            };
+            let realized_before = position.realized_pnl;
+            if position.apply_fill(side, quantity, fill_price).is_err() {
+                return counters;
+            }
+            let pnl = position.realized_pnl - realized_before;
+            let fee = fill_price * quantity * config.taker_fee_pct;
+            let notional = position.entry_price * position.quantity;
+            let max_leverage = config.max_leverage.trunc().to_u32().unwrap_or(1);
+            let leverage = futures::minimum_leverage(
+                notional,
+                notional * config.maintenance_margin_rate,
+                fee,
+                *equity,
+                max_leverage,
+            )
+            .unwrap_or(max_leverage);
+            *equity += pnl - fee;
+            if let Some(campaign) = self.campaign.as_mut() {
+                campaign.reduce_notional += fill_price * quantity;
+                campaign.reduce_quantity += quantity;
+                campaign.realized_pnl += pnl;
+                campaign.fees += fee;
+                campaign.slippage += slip * quantity;
+            }
+            self.position = Some(position);
+            self.margin = notional / Decimal::from(leverage.max(1));
+            self.exits = Some(exits);
+        }
+        counters
+    }
+
+    /// The position, margin, stop and fee an increase of `quantity` on `side` at `fill_price`
+    /// would leave, with the engine's margin rule on the new aggregate notional.
+    fn plan_increase(
+        &self,
+        side: Side,
+        quantity: Decimal,
+        fill_price: Decimal,
+        stop_distance: Decimal,
+        config: &BacktestConfig,
+        equity: Decimal,
+    ) -> Result<IncreasePlan, PlanFailure> {
+        let position = match &self.position {
+            Some(position) => {
+                let mut position = position.clone();
+                position
+                    .apply_fill(side, quantity, fill_price)
+                    .map_err(|_| PlanFailure::Unmarginable)?;
+                position
+            }
+            None => Position::new(position_side(side), quantity, fill_price)
+                .map_err(|_| PlanFailure::Unmarginable)?,
+        };
+        let exits = ProtectiveExits::for_target(side, fill_price, stop_distance)
+            .map_err(|_| PlanFailure::InvalidStop)?;
+        let fee = fill_price * quantity * config.taker_fee_pct;
+        let notional = position.entry_price * position.quantity;
+        let maintenance = notional * config.maintenance_margin_rate;
+        let leverage = futures::minimum_leverage(
+            notional,
+            maintenance,
+            fee,
+            equity,
+            config.max_leverage.trunc().to_u32().unwrap_or(1),
+        )
+        .ok_or(PlanFailure::Unmarginable)?;
+        let margin = notional / Decimal::from(leverage);
+        let liquidation = futures::liquidation_price(
+            side,
+            position.entry_price,
+            position.quantity,
+            margin,
+            position.quantity * position.entry_price * config.maintenance_margin_rate,
+        );
+        let stop_first = match position.side {
+            PositionSide::Long => exits.stop > liquidation,
+            PositionSide::Short => exits.stop < liquidation,
+        };
+        if !stop_first {
+            return Err(PlanFailure::LiquidationBeforeStop);
+        }
+        Ok(IncreasePlan {
+            quantity,
+            position,
+            margin,
+            exits,
+            fee,
+        })
+    }
+
+    /// The largest increase below `quantity`, in whole lot steps, whose stop trades before its
+    /// liquidation price; `None` when not even one step does.
+    ///
+    /// A larger order needs a higher leverage, which moves the liquidation price closer, so
+    /// the condition is monotone in the quantity and a bisection over lot steps finds it.
+    fn largest_safe_increase(
+        &self,
+        side: Side,
+        quantity: Decimal,
+        fill_price: Decimal,
+        stop_distance: Decimal,
+        config: &BacktestConfig,
+        equity: Decimal,
+    ) -> Option<IncreasePlan> {
+        let step = config.quantity_step_size;
+        if step <= Decimal::ZERO {
+            return None;
+        }
+        // Invariant: `low` steps are safe (0 places nothing), `high` steps are not.
+        let mut low: u64 = 0;
+        let mut high: u64 = (quantity / step).floor().to_u64()?;
+        let mut best = None;
+        while high - low > 1 {
+            let middle = low + (high - low) / 2;
+            match self.plan_increase(
+                side,
+                Decimal::from(middle) * step,
+                fill_price,
+                stop_distance,
+                config,
+                equity,
+            ) {
+                Ok(plan) => {
+                    low = middle;
+                    best = Some(plan);
+                }
+                Err(_) => high = middle,
+            }
+        }
+        best
+    }
+
+    /// Closes the whole target position with a taker market order at the event's open.
+    fn close_target_at_open(
+        &mut self,
+        bar: &PriceEvent,
+        reason: &str,
+        config: &BacktestConfig,
+        equity: &mut Decimal,
+        excursion: &mut Option<TradeExcursion>,
+    ) {
+        let Some(side) = self.position.as_ref().map(|position| position.side) else {
+            return;
+        };
+        let (price, slip) = market_fill_price(closing_side(side), bar.open, config.slippage_pct);
+        self.close_with_fee_rate(
+            bar.start_ms,
+            price,
+            slip,
+            config.taker_fee_pct,
+            reason,
+            equity,
+            excursion,
+        );
     }
 
     /// Counts one more event held and closes the position when it is liquidated or a protective
@@ -526,6 +924,20 @@ impl ExecutionCore {
         };
         self.intent = None;
         self.exits = None;
+        if let Some(campaign) = self.campaign.take() {
+            self.close_campaign(
+                pos,
+                campaign,
+                exit_time,
+                exit_price,
+                slippage_per_unit,
+                fee_rate,
+                exit_reason,
+                equity,
+                excursion,
+            );
+            return;
+        }
         let entry_time = self.entry_time.take().unwrap_or(exit_time);
         let entry_fee = std::mem::take(&mut self.entry_fee);
         let entry_slippage = std::mem::take(&mut self.entry_slippage);
@@ -579,6 +991,148 @@ impl ExecutionCore {
             excursion,
         });
     }
+}
+
+impl ExecutionCore {
+    /// Closes a target campaign: the last reducing fill of `pos` at `exit_price`, then one
+    /// [`ClosedTrade`] for the whole campaign (strategy spec §11.9). The entry price is the VWAP
+    /// of the increasing fills, the exit price that of the reducing fills, the quantity the peak
+    /// absolute quantity, and the PnL, fees, slippage and funding are the campaign sums. A
+    /// forced exit blocks new targets on its side until re-armed.
+    #[allow(clippy::too_many_arguments)]
+    fn close_campaign(
+        &mut self,
+        pos: Position,
+        mut campaign: Campaign,
+        exit_time: i64,
+        exit_price: Decimal,
+        slippage_per_unit: Decimal,
+        fee_rate: Decimal,
+        exit_reason: &str,
+        equity: &mut Decimal,
+        excursion: &mut Option<TradeExcursion>,
+    ) {
+        let fill_pnl = pos.unrealized_pnl(exit_price);
+        let exit_fee = exit_price * pos.quantity * fee_rate;
+        *equity += fill_pnl - exit_fee;
+        let funding_paid = std::mem::take(&mut self.funding_accrued);
+        self.margin = Decimal::ZERO;
+        self.entry_time = None;
+
+        campaign.reduce_notional += exit_price * pos.quantity;
+        campaign.reduce_quantity += pos.quantity;
+        campaign.realized_pnl += fill_pnl;
+        campaign.fees += exit_fee;
+        campaign.slippage += slippage_per_unit * pos.quantity;
+
+        let entry_price = vwap(campaign.increase_notional, campaign.increase_quantity);
+        let exit_vwap = vwap(campaign.reduce_notional, campaign.reduce_quantity);
+        let quantity = campaign.peak_quantity;
+        let pnl_gross = campaign.realized_pnl;
+        let pnl_net = pnl_gross - campaign.fees - funding_paid;
+        let return_pct = if entry_price > Decimal::ZERO && quantity > Decimal::ZERO {
+            pnl_net / (entry_price * quantity)
+        } else {
+            Decimal::ZERO
+        };
+        let entry_time = campaign.entry_time;
+        let holding_duration_seconds = ((exit_time - entry_time) / 1000).max(0);
+
+        let mut excursion = excursion
+            .take()
+            .unwrap_or_else(|| TradeExcursion::start(entry_time, *equity));
+        excursion.observe_equity(exit_time, *equity);
+        excursion.exit_equity = *equity;
+
+        if matches!(
+            exit_reason,
+            "StopLoss" | "Liquidation" | "MonthlyCircuitBreaker"
+        ) {
+            self.rearm_blocked = Some(pos.side);
+        }
+
+        self.ledger.push(ClosedTrade {
+            entry_time,
+            exit_time,
+            entry_price,
+            exit_price: exit_vwap,
+            quantity,
+            side: pos.side,
+            pnl_gross,
+            fees_paid: campaign.fees,
+            funding_paid,
+            slippage_paid: campaign.slippage,
+            pnl_net,
+            return_pct,
+            exit_reason: exit_reason.to_string(),
+            holding_duration_seconds,
+            excursion,
+        });
+    }
+}
+
+/// Volume-weighted average price of fills summing to `notional` over `quantity`.
+fn vwap(notional: Decimal, quantity: Decimal) -> Decimal {
+    if quantity > Decimal::ZERO {
+        notional / quantity
+    } else {
+        Decimal::ZERO
+    }
+}
+
+/// The side of a signed quantity; `None` for 0.
+fn signed_side(quantity: Decimal) -> Option<PositionSide> {
+    if quantity > Decimal::ZERO {
+        Some(PositionSide::Long)
+    } else if quantity < Decimal::ZERO {
+        Some(PositionSide::Short)
+    } else {
+        None
+    }
+}
+
+/// The position side an opening order on `side` creates.
+fn position_side(side: Side) -> PositionSide {
+    match side {
+        Side::Buy => PositionSide::Long,
+        Side::Sell => PositionSide::Short,
+    }
+}
+
+/// The order-level limit a target delta order of `quantity` at `price` breaks, as the
+/// [`RiskError::kind`] counted for it: the minimum lot, the minimum notional, then the maximum
+/// order notional (the same limits and names an entry is rejected with).
+fn order_limit_rejection(
+    quantity: Decimal,
+    price: Decimal,
+    config: &BacktestConfig,
+) -> Option<&'static str> {
+    let notional = quantity * price;
+    let (max_order_notional, _) = config.effective_notional_caps();
+    let error = if quantity < config.min_order_quantity {
+        RiskError::OrderBelowMinLotSize {
+            quantity: quantity.to_string(),
+            min_quantity: config.min_order_quantity.to_string(),
+        }
+    } else if notional < config.min_order_notional {
+        RiskError::OrderBelowMinNotional {
+            notional: notional.to_string(),
+            min_notional: config.min_order_notional.to_string(),
+        }
+    } else if notional > max_order_notional {
+        RiskError::OrderSizeExceeded {
+            order_notional: notional.to_string(),
+            limit: max_order_notional.to_string(),
+        }
+    } else {
+        return None;
+    };
+    Some(error.kind())
+}
+
+/// The kind counted for a target whose stop would not be a positive price.
+fn invalid_stop_kind() -> &'static str {
+    RiskError::InvalidParameters(String::new()).kind()
 }
 
 #[cfg(test)]

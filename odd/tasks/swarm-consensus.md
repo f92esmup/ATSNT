@@ -178,7 +178,7 @@ Risk: item 3 and item 1-adjacent (the accounting every runner reports). An indep
     - with `latency_ms = 100` the fill is at the first event `≥ ts + 100`;
     - with the default 0, the bar path is unchanged (goldens);
     - old execution-context JSON files without the field still parse (`configs/execution_*.json` round-trip test).
-- [ ] T5.3 S6: `Decision::Target` in the core (spec §11.3–11.9). Route: inline.
+- [x] T5.3 S6: `Decision::Target` in the core (spec §11.3–11.9). Route: delegated writer (context backstop). Done: `PendingTarget`, `fill_target`, a campaign `TradeLedger` branch, `TargetExit` and `TargetFlip`, and the counters `RearmIgnored`, `StopBeyondLiquidation`, `PositionCapClip`. 18 new tests (RED: 18 failed before wiring); 3 mutation checks. The superseded unsupported-target test was replaced. Goldens byte-identical; workspace 664 passed.
   - Sizing at decision time through `size_target`. Target replaces pending. `Δ` at fill.
   - Dust counted under the existing `RiskError` kinds. Flip in two fills. Scale-in and scale-out through `Position::apply_fill`, with margin recomputed.
   - The stop recomputed after each fill. The liquidation clip. Re-arm.
@@ -424,4 +424,9 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
   - `due_ms` lives in the core next to the pending order.
   - Core functions take `impl Into<PriceEvent>`, so existing core tests stay unchanged.
   - Parent spot check: fmt clean, clippy clean, `cargo test --workspace` 647 passed, 0 failed. The only test-file edit is an addition in `execution_config_contract.rs` (no line removed).
-- Next: T5.3 (`Decision::Target` in the core), then the independent verifier for Phase 5.
+- T5.3 deviations reported by the writer (to be confirmed by the user):
+  - (a) A Target that arrives while a triple-barrier Entry is open or pending is ignored and counted `UnsupportedDecision`. The spec leaves mixing open.
+  - (b) Reported slippage on target fills is `open × slippage_pct`. Entries also add the adverse gap from the signal price.
+  - (c) The liquidation clip is applied before the fill, with the same result.
+  - Parent spot check: fmt clean, clippy clean, `cargo test --workspace` 664 passed, 0 failed.
+- Next: independent verifier for Phase 5 (Verification trigger: high-risk item 3).
