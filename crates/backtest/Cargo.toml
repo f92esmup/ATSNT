@@ -49,6 +49,10 @@ path = "src/bin/paper_trading.rs"
 name = "live_trading"
 path = "src/bin/live_trading.rs"
 
+[[bin]]
+name = "calibrate_feeds"
+path = "src/bin/calibrate_feeds.rs"
+
 
 [dev-dependencies]
 tempfile = "3"
