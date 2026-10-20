@@ -161,13 +161,6 @@ async fn main() -> Result<()> {
         println!("[GATE] paper_trading and live_trading will refuse it: {reason}");
     }
     let input_kind = loaded.strategy.input_kind();
-    if input_kind == InputKind::Trades && args.fill_model == FillModelArg::Tick {
-        anyhow::bail!(
-            "--fill-model tick does not support strategies that consume trades yet (strategy \
-             '{}'); use --fill-model bar",
-            loaded.strategy_id
-        );
-    }
     let calibration_end = calibration_end_ms(&loaded.shared_config_json);
     let mut strategy = loaded.strategy;
     let strat_config_val = loaded.config_json;
@@ -289,7 +282,7 @@ async fn main() -> Result<()> {
     };
 
     let replay_start = Instant::now();
-    let mut strategy_audit = None;
+    let strategy_audit;
     let (metrics, closed_trades) = match args.fill_model {
         FillModelArg::Bar if input_kind == InputKind::Trades => {
             let mut engine = BacktestEngine::new(engine_config);
@@ -316,7 +309,8 @@ async fn main() -> Result<()> {
             }
             strategy_audit = strategy.audit();
             let mark = (last_price > Decimal::ZERO).then_some(last_price);
-            engine.finish_with_trades(mark)
+            let (metrics, trades) = engine.finish_with_trades(mark);
+            (metrics, trades)
         }
         FillModelArg::Bar => {
             let mut engine = BacktestEngine::new(engine_config);
@@ -346,7 +340,8 @@ async fn main() -> Result<()> {
             }
             strategy_audit = strategy.audit();
             let mark = (last_price > Decimal::ZERO).then_some(last_price);
-            engine.finish_with_trades(mark)
+            let (metrics, trades) = engine.finish_with_trades(mark);
+            (metrics, trades)
         }
         FillModelArg::Tick => {
             println!(
@@ -393,6 +388,7 @@ async fn main() -> Result<()> {
                     "[!] A {side:?} position of {quantity} @ {entry} was still open when the data ended; it is not part of the metrics."
                 );
             }
+            strategy_audit = simulation.strategy_audit();
             simulation.finish()
         }
     };

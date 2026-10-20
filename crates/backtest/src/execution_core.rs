@@ -62,8 +62,10 @@ pub const TARGET_FLIP_REASON: &str = "TargetFlip";
 ///
 /// Every position is a campaign. A triple-barrier entry is the campaign with one increasing fill
 /// and one reducing fill (the close), so both decision kinds share one [`ClosedTrade`] builder.
+/// The bar engine and the trading session both feed their fills here and close campaigns
+/// through [`TradeLedger::close_campaign`].
 #[derive(Debug, Clone, Copy, Default)]
-struct Campaign {
+pub(crate) struct Campaign {
     entry_time: i64,
     increase_notional: Decimal,
     increase_quantity: Decimal,
@@ -79,7 +81,7 @@ struct Campaign {
 
 impl Campaign {
     /// An empty campaign whose first fill happens at `entry_time`.
-    fn starting(entry_time: i64) -> Self {
+    pub(crate) fn starting(entry_time: i64) -> Self {
         Self {
             entry_time,
             ..Self::default()
@@ -87,7 +89,7 @@ impl Campaign {
     }
 
     /// Adds a fill of `quantity` at `price` that increased the position to `position_quantity`.
-    fn add_increase(
+    pub(crate) fn add_increase(
         &mut self,
         price: Decimal,
         quantity: Decimal,
@@ -104,7 +106,7 @@ impl Campaign {
     }
 
     /// Adds a fill of `quantity` at `price` that reduced the position and realised `pnl`.
-    fn add_reduction(
+    pub(crate) fn add_reduction(
         &mut self,
         price: Decimal,
         quantity: Decimal,
@@ -119,6 +121,34 @@ impl Campaign {
         self.fees += fee;
         self.slippage += slippage;
     }
+
+    /// Realised PnL net of the campaign's fees and of `funding_paid`.
+    pub(crate) fn net_pnl(&self, funding_paid: Decimal) -> Decimal {
+        self.realized_pnl - self.fees - funding_paid
+    }
+}
+
+/// How a campaign ended: its last (closing) fill and what the trade is labelled with.
+#[derive(Debug, Clone)]
+pub(crate) struct CampaignClose<'a> {
+    /// Side of the position that closed.
+    pub(crate) side: PositionSide,
+    /// Time of the closing fill.
+    pub(crate) exit_time: i64,
+    /// Average entry price of the position when it closed; the trade's entry price when the
+    /// campaign had a single increasing fill.
+    pub(crate) last_entry_price: Decimal,
+    /// Price of the closing fill; the trade's exit price when the campaign had a single
+    /// reducing fill.
+    pub(crate) last_exit_price: Decimal,
+    /// Quantity the closing fill closed.
+    pub(crate) last_quantity: Decimal,
+    /// Funding paid by the position over the campaign.
+    pub(crate) funding_paid: Decimal,
+    /// Exit reason string of the trade.
+    pub(crate) exit_reason: &'a str,
+    /// The trade's finished excursion.
+    pub(crate) excursion: TradeExcursion,
 }
 
 /// The state an increasing target fill would leave, before it is committed.
@@ -346,8 +376,66 @@ impl TradeLedger {
         self.trades
     }
 
-    fn push(&mut self, trade: ClosedTrade) {
-        self.trades.push(trade);
+    /// Records a finished campaign as one [`ClosedTrade`] and returns it. This is the only
+    /// builder of closed trades in the crate, for both decision kinds and every runner.
+    ///
+    /// The entry price is the VWAP of the increasing fills, the exit price that of the reducing
+    /// fills, the quantity the peak absolute quantity, and the PnL, fees, slippage and funding
+    /// are the campaign sums. A VWAP over a single fill is that fill's price, so a triple-barrier
+    /// entry (one increasing fill, one reducing fill) keeps the prices it always had.
+    pub(crate) fn close_campaign(
+        &mut self,
+        campaign: Campaign,
+        close: CampaignClose<'_>,
+    ) -> &ClosedTrade {
+        let CampaignClose {
+            side,
+            exit_time,
+            last_entry_price,
+            last_exit_price,
+            last_quantity,
+            funding_paid,
+            exit_reason,
+            excursion,
+        } = close;
+        let pnl_net = campaign.net_pnl(funding_paid);
+        let entry_price = if campaign.increase_fills > 1 {
+            vwap(campaign.increase_notional, campaign.increase_quantity)
+        } else {
+            last_entry_price
+        };
+        let exit_vwap = if campaign.reduce_fills > 1 {
+            vwap(campaign.reduce_notional, campaign.reduce_quantity)
+        } else {
+            last_exit_price
+        };
+        let quantity = campaign.peak_quantity.max(last_quantity);
+        let return_pct = if entry_price > Decimal::ZERO && quantity > Decimal::ZERO {
+            pnl_net / (entry_price * quantity)
+        } else {
+            Decimal::ZERO
+        };
+        let entry_time = campaign.entry_time;
+        let holding_duration_seconds = ((exit_time - entry_time) / 1000).max(0);
+        self.trades.push(ClosedTrade {
+            entry_time,
+            exit_time,
+            entry_price,
+            exit_price: exit_vwap,
+            quantity,
+            side,
+            pnl_gross: campaign.realized_pnl,
+            fees_paid: campaign.fees,
+            funding_paid,
+            slippage_paid: campaign.slippage,
+            pnl_net,
+            return_pct,
+            exit_reason: exit_reason.to_string(),
+            holding_duration_seconds,
+            excursion,
+        });
+        let index = self.trades.len() - 1;
+        &self.trades[index]
     }
 }
 
@@ -1052,32 +1140,12 @@ impl ExecutionCore {
             exit_fee,
             slippage_per_unit * pos.quantity,
         );
-        let pnl_net = campaign.realized_pnl - campaign.fees - funding_paid;
 
         // equity already had the fees of earlier fills deducted. Adjust with this fill's PnL
         // and fee.
         *equity += pnl_gross - exit_fee;
 
-        let entry_price = if campaign.increase_fills > 1 {
-            vwap(campaign.increase_notional, campaign.increase_quantity)
-        } else {
-            pos.entry_price
-        };
-        let exit_vwap = if campaign.reduce_fills > 1 {
-            vwap(campaign.reduce_notional, campaign.reduce_quantity)
-        } else {
-            exit_price
-        };
-        let quantity = campaign.peak_quantity.max(pos.quantity);
-        let return_pct = if entry_price > Decimal::ZERO && quantity > Decimal::ZERO {
-            pnl_net / (entry_price * quantity)
-        } else {
-            Decimal::ZERO
-        };
-
         let entry_time = campaign.entry_time;
-        let holding_duration_seconds = ((exit_time - entry_time) / 1000).max(0);
-
         let mut excursion = excursion
             .take()
             .unwrap_or_else(|| TradeExcursion::start(entry_time, *equity));
@@ -1093,23 +1161,19 @@ impl ExecutionCore {
             self.rearm_blocked = Some(pos.side);
         }
 
-        self.ledger.push(ClosedTrade {
-            entry_time,
-            exit_time,
-            entry_price,
-            exit_price: exit_vwap,
-            quantity,
-            side: pos.side,
-            pnl_gross: campaign.realized_pnl,
-            fees_paid: campaign.fees,
-            funding_paid,
-            slippage_paid: campaign.slippage,
-            pnl_net,
-            return_pct,
-            exit_reason: exit_reason.to_string(),
-            holding_duration_seconds,
-            excursion,
-        });
+        self.ledger.close_campaign(
+            campaign,
+            CampaignClose {
+                side: pos.side,
+                exit_time,
+                last_entry_price: pos.entry_price,
+                last_exit_price: exit_price,
+                last_quantity: pos.quantity,
+                funding_paid,
+                exit_reason,
+                excursion,
+            },
+        );
     }
 }
 
@@ -1149,17 +1213,37 @@ fn order_limit_rejection(
     price: Decimal,
     config: &BacktestConfig,
 ) -> Option<&'static str> {
-    let notional = quantity * price;
     let (max_order_notional, _) = config.effective_notional_caps();
-    let error = if quantity < config.min_order_quantity {
+    order_limit_kind(
+        quantity,
+        price,
+        config.min_order_quantity,
+        config.min_order_notional,
+        max_order_notional,
+    )
+}
+
+/// The order-level limit an order of `quantity` at `price` breaks, as the [`RiskError::kind`]
+/// counted for it: the minimum lot, the minimum notional, then the maximum order notional.
+/// Shared by the bar engine and the trading session, so a target delta is judged the same way
+/// on both paths.
+pub(crate) fn order_limit_kind(
+    quantity: Decimal,
+    price: Decimal,
+    min_order_quantity: Decimal,
+    min_order_notional: Decimal,
+    max_order_notional: Decimal,
+) -> Option<&'static str> {
+    let notional = quantity * price;
+    let error = if quantity < min_order_quantity {
         RiskError::OrderBelowMinLotSize {
             quantity: quantity.to_string(),
-            min_quantity: config.min_order_quantity.to_string(),
+            min_quantity: min_order_quantity.to_string(),
         }
-    } else if notional < config.min_order_notional {
+    } else if notional < min_order_notional {
         RiskError::OrderBelowMinNotional {
             notional: notional.to_string(),
-            min_notional: config.min_order_notional.to_string(),
+            min_notional: min_order_notional.to_string(),
         }
     } else if notional > max_order_notional {
         RiskError::OrderSizeExceeded {

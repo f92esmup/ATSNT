@@ -59,6 +59,11 @@ pub trait Strategy: Send {
     /// Clears internal state buffers to allow clean replay or backtest isolation.
     fn reset(&mut self);
 
+    /// Capability used by the paper/live product gate (Section 17.1). Default: false.
+    fn emits_targets(&self) -> bool {
+        false
+    }
+
     /// Strategy-specific audit written into reports as `strategy_audit`; `None` by default.
     fn audit(&self) -> Option<serde_json::Value> {
         None
@@ -196,6 +201,10 @@ impl<S: ?Sized + Strategy> Strategy for Box<S> {
     fn audit(&self) -> Option<serde_json::Value> {
         (**self).audit()
     }
+
+    fn emits_targets(&self) -> bool {
+        (**self).emits_targets()
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +229,13 @@ mod tests {
             buy_dollar_volume: close,
             sell_dollar_volume: dec!(0),
         }
+    }
+
+    #[test]
+    fn a_strategy_emits_no_targets_by_default_and_a_box_forwards_the_capability() {
+        assert!(!BarOnly.emits_targets());
+        let boxed: Box<dyn Strategy> = Box::new(BarOnly);
+        assert!(!boxed.emits_targets());
     }
 
     /// A bar strategy written against the original contract: it only implements `on_bar`.

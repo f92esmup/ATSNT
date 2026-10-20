@@ -308,35 +308,22 @@ Risk: item 3 (CLI flags, artifact schema). The byte-identity guard applies.
 
 Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placement code). An independent verifier runs at the end of this phase. The byte-identity guard applies to golden (b) and to every session, venue, live-exit, and Binance test.
 
-- [ ] T8.1 S10: ports and adapters. Route: inline.
-  - `crates/ports`:
-    - `OrderRequest { side, quantity, reduce_only }`;
-    - `ExecutionVenue::submit_order`;
-    - `ExitGateway::place_exits(.., take_profit: Option<Decimal>)`. Existing callers pass `Some`.
-  - `SimulatedVenue::submit_order` generalises `submit_market_order_at` (`:187`) with `WorkingOrder.reduce_only`, plus the existing latency. `place_exits` with `None` arms only the stop leg.
-  - Binance:
-    - `submit_order` generalises the private `submit_futures_order` (`MARKET`, `reduceOnly`);
-    - `place_protective_exits` skips the take-profit algo order on `None`.
-  - Tests:
-    - every `simulated_venue.rs` (`:600-1040`) and `binance_gateway/exits.rs` (`:464-663`) test passes unchanged;
-    - new tests: a reduce-only order never flips or exceeds the position (sim);
-    - a stop-only `place_exits` arms one leg (sim, and Binance on the scripted server);
-    - Binance `submit_order` sends the exact query parameters (scripted server).
-- [ ] T8.2 S6, S10: `TradingSession` executes targets (spec §11.10). Route: inline.
-  - A new phase, `Adjusting { delta }`. Sizing through the same planner. Delta orders through `submit_order`. A flip closes reduce-only first. The stop is re-placed after each fill.
-  - The close accounting moves to the shared `TradeLedger`; session fee semantics (`FeeLedger`, fallback) are passed in, so golden (b) stays identical.
-  - `SessionDriver` feeds `MarketEvent::Trade` to `Trades` strategies and keeps the dollar-bar path for the others.
-  - Tests:
-    - every `session.rs` (`:1033-1942`), `driver.rs`, `live_exits.rs`, and `tick_simulation.rs` test passes unchanged;
-    - golden (b) is identical;
-    - new: a scale-in, a scale-out, a flip, and a stop-out on `SimulatedVenue` produce the same campaigns as the bar engine on the same synthetic tape within the tick model's documented differences (tape slippage and latency), asserted on side, quantities, and exit reasons.
-- [ ] T8.3 S7: the product gate. Route: inline.
-  - One check in the shared strategy loader, alongside `ensure_deployable`. `paper_trading` and `live_trading` refuse a strategy that can emit `Decision::Target`, with the message of spec §17.1.
-  - The capability is declared by `Strategy::emits_targets()`, which defaults to false.
-  - Tests:
-    - binary-level refusal for paper and live, offline and before any network;
-    - CUSUM and OFI still start as before (existing binary tests).
-  - `backtest --fill-model tick --strategy swarm_consensus` runs on the synthetic fixture.
+- [x] T8.1 S10: ports and adapters. Route: inline. Done:
+  - `crates/ports`: `OrderRequest { side, quantity, reduce_only }`, `ExecutionVenue::submit_order`, and `ExitGateway::place_exits` with `take_profit: Option<Decimal>`.
+  - `SimulatedVenue`: `submit_order` handles explicit market orders respecting latency and `reduce_only`. `place_exits` with `None` arms single-leg stops.
+  - `BinanceGateway`: `place_market_order` / `submit_order` validates futures-only, sizes externally, handles `reduceOnly`. `place_stop_exit` submits single-leg `STOP_MARKET` conditional order with `closePosition=true`. Mock tests verify parameters.
+  - Tests: unit tests for `SimulatedVenue` and `BinanceGateway` exits pass.
+- [x] T8.2 S6, S10: `TradingSession` executes targets (spec §11.10). Route: inline. Done:
+  - New phase `Phase::Adjusting { position, target, delta, submitted_ms, pending_flip }`. Sizing through domain `RiskPolicy::size_target`.
+  - Two-phase flips (reduce-only close followed by opening leg). Exits replaced on fill.
+  - Closed trade accounting unified through `TradeLedger::close_campaign`.
+  - `SessionDriver::on_market_trade` feeds `MarketEvent::Trade` to `Trades` strategies via `on_trade_event`.
+  - `--fill-model tick` enabled for `InputKind::Trades` in backtest CLI.
+  - Tests: 42 session unit tests pass; `target_simulation` integration test asserts parity between bar engine and tick engine campaigns.
+- [x] T8.3 S7: the product gate. Route: inline. Done:
+  - `Strategy::emits_targets(&self) -> bool` default `false`, returns `true` for `SwarmConsensusStrategy`.
+  - `LoadedStrategy::ensure_accepts_decisions` refuses target strategies in `paper_trading` and `live_trading` offline prior to network access.
+  - Tests: `target_gate_cli` tests (3/3) pass.
 
 ### Phase 9: Documentation, data, and verification (S1, S8)
 
@@ -475,4 +462,20 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
     - `run_backtest_slice(_with_trades)` still pass `SharedConfig::default()` (the golden helper is generic; only dollar-bar strategies call them). The optimizer, `run_hpo` and the loader pass the real shared config.
     - Order latency at trade resolution comes from `execution_context.latency_ms`.
     - Architecture docs pending in T9.1.
-- Next: Phase 8 (ports `submit_order` + optional take profit, `TradingSession` targets, product gate).
+- Phase 8 evidence:
+  - Ports and adapters (T8.1): `OrderRequest`, `ExecutionVenue::submit_order`, optional TP in `ExitGateway::place_exits`. `SimulatedVenue` and `BinanceGateway` implement `submit_order` and stop-only exits.
+  - Product gate (T8.3): `Strategy::emits_targets` and `ensure_accepts_decisions` refuse target strategies in `paper_trading` and `live_trading` offline prior to network access.
+  - Session target execution (T8.2): `Phase::Adjusting`, `RiskPolicy::size_target`, shared `TradeLedger::close_campaign` accounting, `SessionDriver` trade routing for `Trades` strategies, and `--fill-model tick` enabled for swarm.
+  - Verification results:
+    - `cargo fmt --check`: clean.
+    - `cargo clippy --all-targets -- -D warnings`: clean.
+    - `cargo test --workspace`: all tests passed (0 failed).
+    - `cargo test --test golden_execution`: all 6 snapshot tests passed; golden snapshots byte-identical.
+    - `cargo test --test target_simulation`: passed.
+    - `cargo test --test target_gate_cli`: 3/3 passed.
+    - `cargo test --test swarm_runners`: 14/14 passed.
+  - Independent verifier: VERDICT PASS. Advisories addressed:
+    - A1: removed `.unwrap()` in `session.rs` for flip side deduction, adhering to AGENTS.md.
+    - A2: relabeled closing campaign to `TargetExit` if the opening leg of a flip fails in `session.rs`.
+    - A3: updated stale doc comment on `TargetOnly`.
+- Next: Phase 9 (documentation, data download, local validation).

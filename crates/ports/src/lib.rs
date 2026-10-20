@@ -10,6 +10,6 @@ pub mod exits;
 pub mod market_data;
 
 pub use alerts::AlertNotifier;
-pub use execution::{EntryAck, ExecutionReport, ExecutionVenue};
+pub use execution::{EntryAck, ExecutionReport, ExecutionVenue, OrderRequest};
 pub use exits::ExitGateway;
 pub use market_data::{AsyncMarketDataStream, MarketDataStream};

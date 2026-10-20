@@ -237,6 +237,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         );
     }
     let loaded = backtest::load_strategy(&strategy_id, args.config.as_deref())?;
+    loaded.ensure_accepts_decisions()?;
     for line in loaded.report_lines() {
         println!("{line}");
     }
@@ -528,6 +529,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
             // A market order settles in milliseconds; half a minute without a terminal status
             // means a lost report or a stuck order.
             entry_timeout_ms: 30_000,
+            risk_policy: run_spec.execution_context.risk_policy().ok(),
         },
         strategy,
     );

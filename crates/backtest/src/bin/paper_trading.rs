@@ -124,6 +124,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         );
     }
     let loaded = backtest::load_strategy(&strategy_id, args.config.as_deref())?;
+    loaded.ensure_accepts_decisions()?;
     for line in loaded.report_lines() {
         println!("{line}");
     }

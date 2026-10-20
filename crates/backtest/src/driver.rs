@@ -55,7 +55,7 @@ impl<S: Strategy> SessionDriver<S> {
     }
 
     /// Feeds one market trade: the session's trade-time duties run first, then the sampler, and
-    /// a completed bar is delivered to the session.
+    /// a completed bar is delivered to the session (or raw trade for Trades strategies).
     pub async fn on_market_trade<V: ExecutionVenue>(
         &mut self,
         venue: &V,
@@ -66,12 +66,21 @@ impl<S: Strategy> SessionDriver<S> {
             .session
             .on_trade(venue, trade.timestamp, trade.price)
             .await;
-        let bar = self.aggregator.process_trade(trade);
-        let mut bar_events = Vec::new();
-        if let Some(bar) = &bar {
-            self.bars += 1;
-            bar_events = self.session.on_bar(venue, bar).await;
-        }
+        let (bar, bar_events) = match self.session.strategy().input_kind() {
+            strategies::InputKind::Trades => {
+                let events = self.session.on_trade_event(venue, trade).await;
+                (None, events)
+            }
+            strategies::InputKind::DollarBars => {
+                let bar = self.aggregator.process_trade(trade);
+                let mut bar_events = Vec::new();
+                if let Some(bar) = &bar {
+                    self.bars += 1;
+                    bar_events = self.session.on_bar(venue, bar).await;
+                }
+                (bar, bar_events)
+            }
+        };
         DriverStep {
             bar,
             trade_events,
@@ -126,6 +135,11 @@ impl<S: Strategy> SessionDriver<S> {
         &self.session
     }
 
+    /// The strategy inside the session.
+    pub fn strategy(&self) -> &S {
+        self.session.strategy()
+    }
+
     /// Market trades fed so far.
     pub fn ticks(&self) -> u64 {
         self.ticks
@@ -142,7 +156,7 @@ mod tests {
     use super::*;
     use crate::session::SessionConfig;
     use domain::{OrderIntent, Side};
-    use ports::{EntryAck, ExitGateway};
+    use ports::{EntryAck, ExitGateway, OrderRequest};
     use rust_decimal_macros::dec;
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -161,7 +175,7 @@ mod tests {
             _: &str,
             _: Side,
             _: Decimal,
-            _: Decimal,
+            _: Option<Decimal>,
         ) -> Result<(), String> {
             self.calls.borrow_mut().push("place".to_string());
             Ok(())
@@ -194,6 +208,11 @@ mod tests {
                 price: dec!(100),
                 sent_at_ms: 0,
             })
+        }
+
+        async fn submit_order(&self, _: &str, _: &OrderRequest) -> Result<EntryAck, String> {
+            self.calls.borrow_mut().push("order".to_string());
+            Err("explicit orders are not scripted".to_string())
         }
     }
 
@@ -228,6 +247,7 @@ mod tests {
                 max_monthly_drawdown_pct: dec!(0.15),
                 halt_retry_ms: 5_000,
                 entry_timeout_ms: 30_000,
+                risk_policy: None,
             },
             Scripted {
                 intents: intents.into(),
@@ -327,6 +347,7 @@ mod tests {
                 max_monthly_drawdown_pct: dec!(0.15),
                 halt_retry_ms: 5_000,
                 entry_timeout_ms: 30_000,
+                risk_policy: None,
             },
             Scripted {
                 intents: VecDeque::new(),

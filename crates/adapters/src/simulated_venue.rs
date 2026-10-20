@@ -21,7 +21,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use domain::futures::{self, FundingSchedule};
 use domain::{OrderIntent, RiskError, RiskPolicy, Side, Trade};
-use ports::{EntryAck, ExecutionReport, ExecutionVenue, ExitGateway};
+use ports::{EntryAck, ExecutionReport, ExecutionVenue, ExitGateway, OrderRequest};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -119,7 +119,8 @@ struct SimPosition {
 #[derive(Debug, Clone, Copy)]
 struct ExitLegs {
     stop_loss: Decimal,
-    take_profit: Decimal,
+    /// `None` when only the stop leg is armed.
+    take_profit: Option<Decimal>,
 }
 
 #[derive(Debug)]
@@ -196,16 +197,51 @@ impl SimulatedVenue {
             ));
         }
         let mut state = self.lock();
+        Ok(self.queue_order(&mut state, side, quantity, at_ms, false, 1))
+    }
+
+    /// Queues a market order sent at `at_ms`; it reaches the market after the configured
+    /// latency. Returns the order id.
+    fn queue_order(
+        &self,
+        state: &mut State,
+        side: Side,
+        quantity: Decimal,
+        at_ms: i64,
+        reduce_only: bool,
+        leverage: u32,
+    ) -> String {
         let order_id = format!("sim-{}", state.next_order_id);
         state.next_order_id += 1;
         state.orders.push(WorkingOrder {
             side,
             remaining: quantity,
             due_ms: at_ms + self.config.latency_ms,
-            reduce_only: false,
-            leverage: 1,
+            reduce_only,
+            leverage,
         });
-        Ok(order_id)
+        order_id
+    }
+
+    /// Lowest supported leverage that margins `notional` with the wallet, or a risk error.
+    fn leverage_for(&self, notional: Decimal, wallet: Decimal) -> Result<u32, SimulatedVenueError> {
+        futures::minimum_leverage(
+            notional,
+            notional * self.config.maintenance_margin_rate,
+            notional * self.config.taker_fee_pct,
+            wallet,
+            self.config
+                .risk_policy
+                .max_leverage
+                .trunc()
+                .to_u32()
+                .unwrap_or(1),
+        )
+        .ok_or_else(|| {
+            SimulatedVenueError::Risk(
+                "the balance cannot margin the order at any supported leverage".to_string(),
+            )
+        })
     }
 
     /// Funding payments settled since the last call, oldest first.
@@ -310,8 +346,14 @@ impl SimulatedVenue {
             return;
         };
         let (stop_hit, take_hit) = match position.side {
-            Side::Buy => (price <= legs.stop_loss, price >= legs.take_profit),
-            Side::Sell => (price >= legs.stop_loss, price <= legs.take_profit),
+            Side::Buy => (
+                price <= legs.stop_loss,
+                legs.take_profit.is_some_and(|take| price >= take),
+            ),
+            Side::Sell => (
+                price >= legs.stop_loss,
+                legs.take_profit.is_some_and(|take| price <= take),
+            ),
         };
         if stop_hit || take_hit {
             state.exits = None;
@@ -339,7 +381,12 @@ impl SimulatedVenue {
             }
             let mut take = order.remaining.min(available);
             if order.reduce_only {
-                let open = state.position.map_or(Decimal::ZERO, |p| p.quantity);
+                // A reduce-only order only closes a position on the other side, and never more
+                // than is open, so it can neither flip nor grow the position.
+                let open = state
+                    .position
+                    .filter(|p| p.side != order.side)
+                    .map_or(Decimal::ZERO, |p| p.quantity);
                 take = take.min(open);
             }
             if take <= Decimal::ZERO {
@@ -404,13 +451,25 @@ impl SimulatedVenue {
                     Side::Buy => Decimal::ONE,
                     Side::Sell => -Decimal::ONE,
                 };
-                state.wallet += (price - position.entry_price) * quantity * direction;
-                let remaining = position.quantity - quantity;
+                let closed = quantity.min(position.quantity);
+                state.wallet += (price - position.entry_price) * closed * direction;
+                let remaining = position.quantity - closed;
                 position.margin = position.margin * remaining / position.quantity;
                 position.quantity = remaining;
                 state.position = (position.quantity > Decimal::ZERO).then_some(position);
                 if state.position.is_none() {
                     state.exits = None;
+                }
+                // An opening order larger than the opposite position flips it (one-way mode);
+                // a reduce-only order was already clipped to the open quantity.
+                let excess = quantity - closed;
+                if !reduce_only && excess > Decimal::ZERO {
+                    state.position = Some(SimPosition {
+                        side,
+                        quantity: excess,
+                        entry_price: price,
+                        margin: price * excess / Decimal::from(leverage),
+                    });
                 }
             }
             Some(mut position) => {
@@ -441,7 +500,7 @@ impl ExitGateway for SimulatedVenue {
         _symbol: &str,
         entry_side: Side,
         stop_loss: Decimal,
-        take_profit: Decimal,
+        take_profit: Option<Decimal>,
     ) -> Result<(), Self::Error> {
         let mut state = self.lock();
         let last = state.last_price.ok_or(SimulatedVenueError::NoMarketData)?;
@@ -449,8 +508,8 @@ impl ExitGateway for SimulatedVenue {
             return Err(SimulatedVenueError::NoPosition);
         }
         let immediate = match entry_side {
-            Side::Buy => stop_loss >= last || take_profit <= last,
-            Side::Sell => stop_loss <= last || take_profit >= last,
+            Side::Buy => stop_loss >= last || take_profit.is_some_and(|take| take <= last),
+            Side::Sell => stop_loss <= last || take_profit.is_some_and(|take| take >= last),
         };
         if immediate {
             return Err(SimulatedVenueError::WouldTriggerImmediately);
@@ -521,40 +580,67 @@ impl ExecutionVenue for SimulatedVenue {
             Decimal::ZERO,
             drawdown,
         )?;
-        let notional = quantity * intent.price;
-        let leverage = futures::minimum_leverage(
-            notional,
-            notional * self.config.maintenance_margin_rate,
-            notional * self.config.taker_fee_pct,
-            equity,
-            self.config
-                .risk_policy
-                .max_leverage
-                .trunc()
-                .to_u32()
-                .unwrap_or(1),
-        )
-        .ok_or_else(|| {
-            SimulatedVenueError::Risk(
-                "the balance cannot margin the order at any supported leverage".to_string(),
-            )
-        })?;
-        let order_id = format!("sim-{}", state.next_order_id);
-        state.next_order_id += 1;
-        let due_ms = state.clock_ms + self.config.latency_ms;
-        state.orders.push(WorkingOrder {
-            side: intent.side,
-            remaining: quantity,
-            due_ms,
-            reduce_only: false,
-            leverage,
-        });
+        let leverage = self.leverage_for(quantity * intent.price, equity)?;
+        let clock_ms = state.clock_ms;
+        let order_id =
+            self.queue_order(&mut state, intent.side, quantity, clock_ms, false, leverage);
         Ok(EntryAck {
             order_id,
             status: "NEW".to_string(),
             quantity,
             price: intent.price,
             sent_at_ms: state.clock_ms,
+        })
+    }
+
+    /// Queues a market order of the exact requested quantity with the configured latency.
+    ///
+    /// A `reduce_only` order is clipped to the open opposite position when it fills, so it
+    /// never flips nor grows the position. An opening order runs at the lowest leverage that
+    /// margins the notional it adds (at the last price) with the wallet balance.
+    async fn submit_order(
+        &self,
+        _symbol: &str,
+        request: &OrderRequest,
+    ) -> Result<EntryAck, Self::Error> {
+        if request.quantity <= Decimal::ZERO {
+            return Err(SimulatedVenueError::Risk(
+                "the order quantity must be positive".to_string(),
+            ));
+        }
+        let mut state = self.lock();
+        let last = state.last_price.ok_or(SimulatedVenueError::NoMarketData)?;
+        let leverage = if request.reduce_only {
+            1
+        } else {
+            let added = match state.position {
+                Some(position) if position.side == request.side => {
+                    position.quantity + request.quantity
+                }
+                Some(position) => (request.quantity - position.quantity).max(Decimal::ZERO),
+                None => request.quantity,
+            };
+            if added > Decimal::ZERO {
+                self.leverage_for(added * last, state.wallet)?
+            } else {
+                1
+            }
+        };
+        let clock_ms = state.clock_ms;
+        let order_id = self.queue_order(
+            &mut state,
+            request.side,
+            request.quantity,
+            clock_ms,
+            request.reduce_only,
+            leverage,
+        );
+        Ok(EntryAck {
+            order_id,
+            status: "NEW".to_string(),
+            quantity: request.quantity,
+            price: last,
+            sent_at_ms: clock_ms,
         })
     }
 }
@@ -707,10 +793,10 @@ mod tests {
         let venue = long_venue(0).await;
 
         let stop_above_market = venue
-            .place_exits("BTCUSDT", Side::Buy, dec!(100.5), dec!(104))
+            .place_exits("BTCUSDT", Side::Buy, dec!(100.5), Some(dec!(104)))
             .await;
         let target_below_market = venue
-            .place_exits("BTCUSDT", Side::Buy, dec!(98), dec!(99.5))
+            .place_exits("BTCUSDT", Side::Buy, dec!(98), Some(dec!(99.5)))
             .await;
 
         assert_eq!(
@@ -729,7 +815,7 @@ mod tests {
         venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
 
         let result = venue
-            .place_exits("BTCUSDT", Side::Buy, dec!(98), dec!(104))
+            .place_exits("BTCUSDT", Side::Buy, dec!(98), Some(dec!(104)))
             .await;
 
         assert_eq!(result, Err(SimulatedVenueError::NoPosition));
@@ -739,7 +825,7 @@ mod tests {
     async fn a_crossed_stop_fills_on_the_tape_after_the_latency() {
         let venue = long_venue(100).await;
         venue
-            .place_exits("BTCUSDT", Side::Buy, dec!(98), dec!(104))
+            .place_exits("BTCUSDT", Side::Buy, dec!(98), Some(dec!(104)))
             .await
             .unwrap();
 
@@ -763,7 +849,7 @@ mod tests {
     async fn the_print_that_arms_a_stop_does_not_fill_it() {
         let venue = long_venue(0).await;
         venue
-            .place_exits("BTCUSDT", Side::Buy, dec!(98), dec!(104))
+            .place_exits("BTCUSDT", Side::Buy, dec!(98), Some(dec!(104)))
             .await
             .unwrap();
 
@@ -778,7 +864,7 @@ mod tests {
     async fn a_crossed_take_profit_fills_as_a_market_order_and_drops_the_stop() {
         let venue = long_venue(0).await;
         venue
-            .place_exits("BTCUSDT", Side::Buy, dec!(98), dec!(104))
+            .place_exits("BTCUSDT", Side::Buy, dec!(98), Some(dec!(104)))
             .await
             .unwrap();
 
@@ -802,7 +888,7 @@ mod tests {
             .unwrap();
         venue.on_trade(&print(1_001, dec!(100), dec!(10), Side::Sell));
         venue
-            .place_exits("BTCUSDT", Side::Sell, dec!(102), dec!(96))
+            .place_exits("BTCUSDT", Side::Sell, dec!(102), Some(dec!(96)))
             .await
             .unwrap();
 
@@ -818,7 +904,7 @@ mod tests {
     async fn cancelling_orders_drops_working_entries_and_exits_but_not_closing_orders() {
         let venue = long_venue(0).await;
         venue
-            .place_exits("BTCUSDT", Side::Buy, dec!(98), dec!(104))
+            .place_exits("BTCUSDT", Side::Buy, dec!(98), Some(dec!(104)))
             .await
             .unwrap();
         assert!(venue.close_position("BTCUSDT").await.unwrap());
@@ -984,7 +1070,7 @@ mod tests {
     async fn a_liquidation_drops_the_working_orders_and_exits() {
         let venue = leveraged_long().await;
         venue
-            .place_exits("BTCUSDT", Side::Buy, dec!(99.9), dec!(104))
+            .place_exits("BTCUSDT", Side::Buy, dec!(99.9), Some(dec!(104)))
             .await
             .unwrap();
         venue.close_position("BTCUSDT").await.unwrap();
@@ -1043,5 +1129,152 @@ mod tests {
         assert!(venue
             .submit_market_order_at(Side::Buy, Decimal::ZERO, 0)
             .is_err());
+    }
+
+    fn order(side: Side, quantity: Decimal, reduce_only: bool) -> OrderRequest {
+        OrderRequest {
+            side,
+            quantity,
+            reduce_only,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_explicit_order_needs_a_market_and_a_positive_quantity() {
+        let empty = venue(0);
+        let market = venue(0);
+        market.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
+
+        let no_market = empty
+            .submit_order("BTCUSDT", &order(Side::Buy, dec!(1), false))
+            .await;
+        let zero = market
+            .submit_order("BTCUSDT", &order(Side::Buy, Decimal::ZERO, false))
+            .await;
+
+        assert_eq!(no_market, Err(SimulatedVenueError::NoMarketData));
+        assert!(matches!(zero, Err(SimulatedVenueError::Risk(_))));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_order_trades_its_exact_quantity_after_the_latency() {
+        let venue = long_venue(100).await;
+
+        let ack = venue
+            .submit_order("BTCUSDT", &order(Side::Buy, dec!(3), false))
+            .await
+            .unwrap();
+        let early = venue.on_trade(&print(1_150, dec!(102), dec!(10), Side::Buy));
+        let filled = venue.on_trade(&print(1_200, dec!(102), dec!(10), Side::Buy));
+
+        assert_eq!(ack.quantity, dec!(3));
+        assert_eq!(ack.price, dec!(100));
+        assert_eq!(ack.sent_at_ms, 1_100);
+        assert!(early.is_empty());
+        assert_eq!(filled[0].last_quantity, dec!(3));
+        // Scale-in averages the entry: (5 * 100 + 3 * 102) / 8.
+        assert_eq!(venue.position(), Some((Side::Buy, dec!(8), dec!(100.75))));
+    }
+
+    #[tokio::test]
+    async fn a_reduce_only_order_never_flips_or_exceeds_the_position() {
+        let venue = long_venue(0).await;
+
+        venue
+            .submit_order("BTCUSDT", &order(Side::Sell, dec!(8), true))
+            .await
+            .unwrap();
+        let fills = venue.on_trade(&print(2_000, dec!(101), dec!(100), Side::Sell));
+        let later = venue.on_trade(&print(2_001, dec!(101), dec!(100), Side::Sell));
+
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].last_quantity, dec!(5));
+        assert!(later.is_empty());
+        assert!(venue.position().is_none());
+        // 5 units closed at +1 minus the commissions of both fills (0.5 and 0.505).
+        assert_eq!(venue.wallet_balance(), dec!(1003.995));
+    }
+
+    #[tokio::test]
+    async fn a_reduce_only_order_on_the_position_side_never_increases_it() {
+        let venue = long_venue(0).await;
+
+        venue
+            .submit_order("BTCUSDT", &order(Side::Buy, dec!(2), true))
+            .await
+            .unwrap();
+        let fills = venue.on_trade(&print(2_000, dec!(101), dec!(100), Side::Buy));
+
+        assert!(fills.is_empty());
+        assert_eq!(venue.position(), Some((Side::Buy, dec!(5), dec!(100))));
+    }
+
+    #[tokio::test]
+    async fn a_partial_reduce_only_order_scales_out_and_keeps_the_entry() {
+        let venue = long_venue(0).await;
+
+        venue
+            .submit_order("BTCUSDT", &order(Side::Sell, dec!(2), true))
+            .await
+            .unwrap();
+        venue.on_trade(&print(2_000, dec!(104), dec!(100), Side::Sell));
+
+        assert_eq!(venue.position(), Some((Side::Buy, dec!(3), dec!(100))));
+    }
+
+    #[tokio::test]
+    async fn an_order_larger_than_the_opposite_position_flips_it() {
+        let venue = long_venue(0).await;
+
+        venue
+            .submit_order("BTCUSDT", &order(Side::Sell, dec!(7), false))
+            .await
+            .unwrap();
+        venue.on_trade(&print(2_000, dec!(100), dec!(100), Side::Sell));
+
+        assert_eq!(venue.position(), Some((Side::Sell, dec!(2), dec!(100))));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_order_the_balance_cannot_margin_is_refused() {
+        let venue = venue(0);
+        venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
+
+        // 1000 units at 100 is 100,000 of notional: more than 20x a balance of 1000.
+        let result = venue
+            .submit_order("BTCUSDT", &order(Side::Buy, dec!(1000), false))
+            .await;
+
+        assert!(matches!(result, Err(SimulatedVenueError::Risk(_))));
+    }
+
+    #[tokio::test]
+    async fn a_stop_only_exit_arms_one_leg() {
+        let venue = long_venue(0).await;
+        venue
+            .place_exits("BTCUSDT", Side::Buy, dec!(98), None)
+            .await
+            .unwrap();
+
+        // No take profit: a rally never closes the position.
+        let rally = venue.on_trade(&print(2_000, dec!(150), dec!(100), Side::Sell));
+        venue.on_trade(&print(2_001, dec!(97.5), dec!(1), Side::Sell));
+        let stop = venue.on_trade(&print(2_002, dec!(97.4), dec!(100), Side::Sell));
+
+        assert!(rally.is_empty());
+        assert_eq!(stop.len(), 1);
+        assert_eq!(stop[0].last_quantity, dec!(5));
+        assert!(venue.position().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stop_only_exit_is_still_refused_when_it_would_trigger() {
+        let venue = long_venue(0).await;
+
+        let result = venue
+            .place_exits("BTCUSDT", Side::Buy, dec!(100.5), None)
+            .await;
+
+        assert_eq!(result, Err(SimulatedVenueError::WouldTriggerImmediately));
     }
 }

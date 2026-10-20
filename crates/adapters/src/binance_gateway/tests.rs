@@ -1697,3 +1697,100 @@ fn spot_sizing_policy_uses_symbol_filters_and_no_leverage() {
     assert_eq!(policy.quantity_step_size, dec!(1));
     assert_eq!(policy.min_order_quantity, dec!(1));
 }
+
+async fn submit_explicit_test_order(
+    request: ports::OrderRequest,
+) -> (ports::EntryAck, Vec<String>) {
+    use ports::ExecutionVenue;
+
+    let (base_url, requests, server) =
+        spawn_futures_mock_server(valid_futures_responses(current_unix_time_ms().unwrap()));
+    let gateway = futures_submission_test_gateway(base_url);
+
+    let ack = gateway.submit_order("BTCUSDT", &request).await.unwrap();
+
+    server.join().unwrap();
+    let requests = requests.lock().unwrap().clone();
+    (ack, requests)
+}
+
+#[tokio::test]
+async fn an_explicit_reduce_only_order_sends_the_exact_market_query() {
+    let (ack, requests) = submit_explicit_test_order(ports::OrderRequest {
+        side: Side::Sell,
+        quantity: dec!(0.250),
+        reduce_only: true,
+    })
+    .await;
+
+    let posts: Vec<&String> = requests
+        .iter()
+        .filter(|request| request.starts_with("POST /fapi/v1/order?"))
+        .collect();
+    assert_eq!(posts.len(), 1);
+    let post = posts[0];
+    let query = post
+        .split_whitespace()
+        .nth(1)
+        .and_then(|target| target.split_once('?'))
+        .map(|(_, query)| query)
+        .unwrap();
+    let client_order_id = request_parameter(post, "newClientOrderId").unwrap();
+    assert!(query.starts_with(&format!(
+        "symbol=BTCUSDT&side=SELL&type=MARKET&quantity=0.250&reduceOnly=true&newClientOrderId={client_order_id}&"
+    )));
+    assert_eq!(request_parameter(post, "price"), None);
+    assert_eq!(request_parameter(post, "timeInForce"), None);
+    assert_eq!(ack.order_id, client_order_id);
+    assert_eq!(ack.quantity, dec!(0.250));
+    assert_eq!(ack.status, "NEW");
+}
+
+#[tokio::test]
+async fn an_explicit_opening_order_carries_no_reduce_only_flag() {
+    let (ack, requests) = submit_explicit_test_order(ports::OrderRequest {
+        side: Side::Buy,
+        quantity: dec!(0.003),
+        reduce_only: false,
+    })
+    .await;
+
+    let post = requests
+        .iter()
+        .find(|request| request.starts_with("POST /fapi/v1/order?"))
+        .expect("order should be submitted");
+    let client_order_id = request_parameter(post, "newClientOrderId").unwrap();
+    assert!(post.contains(&format!(
+        "?symbol=BTCUSDT&side=BUY&type=MARKET&quantity=0.003&newClientOrderId={client_order_id}&"
+    )));
+    assert_eq!(request_parameter(post, "reduceOnly"), None);
+    assert_eq!(ack.quantity, dec!(0.003));
+}
+
+#[tokio::test]
+async fn an_explicit_order_refuses_a_non_positive_quantity_or_spot_without_network() {
+    use ports::ExecutionVenue;
+
+    let (base_url, requests, server) = spawn_futures_mock_server(HashMap::new());
+    let futures = futures_submission_test_gateway(base_url.clone());
+    let mut spot = BinanceGateway::new(BinanceGatewayConfig {
+        spot: true,
+        ..Default::default()
+    })
+    .unwrap();
+    spot.base_url = base_url;
+    let zero = ports::OrderRequest {
+        side: Side::Buy,
+        quantity: Decimal::ZERO,
+        reduce_only: false,
+    };
+    let one = ports::OrderRequest {
+        quantity: dec!(1),
+        ..zero
+    };
+
+    assert!(futures.submit_order("BTCUSDT", &zero).await.is_err());
+    assert!(spot.submit_order("BTCUSDT", &one).await.is_err());
+    server.join().unwrap();
+    assert!(requests.lock().unwrap().is_empty());
+}

@@ -90,6 +90,7 @@ impl<S: Strategy> TickSimulation<S> {
                 max_monthly_drawdown_pct: backtest.max_monthly_drawdown_pct,
                 halt_retry_ms: HALT_RETRY_MS,
                 entry_timeout_ms: ENTRY_TIMEOUT_MS,
+                risk_policy: backtest.risk_policy().ok(),
             },
             strategy,
         );
@@ -154,6 +155,16 @@ impl<S: Strategy> TickSimulation<S> {
     /// Dollar bars the strategy has seen so far.
     pub fn bars_processed(&self) -> u64 {
         self.driver.bars()
+    }
+
+    /// Strategy being executed by the simulation.
+    pub fn strategy(&self) -> &S {
+        self.driver.strategy()
+    }
+
+    /// Strategy-specific audit report, if any.
+    pub fn strategy_audit(&self) -> Option<serde_json::Value> {
+        self.driver.strategy().audit()
     }
 
     /// Whether the monthly breaker or an emergency halt stopped the run.

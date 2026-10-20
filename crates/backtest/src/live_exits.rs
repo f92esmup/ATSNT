@@ -103,7 +103,7 @@ impl ExitManager {
         let mut last_error = String::new();
         for _ in 0..MAX_ATTEMPTS {
             match gateway
-                .place_exits(&self.symbol, entry_side, stop_loss, take_profit)
+                .place_exits(&self.symbol, entry_side, stop_loss, Some(take_profit))
                 .await
             {
                 Ok(()) => return ExitEvent::Protected,
@@ -258,7 +258,7 @@ mod tests {
             _: &str,
             _: Side,
             _: Decimal,
-            _: Decimal,
+            _: Option<Decimal>,
         ) -> Result<(), String> {
             self.calls.borrow_mut().push("place");
             self.place.borrow_mut().pop_front().unwrap_or(Ok(()))

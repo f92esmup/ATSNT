@@ -60,6 +60,10 @@ impl Strategy for SwarmConsensusStrategy {
     fn audit(&self) -> Option<serde_json::Value> {
         Some(self.ensemble.audit().to_json())
     }
+
+    fn emits_targets(&self) -> bool {
+        true
+    }
 }
 
 impl OptimizableStrategy for SwarmConsensusStrategy {
@@ -115,6 +119,16 @@ mod tests {
         assert_eq!(strategy.input_kind(), InputKind::Trades);
         let audit = strategy.audit().expect("the swarm reports an audit");
         assert!(audit.is_object());
+    }
+
+    #[test]
+    fn the_swarm_declares_that_it_emits_targets_also_through_a_box() {
+        let strategy =
+            SwarmConsensusStrategy::from_config(&SwarmConfig::default(), PolicyConfig::default())
+                .unwrap();
+        assert!(strategy.emits_targets());
+        let boxed: Box<dyn Strategy> = Box::new(strategy);
+        assert!(boxed.emits_targets());
     }
 
     #[test]

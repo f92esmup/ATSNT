@@ -129,14 +129,7 @@ impl BinanceGateway {
         stop_loss: Decimal,
         take_profit: Decimal,
     ) -> Result<[ProtectiveExitReport; 2], GatewayError> {
-        self.require_futures()?;
-        if !is_valid_asset(symbol) {
-            return Err(GatewayError::Config(
-                "symbol must contain only ASCII letters and digits".to_string(),
-            ));
-        }
-        let exchange_info = self.get_binance_json("/fapi/v1/exchangeInfo").await?;
-        let rules = parse_futures_symbol_rules(&exchange_info, symbol)?;
+        let rules = self.exit_rules(symbol).await?;
 
         let stop = self
             .place_one_exit(symbol, entry_side, ExitKind::StopLoss, stop_loss, &rules)
@@ -151,6 +144,31 @@ impl BinanceGateway {
             )
             .await?;
         Ok([stop, take])
+    }
+
+    /// Places only the stop loss as an exchange-held conditional order that closes the whole
+    /// position (`closePosition=true`); used for positions that carry no take profit.
+    pub async fn place_stop_exit(
+        &self,
+        symbol: &str,
+        entry_side: Side,
+        stop_loss: Decimal,
+    ) -> Result<ProtectiveExitReport, GatewayError> {
+        let rules = self.exit_rules(symbol).await?;
+        self.place_one_exit(symbol, entry_side, ExitKind::StopLoss, stop_loss, &rules)
+            .await
+    }
+
+    /// Validates the profile and symbol, then reads the contract filters the exits align to.
+    async fn exit_rules(&self, symbol: &str) -> Result<FuturesSymbolRules, GatewayError> {
+        self.require_futures()?;
+        if !is_valid_asset(symbol) {
+            return Err(GatewayError::Config(
+                "symbol must contain only ASCII letters and digits".to_string(),
+            ));
+        }
+        let exchange_info = self.get_binance_json("/fapi/v1/exchangeInfo").await?;
+        parse_futures_symbol_rules(&exchange_info, symbol)
     }
 
     async fn place_one_exit(
@@ -339,11 +357,18 @@ impl ports::ExitGateway for BinanceGateway {
         symbol: &str,
         entry_side: Side,
         stop_loss: Decimal,
-        take_profit: Decimal,
+        take_profit: Option<Decimal>,
     ) -> Result<(), Self::Error> {
-        self.place_protective_exits(symbol, entry_side, stop_loss, take_profit)
-            .await
-            .map(|_| ())
+        match take_profit {
+            Some(take_profit) => self
+                .place_protective_exits(symbol, entry_side, stop_loss, take_profit)
+                .await
+                .map(|_| ()),
+            None => self
+                .place_stop_exit(symbol, entry_side, stop_loss)
+                .await
+                .map(|_| ()),
+        }
     }
 
     async fn cancel_orders(&self, symbol: &str) -> Result<(), Self::Error> {
@@ -375,6 +400,21 @@ impl ports::ExecutionVenue for BinanceGateway {
             status: report.status,
             quantity: report.original_qty,
             price: intent.price,
+            sent_at_ms: report.sent_at_ms,
+        })
+    }
+
+    async fn submit_order(
+        &self,
+        symbol: &str,
+        request: &ports::OrderRequest,
+    ) -> Result<ports::EntryAck, Self::Error> {
+        let report = self.place_market_order(symbol, request).await?;
+        Ok(ports::EntryAck {
+            order_id: report.client_order_id,
+            status: report.status,
+            quantity: report.original_qty,
+            price: report.price,
             sent_at_ms: report.sent_at_ms,
         })
     }
@@ -671,5 +711,76 @@ mod tests {
         assert!(gateway.cancel_exit_orders("BTCUSDT").await.is_err());
         assert!(gateway.close_position_market("BTCUSDT").await.is_err());
         assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stop_only_exit_places_one_stop_market_order() {
+        use ports::ExitGateway;
+
+        let (url, requests) = spawn_mock(vec![
+            ("GET /fapi/v1/exchangeInfo", 200, EXCHANGE_INFO),
+            (
+                "POST /fapi/v1/algoOrder",
+                200,
+                r#"{"algoId":78,"algoStatus":"NEW"}"#,
+            ),
+        ])
+        .await;
+
+        gateway(&url, false)
+            .place_exits("BTCUSDT", Side::Sell, dec!(100.54), None)
+            .await
+            .unwrap();
+
+        let log = requests.lock().unwrap();
+        let posts: Vec<&String> = log
+            .iter()
+            .filter(|line| line.starts_with("POST /fapi/v1/algoOrder"))
+            .collect();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(param(posts[0], "type").as_deref(), Some("STOP_MARKET"));
+        assert_eq!(param(posts[0], "side").as_deref(), Some("BUY"));
+        // A short's stop rounds down, toward the entry.
+        assert_eq!(param(posts[0], "triggerPrice").as_deref(), Some("100.5"));
+        assert_eq!(param(posts[0], "closePosition").as_deref(), Some("true"));
+        assert_eq!(
+            param(posts[0], "workingType").as_deref(),
+            Some("MARK_PRICE")
+        );
+        assert!(param(posts[0], "clientAlgoId").unwrap().ends_with("_sl"));
+    }
+
+    #[tokio::test]
+    async fn the_port_with_a_take_profit_places_both_legs_as_before() {
+        use ports::ExitGateway;
+
+        let (url, requests) = spawn_mock(vec![
+            ("GET /fapi/v1/exchangeInfo", 200, EXCHANGE_INFO),
+            (
+                "POST /fapi/v1/algoOrder",
+                200,
+                r#"{"algoId":79,"algoStatus":"NEW"}"#,
+            ),
+        ])
+        .await;
+
+        gateway(&url, false)
+            .place_exits("BTCUSDT", Side::Buy, dec!(99.87), Some(dec!(110.04)))
+            .await
+            .unwrap();
+
+        let log = requests.lock().unwrap();
+        let types: Vec<Option<String>> = log
+            .iter()
+            .filter(|line| line.starts_with("POST /fapi/v1/algoOrder"))
+            .map(|line| param(line, "type"))
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                Some("STOP_MARKET".to_string()),
+                Some("TAKE_PROFIT_MARKET".to_string())
+            ]
+        );
     }
 }

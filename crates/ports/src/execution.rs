@@ -20,6 +20,22 @@ pub struct EntryAck {
     pub sent_at_ms: i64,
 }
 
+/// A market order of an explicit quantity, sized by the caller.
+///
+/// It carries no sizing inputs: the session sizes a target position with the shared domain
+/// planner and sends the difference with the current position. A `reduce_only` order may only
+/// shrink the open position: the venue never lets it flip the position or close more than is
+/// open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrderRequest {
+    /// Direction of the order.
+    pub side: Side,
+    /// Quantity to trade, in base units; must be positive.
+    pub quantity: Decimal,
+    /// `true` when the order may only reduce the open position.
+    pub reduce_only: bool,
+}
+
 /// One execution (partial or complete) reported by the venue for any order of the session.
 ///
 /// Live builds it from the private user-data stream; a simulated venue emits the same shape,
@@ -69,5 +85,15 @@ pub trait ExecutionVenue: ExitGateway {
         intent: &OrderIntent,
         equity: Decimal,
         session_peak: Decimal,
+    ) -> Result<EntryAck, Self::Error>;
+
+    /// Dispatches a market order of the request's exact quantity, with no sizing in the venue.
+    ///
+    /// The acknowledgement's `quantity` is the requested quantity and its `price` the venue's
+    /// reference price at send time (the last trade, or 0 when the venue cannot tell).
+    async fn submit_order(
+        &self,
+        symbol: &str,
+        request: &OrderRequest,
     ) -> Result<EntryAck, Self::Error>;
 }

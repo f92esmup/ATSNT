@@ -481,15 +481,18 @@ impl BinanceGateway {
         Ok(body)
     }
 
+    /// Dispatches a USD-M `MARKET` order of an exact quantity, with `reduceOnly=true` when
+    /// `reduce_only`, and reconciles an ambiguous outcome by its client order id.
     async fn submit_futures_order(
         &self,
         symbol: &str,
-        intent: &OrderIntent,
+        order_side: Side,
         quantity: Decimal,
+        reduce_only: bool,
         snapshot: &FuturesPreflightSnapshot,
         lease: &FuturesSubmissionLease<'_>,
     ) -> Result<OrderExecutionReport, GatewayError> {
-        let side = match intent.side {
+        let side = match order_side {
             Side::Buy => "BUY",
             Side::Sell => "SELL",
         };
@@ -499,12 +502,13 @@ impl BinanceGateway {
         let order = FuturesOrderRequest {
             symbol: symbol.to_string(),
             client_order_id: lease.client_order_id.clone(),
-            side: intent.side,
+            side: order_side,
             price: Decimal::ZERO,
             quantity,
         };
+        let reduce_only_flag = if reduce_only { "&reduceOnly=true" } else { "" };
         let parameters = format!(
-            "symbol={}&side={side}&type=MARKET&quantity={quantity}&newClientOrderId={}",
+            "symbol={}&side={side}&type=MARKET&quantity={quantity}{reduce_only_flag}&newClientOrderId={}",
             order.symbol, order.client_order_id
         );
         let signed_query = self
@@ -664,6 +668,39 @@ impl BinanceGateway {
         Ok(policy)
     }
 
+    /// Submits a USD-M `MARKET` order of the request's exact quantity, with no sizing.
+    ///
+    /// The caller sizes the order (a target position is sized with the shared domain planner).
+    /// The order goes through the same single-flight reservation, fresh account snapshot and
+    /// ambiguous-outcome reconciliation as an entry. Spot accounts are refused.
+    pub async fn place_market_order(
+        &self,
+        symbol: &str,
+        request: &ports::OrderRequest,
+    ) -> Result<OrderExecutionReport, GatewayError> {
+        if self.config.spot {
+            return Err(GatewayError::Config(
+                "explicit market orders are only supported for USD-M futures".to_string(),
+            ));
+        }
+        if request.quantity <= Decimal::ZERO {
+            return Err(GatewayError::Config(
+                "the order quantity must be positive".to_string(),
+            ));
+        }
+        let lease = self.reserve_futures_submission()?;
+        let snapshot = self.fetch_futures_preflight_snapshot(symbol).await?;
+        self.submit_futures_order(
+            symbol,
+            request.side,
+            request.quantity,
+            request.reduce_only,
+            &snapshot,
+            &lease,
+        )
+        .await
+    }
+
     /// Sizes with the shared session policy, then submits a signed live order to Binance.
     pub async fn place_order(
         &self,
@@ -719,7 +756,7 @@ impl BinanceGateway {
             (futures_snapshot.as_ref(), submission_lease.as_ref())
         {
             return self
-                .submit_futures_order(symbol, intent, quantity, snapshot, lease)
+                .submit_futures_order(symbol, intent.side, quantity, false, snapshot, lease)
                 .await;
         }
 

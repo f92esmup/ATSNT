@@ -132,6 +132,18 @@ impl LoadedStrategy {
         }
     }
 
+    /// Product gate: paper_trading and live_trading refuse a strategy that can emit
+    /// `Decision::Target` (spec §17.1).
+    pub fn ensure_accepts_decisions(&self) -> Result<()> {
+        if self.strategy.emits_targets() {
+            anyhow::bail!(
+                "strategy '{}' emits target-position decisions, which paper_trading and live_trading do not accept yet",
+                self.strategy_id
+            );
+        }
+        Ok(())
+    }
+
     /// Human-readable lines describing the configuration source, for runner start-up output.
     pub fn report_lines(&self) -> Vec<String> {
         match &self.source {
@@ -543,6 +555,25 @@ mod tests {
             assert!(
                 message.contains("dollar_bars_cusum") && message.contains("order_flow_imbalance")
             );
+        }
+    }
+
+    #[test]
+    fn paper_and_live_refuse_a_strategy_that_emits_targets() {
+        let loaded = load_strategy("swarm", None).unwrap();
+        let err = loaded.ensure_accepts_decisions().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "strategy 'swarm_consensus' emits target-position decisions, which paper_trading \
+             and live_trading do not accept yet"
+        );
+    }
+
+    #[test]
+    fn paper_and_live_accept_the_entry_strategies() {
+        for id in ["dollar_bars_cusum", "order_flow_imbalance"] {
+            let loaded = load_strategy(id, None).unwrap();
+            assert!(loaded.ensure_accepts_decisions().is_ok(), "{id}");
         }
     }
 

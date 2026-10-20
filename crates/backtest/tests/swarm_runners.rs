@@ -469,7 +469,7 @@ fn the_backtest_refuses_a_calibration_that_overlaps_the_data() {
 }
 
 #[test]
-fn the_backtest_refuses_the_tick_fill_model_for_a_trade_strategy() {
+fn the_backtest_runs_the_tick_fill_model_for_a_trade_strategy() {
     let dir = tempfile::tempdir().unwrap();
     let data = write_trades(dir.path(), &swarm_trades(3));
     let shared_path = write_json(dir.path(), "shared.json", &shared());
@@ -483,10 +483,8 @@ fn the_backtest_refuses_the_tick_fill_model_for_a_trade_strategy() {
             "tick",
         ],
     );
-    assert!(!out.status.success());
-    assert!(
-        text(&out).contains("--fill-model tick does not support"),
-        "{}",
-        text(&out)
-    );
+    assert!(out.status.success(), "{}", text(&out));
+    let t = text(&out);
+    assert!(t.contains("QUANTITATIVE PERFORMANCE REPORT"));
+    assert!(t.contains("STRATEGY AUDIT"));
 }

@@ -8,13 +8,19 @@
 
 use std::collections::VecDeque;
 
-use domain::{DollarBar, DollarBarAggregator, DomainError, OrderIntent, PositionSide, Side, Trade};
-use ports::{EntryAck, ExecutionReport, ExecutionVenue};
+use domain::{
+    DollarBar, DollarBarAggregator, DomainError, OrderIntent, PositionSide, RiskPolicy, Side,
+    TargetPosition, Trade,
+};
+use ports::{EntryAck, ExecutionReport, ExecutionVenue, OrderRequest};
 use rust_decimal::Decimal;
 use strategies::{Decision, MarketEvent, Strategy};
 
 use crate::daily_watermark::DailyWatermark;
 use crate::excursion::ExcursionTracker;
+use crate::execution_core::{
+    order_limit_kind, Campaign, CampaignClose, TradeLedger, TARGET_EXIT_REASON, TARGET_FLIP_REASON,
+};
 use crate::fee_ledger::FeeLedger;
 use crate::live_exits::{ExitEvent, ExitManager, HaltState};
 use crate::metrics::{ClosedTrade, TradeExcursion};
@@ -37,6 +43,8 @@ pub struct SessionConfig {
     /// (market-trade time). The wait is also the retry throttle's partner: failed attempts repeat
     /// every `halt_retry_ms`.
     pub entry_timeout_ms: i64,
+    /// Risk policy used to size `Target` decisions; `None` for sessions that do not trade targets.
+    pub risk_policy: Option<RiskPolicy>,
 }
 
 /// Why a strategy signal was not turned into an order.
@@ -130,12 +138,20 @@ enum Phase {
         cancel_sent_ms: Option<i64>,
     },
     Open {
-        intent: OrderIntent,
+        intent: Option<OrderIntent>,
         side: Side,
         entry_price: Decimal,
         quantity: Decimal,
         entry_time_ms: i64,
         exit_fills: Fills,
+        stop_distance: Option<Decimal>,
+    },
+    Adjusting {
+        position: Option<(Side, Decimal, Decimal)>,
+        target: TargetPosition,
+        delta: Decimal,
+        submitted_ms: i64,
+        pending_flip: Option<OrderRequest>,
     },
 }
 
@@ -151,7 +167,9 @@ pub struct TradingSession<S: Strategy> {
     monthly: MonthlyGuard,
     wallet: Decimal,
     account_ok: bool,
-    closed_trades: Vec<ClosedTrade>,
+    ledger: TradeLedger,
+    campaign: Option<Campaign>,
+    rearm_blocked: Option<PositionSide>,
     last_halt_attempt_ms: Option<i64>,
     exit_hint: Option<&'static str>,
     funding: Decimal,
@@ -184,7 +202,9 @@ impl<S: Strategy> TradingSession<S> {
             fees: FeeLedger::new(),
             daily: DailyWatermark::new(),
             account_ok: true,
-            closed_trades: Vec::new(),
+            ledger: TradeLedger::default(),
+            campaign: None,
+            rearm_blocked: None,
             last_halt_attempt_ms: None,
             exit_hint: None,
             funding: Decimal::ZERO,
@@ -196,7 +216,17 @@ impl<S: Strategy> TradingSession<S> {
 
     /// Trades closed so far, oldest first.
     pub fn closed_trades(&self) -> &[ClosedTrade] {
-        &self.closed_trades
+        self.ledger.trades()
+    }
+
+    /// Reference to the session's strategy.
+    pub fn strategy(&self) -> &S {
+        &self.strategy
+    }
+
+    /// Mutable reference to the session's strategy.
+    pub fn strategy_mut(&mut self) -> &mut S {
+        &mut self.strategy
     }
 
     /// Whether the monthly breaker or an emergency halt blocks new entries.
@@ -313,19 +343,13 @@ impl<S: Strategy> TradingSession<S> {
             events.push(SessionEvent::Exit(event));
         }
 
-        if let Phase::Open {
-            side,
-            entry_price,
-            quantity,
-            ..
-        } = &self.phase
-        {
+        if let Some((side, entry_price, quantity)) = self.open_position() {
             self.excursion.mark(
                 bar.end_time,
                 self.wallet,
-                *side,
-                *entry_price,
-                *quantity,
+                side,
+                entry_price,
+                quantity,
                 bar.close,
             );
         }
@@ -342,18 +366,213 @@ impl<S: Strategy> TradingSession<S> {
         );
 
         let decision = self.strategy.on_event(&MarketEvent::DollarBar(bar));
-        if let Some(Decision::Target(target)) = &decision {
-            // Target execution on venues arrives with odd swarm-consensus T8.2.
-            tracing::warn!(
-                level = target.level(),
-                "target decision ignored: not supported yet"
+        if let Some(Decision::Target(target)) = decision {
+            events.extend(
+                self.dispatch_target(venue, target, bar.close, bar.end_time)
+                    .await,
             );
-        }
-        if let Some(Decision::Entry(intent)) = decision {
+        } else if let Some(Decision::Entry(intent)) = decision {
             events.push(SessionEvent::Signal(intent.clone()));
             events.extend(self.dispatch(venue, intent, day_peak, bar.end_time).await);
         }
         events
+    }
+
+    /// Feeds one raw market trade for trade-consuming strategies.
+    pub async fn on_trade_event<V: ExecutionVenue>(
+        &mut self,
+        venue: &V,
+        trade: &Trade,
+    ) -> Vec<SessionEvent> {
+        let mut events = Vec::new();
+
+        if let Some((side, entry_price, quantity)) = self.open_position() {
+            self.excursion.mark(
+                trade.timestamp,
+                self.wallet,
+                side,
+                entry_price,
+                quantity,
+                trade.price,
+            );
+        }
+
+        let open_position = self.open_position();
+        let day_peak = self.daily.observe(
+            trade.timestamp,
+            marked_equity(self.wallet, open_position, trade.price),
+        );
+
+        let decision = self.strategy.on_event(&MarketEvent::Trade(trade));
+        if let Some(Decision::Target(target)) = decision {
+            events.extend(
+                self.dispatch_target(venue, target, trade.price, trade.timestamp)
+                    .await,
+            );
+        } else if let Some(Decision::Entry(intent)) = decision {
+            events.push(SessionEvent::Signal(intent.clone()));
+            events.extend(
+                self.dispatch(venue, intent, day_peak, trade.timestamp)
+                    .await,
+            );
+        }
+        events
+    }
+
+    async fn dispatch_target<V: ExecutionVenue>(
+        &mut self,
+        venue: &V,
+        target: TargetPosition,
+        mark_price: Decimal,
+        now_ms: i64,
+    ) -> Vec<SessionEvent> {
+        let level = target.level();
+        if let Some(blocked) = self.rearm_blocked {
+            if level == 0 {
+                self.rearm_blocked = None;
+            } else {
+                let side = if level > 0 {
+                    PositionSide::Long
+                } else {
+                    PositionSide::Short
+                };
+                if side != blocked {
+                    self.rearm_blocked = None;
+                } else {
+                    return Vec::new();
+                }
+            }
+        }
+
+        if !self.account_ok || self.is_halted() {
+            if self.is_halted() && level != 0 {
+                return vec![SessionEvent::SignalSkipped(SkipReason::Halted)];
+            }
+            if !self.account_ok {
+                return vec![SessionEvent::SignalSkipped(SkipReason::AccountMismatch)];
+            }
+        }
+
+        if matches!(
+            self.phase,
+            Phase::EntryPending { .. } | Phase::Adjusting { .. }
+        ) {
+            return vec![SessionEvent::SignalSkipped(SkipReason::PositionOpen)];
+        }
+
+        let current = self.open_position();
+        let current_signed_qty = match current {
+            Some((Side::Buy, _, q)) => q,
+            Some((Side::Sell, _, q)) => -q,
+            None => Decimal::ZERO,
+        };
+
+        let Some(policy) = &self.config.risk_policy else {
+            return Vec::new();
+        };
+
+        let drawdown = self
+            .daily
+            .drawdown_pct(marked_equity(self.wallet, current, mark_price));
+        let sizing = match policy.size_target(
+            &target,
+            mark_price,
+            self.wallet,
+            current_signed_qty,
+            drawdown,
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let target_qty = sizing.quantity;
+        let delta = target_qty - current_signed_qty;
+        if delta == Decimal::ZERO {
+            return Vec::new();
+        }
+
+        if target.level() != 0
+            && order_limit_kind(
+                delta.abs(),
+                mark_price,
+                policy.min_order_quantity,
+                policy.min_order_notional,
+                policy.max_order_notional,
+            )
+            .is_some()
+        {
+            return Vec::new();
+        }
+
+        let is_flip = current_signed_qty != Decimal::ZERO
+            && target_qty != Decimal::ZERO
+            && (current_signed_qty > Decimal::ZERO) != (target_qty > Decimal::ZERO);
+
+        if is_flip {
+            let Some((current_side, _, _)) = current else {
+                return Vec::new();
+            };
+            let close_side = match current_side {
+                Side::Buy => Side::Sell,
+                Side::Sell => Side::Buy,
+            };
+            let close_req = OrderRequest {
+                side: close_side,
+                quantity: current_signed_qty.abs(),
+                reduce_only: true,
+            };
+            let open_side = if target_qty > Decimal::ZERO {
+                Side::Buy
+            } else {
+                Side::Sell
+            };
+            let open_req = OrderRequest {
+                side: open_side,
+                quantity: target_qty.abs(),
+                reduce_only: false,
+            };
+            match venue.submit_order(&self.config.symbol, &close_req).await {
+                Ok(ack) => {
+                    self.phase = Phase::Adjusting {
+                        position: current,
+                        target,
+                        delta: -current_signed_qty,
+                        submitted_ms: now_ms,
+                        pending_flip: Some(open_req),
+                    };
+                    vec![SessionEvent::EntrySubmitted(ack)]
+                }
+                Err(err) => vec![SessionEvent::EntryFailed(err.to_string())],
+            }
+        } else {
+            let is_reduction = current_signed_qty != Decimal::ZERO
+                && target_qty.abs() < current_signed_qty.abs()
+                && (target_qty == Decimal::ZERO
+                    || (current_signed_qty > Decimal::ZERO) == (target_qty > Decimal::ZERO));
+            let side = if delta > Decimal::ZERO {
+                Side::Buy
+            } else {
+                Side::Sell
+            };
+            let req = OrderRequest {
+                side,
+                quantity: delta.abs(),
+                reduce_only: is_reduction,
+            };
+            match venue.submit_order(&self.config.symbol, &req).await {
+                Ok(ack) => {
+                    self.phase = Phase::Adjusting {
+                        position: current,
+                        target,
+                        delta,
+                        submitted_ms: now_ms,
+                        pending_flip: None,
+                    };
+                    vec![SessionEvent::EntrySubmitted(ack)]
+                }
+                Err(err) => vec![SessionEvent::EntryFailed(err.to_string())],
+            }
+        }
     }
 
     /// Feeds one execution report from the venue (entry fills, exit fills, acknowledgements).
@@ -444,22 +663,37 @@ impl<S: Strategy> TradingSession<S> {
                 quantity,
                 entry_time_ms,
                 mut exit_fills,
+                stop_distance,
             } => {
                 exit_fills.add(report);
                 if report.liquidation {
                     self.exit_hint = Some("Liquidation");
                 }
                 if report.order_filled && exit_fills.quantity > Decimal::ZERO {
-                    let closed = ClosedPosition {
-                        intent,
-                        side,
-                        entry_price,
-                        quantity,
-                        entry_time_ms,
-                        exit_price: exit_fills.average_price(),
-                        exit_time_ms: report.time_ms,
-                    };
-                    events.extend(self.close_position_from(venue, closed).await);
+                    if let Some(intent) = intent {
+                        let closed = ClosedPosition {
+                            intent,
+                            side,
+                            entry_price,
+                            quantity,
+                            entry_time_ms,
+                            exit_price: exit_fills.average_price(),
+                            exit_time_ms: report.time_ms,
+                        };
+                        events.extend(self.close_position_from(venue, closed).await);
+                    } else {
+                        events.extend(
+                            self.close_target_position(
+                                venue,
+                                side,
+                                entry_price,
+                                quantity,
+                                exit_fills.average_price(),
+                                report.time_ms,
+                            )
+                            .await,
+                        );
+                    }
                 } else {
                     self.phase = Phase::Open {
                         intent,
@@ -468,7 +702,247 @@ impl<S: Strategy> TradingSession<S> {
                         quantity,
                         entry_time_ms,
                         exit_fills,
+                        stop_distance,
                     };
+                }
+            }
+            Phase::Adjusting {
+                position,
+                target,
+                delta,
+                submitted_ms,
+                pending_flip,
+            } => {
+                if report.last_quantity <= Decimal::ZERO
+                    && !report.order_filled
+                    && !report.order_closed
+                {
+                    self.phase = Phase::Adjusting {
+                        position,
+                        target,
+                        delta,
+                        submitted_ms,
+                        pending_flip,
+                    };
+                    return events;
+                }
+
+                let fee = if report.commission > Decimal::ZERO {
+                    report.commission
+                } else {
+                    report.last_price * report.last_quantity * self.config.fallback_fee_pct
+                };
+                let slippage = Decimal::ZERO;
+
+                match position {
+                    None => {
+                        // Opening from flat
+                        let side = report.side;
+                        let fill_price = report.last_price;
+                        let fill_qty = report.last_quantity;
+                        let mut campaign = Campaign::starting(report.time_ms);
+                        self.excursion.open(report.time_ms, self.wallet);
+                        campaign.add_increase(fill_price, fill_qty, fee, slippage, fill_qty);
+
+                        let stop = match side {
+                            Side::Buy => fill_price - target.stop_distance(),
+                            Side::Sell => fill_price + target.stop_distance(),
+                        };
+                        let _ = venue.cancel_orders(&self.config.symbol).await;
+                        let _ = venue
+                            .place_exits(&self.config.symbol, side, stop, None)
+                            .await;
+
+                        self.campaign = Some(campaign);
+                        if report.order_filled {
+                            self.phase = Phase::Open {
+                                intent: None,
+                                side,
+                                entry_price: fill_price,
+                                quantity: fill_qty,
+                                entry_time_ms: report.time_ms,
+                                exit_fills: Fills::default(),
+                                stop_distance: Some(target.stop_distance()),
+                            };
+                        } else {
+                            self.phase = Phase::Adjusting {
+                                position: Some((side, fill_price, fill_qty)),
+                                target,
+                                delta,
+                                submitted_ms,
+                                pending_flip,
+                            };
+                        }
+                    }
+                    Some((pos_side, entry_price, pos_qty)) => {
+                        if report.side == pos_side {
+                            // Scale-in (increase)
+                            let new_qty = pos_qty + report.last_quantity;
+                            let new_entry_price = (pos_qty * entry_price
+                                + report.last_quantity * report.last_price)
+                                / new_qty;
+                            if let Some(camp) = self.campaign.as_mut() {
+                                camp.add_increase(
+                                    report.last_price,
+                                    report.last_quantity,
+                                    fee,
+                                    slippage,
+                                    new_qty,
+                                );
+                            }
+                            let stop = match pos_side {
+                                Side::Buy => report.last_price - target.stop_distance(),
+                                Side::Sell => report.last_price + target.stop_distance(),
+                            };
+                            let _ = venue.cancel_orders(&self.config.symbol).await;
+                            let _ = venue
+                                .place_exits(&self.config.symbol, pos_side, stop, None)
+                                .await;
+
+                            if report.order_filled {
+                                self.phase = Phase::Open {
+                                    intent: None,
+                                    side: pos_side,
+                                    entry_price: new_entry_price,
+                                    quantity: new_qty,
+                                    entry_time_ms: report.time_ms,
+                                    exit_fills: Fills::default(),
+                                    stop_distance: Some(target.stop_distance()),
+                                };
+                            } else {
+                                self.phase = Phase::Adjusting {
+                                    position: Some((pos_side, new_entry_price, new_qty)),
+                                    target,
+                                    delta,
+                                    submitted_ms,
+                                    pending_flip,
+                                };
+                            }
+                        } else {
+                            // Reduction or close
+                            let closed_qty = report.last_quantity.min(pos_qty);
+                            let remaining_qty = pos_qty - closed_qty;
+                            let pnl = match pos_side {
+                                Side::Buy => (report.last_price - entry_price) * closed_qty,
+                                Side::Sell => (entry_price - report.last_price) * closed_qty,
+                            };
+                            if let Some(camp) = self.campaign.as_mut() {
+                                camp.add_reduction(
+                                    report.last_price,
+                                    closed_qty,
+                                    pnl,
+                                    fee,
+                                    slippage,
+                                );
+                            }
+
+                            if remaining_qty > Decimal::ZERO {
+                                let stop = match pos_side {
+                                    Side::Buy => report.last_price - target.stop_distance(),
+                                    Side::Sell => report.last_price + target.stop_distance(),
+                                };
+                                let _ = venue.cancel_orders(&self.config.symbol).await;
+                                let _ = venue
+                                    .place_exits(&self.config.symbol, pos_side, stop, None)
+                                    .await;
+
+                                if report.order_filled {
+                                    self.phase = Phase::Open {
+                                        intent: None,
+                                        side: pos_side,
+                                        entry_price,
+                                        quantity: remaining_qty,
+                                        entry_time_ms: report.time_ms,
+                                        exit_fills: Fills::default(),
+                                        stop_distance: Some(target.stop_distance()),
+                                    };
+                                } else {
+                                    self.phase = Phase::Adjusting {
+                                        position: Some((pos_side, entry_price, remaining_qty)),
+                                        target,
+                                        delta,
+                                        submitted_ms,
+                                        pending_flip,
+                                    };
+                                }
+                            } else {
+                                // Full close of the campaign
+                                let campaign = self
+                                    .campaign
+                                    .take()
+                                    .unwrap_or_else(|| Campaign::starting(report.time_ms));
+                                let exit_reason = if pending_flip.is_some() {
+                                    TARGET_FLIP_REASON
+                                } else {
+                                    TARGET_EXIT_REASON
+                                };
+                                let funding_paid = std::mem::take(&mut self.funding);
+                                let entry_equity =
+                                    self.excursion.entry_equity().unwrap_or(self.wallet);
+                                let net = campaign.net_pnl(funding_paid);
+                                let exit_equity = entry_equity + net;
+                                let excursion = self
+                                    .excursion
+                                    .close(report.time_ms, exit_equity)
+                                    .unwrap_or_else(|| {
+                                        TradeExcursion::start(report.time_ms, exit_equity)
+                                    });
+
+                                let trade = self
+                                    .ledger
+                                    .close_campaign(
+                                        campaign,
+                                        CampaignClose {
+                                            side: match pos_side {
+                                                Side::Buy => PositionSide::Long,
+                                                Side::Sell => PositionSide::Short,
+                                            },
+                                            exit_time: report.time_ms,
+                                            last_entry_price: entry_price,
+                                            last_exit_price: report.last_price,
+                                            last_quantity: pos_qty,
+                                            funding_paid,
+                                            exit_reason,
+                                            excursion,
+                                        },
+                                    )
+                                    .clone();
+
+                                events.push(SessionEvent::PositionClosed(Box::new(trade)));
+                                let _ = venue.cancel_orders(&self.config.symbol).await;
+
+                                if let Some(flip_order) = pending_flip {
+                                    match venue.submit_order(&self.config.symbol, &flip_order).await
+                                    {
+                                        Ok(ack) => {
+                                            let flip_delta = if flip_order.side == Side::Buy {
+                                                flip_order.quantity
+                                            } else {
+                                                -flip_order.quantity
+                                            };
+                                            self.phase = Phase::Adjusting {
+                                                position: None,
+                                                target,
+                                                delta: flip_delta,
+                                                submitted_ms: report.time_ms,
+                                                pending_flip: None,
+                                            };
+                                            events.push(SessionEvent::EntrySubmitted(ack));
+                                        }
+                                        Err(err) => {
+                                            if let Some(last) = self.ledger.last_mut() {
+                                                last.exit_reason = TARGET_EXIT_REASON.to_string();
+                                            }
+                                            self.phase = Phase::Flat;
+                                            events.push(SessionEvent::EntryFailed(err.to_string()));
+                                        }
+                                    }
+                                } else {
+                                    self.phase = Phase::Flat;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -504,6 +978,7 @@ impl<S: Strategy> TradingSession<S> {
                 quantity,
                 ..
             } => Some((*side, *entry_price, *quantity)),
+            Phase::Adjusting { position, .. } => *position,
             _ => None,
         }
     }
@@ -680,12 +1155,13 @@ impl<S: Strategy> TradingSession<S> {
             self.exit_hint = Some("ProtectionFailed");
         }
         self.phase = Phase::Open {
-            intent,
+            intent: Some(intent),
             side,
             entry_price: price,
             quantity: fills.quantity,
             entry_time_ms: time_ms,
             exit_fills: Fills::default(),
+            stop_distance: None,
         };
         vec![SessionEvent::PositionOpened {
             side,
@@ -724,48 +1200,118 @@ impl<S: Strategy> TradingSession<S> {
             (entry_price * quantity + exit_price * quantity) * self.config.fallback_fee_pct,
         );
         let funding = std::mem::take(&mut self.funding);
-        let net = gross - fees - funding;
-        let return_pct = if entry_price > Decimal::ZERO && quantity > Decimal::ZERO {
-            net / (entry_price * quantity)
-        } else {
-            Decimal::ZERO
-        };
 
         let reason = self
             .exit_hint
             .take()
             .unwrap_or_else(|| infer_exit_reason(side, exit_price, &intent));
-        let slippage = adverse_move(side, entry_price, intent.price) * quantity
-            + trigger_slippage(side, exit_price, &intent, reason) * quantity;
+        let entry_slippage = adverse_move(side, entry_price, intent.price) * quantity;
+        let exit_slippage = trigger_slippage(side, exit_price, &intent, reason) * quantity;
 
         let entry_equity = self.excursion.entry_equity().unwrap_or(self.wallet);
+        let net = gross - fees - funding;
         let exit_equity = entry_equity + net;
         let excursion = self
             .excursion
             .close(exit_time_ms, exit_equity)
             .unwrap_or_else(|| TradeExcursion::start(exit_time_ms, exit_equity));
 
-        let trade = ClosedTrade {
-            entry_time: entry_time_ms,
-            exit_time: exit_time_ms,
+        let mut campaign = Campaign::starting(entry_time_ms);
+        campaign.add_increase(
             entry_price,
-            exit_price,
             quantity,
-            side: match side {
-                Side::Buy => PositionSide::Long,
-                Side::Sell => PositionSide::Short,
-            },
-            pnl_gross: gross,
-            fees_paid: fees,
-            funding_paid: funding,
-            slippage_paid: slippage,
-            pnl_net: net,
-            return_pct,
-            exit_reason: reason.to_string(),
-            holding_duration_seconds: ((exit_time_ms - entry_time_ms) / 1000).max(0),
-            excursion,
+            Decimal::ZERO,
+            entry_slippage,
+            quantity,
+        );
+        campaign.add_reduction(exit_price, quantity, gross, fees, exit_slippage);
+
+        let pos_side = match side {
+            Side::Buy => PositionSide::Long,
+            Side::Sell => PositionSide::Short,
         };
-        self.closed_trades.push(trade.clone());
+        let trade = self
+            .ledger
+            .close_campaign(
+                campaign,
+                CampaignClose {
+                    side: pos_side,
+                    exit_time: exit_time_ms,
+                    last_entry_price: entry_price,
+                    last_exit_price: exit_price,
+                    last_quantity: quantity,
+                    funding_paid: funding,
+                    exit_reason: reason,
+                    excursion,
+                },
+            )
+            .clone();
+
+        vec![
+            SessionEvent::Exit(cleanup),
+            SessionEvent::PositionClosed(Box::new(trade)),
+        ]
+    }
+
+    async fn close_target_position<V: ExecutionVenue>(
+        &mut self,
+        venue: &V,
+        side: Side,
+        entry_price: Decimal,
+        quantity: Decimal,
+        exit_price: Decimal,
+        exit_time_ms: i64,
+    ) -> Vec<SessionEvent> {
+        let cleanup = self.exits.on_position_closed_by_exchange(venue).await;
+        let mut campaign = self
+            .campaign
+            .take()
+            .unwrap_or_else(|| Campaign::starting(exit_time_ms));
+
+        let gross = match side {
+            Side::Buy => (exit_price - entry_price) * quantity,
+            Side::Sell => (entry_price - exit_price) * quantity,
+        };
+        let fees = self.fees.take().unwrap_or(
+            (entry_price * quantity + exit_price * quantity) * self.config.fallback_fee_pct,
+        );
+        let funding = std::mem::take(&mut self.funding);
+        let reason = self.exit_hint.take().unwrap_or("StopLoss");
+        let slippage = Decimal::ZERO;
+
+        campaign.add_reduction(exit_price, quantity, gross, fees, slippage);
+
+        let pos_side = match side {
+            Side::Buy => PositionSide::Long,
+            Side::Sell => PositionSide::Short,
+        };
+        self.rearm_blocked = Some(pos_side);
+
+        let entry_equity = self.excursion.entry_equity().unwrap_or(self.wallet);
+        let net = campaign.net_pnl(funding);
+        let exit_equity = entry_equity + net;
+        let excursion = self
+            .excursion
+            .close(exit_time_ms, exit_equity)
+            .unwrap_or_else(|| TradeExcursion::start(exit_time_ms, exit_equity));
+
+        let trade = self
+            .ledger
+            .close_campaign(
+                campaign,
+                CampaignClose {
+                    side: pos_side,
+                    exit_time: exit_time_ms,
+                    last_entry_price: entry_price,
+                    last_exit_price: exit_price,
+                    last_quantity: quantity,
+                    funding_paid: funding,
+                    exit_reason: reason,
+                    excursion,
+                },
+            )
+            .clone();
+
         vec![
             SessionEvent::Exit(cleanup),
             SessionEvent::PositionClosed(Box::new(trade)),
@@ -844,7 +1390,7 @@ fn trigger_slippage(
 mod tests {
     use super::*;
     use domain::{DollarBar, OrderIntent, Side};
-    use ports::{EntryAck, ExecutionReport, ExecutionVenue, ExitGateway};
+    use ports::{EntryAck, ExecutionReport, ExecutionVenue, ExitGateway, OrderRequest};
     use rust_decimal_macros::dec;
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -877,8 +1423,9 @@ mod tests {
             _: &str,
             side: Side,
             stop_loss: Decimal,
-            take_profit: Decimal,
+            take_profit: Option<Decimal>,
         ) -> Result<(), String> {
+            let take_profit = take_profit.map_or_else(|| "none".to_string(), |tp| tp.to_string());
             self.calls
                 .borrow_mut()
                 .push(format!("place {side:?} {stop_loss} {take_profit}"));
@@ -915,6 +1462,20 @@ mod tests {
                 order_id: "entry-1".to_string(),
                 status: "NEW".to_string(),
                 quantity: dec!(1),
+                price: dec!(100),
+                sent_at_ms: 0,
+            })
+        }
+
+        async fn submit_order(&self, _: &str, request: &OrderRequest) -> Result<EntryAck, String> {
+            self.calls.borrow_mut().push(format!(
+                "order {:?} {} {}",
+                request.side, request.quantity, request.reduce_only
+            ));
+            Ok(EntryAck {
+                order_id: "order-1".to_string(),
+                status: "NEW".to_string(),
+                quantity: request.quantity,
                 price: dec!(100),
                 sent_at_ms: 0,
             })
@@ -980,6 +1541,7 @@ mod tests {
                 max_monthly_drawdown_pct: dec!(0.15),
                 halt_retry_ms: 5_000,
                 entry_timeout_ms: 30_000,
+                risk_policy: None,
             },
             Scripted::with(intents),
         )
@@ -1037,7 +1599,7 @@ mod tests {
             .any(|e| matches!(e, SessionEvent::PositionOpened { .. })));
     }
 
-    /// Asks for a long target on every bar; sessions cannot execute targets yet.
+    /// Asks for a long target on every bar; used to test target execution in sessions.
     struct TargetOnly;
 
     impl Strategy for TargetOnly {
@@ -1059,7 +1621,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_target_decision_never_reaches_the_venue() {
+    async fn a_target_decision_never_reaches_the_venue_without_risk_policy() {
         let venue = FakeVenue::default();
         let mut session = TradingSession::new(
             SessionConfig {
@@ -1069,6 +1631,7 @@ mod tests {
                 max_monthly_drawdown_pct: dec!(0.15),
                 halt_retry_ms: 5_000,
                 entry_timeout_ms: 30_000,
+                risk_policy: None,
             },
             TargetOnly,
         );
@@ -1078,6 +1641,31 @@ mod tests {
         assert!(events.is_empty());
         assert!(venue.entries.borrow().is_empty());
         assert!(venue.calls.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_target_decision_with_risk_policy_submits_an_order() {
+        let venue = FakeVenue::default();
+        let policy = domain::RiskPolicy::new(dec!(100_000), dec!(50_000), dec!(0.05)).unwrap();
+        let mut session = TradingSession::new(
+            SessionConfig {
+                symbol: "BTCUSDT".to_string(),
+                initial_equity: dec!(1000),
+                fallback_fee_pct: dec!(0.0005),
+                max_monthly_drawdown_pct: dec!(0.15),
+                halt_retry_ms: 5_000,
+                entry_timeout_ms: 30_000,
+                risk_policy: Some(policy),
+            },
+            TargetOnly,
+        );
+
+        let events = session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+
+        assert_eq!(events.len(), 1); // EntrySubmitted
+        assert!(matches!(events[0], SessionEvent::EntrySubmitted(_)));
+        let calls = venue.calls.borrow().clone();
+        assert_eq!(calls, vec!["order Buy 2.000 false".to_string()]); // 1000 * 0.01 / 5 = 2 BTC
     }
 
     #[tokio::test]
