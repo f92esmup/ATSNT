@@ -108,6 +108,10 @@ through one domain planner:
 - **Target(t)**: quantity from `size_target`. Sign from `t.level`. Exits are
   `{fill ∓ t.stop_distance, None, None}`.
 
+The two kinds are not mixed in one position. A `Target` that arrives while a triple-barrier
+`Entry` position is open or pending is ignored and counted `UnsupportedDecision`; an `Entry` that
+arrives while a target is open or pending is ignored, as any entry is when not flat (Section 11.2).
+
 `size_order` and `size_target` share one private quantity core. That core keeps the operation
 order of today's `size_order` (`risk.rs:254-259`):
 
@@ -779,6 +783,9 @@ A decision is **scheduled**, never filled on the event that produced it:
 - A newer `Target` replaces a pending `Target`.
 - An `Entry` is still ignored unless the strategy is flat with nothing pending (today's rule at
   `engine.rs:302-306`).
+- A `Target` that arrives while a triple-barrier `Entry` position is open or pending is ignored
+  and counted `UnsupportedDecision` in `rejected_orders`: mixing decision kinds in one position is
+  not supported.
 
 ### 11.3 Sizing at decision time
 
@@ -801,6 +808,12 @@ what `submit_entry` uses at `engine.rs:516`. For a `Target`:
   the engine's (`open + open·pct` on a buy, `ref - ref·pct` on a sell), so the shared code gives
   identical numbers on entries.
 - Fee: `(fill_px · |q|) · taker_fee_pct`.
+- Reported slippage (`slippage_paid`, informative only: the fill price already includes it, so
+  cash and PnL never deduct it again) uses the entry convention. An increasing fill reports
+  `open · slippage_pct` plus the adverse part of the gap from the decision price (the deciding
+  event's close the target was sized at), per unit; a gap in favour does not cancel the slippage.
+  A reducing fill, the close of a flip, and a flat target are market exits and report
+  `open · slippage_pct` per unit, as an entry's market exit does.
 - **Dust**: if `|Δ| < min_order_quantity` or `|Δ| · price < min_order_notional`, no order is sent
   and the decision is counted in `rejected_orders` under the existing `RiskError` kinds. A target of
   0 always closes the whole position, whatever its size.
@@ -835,8 +848,11 @@ function with optional take profit and time limit:
 - Liquidation comes first. It is evaluated with the existing rule (`liquidate_if_due`,
   `engine.rs:396-437`), whose stop-before-liquidation check now reads `exits.stop` instead of
   `intent.stop_loss`. The value is the same for entries.
-- After a target fill, if the liquidation price lies between the entry and the stop, the target is
-  reduced until it does not, and a `stop_beyond_liquidation` clip is counted.
+- If an increasing target fill would leave the liquidation price between the entry and the stop,
+  the order is reduced, in whole lot steps, to the largest quantity whose stop trades first, and a
+  `stop_beyond_liquidation` clip is counted. The clip is applied **before** the fill: the reduced
+  order is the one that fills, so no oversized position ever exists. A clip to less than one lot
+  places nothing.
 - Exit reason strings reuse the existing ones: `StopLoss`, `Liquidation`, `MonthlyCircuitBreaker`,
   `EndOfSimulation`. Two strings are added (Section 11.9).
 
@@ -869,8 +885,10 @@ The metrics pipeline (Sortino, profit factor, DSR, minimum trades per fold) work
 - `pnl_gross`: the sum of realised PnL. Fees, slippage, and funding: the campaign sums.
 - `return_pct`, holding time, and equity fields: today's formulas.
 - New `exit_reason` strings:
-  - `TargetExit`: the target reached 0;
-  - `TargetFlip`: the campaign ended in a flip.
+  - `TargetExit`: the position returned to 0. This includes a target whose level sizes to a
+    quantity of 0 (it closes the position), and a flip whose opening leg is not placed (dust,
+    `OrderSizeExceeded`, unmarginable, or clipped to nothing): the position ended flat;
+  - `TargetFlip`: the campaign ended in a flip whose opening leg filled on the same event.
   Both are additive to the BI string domain and are documented in
   `docs/architecture/13-bi-data-contract.md`.
 - A level change inside a campaign is **not** a trade. Counting each one would multiply the trade

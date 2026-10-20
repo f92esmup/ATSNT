@@ -200,6 +200,15 @@ Risk: item 3 and item 1-adjacent (the accounting every runner reports). An indep
     - a 3-fill campaign is 1 `ClosedTrade` with VWAP entry and exit, peak quantity, and summed costs;
     - cash reconciles to the cent on a hand-computed scenario.
 
+- [x] T5.4 S10, S6: Phase 5 hardening from the independent verifier's advisories. Route: delegated writer (context backstop). Done (+579/-203):
+  - A1: one `ClosedTrade` builder for entries and targets (an entry is a campaign with one increasing and one reducing fill); one fee helper, one margin helper, one liquidation-price function, one adverse-gap helper.
+  - 4b: target increases report slippage like entries (adverse gap from the decision price plus model slippage).
+  - A2: a flip whose opening leg does not fill closes as `TargetExit`.
+  - A3: margin and liquidation after scale-in/out, target latency, and re-arm after liquidation or kill switch are now pinned.
+  - RED: 3 tests (4b, A2×2); 5 behaviour guards passed at once.
+  - One existing expectation changed: the multi-fill campaign `slippage_paid` went from 10.271192 to 60.233192 (the 2-point adverse gap).
+  - Goldens byte-identical; workspace 672 passed.
+
 ### Phase 6: The swarm strategy (S1–S5)
 
 New module `crates/strategies/src/swarm_consensus/` with `mod.rs`, `genome.rs`, `agent.rs`, `rules.rs`, `ensemble.rs`, `audit.rs`, and `policy.rs`. Route: inline. It is one coherent unit, with no parallel reason.
@@ -429,4 +438,9 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
   - (b) Reported slippage on target fills is `open × slippage_pct`. Entries also add the adverse gap from the signal price.
   - (c) The liquidation clip is applied before the fill, with the same result.
   - Parent spot check: fmt clean, clippy clean, `cargo test --workspace` 664 passed, 0 failed.
-- Next: independent verifier for Phase 5 (Verification trigger: high-risk item 3).
+- Phase 5 independent verifier: no blockers.
+  - Item results: byte identity PASS (goldens unchanged, plus a baseline-vs-HEAD probe over 3 non-default configs, IDENTICAL); no-duplication PASS with advisory A1; spec §11 conformance PASS with advisories; workspace 664 passed.
+  - Advisories fixed in T5.4: A1, 4b, A2, A3.
+  - Accepted and written into the spec: 4a (a Target during an Entry position is `UnsupportedDecision`), 4c (the liquidation clip before the fill), A6 (a level that sizes to 0 is `TargetExit`, documented).
+  - Left: A4 (a flip's closed trade misses its post-exit drawdown sample) and A5 (the reduction leverage fallback); both minor.
+- Next: Phase 6 (the swarm strategy: genome, detectors, rules, ensemble, policy, registration).
