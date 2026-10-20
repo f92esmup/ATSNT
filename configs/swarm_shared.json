@@ -1,0 +1,25 @@
+{
+  "genome_seed": 123456,
+  "agents_per_feed": 6,
+  "history_size": 50,
+  "tick_thresholds": [
+    4809,
+    57701,
+    230801,
+    1384802
+  ],
+  "volume_thresholds": [
+    "506.814",
+    "6081.762",
+    "24327.048",
+    "145962.290"
+  ],
+  "range_thresholds": [
+    "0.001734",
+    "0.006968",
+    "0.012217",
+    "0.028086"
+  ],
+  "calibration_end_ms": 1777593599783,
+  "allow_short": true
+}

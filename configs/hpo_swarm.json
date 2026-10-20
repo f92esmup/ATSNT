@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0",
+  "strategy_id": "swarm_consensus",
+  "symbol": "BTCUSDT",
+  "market_type": "usd_m_perpetual",
+  "sampling": {
+    "type": "trades",
+    "price_bucket_ms": 1000
+  },
+  "strategy_config": {
+    "threshold_base": "0.25",
+    "threshold_step": "0.15",
+    "hysteresis": "0.15",
+    "base_risk": "0.010",
+    "risk_increment": "0.015",
+    "stop_atr_multiplier": "3.0"
+  },
+  "execution_context": {
+    "initial_capital": "10000",
+    "maker_fee_pct": "0.0002",
+    "taker_fee_pct": "0.0005",
+    "slippage_pct": "0.0005",
+    "risk_per_trade_pct": "0.01",
+    "max_daily_drawdown_pct": "0.05",
+    "max_monthly_drawdown_pct": "0.15",
+    "max_leverage": "20",
+    "min_order_quantity": "0.001",
+    "quantity_step_size": "0.001",
+    "min_order_notional": "5",
+    "funding_rate_pct": "0.0001",
+    "maintenance_margin_rate": "0.004"
+  },
+  "hpo_scorecard": {
+    "mean_is_sortino": "-0.067885889575437310889403117",
+    "mean_oos_sortino": "-0.5472414506860878788647416766",
+    "mean_oos_profit_factor": "0.2213036471334682554910696213",
+    "oos_sharpe": "-0.480974",
+    "total_oos_trades": 112,
+    "min_fold_trades": 54,
+    "stability_score": "0",
+    "fitness": "0",
+    "dsr_p_value": "1.0000",
+    "is_statistically_significant": false,
+    "trials_evaluated": 10
+  },
+  "shared_config": {
+    "agents_per_feed": 6,
+    "allow_short": true,
+    "calibration_end_ms": 1777593599783,
+    "genome_seed": 123456,
+    "history_size": 50,
+    "range_thresholds": [
+      "0.001734",
+      "0.006968",
+      "0.012217",
+      "0.028086"
+    ],
+    "tick_thresholds": [
+      4809,
+      57701,
+      230801,
+      1384802
+    ],
+    "volume_thresholds": [
+      "506.814",
+      "6081.762",
+      "24327.048",
+      "145962.290"
+    ]
+  }
+}
