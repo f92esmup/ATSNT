@@ -16,6 +16,14 @@ use crate::run::RunSpec;
 pub enum SamplingConfig {
     /// Information-driven volume in quote currency (USDT) to form a Dollar Bar.
     DollarBar { threshold: Decimal },
+    /// Raw trades, the input of a trade-consuming strategy (strategy spec §11.1): grouped into
+    /// `price_bucket_ms` price events (HPO), or one price event per trade when it is `None`
+    /// (the bar-fill backtest at trade resolution).
+    Trades {
+        /// Width of the price buckets in milliseconds; `None` at trade resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        price_bucket_ms: Option<i64>,
+    },
 }
 
 impl SamplingConfig {
@@ -23,6 +31,7 @@ impl SamplingConfig {
     pub fn dollar_bar_threshold(&self) -> Option<Decimal> {
         match self {
             Self::DollarBar { threshold } => Some(*threshold),
+            Self::Trades { .. } => None,
         }
     }
 }
@@ -116,6 +125,34 @@ impl<C> StrategyDeploymentArtifact<C> {
     pub fn dollar_bar_threshold(&self) -> Option<Decimal> {
         self.spec.sampling.dollar_bar_threshold()
     }
+}
+
+/// The deployment artifact `run_hpo` writes: a [`StrategyDeploymentArtifact`] plus the shared
+/// configuration the whole run was frozen with (strategy spec §15.1).
+///
+/// `shared_config` is omitted when the strategy has none (its shared configuration is `()`), so
+/// such artifacts are byte-identical to a plain [`StrategyDeploymentArtifact`], and artifacts
+/// written before the field existed load with `None`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HpoDeploymentArtifact<C> {
+    /// The artifact, serialized flat.
+    #[serde(flatten)]
+    pub artifact: StrategyDeploymentArtifact<C>,
+    /// The frozen shared configuration of the run, as JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_config: Option<serde_json::Value>,
+}
+
+/// The `shared_config` an artifact file stores, or `None` when it stores none (or `null`).
+pub fn load_artifact_shared_config(path: &Path) -> Result<Option<serde_json::Value>> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read configuration file: {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse configuration file: {}", path.display()))?;
+    Ok(value
+        .get("shared_config")
+        .filter(|shared| !shared.is_null())
+        .cloned())
 }
 
 /// Result of loading a strategy configuration file, supporting both the
@@ -363,6 +400,106 @@ mod tests {
         assert_eq!(parsed.dollar_bar_threshold(), Some(dec!(10_000_000)));
         assert_eq!(parsed.spec.strategy_config, config);
         assert_eq!(parsed.spec.market_type, MarketType::UsdMPerpetual);
+    }
+
+    fn cusum_artifact() -> StrategyDeploymentArtifact<DollarBarsCusumConfig> {
+        StrategyDeploymentArtifact {
+            schema_version: "1.0".to_string(),
+            spec: RunSpec {
+                strategy_id: "dollar_bars_cusum".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                market_type: MarketType::UsdMPerpetual,
+                sampling: SamplingConfig::DollarBar {
+                    threshold: dec!(1_000_000),
+                },
+                strategy_config: DollarBarsCusumConfig::default(),
+                execution_context: BacktestConfig::default(),
+            },
+            hpo_scorecard: Some(scorecard()),
+        }
+    }
+
+    #[test]
+    fn trade_sampling_round_trips_and_declares_no_dollar_bar() {
+        let sampling = SamplingConfig::Trades {
+            price_bucket_ms: Some(1_000),
+        };
+        let json = serde_json::to_value(sampling).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "trades", "price_bucket_ms": 1000})
+        );
+        assert_eq!(
+            serde_json::from_value::<SamplingConfig>(json).unwrap(),
+            sampling
+        );
+        assert_eq!(sampling.dollar_bar_threshold(), None);
+
+        // Trade resolution (one price event per trade) has no bucket.
+        let per_trade = SamplingConfig::Trades {
+            price_bucket_ms: None,
+        };
+        let json = serde_json::to_value(per_trade).unwrap();
+        assert_eq!(json, serde_json::json!({"type": "trades"}));
+        assert_eq!(
+            serde_json::from_value::<SamplingConfig>(json).unwrap(),
+            per_trade
+        );
+    }
+
+    #[test]
+    fn an_hpo_artifact_without_a_shared_config_is_byte_identical_to_the_plain_artifact() {
+        let plain = cusum_artifact();
+        let hpo = HpoDeploymentArtifact {
+            artifact: plain.clone(),
+            shared_config: None,
+        };
+
+        assert_eq!(
+            serde_json::to_string_pretty(&hpo).unwrap(),
+            serde_json::to_string_pretty(&plain).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_hpo_artifact_stores_its_shared_config_and_round_trips() {
+        let shared = serde_json::json!({"genome_seed": 123456, "calibration_end_ms": 42});
+        let hpo = HpoDeploymentArtifact {
+            artifact: cusum_artifact(),
+            shared_config: Some(shared.clone()),
+        };
+        let json = serde_json::to_string_pretty(&hpo).unwrap();
+
+        let parsed: HpoDeploymentArtifact<DollarBarsCusumConfig> =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, hpo);
+        // The plain artifact type still reads it, ignoring the new key.
+        let plain: StrategyDeploymentArtifact<DollarBarsCusumConfig> =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(plain, cusum_artifact());
+
+        let path =
+            std::env::temp_dir().join(format!("atsnt-{}-shared-artifact.json", std::process::id()));
+        fs::write(&path, &json).unwrap();
+        assert_eq!(load_artifact_shared_config(&path).unwrap(), Some(shared));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_old_artifact_without_the_new_fields_still_loads() {
+        let old = serde_json::to_string(&cusum_artifact()).unwrap();
+        assert!(!old.contains("shared_config"));
+
+        let parsed: HpoDeploymentArtifact<DollarBarsCusumConfig> =
+            serde_json::from_str(&old).unwrap();
+        assert_eq!(parsed.shared_config, None);
+        assert_eq!(parsed.artifact, cusum_artifact());
+
+        let path =
+            std::env::temp_dir().join(format!("atsnt-{}-old-artifact.json", std::process::id()));
+        fs::write(&path, &old).unwrap();
+        assert_eq!(load_artifact_shared_config(&path).unwrap(), None);
+        let _ = fs::remove_file(path);
     }
 
     #[test]

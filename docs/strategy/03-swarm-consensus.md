@@ -1016,8 +1016,11 @@ ensemble per candidate would repeat the same work 1,680 times.
 
 ### 15.2 Data window, warm-up, and folds
 
-- **Data window.** The data must start at least 70 days before the first evaluated timestamp,
-  which is the first feature the extractor emits (the swarm is ready there).
+- **Data window.** Evaluation starts at the later of (first trade + 70 days) and the first feature
+  the extractor emits. The 1d feeds need 64 closed bars, so the first feature arrives around day 64.
+  The extractor runs over the whole data. Features and price events before the evaluation start are
+  dropped, so the swarm never trades half warm. The run fails with "the data window gives the swarm
+  less than 70 days of warm-up ..." when nothing is left to evaluate.
 - **Calibration check.** `calibration_end_ms` must be earlier than the first trade of the data.
   The run fails otherwise.
 - **Folds.** They stay index-based over the price events, with today's splitter code. For

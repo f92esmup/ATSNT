@@ -8,16 +8,23 @@ use adapters::{
 };
 use anyhow::{Context, Result};
 use backtest::{
-    artifact_object_name, artifact_run_suffix, now_unix_ms, record_hpo, BacktestConfig, DataWindow,
-    HpoScorecard, RunContext, RunSpec, RunType, SamplingConfig, SinkFailures,
-    StrategyDeploymentArtifact, WalkForwardConfig, WalkForwardOptimizer, WalkForwardSplitter,
+    artifact_object_name, artifact_run_suffix, bar_tape, calibration_end_ms, check_calibration,
+    embargo_buckets, now_unix_ms, record_hpo, trade_tape, BacktestConfig, DataWindow, FeaturesOf,
+    HpoDeploymentArtifact, HpoScorecard, RunContext, RunSpec, RunType, SamplingConfig,
+    SinkFailures, StrategyDeploymentArtifact, Tape, WalkForwardConfig, WalkForwardOptimizer,
+    WalkForwardSplitter, TRADES_WARM_UP_MS,
 };
 use chrono::Utc;
 use clap::Parser;
 use domain::DollarBarAggregator;
 use rust_decimal::Decimal;
 use serde_json::json;
-use strategies::OptimizableStrategy;
+use strategies::{InputKind, OptimizableStrategy};
+
+/// Price bucket width of a trade-consuming strategy when `--price-bucket-ms` is not given.
+const DEFAULT_PRICE_BUCKET_MS: i64 = 1_000;
+/// Embargo of a trade-consuming strategy when `--embargo-ms` is not given: one day.
+const DEFAULT_EMBARGO_MS: i64 = 86_400_000;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -37,7 +44,8 @@ struct Args {
     )]
     data: PathBuf,
 
-    /// Dollar bar threshold (e.g. 1000000 for $1M per bar)
+    /// Dollar bar threshold (e.g. 1000000 for $1M per bar); strategies that consume dollar
+    /// bars only
     #[arg(long, default_value = "1000000")]
     dollar_bar: Decimal,
 
@@ -49,9 +57,26 @@ struct Args {
     #[arg(long, default_value_t = 0.70)]
     train_ratio: f64,
 
-    /// Number of embargo bars quarantined between train and test
+    /// Number of embargo bars quarantined between train and test; strategies that consume
+    /// dollar bars only (see --embargo-ms)
     #[arg(long, default_value_t = 20)]
     embargo_bars: usize,
+
+    /// Path to the JSON shared configuration (structural, frozen for the whole run) of the
+    /// strategy, e.g. the swarm's calibrated feeds written by calibrate_feeds. Required for
+    /// strategies that consume trades; stored in the winning artifact
+    #[arg(long)]
+    shared_config: Option<PathBuf>,
+
+    /// Width in milliseconds of the price buckets the trades are grouped into; strategies that
+    /// consume trades only [default: 1000]
+    #[arg(long)]
+    price_bucket_ms: Option<i64>,
+
+    /// Embargo in milliseconds quarantined between train and test, converted to price buckets
+    /// (embargo / bucket); strategies that consume trades only [default: 86400000, one day]
+    #[arg(long)]
+    embargo_ms: Option<i64>,
 
     /// Maximum parameter combinations to evaluate
     #[arg(short, long, default_value_t = 60)]
@@ -120,6 +145,84 @@ async fn main() -> Result<()> {
     let symbol_upper = args.symbol.to_ascii_uppercase();
     println!("Symbol:      {}", symbol_upper);
     println!("Data:        {}", args.data.display());
+
+    let start_total = Instant::now();
+    let run = HpoRun {
+        args: &args,
+        started_at_ms,
+        start_total,
+        symbol_upper: &symbol_upper,
+    };
+    match strategies::dispatch(&args.strategy, run) {
+        Some(report) => report.await?,
+        None => anyhow::bail!(strategies::unknown_strategy_message(&args.strategy)),
+    }
+
+    print_phase_timing("total", start_total);
+    Ok(())
+}
+
+/// Prints a machine-greppable elapsed-time line for one pipeline phase.
+fn print_phase_timing(phase: &str, since: Instant) {
+    println!(
+        "[TIMING] phase={phase} seconds={:.2}",
+        since.elapsed().as_secs_f64()
+    );
+}
+
+/// One HPO run waiting for the registry to say which strategy it optimizes.
+struct HpoRun<'a> {
+    args: &'a Args,
+    started_at_ms: i64,
+    start_total: Instant,
+    symbol_upper: &'a str,
+}
+
+impl<'a> strategies::StrategyVisitor for HpoRun<'a> {
+    type Output = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>;
+
+    fn visit<S>(self) -> Self::Output
+    where
+        S: OptimizableStrategy + 'static,
+        S::Config: Default,
+        S::Space: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        Box::pin(run_and_report_hpo::<S>(self))
+    }
+}
+
+/// Opens the market data file as a trade stream (Parquet file or directory, else CSV).
+fn open_stream(
+    data: &std::path::Path,
+) -> Result<Box<dyn MarketDataStream<Error = adapters::AdapterError>>> {
+    if data.is_dir() || data.extension().and_then(|s| s.to_str()) == Some("parquet") {
+        Ok(Box::new(BinanceParquetReader::open(data)?))
+    } else {
+        let file =
+            File::open(data).with_context(|| format!("Failed to open {}", data.display()))?;
+        Ok(Box::new(BinanceCsvReader::new(BufReader::new(file))))
+    }
+}
+
+/// The run's input once prepared for the strategy's input kind (strategy spec §15.1).
+struct PreparedInput<F> {
+    tape: Tape<F>,
+    raw_trades: usize,
+    embargo: usize,
+    sampling: SamplingConfig,
+    data_window: DataWindow,
+    /// Fold unit in the console output.
+    unit: &'static str,
+    /// Settings recorded only for strategies that consume trades.
+    extra_settings: Option<serde_json::Value>,
+}
+
+/// Dollar-bar input: today's path. The bars are the tape, and `--embargo-bars` counts bars.
+fn prepare_dollar_bars<S: OptimizableStrategy>(
+    args: &Args,
+    shared: &S::SharedConfig,
+    start_total: Instant,
+) -> Result<PreparedInput<FeaturesOf<S>>> {
     println!("Dollar Bar:  ${}", args.dollar_bar);
     println!(
         "Folds:       {} (Train Ratio: {:.0}%, Embargo: {} bars)",
@@ -130,21 +233,9 @@ async fn main() -> Result<()> {
     println!("Candidates:  Up to {}", args.candidates);
     println!("------------------------------------------------------------");
 
-    let start_total = Instant::now();
-
     // 1. Ingest Market Data into In-Memory Dollar Bars
     println!("[1/4] Aggregating market trade stream into Dollar Bars...");
-    let mut stream: Box<dyn MarketDataStream<Error = adapters::AdapterError>> = if args
-        .data
-        .is_dir()
-        || args.data.extension().and_then(|s| s.to_str()) == Some("parquet")
-    {
-        Box::new(BinanceParquetReader::open(&args.data)?)
-    } else {
-        let file = File::open(&args.data)
-            .with_context(|| format!("Failed to open {}", args.data.display()))?;
-        Box::new(BinanceCsvReader::new(BufReader::new(file)))
-    };
+    let mut stream = open_stream(&args.data)?;
 
     let mut aggregator = DollarBarAggregator::new(args.dollar_bar)
         .map_err(|e| anyhow::anyhow!("Failed to initialize aggregator: {e}"))?;
@@ -171,18 +262,185 @@ async fn main() -> Result<()> {
         anyhow::bail!("No Dollar Bars were emitted; reduce --dollar-bar threshold.");
     }
 
+    let data_window = DataWindow {
+        source: Some(args.data.display().to_string()),
+        start_ms: bars.first().map(|b| b.start_time),
+        end_ms: bars.last().map(|b| b.end_time),
+    };
+    Ok(PreparedInput {
+        tape: bar_tape::<S>(shared, &bars)?,
+        raw_trades,
+        embargo: args.embargo_bars,
+        sampling: SamplingConfig::DollarBar {
+            threshold: args.dollar_bar,
+        },
+        data_window,
+        unit: "bars",
+        extra_settings: None,
+    })
+}
+
+/// Trade input (strategy spec §15.1–15.2): the trades stream once through the extractor and
+/// into price buckets; the calibration check and the warm-up cut apply, and `--embargo-ms` is
+/// converted to buckets.
+fn prepare_trades<S: OptimizableStrategy>(
+    args: &Args,
+    shared: &S::SharedConfig,
+    start_total: Instant,
+) -> Result<PreparedInput<FeaturesOf<S>>> {
+    let bucket_ms = args.price_bucket_ms.unwrap_or(DEFAULT_PRICE_BUCKET_MS);
+    let embargo_ms = args.embargo_ms.unwrap_or(DEFAULT_EMBARGO_MS);
+    let embargo = embargo_buckets(embargo_ms, bucket_ms)?;
+    println!("Price Bucket: {} ms", bucket_ms);
+    println!(
+        "Folds:       {} (Train Ratio: {:.0}%, Embargo: {} ms = {} buckets)",
+        args.folds,
+        args.train_ratio * 100.0,
+        embargo_ms,
+        embargo
+    );
+    println!("Candidates:  Up to {}", args.candidates);
+    println!("------------------------------------------------------------");
+
+    println!(
+        "[1/4] Streaming trades through the {} extractor into {} ms price buckets...",
+        S::id(),
+        bucket_ms
+    );
+    let mut stream = open_stream(&args.data)?;
+    let mut read_error = None;
+    let mut raw_trades = 0usize;
+    let trades = std::iter::from_fn(|| match stream.next_trade() {
+        Ok(trade) => trade,
+        Err(error) => {
+            read_error = Some(error);
+            None
+        }
+    })
+    .inspect(|_| raw_trades += 1);
+    let tape = trade_tape::<S>(shared, trades, bucket_ms)?;
+    if let Some(error) = read_error {
+        return Err(error.into());
+    }
+    let (Some(first), Some(last)) = (tape.prices().first(), tape.prices().last()) else {
+        anyhow::bail!("No trades were read from {}", args.data.display());
+    };
+    let data_window = DataWindow {
+        source: Some(args.data.display().to_string()),
+        start_ms: Some(first.start_ms),
+        end_ms: Some(last.end_ms),
+    };
+    check_calibration(calibration_end_ms(shared), first.start_ms)?;
+    let built = tape.len();
+    let tape = tape.after_warm_up(TRADES_WARM_UP_MS)?;
+    println!(
+        "      Ingested {} ticks -> {} price buckets, {} evaluated after the {}-day warm-up, \
+         {} features, in {:.2}s",
+        raw_trades,
+        built,
+        tape.len(),
+        TRADES_WARM_UP_MS / 86_400_000,
+        tape.features().len(),
+        start_total.elapsed().as_secs_f64()
+    );
+    print_phase_timing("ingest", start_total);
+
+    Ok(PreparedInput {
+        tape,
+        raw_trades,
+        embargo,
+        sampling: SamplingConfig::Trades {
+            price_bucket_ms: Some(bucket_ms),
+        },
+        data_window,
+        unit: "buckets",
+        extra_settings: Some(json!({
+            "price_bucket_ms": bucket_ms,
+            "embargo_ms": embargo_ms,
+        })),
+    })
+}
+
+/// The shared configuration of the run: `--shared-config`, else the strategy's default. A
+/// strategy that consumes trades must be given one (its thresholds are calibrated); the trade
+/// flags are refused for a strategy that consumes dollar bars.
+fn shared_config<S>(args: &Args) -> Result<(S::SharedConfig, InputKind)>
+where
+    S: OptimizableStrategy,
+    S::Config: Default,
+{
+    let shared = match &args.shared_config {
+        Some(path) => {
+            let content = fs::read_to_string(path).with_context(|| {
+                format!(
+                    "Failed to read shared configuration file: {}",
+                    path.display()
+                )
+            })?;
+            serde_json::from_str::<S::SharedConfig>(&content)
+                .with_context(|| "Failed to parse shared configuration JSON")?
+        }
+        None => S::SharedConfig::default(),
+    };
+    let input_kind = S::from_config(&shared, S::Config::default())
+        .map_err(|error| anyhow::anyhow!("Failed to initialize strategy: {error}"))?
+        .input_kind();
+    match input_kind {
+        InputKind::Trades if args.shared_config.is_none() => anyhow::bail!(
+            "strategy '{}' consumes trades and needs the shared configuration its feeds were \
+             calibrated with: pass --shared-config <file> (e.g. the output of calibrate_feeds)",
+            S::id()
+        ),
+        InputKind::DollarBars if args.embargo_ms.is_some() || args.price_bucket_ms.is_some() => {
+            anyhow::bail!(
+                "--embargo-ms and --price-bucket-ms apply only to strategies that consume \
+                 trades; strategy '{}' consumes dollar bars: use --embargo-bars",
+                S::id()
+            )
+        }
+        _ => Ok((shared, input_kind)),
+    }
+}
+
+async fn run_and_report_hpo<S>(run: HpoRun<'_>) -> Result<()>
+where
+    S: OptimizableStrategy,
+    S::Config: Default,
+    S::Space: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let HpoRun {
+        args,
+        started_at_ms,
+        start_total,
+        symbol_upper,
+    } = run;
+    let (shared, input_kind) = shared_config::<S>(args)?;
+    let PreparedInput {
+        tape,
+        raw_trades,
+        embargo,
+        sampling,
+        data_window,
+        unit,
+        extra_settings,
+    } = match input_kind {
+        InputKind::DollarBars => prepare_dollar_bars::<S>(args, &shared, start_total)?,
+        InputKind::Trades => prepare_trades::<S>(args, &shared, start_total)?,
+    };
+
     // 2. Generate Walk-Forward Folds with Embargo
     println!("[2/4] Generating Purged & Embargoed temporal splits...");
     let wf_config = WalkForwardConfig {
         num_folds: args.folds,
         train_ratio: args.train_ratio,
-        embargo_bars: args.embargo_bars,
+        embargo_bars: embargo,
     };
-    let folds = WalkForwardSplitter::generate_rolling_folds(bars.len(), &wf_config)?;
+    let folds = WalkForwardSplitter::generate_rolling_folds(tape.len(), &wf_config)?;
+    let folds = folds.as_slice();
 
-    for fold in &folds {
+    for fold in folds {
         println!(
-            "      Fold #{}: Train [{}..{}] ({} bars) | Embargo [{}..{}] ({} bars) | Test [{}..{}] ({} bars)",
+            "      Fold #{}: Train [{}..{}] ({} {unit}) | Embargo [{}..{}] ({} {unit}) | Test [{}..{}] ({} {unit})",
             fold.fold_idx,
             fold.train_range.start,
             fold.train_range.end,
@@ -228,82 +486,6 @@ async fn main() -> Result<()> {
         engine_config.describe_notional_caps(engine_config.initial_capital)
     );
 
-    let run = HpoRun {
-        args: &args,
-        bars: &bars,
-        folds: &folds,
-        engine_config,
-        started_at_ms,
-        raw_trades,
-        opt_start,
-        symbol_upper: &symbol_upper,
-    };
-    match strategies::dispatch(&args.strategy, run) {
-        Some(report) => report.await?,
-        None => anyhow::bail!(strategies::unknown_strategy_message(&args.strategy)),
-    }
-
-    print_phase_timing("total", start_total);
-    Ok(())
-}
-
-/// Prints a machine-greppable elapsed-time line for one pipeline phase.
-fn print_phase_timing(phase: &str, since: Instant) {
-    println!(
-        "[TIMING] phase={phase} seconds={:.2}",
-        since.elapsed().as_secs_f64()
-    );
-}
-
-/// One HPO run waiting for the registry to say which strategy it optimizes.
-struct HpoRun<'a> {
-    args: &'a Args,
-    bars: &'a [domain::DollarBar],
-    folds: &'a [backtest::WalkForwardFold],
-    engine_config: BacktestConfig,
-    started_at_ms: i64,
-    raw_trades: usize,
-    opt_start: Instant,
-    symbol_upper: &'a str,
-}
-
-impl<'a> strategies::StrategyVisitor for HpoRun<'a> {
-    type Output = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>;
-
-    fn visit<S>(self) -> Self::Output
-    where
-        S: OptimizableStrategy + 'static,
-        S::Config: Default,
-        S::Space: serde::Serialize + serde::de::DeserializeOwned,
-    {
-        Box::pin(run_and_report_hpo::<S>(
-            self.args,
-            self.bars,
-            self.folds,
-            self.engine_config,
-            self.started_at_ms,
-            self.raw_trades,
-            self.opt_start,
-            self.symbol_upper,
-        ))
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_and_report_hpo<S>(
-    args: &Args,
-    bars: &[domain::DollarBar],
-    folds: &[backtest::WalkForwardFold],
-    engine_config: BacktestConfig,
-    started_at_ms: i64,
-    raw_trades: usize,
-    opt_start: Instant,
-    symbol_upper: &str,
-) -> Result<()>
-where
-    S: OptimizableStrategy,
-    S::Space: serde::Serialize + serde::de::DeserializeOwned,
-{
     let param_space = if let Some(path) = &args.param_space {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read parameter space file: {}", path.display()))?;
@@ -314,9 +496,12 @@ where
     };
 
     let space_json = serde_json::to_value(&param_space)?;
+    // `()` (a dollar-bar strategy) serializes to `null`: nothing to store.
+    let shared_json = Some(serde_json::to_value(&shared)?).filter(|value| !value.is_null());
     let optimizer = WalkForwardOptimizer::<S>::new(engine_config, param_space)
+        .with_shared_config(shared)
         .with_min_trades_per_fold(args.min_trades_per_fold);
-    let evaluations = optimizer.run_optimization(bars, folds, args.candidates)?;
+    let evaluations = optimizer.run_optimization_on_tape(&tape, folds, args.candidates)?;
     // Ranked eligible first: the first one is the winner only when it reached the minimum.
     let winner = evaluations.first().filter(|e| e.eligible).cloned();
     let eligible_count = evaluations.iter().filter(|e| e.eligible).count();
@@ -376,9 +561,7 @@ where
         strategy_id: S::id().to_string(),
         symbol: symbol_upper.to_string(),
         market_type: strategies::MarketType::UsdMPerpetual,
-        sampling: SamplingConfig::DollarBar {
-            threshold: args.dollar_bar,
-        },
+        sampling,
         strategy_config: space_json,
         execution_context: engine_config,
     };
@@ -388,20 +571,20 @@ where
     if args.gcp_bigquery && !evaluations.is_empty() {
         let bq = BigQuerySink::from_env().with_strict(args.strict_sinks);
         let sweep_ctx = RunContext::new(RunType::Hpo, &sweep_spec, started_at_ms);
-        let data_window = DataWindow {
-            source: Some(args.data.display().to_string()),
-            start_ms: bars.first().map(|b| b.start_time),
-            end_ms: bars.last().map(|b| b.end_time),
-        };
-        let settings = json!({
+        let mut settings = json!({
             "folds": folds.len(),
             "train_ratio": args.train_ratio,
-            "embargo_bars": args.embargo_bars,
+            "embargo_bars": embargo,
             "candidates_requested": args.candidates,
-            "total_bars": bars.len(),
+            "total_bars": tape.len(),
             "raw_trades": raw_trades,
             "optimization_seconds": opt_duration,
         });
+        if let (Some(settings), Some(serde_json::Value::Object(extra))) =
+            (settings.as_object_mut(), extra_settings)
+        {
+            settings.extend(extra);
+        }
         let record_start = Instant::now();
         println!(
             "[*] Recording HPO run {} with {} trial runs to BigQuery...",
@@ -482,10 +665,13 @@ where
         trials_evaluated: evaluations.len(),
     };
 
-    let deployment_artifact = StrategyDeploymentArtifact {
-        schema_version: "1.0".to_string(),
-        spec: sweep_spec.with_config(winner.config.clone()),
-        hpo_scorecard: Some(scorecard),
+    let deployment_artifact = HpoDeploymentArtifact {
+        artifact: StrategyDeploymentArtifact {
+            schema_version: "1.0".to_string(),
+            spec: sweep_spec.with_config(winner.config.clone()),
+            hpo_scorecard: Some(scorecard),
+        },
+        shared_config: shared_json,
     };
 
     if let Some(parent) = args.output_config.parent() {
@@ -499,13 +685,21 @@ where
     );
     println!(
         "        • Strategy:     {}",
-        deployment_artifact.spec.strategy_id
+        deployment_artifact.artifact.spec.strategy_id
     );
     println!(
         "        • Symbol:       {}",
-        deployment_artifact.spec.symbol
+        deployment_artifact.artifact.spec.symbol
     );
-    println!("        • Sampling:     DollarBar(${})", args.dollar_bar);
+    match sampling {
+        SamplingConfig::DollarBar { threshold } => {
+            println!("        • Sampling:     DollarBar(${})", threshold)
+        }
+        SamplingConfig::Trades { price_bucket_ms } => println!(
+            "        • Sampling:     Trades({} ms price buckets)",
+            price_bucket_ms.unwrap_or(DEFAULT_PRICE_BUCKET_MS)
+        ),
+    }
 
     if args.gcs_upload {
         let upload_start = Instant::now();

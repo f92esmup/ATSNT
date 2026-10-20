@@ -6,16 +6,17 @@ use std::time::Instant;
 use adapters::{BigQuerySink, BinanceCsvReader, BinanceParquetReader, MarketDataStream};
 use anyhow::{Context, Result};
 use backtest::{
-    now_unix_ms, record_backtest, record_monte_carlo, BacktestConfig, BacktestEngine, DataWindow,
-    MonteCarloConfig, MonteCarloSimulator, RunContext, RunSpec, RunType, SamplingConfig,
-    SinkFailures, TickSimulation, TickSimulationConfig,
+    calibration_end_ms, check_calibration, now_unix_ms, record_backtest_with_audit,
+    record_monte_carlo, BacktestConfig, BacktestEngine, DataWindow, MonteCarloConfig,
+    MonteCarloSimulator, PriceEvent, RunContext, RunSpec, RunType, SamplingConfig, SinkFailures,
+    TickSimulation, TickSimulationConfig,
 };
 use clap::Parser;
 use domain::futures::FundingSchedule;
 use domain::DollarBarAggregator;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use strategies::{MarketType, Strategy};
+use strategies::{InputKind, MarketEvent, MarketType, Strategy};
 
 /// How simulated orders are filled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -41,8 +42,14 @@ struct Args {
     dollar_bar: Option<Decimal>,
 
     /// Optional path to JSON strategy configuration (e.g. configs/hpo_results.json)
-    #[arg(short, long)]
+    #[arg(short, long, visible_alias = "strategy-config")]
     config: Option<PathBuf>,
+
+    /// Optional path to the JSON shared (structural) configuration of the strategy, e.g. the
+    /// swarm's calibrated feeds; a deployment artifact's stored one comes first, and without
+    /// either the strategy's default is used
+    #[arg(long)]
+    shared_config: Option<PathBuf>,
 
     /// Strategy to run: "dollar_bars_cusum" (or "cusum") vs "order_flow_imbalance" (or "ofi").
     /// Inferred automatically from --config artifact if omitted; one that contradicts the
@@ -62,9 +69,10 @@ struct Args {
     #[arg(long)]
     risk_per_trade: Option<Decimal>,
 
-    /// Fill model: "bar" fills at bar granularity (fast, used by the optimizer); "tick" replays
-    /// every trade through the live trading session on a simulated venue with order latency and
-    /// tape-walk market fills (slow, for validating finalists)
+    /// Fill model: "bar" fills at bar granularity (fast, used by the optimizer), or at trade
+    /// resolution for strategies that consume trades; "tick" replays every trade through the
+    /// live trading session on a simulated venue with order latency and tape-walk market fills
+    /// (slow, for validating finalists; not yet available for strategies that consume trades)
     #[arg(long, value_enum, default_value_t = FillModelArg::Bar)]
     fill_model: FillModelArg,
 
@@ -139,7 +147,11 @@ async fn main() -> Result<()> {
             config_path.display()
         );
     }
-    let loaded = backtest::load_strategy(&strategy_id, args.config.as_deref())?;
+    let loaded = backtest::load_strategy_with_shared(
+        &strategy_id,
+        args.config.as_deref(),
+        args.shared_config.as_deref(),
+    )?;
     for line in loaded.report_lines() {
         println!("{line}");
     }
@@ -148,6 +160,15 @@ async fn main() -> Result<()> {
     if let Some(reason) = loaded.deployment_blocker() {
         println!("[GATE] paper_trading and live_trading will refuse it: {reason}");
     }
+    let input_kind = loaded.strategy.input_kind();
+    if input_kind == InputKind::Trades && args.fill_model == FillModelArg::Tick {
+        anyhow::bail!(
+            "--fill-model tick does not support strategies that consume trades yet (strategy \
+             '{}'); use --fill-model bar",
+            loaded.strategy_id
+        );
+    }
+    let calibration_end = calibration_end_ms(&loaded.shared_config_json);
     let mut strategy = loaded.strategy;
     let strat_config_val = loaded.config_json;
     let strat_id = loaded.strategy_id;
@@ -182,10 +203,15 @@ async fn main() -> Result<()> {
     let mut aggregator = DollarBarAggregator::new(effective_dollar_bar)
         .map_err(|e| anyhow::anyhow!("Failed to initialize aggregator: {e}"))?;
 
-    println!(
-        "[*] Configured DollarBarAggregator with threshold: ${}",
-        effective_dollar_bar
-    );
+    match input_kind {
+        InputKind::DollarBars => println!(
+            "[*] Configured DollarBarAggregator with threshold: ${}",
+            effective_dollar_bar
+        ),
+        InputKind::Trades => {
+            println!("[*] Input: raw trades, one price event per trade (trade resolution)")
+        }
+    }
 
     println!("[*] Strategy loaded: {}", strategy.name());
 
@@ -263,7 +289,35 @@ async fn main() -> Result<()> {
     };
 
     let replay_start = Instant::now();
+    let mut strategy_audit = None;
     let (metrics, closed_trades) = match args.fill_model {
+        FillModelArg::Bar if input_kind == InputKind::Trades => {
+            let mut engine = BacktestEngine::new(engine_config);
+            let mut last_price = Decimal::ZERO;
+            while let Some(trade) = stream.next_trade()? {
+                total_trades_processed += 1;
+                if total_trades_processed == 1 {
+                    // Strategy spec §15.2: thresholds calibrated on these trades would leak them.
+                    check_calibration(calibration_end, trade.timestamp)?;
+                }
+                last_price = trade.price;
+                data_window.start_ms.get_or_insert(trade.timestamp);
+                data_window.end_ms = Some(trade.timestamp);
+
+                engine.process_event(&PriceEvent::from(&trade), &mut || {
+                    strategy.on_event(&MarketEvent::Trade(&trade))
+                });
+                if engine.is_halted() {
+                    println!(
+                        "\n[!] Monthly circuit breaker tripped: simulation halted early, remaining market data skipped."
+                    );
+                    break;
+                }
+            }
+            strategy_audit = strategy.audit();
+            let mark = (last_price > Decimal::ZERO).then_some(last_price);
+            engine.finish_with_trades(mark)
+        }
         FillModelArg::Bar => {
             let mut engine = BacktestEngine::new(engine_config);
             let mut last_price = Decimal::ZERO;
@@ -290,6 +344,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            strategy_audit = strategy.audit();
             let mark = (last_price > Decimal::ZERO).then_some(last_price);
             engine.finish_with_trades(mark)
         }
@@ -411,12 +466,25 @@ async fn main() -> Result<()> {
         println!("------------------------------------------------------------");
     }
 
+    if let Some(audit) = &strategy_audit {
+        println!("\n------------------------------------------------------------");
+        println!("                       STRATEGY AUDIT                       ");
+        println!("------------------------------------------------------------");
+        println!("{}", serde_json::to_string_pretty(audit)?);
+        println!("------------------------------------------------------------");
+    }
+
     let run_spec = RunSpec {
         strategy_id: strat_id,
         symbol,
         market_type: art_market.unwrap_or(MarketType::UsdMPerpetual),
-        sampling: SamplingConfig::DollarBar {
-            threshold: effective_dollar_bar,
+        sampling: match input_kind {
+            InputKind::DollarBars => SamplingConfig::DollarBar {
+                threshold: effective_dollar_bar,
+            },
+            InputKind::Trades => SamplingConfig::Trades {
+                price_bucket_ms: None,
+            },
         },
         strategy_config: strat_config_val,
         execution_context: engine_config,
@@ -439,13 +507,14 @@ async fn main() -> Result<()> {
             run_ctx.run_id,
             closed_trades.len()
         );
-        let recorded = record_backtest(
+        let recorded = record_backtest_with_audit(
             bq,
             &run_ctx,
             &run_spec,
             &data_window,
             &metrics,
             &closed_trades,
+            strategy_audit.as_ref(),
         )
         .await;
         sinks.record("record backtest run", recorded);

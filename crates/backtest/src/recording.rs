@@ -311,12 +311,28 @@ pub async fn record_backtest<R: RunRecorder, C: Serialize>(
     metrics: &BacktestMetrics,
     trades: &[ClosedTrade],
 ) -> Result<(), AdapterError> {
+    record_backtest_with_audit(recorder, ctx, spec, data, metrics, trades, None).await
+}
+
+/// [`record_backtest`] that also stores the strategy's audit (`Strategy::audit`) in the `full`
+/// metrics row's extras as `{"strategy_audit": ...}`. Without an audit the rows are exactly
+/// those of [`record_backtest`].
+pub async fn record_backtest_with_audit<R: RunRecorder, C: Serialize>(
+    recorder: &R,
+    ctx: &RunContext,
+    spec: &RunSpec<C>,
+    data: &DataWindow,
+    metrics: &BacktestMetrics,
+    trades: &[ClosedTrade],
+    strategy_audit: Option<&serde_json::Value>,
+) -> Result<(), AdapterError> {
     let run = ctx
         .run_row(spec, RunStatus::Completed, Some(now_unix_ms()), data)
         .map_err(serialization_error)?;
     recorder.record_runs(&[run]).await?;
+    let extras = strategy_audit.map(|audit| serde_json::json!({ "strategy_audit": audit }));
     recorder
-        .record_metrics(&[ctx.metrics_row("full", metrics, None)])
+        .record_metrics(&[ctx.metrics_row("full", metrics, extras)])
         .await?;
     if !trades.is_empty() {
         recorder.record_trades(&ctx.trade_rows(trades, 1)).await?;

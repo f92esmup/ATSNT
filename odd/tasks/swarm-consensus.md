@@ -267,7 +267,7 @@ New module `crates/strategies/src/swarm_consensus/` with `mod.rs`, `genome.rs`, 
 
 Risk: item 3 (CLI flags, artifact schema). The byte-identity guard applies.
 
-- [ ] T7.1 S10: the tape in `crates/backtest/src/optimization.rs`. Route: inline.
+- [x] T7.1 S10: the tape in `crates/backtest/src/optimization.rs`. Route: delegated writer X (context backstop; parallel with T7.4). Done: `Tape<F>`, `bar_tape`, `trade_tape`, `run_tape_slice`, `run_optimization_on_tape`, `with_shared_config`. `run_optimization(&bars, ..)` is kept and delegates. RED for the extractor-runs-once counter (0 → 1). Golden (c) unchanged.
   - `Tape<F> { features: Vec<(i64, F)>, prices: Vec<PriceEvent> }`. `WalkForwardOptimizer::run_optimization` takes a tape and, per candidate and slice, replays a fresh `S::policy` through `BacktestEngine::process_event`.
   - `run_backtest_slice_with_trades` and `calculate_parameter_stability` follow.
   - For `DollarBars` strategies the tape holds the bars once (the prices are derived from the same slice without copying them).
@@ -275,7 +275,11 @@ Risk: item 3 (CLI flags, artifact schema). The byte-identity guard applies.
     - golden (c) is identical;
     - `hpo_fold_metrics.rs`, `param_space_contract.rs`, and `recording_contract.rs` pass unchanged;
     - the extractor runs exactly once per run (a counter on a test strategy).
-- [ ] T7.2 S6, S7: `run_hpo` input preparation. Route: inline.
+- [x] T7.2 S6, S7: `run_hpo` input preparation. Route: delegated writer X. Done:
+  - Dispatch by `input_kind()`. Trades strategies require `--shared-config <file>` and accept `--price-bucket-ms` and `--embargo-ms`.
+  - The warm-up and calibration checks (`InsufficientWarmUp`, `CalibrationOverlap`) refuse bad inputs.
+  - `SamplingConfig::Trades { price_bucket_ms: Option<i64> }` and the `HpoDeploymentArtifact` wrapper carry `shared_config`. CUSUM/OFI artifacts are byte-identical.
+  - RED: unknown CLI flags and missing types.
   - `DollarBars`: today's code, unchanged.
   - `Trades`: stream the trades through the extractor and `bucket_trades`. New flags `--price-bucket-ms` (default 1000) and `--embargo-ms` (default 86,400,000, `Trades` strategies only). The 70-day lead check and the calibration check (spec §15.2) apply.
   - The artifact adds `SamplingConfig::Trades { price_bucket_ms }` and stores the `SharedConfig`. The `DollarBar` variant is unchanged, and an old-artifact round-trip test covers it.
@@ -285,13 +289,18 @@ Risk: item 3 (CLI flags, artifact schema). The byte-identity guard applies.
     - both checks refuse bad inputs with explicit messages;
     - the artifact round-trips;
     - the `run_hpo --help` text lists the new flags.
-- [ ] T7.3 S7: the `backtest` CLI. Route: inline.
+- [x] T7.3 S7: the `backtest` CLI. Route: delegated writer X. Done:
+  - `--strategy-config` alias and `--shared-config`.
+  - Trades strategies run at trade resolution; `--fill-model tick` is refused until T8.2.
+  - A STRATEGY AUDIT block on stdout, and `record_backtest_with_audit` puts `strategy_audit` in the metrics extras (the CLI writes no report file).
+  - The loader threads the shared config: artifact first, then the flag, then the default; a conflict is refused.
+  - 14 tests in `tests/swarm_runners.rs`.
   - `--strategy swarm_consensus --strategy-config <json>` with `--fill-model bar` runs at trade resolution (each trade is a price event).
   - The report gains `strategy_audit` from `Strategy::audit()`, and nothing for strategies that return `None`.
   - Tests:
     - an end-to-end run on a synthetic fixture produces campaigns and an audit;
     - the `run_contract.rs` output for CUSUM and OFI is unchanged.
-- [ ] T7.4 S3: the `calibrate_feeds` binary in `crates/backtest/src/bin/calibrate_feeds.rs`. Route: inline.
+- [x] T7.4 S3: the `calibrate_feeds` binary in `crates/backtest/src/bin/calibrate_feeds.rs`. Route: delegated writer Y (parallel). Done: `--data/--from/--to/-o/--base`. The output is validated with `SwarmConfig::validate`. 8 unit tests and 2 CLI tests; RED against stubs (6 + 2 failed).
   - Flags: `--data`, `--from`, `--to` (exclusive), and `-o`. It writes a swarm `SharedConfig` JSON.
   - Tests: the output parses; `calibration_end_ms` is the last trade before `--to`.
 
@@ -459,4 +468,11 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
     - RED: the new test `dojis_are_pin_bars_symmetrically` failed on the gravestone, then went GREEN.
     - The reflection test fixture now includes dojis (1 in 10) and passes.
     - `cargo test -p strategies` 105 passed; clippy clean.
-- Next: Phase 7 (optimiser tape, run_hpo for Trades strategies, backtest CLI, calibrate_feeds).
+- Phase 7 evidence:
+  - fmt clean, clippy clean, `cargo test --workspace` 783 passed, 0 failed, goldens unchanged.
+  - Wording fix to spec §15.2: the literal "70 days before the first feature" is impossible, because the 1d feed warms at about day 64. Evaluation now starts at max(first trade + 70 days, first feature). This keeps the intent (≥ 70 days of lead and never a half-warm swarm).
+  - Notes:
+    - `run_backtest_slice(_with_trades)` still pass `SharedConfig::default()` (the golden helper is generic; only dollar-bar strategies call them). The optimizer, `run_hpo` and the loader pass the real shared config.
+    - Order latency at trade resolution comes from `execution_context.latency_ms`.
+    - Architecture docs pending in T9.1.
+- Next: Phase 8 (ports `submit_order` + optional take profit, `TradingSession` targets, product gate).

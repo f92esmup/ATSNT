@@ -16,7 +16,9 @@ use strategies::{
     StrategyVisitor,
 };
 
-use crate::artifact::{load_strategy_config, HpoScorecard, LoadedStrategyConfig};
+use crate::artifact::{
+    load_artifact_shared_config, load_strategy_config, HpoScorecard, LoadedStrategyConfig,
+};
 use crate::config::BacktestConfig;
 
 /// Strategy a runner uses when neither the artifact nor the command line names one.
@@ -83,6 +85,9 @@ pub struct LoadedStrategy {
     pub market_type: Option<MarketType>,
     /// Execution context (fees, risk, margin) the artifact declared.
     pub execution_context: Option<BacktestConfig>,
+    /// The shared configuration the strategy was built with, as JSON; `None` for a strategy
+    /// without one (its shared configuration is `()`).
+    pub shared_config_json: Option<serde_json::Value>,
 }
 
 impl LoadedStrategy {
@@ -206,6 +211,42 @@ pub fn resolve_strategy_id(requested: Option<&str>, config_path: Option<&Path>) 
 
 struct Loader<'a> {
     config_path: Option<&'a Path>,
+    shared_path: Option<&'a Path>,
+}
+
+/// The shared configuration of a load: the artifact's, else the `--shared-config` file's, else
+/// the strategy's default. A file that contradicts the artifact's is refused.
+fn resolve_shared_config<T: DeserializeOwned + Default>(
+    artifact_shared: Option<serde_json::Value>,
+    shared_path: Option<&Path>,
+) -> Result<T> {
+    let from_file = match shared_path {
+        Some(path) => {
+            let content = std::fs::read_to_string(path).with_context(|| {
+                format!(
+                    "Failed to read shared configuration file: {}",
+                    path.display()
+                )
+            })?;
+            let value: serde_json::Value = serde_json::from_str(&content)
+                .with_context(|| "Failed to parse shared configuration JSON")?;
+            Some(value)
+        }
+        None => None,
+    };
+    let chosen = match (artifact_shared, from_file) {
+        (Some(declared), Some(given)) if declared != given => anyhow::bail!(
+            "--shared-config conflicts with the shared configuration stored in the deployment \
+             artifact; drop the option or use a matching file"
+        ),
+        (Some(declared), _) => Some(declared),
+        (None, given) => given,
+    };
+    match chosen {
+        Some(value) => serde_json::from_value(value)
+            .with_context(|| "Failed to parse the strategy's shared configuration"),
+        None => Ok(T::default()),
+    }
 }
 
 impl StrategyVisitor for Loader<'_> {
@@ -217,9 +258,13 @@ impl StrategyVisitor for Loader<'_> {
         S::Config: Default,
         S::Space: Serialize + DeserializeOwned,
     {
+        let mut artifact_shared = None;
         let (config, source, threshold, symbol, market_type, context) = match self.config_path {
             Some(path) => {
                 let loaded = load_strategy_config::<S::Config>(path)?;
+                if matches!(loaded, LoadedStrategyConfig::Artifact(_)) {
+                    artifact_shared = load_artifact_shared_config(path)?;
+                }
                 let source = match &loaded {
                     LoadedStrategyConfig::Artifact(artifact) => ConfigSource::Artifact {
                         schema_version: artifact.schema_version.clone(),
@@ -251,7 +296,10 @@ impl StrategyVisitor for Loader<'_> {
         };
         let config_json = serde_json::to_value(&config)?;
         let config_display = config.to_string();
-        let strategy = S::from_config(&S::SharedConfig::default(), config)
+        let shared: S::SharedConfig = resolve_shared_config(artifact_shared, self.shared_path)?;
+        // `()` (a dollar-bar strategy) serializes to `null`: there is nothing to report.
+        let shared_config_json = Some(serde_json::to_value(&shared)?).filter(|v| !v.is_null());
+        let strategy = S::from_config(&shared, config)
             .map_err(|error| anyhow::anyhow!("Failed to initialize strategy: {error}"))?;
         Ok(LoadedStrategy {
             strategy: Box::new(strategy),
@@ -263,15 +311,35 @@ impl StrategyVisitor for Loader<'_> {
             symbol,
             market_type,
             execution_context: context,
+            shared_config_json,
         })
     }
 }
 
 /// Builds the strategy registered under `name` (id or alias) from `config_path`, or from its
-/// default hyperparameters when no file is given.
+/// default hyperparameters when no file is given, with the shared configuration the artifact
+/// stores or else the strategy's default (see [`load_strategy_with_shared`]).
 pub fn load_strategy(name: &str, config_path: Option<&Path>) -> Result<LoadedStrategy> {
-    dispatch(name, Loader { config_path })
-        .unwrap_or_else(|| Err(anyhow::anyhow!(unknown_strategy_message(name))))
+    load_strategy_with_shared(name, config_path, None)
+}
+
+/// [`load_strategy`] with an optional shared-configuration file (`--shared-config`).
+///
+/// The shared configuration is the one the deployment artifact stores, else the file's, else
+/// the strategy's default; a file that contradicts the artifact's is an error.
+pub fn load_strategy_with_shared(
+    name: &str,
+    config_path: Option<&Path>,
+    shared_path: Option<&Path>,
+) -> Result<LoadedStrategy> {
+    dispatch(
+        name,
+        Loader {
+            config_path,
+            shared_path,
+        },
+    )
+    .unwrap_or_else(|| Err(anyhow::anyhow!(unknown_strategy_message(name))))
 }
 
 #[cfg(test)]
@@ -476,6 +544,85 @@ mod tests {
                 message.contains("dollar_bars_cusum") && message.contains("order_flow_imbalance")
             );
         }
+    }
+
+    fn swarm_shared(calibration_end_ms: i64) -> strategies::SwarmConfig {
+        strategies::SwarmConfig {
+            calibration_end_ms,
+            ..strategies::SwarmConfig::default()
+        }
+    }
+
+    #[test]
+    fn a_dollar_bar_strategy_carries_no_shared_config() {
+        let loaded = load_strategy("cusum", None).unwrap();
+        assert_eq!(loaded.shared_config_json, None);
+    }
+
+    #[test]
+    fn the_shared_config_flag_reaches_the_strategy() {
+        let shared = temp_file(
+            "shared-flag.json",
+            &serde_json::to_string(&swarm_shared(7)).unwrap(),
+        );
+
+        let loaded = load_strategy_with_shared("swarm", None, Some(&shared)).unwrap();
+        std::fs::remove_file(&shared).unwrap();
+
+        assert_eq!(loaded.strategy_id, "swarm_consensus");
+        assert_eq!(
+            loaded.shared_config_json,
+            Some(serde_json::to_value(swarm_shared(7)).unwrap())
+        );
+        assert_eq!(loaded.strategy.input_kind(), strategies::InputKind::Trades);
+    }
+
+    #[test]
+    fn without_a_shared_config_the_strategy_default_is_used() {
+        let loaded = load_strategy("swarm", None).unwrap();
+        assert_eq!(
+            loaded.shared_config_json,
+            Some(serde_json::to_value(strategies::SwarmConfig::default()).unwrap())
+        );
+    }
+
+    #[test]
+    fn the_artifact_shared_config_comes_first_and_a_contradicting_flag_is_refused() {
+        let artifact = serde_json::json!({
+            "schema_version": "1.0",
+            "strategy_id": "swarm_consensus",
+            "symbol": "BTCUSDT",
+            "market_type": "usd_m_perpetual",
+            "sampling": {"type": "trades", "price_bucket_ms": 1000},
+            "strategy_config": serde_json::to_value(strategies::PolicyConfig::default()).unwrap(),
+            "execution_context": serde_json::to_value(BacktestConfig::default()).unwrap(),
+            "shared_config": serde_json::to_value(swarm_shared(5)).unwrap(),
+        });
+        let artifact = temp_file("swarm-artifact.json", &artifact.to_string());
+        let same = temp_file(
+            "shared-same.json",
+            &serde_json::to_string(&swarm_shared(5)).unwrap(),
+        );
+        let other = temp_file(
+            "shared-other.json",
+            &serde_json::to_string(&swarm_shared(9)).unwrap(),
+        );
+
+        let from_artifact = load_strategy("swarm", Some(&artifact)).unwrap();
+        let agreeing = load_strategy_with_shared("swarm", Some(&artifact), Some(&same)).unwrap();
+        let refused = load_strategy_with_shared("swarm", Some(&artifact), Some(&other))
+            .err()
+            .unwrap()
+            .to_string();
+        for path in [artifact, same, other] {
+            std::fs::remove_file(path).unwrap();
+        }
+
+        let expected = Some(serde_json::to_value(swarm_shared(5)).unwrap());
+        assert_eq!(from_artifact.shared_config_json, expected);
+        assert_eq!(agreeing.shared_config_json, expected);
+        assert!(refused.contains("--shared-config"), "{refused}");
+        assert!(refused.contains("conflicts"), "{refused}");
     }
 
     #[test]

@@ -1,16 +1,19 @@
-use domain::DollarBar;
+use std::ops::Range;
+
+use domain::{DollarBar, Trade};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use strategies::{HyperparameterSpace, OptimizableStrategy};
+use strategies::{FeatureExtractor, HyperparameterSpace, MarketEvent, OptimizableStrategy};
 
 use crate::config::BacktestConfig;
 use crate::engine::BacktestEngine;
 use crate::error::BacktestError;
 use crate::metrics::{trade_returns, BacktestMetrics, ClosedTrade};
+use crate::price_event::{bucket_trades, PriceEvent};
 use crate::walk_forward::WalkForwardFold;
 
 /// Closed trades a candidate needs in every in-sample and out-of-sample fold to be ranked.
@@ -22,7 +25,275 @@ pub const DEFAULT_MIN_TRADES_PER_FOLD: usize = 30;
 /// p-value below which a candidate's Deflated Sharpe Ratio counts as significant.
 const DSR_SIGNIFICANCE: Decimal = dec!(0.05);
 
+/// Lead the data must give a trade-consuming strategy before its first evaluated timestamp
+/// (strategy spec §15.2): 70 days, so the slowest swarm feed (1 day, 64 closed bars) is warm.
+pub const TRADES_WARM_UP_MS: i64 = 70 * 86_400_000;
+
+/// The features the extractor of `S` produces.
+pub type FeaturesOf<S> = <<S as OptimizableStrategy>::Extractor as FeatureExtractor>::Features;
+
+/// The input of an optimisation run (strategy spec §15.1): the price events the execution core
+/// trades against, and the features the strategy's extractor produced, each attached to the
+/// price event after which it is decided.
+///
+/// The extractor runs once, when the tape is built; every candidate then replays only its
+/// decision stage ([`OptimizableStrategy::on_features`]) over the tape.
+#[derive(Debug, Clone)]
+pub struct Tape<F> {
+    /// Features with the timestamp of the input that produced them, in input order.
+    features: Vec<(i64, F)>,
+    /// Price events, in time order.
+    prices: Vec<PriceEvent>,
+    /// `feature_ends[i]`: number of features attached to the price events `0..=i`.
+    feature_ends: Vec<usize>,
+}
+
+impl<F> Tape<F> {
+    /// Attaches each feature to the first price event whose `end_ms` is at or after the
+    /// feature's timestamp. Both inputs must be in time order; a feature later than the last
+    /// price event is an error.
+    pub fn merge(prices: Vec<PriceEvent>, features: Vec<(i64, F)>) -> Result<Self, BacktestError> {
+        let mut feature_ends = Vec::with_capacity(prices.len());
+        let mut next = 0;
+        for event in &prices {
+            while features
+                .get(next)
+                .is_some_and(|(timestamp, _)| *timestamp <= event.end_ms)
+            {
+                next += 1;
+            }
+            feature_ends.push(next);
+        }
+        if let Some((timestamp, _)) = features.get(next) {
+            return Err(BacktestError::General(format!(
+                "a feature at {timestamp} ms comes after the last price event"
+            )));
+        }
+        Ok(Self {
+            features,
+            prices,
+            feature_ends,
+        })
+    }
+
+    /// Number of price events.
+    pub fn len(&self) -> usize {
+        self.prices.len()
+    }
+
+    /// Whether the tape holds no price event.
+    pub fn is_empty(&self) -> bool {
+        self.prices.is_empty()
+    }
+
+    /// The price events, in time order.
+    pub fn prices(&self) -> &[PriceEvent] {
+        &self.prices
+    }
+
+    /// Every feature with its timestamp, in input order.
+    pub fn features(&self) -> &[(i64, F)] {
+        &self.features
+    }
+
+    /// The features decided after price event `index` (empty when out of range).
+    pub fn features_at(&self, index: usize) -> &[(i64, F)] {
+        let Some(end) = self.feature_ends.get(index).copied() else {
+            return &[];
+        };
+        let start = index
+            .checked_sub(1)
+            .and_then(|previous| self.feature_ends.get(previous).copied())
+            .unwrap_or(0);
+        &self.features[start..end]
+    }
+
+    /// The tape without the price events that start before `start_ms`, nor their features.
+    pub fn starting_at(mut self, start_ms: i64) -> Self {
+        let skipped = self
+            .prices
+            .partition_point(|event| event.start_ms < start_ms);
+        let dropped_features = skipped
+            .checked_sub(1)
+            .and_then(|last| self.feature_ends.get(last).copied())
+            .unwrap_or(0);
+        self.prices.drain(..skipped);
+        self.features.drain(..dropped_features);
+        self.feature_ends.drain(..skipped);
+        for end in &mut self.feature_ends {
+            *end -= dropped_features;
+        }
+        self
+    }
+
+    /// The warm-up cut of a trade-consuming strategy (strategy spec §15.2): the tape from the
+    /// first timestamp that has at least `warm_up_ms` of data before it and at which the
+    /// extractor has already produced a feature.
+    ///
+    /// Fails with [`BacktestError::InsufficientWarmUp`] when no price event is left after the
+    /// cut, or when the extractor never produced a feature.
+    pub fn after_warm_up(self, warm_up_ms: i64) -> Result<Self, BacktestError> {
+        let (Some(first), Some(last)) = (self.prices.first(), self.prices.last()) else {
+            return Err(BacktestError::InsufficientWarmUp {
+                warm_up_days: warm_up_ms / 86_400_000,
+                data_start_ms: None,
+                data_end_ms: None,
+                first_feature_ms: None,
+            });
+        };
+        let (data_start_ms, data_end_ms) = (first.start_ms, last.end_ms);
+        let first_feature_ms = self.features.first().map(|(timestamp, _)| *timestamp);
+        let refusal = || BacktestError::InsufficientWarmUp {
+            warm_up_days: warm_up_ms / 86_400_000,
+            data_start_ms: Some(data_start_ms),
+            data_end_ms: Some(data_end_ms),
+            first_feature_ms,
+        };
+        let Some(first_feature_ms) = first_feature_ms else {
+            return Err(refusal());
+        };
+        let start_ms = data_start_ms
+            .saturating_add(warm_up_ms)
+            .max(first_feature_ms);
+        let trimmed = self.starting_at(start_ms);
+        if trimmed.is_empty() {
+            return Err(refusal());
+        }
+        Ok(trimmed)
+    }
+}
+
+/// Builds the tape of a dollar-bar input: one price event per bar, and the features the
+/// extractor of `S` produced on that bar attached to it. For a dollar-bar strategy the feature
+/// is the bar itself ([`strategies::BarPassThrough`]).
+pub fn bar_tape<S: OptimizableStrategy>(
+    shared: &S::SharedConfig,
+    bars: &[DollarBar],
+) -> Result<Tape<FeaturesOf<S>>, BacktestError> {
+    let mut extractor = S::extractor(shared)?;
+    let mut features = Vec::with_capacity(bars.len());
+    let mut prices = Vec::with_capacity(bars.len());
+    let mut feature_ends = Vec::with_capacity(bars.len());
+    for bar in bars {
+        prices.push(PriceEvent::from(bar));
+        if let Some(feature) = extractor.on_event(&MarketEvent::DollarBar(bar)) {
+            features.push((bar.end_time, feature));
+        }
+        feature_ends.push(features.len());
+    }
+    Ok(Tape {
+        features,
+        prices,
+        feature_ends,
+    })
+}
+
+/// Builds the tape of a trade input (strategy spec §15.1): the trades stream once through the
+/// extractor of `S` and into `bucket_ms` price buckets ([`bucket_trades`]); a feature produced
+/// by a trade is decided after the bucket that contains it.
+pub fn trade_tape<S: OptimizableStrategy>(
+    shared: &S::SharedConfig,
+    trades: impl IntoIterator<Item = Trade>,
+    bucket_ms: i64,
+) -> Result<Tape<FeaturesOf<S>>, BacktestError> {
+    let mut extractor = S::extractor(shared)?;
+    let mut features = Vec::new();
+    let prices = bucket_trades(
+        trades.into_iter().inspect(|trade| {
+            if let Some(feature) = extractor.on_event(&MarketEvent::Trade(trade)) {
+                features.push((trade.timestamp, feature));
+            }
+        }),
+        bucket_ms,
+    )?;
+    Tape::merge(prices, features)
+}
+
+/// `calibration_end_ms` of a shared configuration that declares one (the swarm's, spec §14.1).
+pub fn calibration_end_ms<T: Serialize>(shared: &T) -> Option<i64> {
+    serde_json::to_value(shared)
+        .ok()?
+        .get("calibration_end_ms")?
+        .as_i64()
+}
+
+/// The calibration check of strategy spec §15.2: thresholds calibrated on the evaluated data
+/// would leak it, so `calibration_end_ms` must be earlier than the first trade.
+pub fn check_calibration(
+    calibration_end_ms: Option<i64>,
+    first_trade_ms: i64,
+) -> Result<(), BacktestError> {
+    match calibration_end_ms {
+        Some(end) if end >= first_trade_ms => Err(BacktestError::CalibrationOverlap {
+            calibration_end_ms: end,
+            first_trade_ms,
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Number of price buckets an embargo of `embargo_ms` spans (`embargo_ms / bucket_ms`).
+pub fn embargo_buckets(embargo_ms: i64, bucket_ms: i64) -> Result<usize, BacktestError> {
+    if bucket_ms <= 0 {
+        return Err(BacktestError::InvalidPriceBucket(bucket_ms));
+    }
+    if embargo_ms < 0 {
+        return Err(BacktestError::InvalidFoldConfig(format!(
+            "embargo must not be negative, got {embargo_ms} ms"
+        )));
+    }
+    usize::try_from(embargo_ms / bucket_ms)
+        .map_err(|_| BacktestError::InvalidFoldConfig(format!("embargo of {embargo_ms} ms")))
+}
+
+/// Replays one fresh decision stage of `S` over a slice of a tape through a fresh engine.
+///
+/// Each price event goes through [`BacktestEngine::process_event`]; its decision step feeds
+/// every feature attached to the event to [`OptimizableStrategy::on_features`] in order, and
+/// the last decision among them is the event's decision. A position still open at the end of
+/// the slice is closed at the last close as `EndOfSimulation`.
+pub fn run_tape_slice<S: OptimizableStrategy>(
+    config: BacktestConfig,
+    shared: &S::SharedConfig,
+    strat_config: &S::Config,
+    tape: &Tape<FeaturesOf<S>>,
+    range: Range<usize>,
+) -> Result<(BacktestMetrics, Vec<ClosedTrade>), BacktestError> {
+    config.validate()?;
+    let prices = tape.prices.get(range.clone()).ok_or_else(|| {
+        BacktestError::InvalidFoldConfig(format!(
+            "slice {range:?} is outside a tape of {} price events",
+            tape.len()
+        ))
+    })?;
+    let mut strategy = S::from_config(shared, strat_config.clone())
+        .map_err(|e| BacktestError::Strategy(e.to_string()))?;
+    let mut engine = BacktestEngine::new(config);
+
+    for (index, event) in range.zip(prices) {
+        let features = tape.features_at(index);
+        engine.process_event(event, &mut || {
+            let mut decision = None;
+            for (_, feature) in features {
+                if let Some(decided) = strategy.on_features(feature) {
+                    decision = Some(decided);
+                }
+            }
+            decision
+        });
+        if engine.is_halted() {
+            break;
+        }
+    }
+
+    let mark_price = prices.last().map(|event| event.close);
+    Ok(engine.finish_with_trades(mark_price))
+}
+
 /// Runs a deterministic backtest against a contiguous slice of `DollarBar`s.
+///
+/// A dollar-bar strategy's shared configuration is `()`, so the default one is the only one;
+/// a strategy with a real shared configuration goes through [`run_tape_slice`].
 pub fn run_backtest_slice<S: OptimizableStrategy>(
     config: BacktestConfig,
     strat_config: &S::Config,
@@ -38,19 +309,30 @@ pub fn run_backtest_slice_with_trades<S: OptimizableStrategy>(
     bars: &[DollarBar],
 ) -> Result<(BacktestMetrics, Vec<ClosedTrade>), BacktestError> {
     config.validate()?;
-    let mut strategy = S::from_config(&S::SharedConfig::default(), strat_config.clone())
-        .map_err(|e| BacktestError::Strategy(e.to_string()))?;
-    let mut engine = BacktestEngine::new(config);
+    let shared = S::SharedConfig::default();
+    let tape = bar_tape::<S>(&shared, bars)?;
+    run_tape_slice::<S>(config, &shared, strat_config, &tape, 0..tape.len())
+}
 
-    for bar in bars {
-        engine.process_bar(&mut strategy, bar);
-        if engine.is_halted() {
-            break;
-        }
+/// One optimisation run's frozen inputs: the tape, the shared configuration and the account.
+pub struct TapeRun<'a, S: OptimizableStrategy> {
+    /// The tape every candidate replays.
+    pub tape: &'a Tape<FeaturesOf<S>>,
+    /// The shared configuration every candidate is built with.
+    pub shared: &'a S::SharedConfig,
+    /// The account and friction schedule of every simulated slice.
+    pub engine_config: BacktestConfig,
+}
+
+impl<S: OptimizableStrategy> TapeRun<'_, S> {
+    /// [`run_tape_slice`] of `candidate` over `range` of this run's tape.
+    pub fn run_slice(
+        &self,
+        candidate: &S::Config,
+        range: Range<usize>,
+    ) -> Result<(BacktestMetrics, Vec<ClosedTrade>), BacktestError> {
+        run_tape_slice::<S>(self.engine_config, self.shared, candidate, self.tape, range)
     }
-
-    let mark_price = bars.last().map(|b| b.close);
-    Ok(engine.finish_with_trades(mark_price))
 }
 
 /// Evaluation outcome for a single hyperparameter candidate across Walk-Forward folds.
@@ -105,18 +387,18 @@ pub struct FoldMetrics {
     pub out_of_sample: BacktestMetrics,
 }
 
-/// Evaluates parameter stability on `bars` (a training slice) by re-running the grid
-/// neighbours of `base` (see `HyperparameterSpace::perturb_neighbors`).
+/// Evaluates parameter stability on `range` of a run's tape (a training slice) by re-running
+/// the grid neighbours of `base` (see `HyperparameterSpace::perturb_neighbors`).
 ///
-/// `base_metrics` are the base's metrics on the same bars. A neighbour that fails, trades
+/// `base_metrics` are the base's metrics on the same slice. A neighbour that fails, trades
 /// fewer than `min_trades` times or has no defined Sortino counts as 0 (see
 /// [`plateau_stability`]).
 pub fn calculate_parameter_stability<S: OptimizableStrategy>(
     space: &S::Space,
     base: &S::Config,
     base_metrics: &BacktestMetrics,
-    bars: &[DollarBar],
-    engine_config: BacktestConfig,
+    run: &TapeRun<'_, S>,
+    range: Range<usize>,
     min_trades: usize,
 ) -> Decimal {
     let measured = |m: &BacktestMetrics| {
@@ -134,9 +416,9 @@ pub fn calculate_parameter_stability<S: OptimizableStrategy>(
         .perturb_neighbors(base)
         .iter()
         .map(|neighbour| {
-            run_backtest_slice::<S>(engine_config, neighbour, bars)
+            run.run_slice(neighbour, range.clone())
                 .ok()
-                .and_then(|m| measured(&m))
+                .and_then(|(m, _)| measured(&m))
         })
         .collect();
     plateau_stability(base_sortino, &neighbours)
@@ -323,7 +605,7 @@ pub struct WalkForwardOptimizer<S: OptimizableStrategy> {
     engine_config: BacktestConfig,
     parameter_space: S::Space,
     min_trades_per_fold: usize,
-    _marker: std::marker::PhantomData<fn() -> S>,
+    shared: S::SharedConfig,
 }
 
 impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
@@ -333,7 +615,7 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
             engine_config,
             parameter_space,
             min_trades_per_fold: DEFAULT_MIN_TRADES_PER_FOLD,
-            _marker: std::marker::PhantomData,
+            shared: S::SharedConfig::default(),
         }
     }
 
@@ -348,13 +630,41 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
         self
     }
 
-    /// Evaluates candidate configurations in parallel across all CPU cores with `Rayon`.
-    ///
-    /// The result is ranked: eligible candidates (see [`CandidateEvaluation::eligible`]) by
-    /// descending fitness, then the ineligible ones by descending fitness.
+    /// Sets the shared configuration (frozen for the whole run) every candidate is built with;
+    /// it defaults to `S::SharedConfig::default()`, the only one of a dollar-bar strategy.
+    pub fn with_shared_config(mut self, shared: S::SharedConfig) -> Self {
+        self.shared = shared;
+        self
+    }
+
+    /// The shared configuration of this run.
+    pub fn shared_config(&self) -> &S::SharedConfig {
+        &self.shared
+    }
+
+    /// [`WalkForwardOptimizer::run_optimization_on_tape`] over the tape of `bars` (see
+    /// [`bar_tape`]); `folds` index the bars.
     pub fn run_optimization(
         &self,
         bars: &[DollarBar],
+        folds: &[WalkForwardFold],
+        max_candidates: usize,
+    ) -> Result<Vec<CandidateEvaluation<S::Config>>, BacktestError> {
+        let tape = bar_tape::<S>(&self.shared, bars)?;
+        self.run_optimization_on_tape(&tape, folds, max_candidates)
+    }
+
+    /// Evaluates candidate configurations in parallel across all CPU cores with `Rayon`.
+    ///
+    /// `folds` index the tape's price events. Per candidate and fold slice, a fresh decision
+    /// stage replays the slice through a fresh engine ([`run_tape_slice`]); the extractor ran
+    /// once, when the tape was built.
+    ///
+    /// The result is ranked: eligible candidates (see [`CandidateEvaluation::eligible`]) by
+    /// descending fitness, then the ineligible ones by descending fitness.
+    pub fn run_optimization_on_tape(
+        &self,
+        tape: &Tape<FeaturesOf<S>>,
         folds: &[WalkForwardFold],
         max_candidates: usize,
     ) -> Result<Vec<CandidateEvaluation<S::Config>>, BacktestError> {
@@ -368,6 +678,11 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
         let total_candidates = candidates.len();
         let config = self.engine_config;
         let min_trades = self.min_trades_per_fold;
+        let run = TapeRun::<S> {
+            tape,
+            shared: &self.shared,
+            engine_config: config,
+        };
 
         let pb = ProgressBar::new(total_candidates as u64);
         pb.set_style(
@@ -385,14 +700,10 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
                 let mut oos_returns = Vec::new();
 
                 for fold in folds.iter() {
-                    let is_metrics =
-                        run_backtest_slice::<S>(config, candidate, fold.train_slice(bars)).ok()?;
-                    let (oos_metrics, oos_trades) = run_backtest_slice_with_trades::<S>(
-                        config,
-                        candidate,
-                        fold.test_slice(bars),
-                    )
-                    .ok()?;
+                    let (is_metrics, _) =
+                        run.run_slice(candidate, fold.train_range.clone()).ok()?;
+                    let (oos_metrics, oos_trades) =
+                        run.run_slice(candidate, fold.test_range.clone()).ok()?;
                     oos_returns.extend(trade_returns(config.initial_capital, &oos_trades));
                     fold_metrics.push(FoldMetrics {
                         fold_idx: fold.fold_idx,
@@ -439,8 +750,8 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
                         &self.parameter_space,
                         candidate,
                         &fold_metrics[0].in_sample,
-                        folds[0].train_slice(bars),
-                        config,
+                        &run,
+                        folds[0].train_range.clone(),
                         min_trades,
                     )
                 } else {
@@ -945,6 +1256,231 @@ mod tests {
                 thresholds: vec![dec!(1.0), dec!(2.0)],
             }
         }
+    }
+
+    static EXTRACTORS_BUILT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static EVENTS_EXTRACTED: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    /// A pass-through extractor that counts how often it is built and fed.
+    struct CountingExtractor;
+
+    impl strategies::FeatureExtractor for CountingExtractor {
+        type Features = DollarBar;
+
+        fn on_event(&mut self, event: &strategies::MarketEvent<'_>) -> Option<DollarBar> {
+            EVENTS_EXTRACTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match event {
+                strategies::MarketEvent::DollarBar(bar) => Some((*bar).clone()),
+                strategies::MarketEvent::Trade(_) => None,
+            }
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    /// [`MockStrategy`] behind a counting extractor.
+    struct CountingStrategy(MockStrategy);
+
+    impl strategies::Strategy for CountingStrategy {
+        fn name(&self) -> &str {
+            "CountingStrategy"
+        }
+
+        fn compatible_market_types(&self) -> &'static [strategies::MarketType] {
+            &[strategies::MarketType::UsdMPerpetual]
+        }
+
+        fn on_bar(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
+            self.0.on_bar(bar)
+        }
+
+        fn reset(&mut self) {
+            self.0.reset()
+        }
+    }
+
+    impl OptimizableStrategy for CountingStrategy {
+        type SharedConfig = ();
+        type Config = MockConfig;
+        type Space = MockSpace;
+        type Extractor = CountingExtractor;
+
+        fn id() -> &'static str {
+            "counting_strategy"
+        }
+
+        fn from_config(_: &(), config: Self::Config) -> Result<Self, domain::DomainError> {
+            Ok(Self(MockStrategy { config, counter: 0 }))
+        }
+
+        fn extractor(_: &()) -> Result<Self::Extractor, domain::DomainError> {
+            EXTRACTORS_BUILT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(CountingExtractor)
+        }
+
+        fn on_features(&mut self, bar: &DollarBar) -> Option<strategies::Decision> {
+            strategies::Strategy::on_bar(self, bar).map(strategies::Decision::Entry)
+        }
+
+        fn default_space() -> Self::Space {
+            MockSpace {
+                windows: vec![2, 3, 5],
+                thresholds: vec![dec!(1.0)],
+            }
+        }
+    }
+
+    fn event(start_ms: i64, end_ms: i64) -> PriceEvent {
+        PriceEvent {
+            start_ms,
+            end_ms,
+            open: dec!(1),
+            high: dec!(1),
+            low: dec!(1),
+            close: dec!(1),
+        }
+    }
+
+    #[test]
+    fn a_feature_is_decided_after_the_price_event_that_contains_its_timestamp() {
+        let prices = vec![event(0, 900), event(1_000, 1_500), event(3_000, 3_000)];
+        let features = vec![(0, 'a'), (900, 'b'), (1_200, 'c'), (3_000, 'd')];
+
+        let tape = Tape::merge(prices, features).unwrap();
+
+        assert_eq!(tape.features_at(0), &[(0, 'a'), (900, 'b')]);
+        assert_eq!(tape.features_at(1), &[(1_200, 'c')]);
+        assert_eq!(tape.features_at(2), &[(3_000, 'd')]);
+        assert!(tape.features_at(3).is_empty());
+        assert!(Tape::merge(vec![event(0, 10)], vec![(11, 'x')]).is_err());
+    }
+
+    #[test]
+    fn a_tape_cut_drops_the_earlier_events_with_their_features() {
+        let prices = vec![event(0, 900), event(1_000, 1_500), event(2_000, 2_500)];
+        let features = vec![(100, 'a'), (1_100, 'b'), (2_100, 'c'), (2_200, 'd')];
+        let tape = Tape::merge(prices, features).unwrap().starting_at(1_000);
+
+        assert_eq!(tape.len(), 2);
+        assert_eq!(tape.prices()[0].start_ms, 1_000);
+        assert_eq!(tape.features_at(0), &[(1_100, 'b')]);
+        assert_eq!(tape.features_at(1), &[(2_100, 'c'), (2_200, 'd')]);
+    }
+
+    #[test]
+    fn the_warm_up_cut_starts_at_the_later_of_the_lead_and_the_first_feature() {
+        let day = 86_400_000;
+        let prices: Vec<PriceEvent> = (0..100).map(|d| event(d * day, d * day + 1)).collect();
+        let early = Tape::merge(prices.clone(), vec![(10 * day, ()), (80 * day, ())]).unwrap();
+        let late = Tape::merge(prices.clone(), vec![(90 * day, ())]).unwrap();
+
+        let early = early.after_warm_up(TRADES_WARM_UP_MS).unwrap();
+        assert_eq!(early.prices()[0].start_ms, 70 * day);
+        assert_eq!(early.features().len(), 1);
+        let late = late.after_warm_up(TRADES_WARM_UP_MS).unwrap();
+        assert_eq!(late.prices()[0].start_ms, 90 * day);
+
+        let short = Tape::merge(prices[..60].to_vec(), vec![(10 * day, ())]).unwrap();
+        let no_feature = Tape::<()>::merge(prices, Vec::new()).unwrap();
+        for tape in [short, no_feature] {
+            let message = tape
+                .after_warm_up(TRADES_WARM_UP_MS)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.starts_with("the data window gives the swarm less than 70 days of warm-up"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_calibration_that_reaches_the_data_is_refused() {
+        #[derive(Serialize)]
+        struct Shared {
+            calibration_end_ms: i64,
+        }
+        assert_eq!(
+            calibration_end_ms(&Shared {
+                calibration_end_ms: 5
+            }),
+            Some(5)
+        );
+        assert_eq!(calibration_end_ms(&()), None);
+
+        assert!(check_calibration(Some(999), 1_000).is_ok());
+        assert!(check_calibration(None, 1_000).is_ok());
+        let message = check_calibration(Some(1_000), 1_000)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("calibration"), "{message}");
+        assert!(message.contains("calibration_end_ms 1000"), "{message}");
+    }
+
+    #[test]
+    fn the_embargo_is_converted_to_whole_buckets() {
+        assert_eq!(embargo_buckets(86_400_000, 1_000), Ok(86_400));
+        assert_eq!(embargo_buckets(2_500, 1_000), Ok(2));
+        assert!(embargo_buckets(1_000, 0).is_err());
+        assert!(embargo_buckets(-1, 1_000).is_err());
+    }
+
+    #[test]
+    fn a_bar_tape_replays_exactly_like_the_bar_engine() {
+        let bars = generate_synthetic_bars(300);
+        let config = MockConfig {
+            window: 3,
+            threshold: Decimal::ONE,
+        };
+        let engine_config = BacktestConfig {
+            max_order_notional: Some(dec!(100_000)),
+            max_position_notional: Some(dec!(100_000)),
+            ..BacktestConfig::default()
+        };
+        let mut strategy = MockStrategy::from_config(&(), config.clone()).unwrap();
+        let mut engine = BacktestEngine::new(engine_config);
+        for bar in &bars[100..250] {
+            engine.process_bar(&mut strategy, bar);
+        }
+        let expected = engine.finish_with_trades(bars.get(249).map(|b| b.close));
+
+        let tape = bar_tape::<MockStrategy>(&(), &bars).unwrap();
+        let replayed =
+            run_tape_slice::<MockStrategy>(engine_config, &(), &config, &tape, 100..250).unwrap();
+
+        assert!(!expected.1.is_empty());
+        assert_eq!(replayed, expected);
+        assert!(
+            run_tape_slice::<MockStrategy>(engine_config, &(), &config, &tape, 250..301).is_err()
+        );
+    }
+
+    #[test]
+    fn the_extractor_runs_exactly_once_per_optimisation_run() {
+        use std::sync::atomic::Ordering;
+        let bars = generate_synthetic_bars(300);
+        let wf_config = WalkForwardConfig {
+            num_folds: 2,
+            train_ratio: 0.70,
+            embargo_bars: 5,
+        };
+        let folds = WalkForwardSplitter::generate_rolling_folds(bars.len(), &wf_config).unwrap();
+        let engine_config = BacktestConfig {
+            max_order_notional: Some(dec!(100_000)),
+            max_position_notional: Some(dec!(100_000)),
+            ..BacktestConfig::default()
+        };
+
+        let results = WalkForwardOptimizer::<CountingStrategy>::with_default_space(engine_config)
+            .with_min_trades_per_fold(1)
+            .run_optimization(&bars, &folds, 3)
+            .unwrap();
+
+        assert_eq!(results.len(), 3, "three candidates over two folds");
+        assert_eq!(EXTRACTORS_BUILT.load(Ordering::SeqCst), 1);
+        assert_eq!(EVENTS_EXTRACTED.load(Ordering::SeqCst), bars.len());
     }
 
     #[test]

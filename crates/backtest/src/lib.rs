@@ -27,8 +27,8 @@ pub mod walk_forward;
 
 pub use alert_throttle::AlertThrottle;
 pub use artifact::{
-    load_strategy_config, HpoScorecard, LoadedStrategyConfig, SamplingConfig,
-    StrategyDeploymentArtifact,
+    load_artifact_shared_config, load_strategy_config, HpoDeploymentArtifact, HpoScorecard,
+    LoadedStrategyConfig, SamplingConfig, StrategyDeploymentArtifact,
 };
 pub use config::BacktestConfig;
 pub use daily_watermark::DailyWatermark;
@@ -52,9 +52,11 @@ pub use monte_carlo::{
 };
 pub use monthly_guard::{marked_equity, utc_month_key, MonthlyGuard};
 pub use optimization::{
-    calculate_parameter_stability, deflated_sharpe_p_value, expected_max_sharpe, plateau_stability,
-    run_backtest_slice, run_backtest_slice_with_trades, CandidateEvaluation, FoldMetrics,
-    ReturnMoments, WalkForwardOptimizer, DEFAULT_MIN_TRADES_PER_FOLD,
+    bar_tape, calculate_parameter_stability, calibration_end_ms, check_calibration,
+    deflated_sharpe_p_value, embargo_buckets, expected_max_sharpe, plateau_stability,
+    run_backtest_slice, run_backtest_slice_with_trades, run_tape_slice, trade_tape,
+    CandidateEvaluation, FeaturesOf, FoldMetrics, ReturnMoments, Tape, TapeRun,
+    WalkForwardOptimizer, DEFAULT_MIN_TRADES_PER_FOLD, TRADES_WARM_UP_MS,
 };
 pub use paper::{
     PaperSessionOwner, PaperSessionRuntime, PaperTradingConfig, PaperTradingEvent,
@@ -62,12 +64,12 @@ pub use paper::{
 };
 pub use price_event::{bucket_trades, PriceEvent};
 pub use recording::{
-    now_unix_ms, record_backtest, record_closed_trade, record_hpo, record_monte_carlo,
-    record_run_status, DataWindow, RunContext, RunStatus, GIT_SHA,
+    now_unix_ms, record_backtest, record_backtest_with_audit, record_closed_trade, record_hpo,
+    record_monte_carlo, record_run_status, DataWindow, RunContext, RunStatus, GIT_SHA,
 };
 pub use registry::{
-    load_strategy, resolve_strategy_id, ConfigSource, DeploymentPolicy, LoadedStrategy,
-    ALLOW_UNPROVEN_STRATEGY_HELP, DEFAULT_STRATEGY_ID,
+    load_strategy, load_strategy_with_shared, resolve_strategy_id, ConfigSource, DeploymentPolicy,
+    LoadedStrategy, ALLOW_UNPROVEN_STRATEGY_HELP, DEFAULT_STRATEGY_ID,
 };
 pub use run::{FillModel, InvalidRunId, RunId, RunSpec, RunType};
 pub use sinks::{artifact_object_name, artifact_run_suffix, SinkFailures, StrictSinkError};
