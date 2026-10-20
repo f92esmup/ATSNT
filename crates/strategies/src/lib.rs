@@ -6,6 +6,7 @@ pub mod dollar_bars_cusum;
 pub mod order_flow_imbalance;
 pub mod registry;
 pub mod strategy;
+pub mod swarm_consensus;
 
 pub use dollar_bars_cusum::{DollarBarsCusumConfig, DollarBarsCusumSpace, DollarBarsCusumStrategy};
 pub use order_flow_imbalance::{
@@ -19,3 +20,4 @@ pub use strategy::{
     BarPassThrough, Decision, FeatureExtractor, HyperparameterSpace, InputKind, MarketEvent,
     MarketType, OptimizableStrategy, Strategy,
 };
+pub use swarm_consensus::{PolicyConfig, SwarmConfig, SwarmConsensusStrategy, SwarmPolicySpace};

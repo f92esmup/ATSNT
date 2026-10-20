@@ -16,6 +16,7 @@ use serde::Serialize;
 use crate::dollar_bars_cusum::DollarBarsCusumStrategy;
 use crate::order_flow_imbalance::OrderFlowImbalanceStrategy;
 use crate::strategy::OptimizableStrategy;
+use crate::swarm_consensus::SwarmConsensusStrategy;
 
 /// Code that runs against one registered strategy type chosen at run time.
 pub trait StrategyVisitor {
@@ -72,6 +73,7 @@ macro_rules! register_strategies {
 register_strategies! {
     DollarBarsCusumStrategy => ["cusum"],
     OrderFlowImbalanceStrategy => ["ofi"],
+    SwarmConsensusStrategy => ["swarm"],
 }
 
 /// Error text for an unknown strategy name, listing what is registered.

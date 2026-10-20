@@ -58,6 +58,11 @@ pub trait Strategy: Send {
 
     /// Clears internal state buffers to allow clean replay or backtest isolation.
     fn reset(&mut self);
+
+    /// Strategy-specific audit written into reports as `strategy_audit`; `None` by default.
+    fn audit(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// The first, frozen stage of a strategy: turns market events into the features its decision
@@ -186,6 +191,10 @@ impl<S: ?Sized + Strategy> Strategy for Box<S> {
 
     fn reset(&mut self) {
         (**self).reset()
+    }
+
+    fn audit(&self) -> Option<serde_json::Value> {
+        (**self).audit()
     }
 }
 
