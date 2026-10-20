@@ -11,14 +11,17 @@ use crate::metrics::{
     BacktestMetrics, ClosedTrade, TradeExcursion, UNSUPPORTED_DECISION_REJECTION,
 };
 use crate::monthly_guard::utc_month_key;
+use crate::price_event::PriceEvent;
 
 /// Deterministic, discrete-event backtesting simulator.
 ///
 /// Models exchange fees, a fixed per-fill slippage and Triple Barrier exits evaluated per bar.
 /// A signal becomes a market order that fills at the next bar's open (the first price after
 /// the signal); take-profit and stop exits are market orders too, so they pay taker fees and
-/// slippage and fill at the open when a bar gaps through the trigger. Tick-level fills,
-/// latency are tracked in `odd/tasks/sim-live-fidelity.md`.
+/// slippage and fill at the open when a bar gaps through the trigger. With
+/// `BacktestConfig::latency_ms` set, an order is due that many milliseconds after the deciding
+/// event's end and fills at the first [`PriceEvent`] starting at or after then. Tick-level
+/// fills are tracked in `odd/tasks/sim-live-fidelity.md`.
 ///
 /// A position pays perpetual funding at every eight-hour settlement a bar crosses (marked at
 /// that bar's open) and runs on isolated margin: when a bar reaches the liquidation price
@@ -202,40 +205,62 @@ impl BacktestEngine {
     }
 
     /// Ingests a closed DollarBar, updates position barriers, and steps the strategy.
+    ///
+    /// A thin wrapper over [`BacktestEngine::process_event`]: the bar is the price event and the
+    /// strategy's decision on it is the decision step.
     pub fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &DollarBar) {
+        self.process_event(&PriceEvent::from(bar), &mut || {
+            strategy.on_event(&MarketEvent::DollarBar(bar))
+        });
+    }
+
+    /// Processes one price event in the order of strategy spec §11.2: day and month rollover,
+    /// funding, the pending order's fill when it is due, liquidation and protective exits, the
+    /// monthly kill switch, the decision step (`decide`), mark to market and the daily breaker,
+    /// and the open trade's excursion.
+    ///
+    /// `decide` is called once per event unless the engine is halted. A decision is scheduled,
+    /// never filled on the event that produced it: its order is due at `event.end_ms +
+    /// latency_ms` and fills at the first later event whose `start_ms` is at or after that time.
+    pub fn process_event(
+        &mut self,
+        event: &PriceEvent,
+        decide: &mut dyn FnMut() -> Option<Decision>,
+    ) {
+        let bar = event;
         let previous_bar_end = self.last_bar_end_time;
-        self.last_bar_end_time = Some(bar.end_time);
+        self.last_bar_end_time = Some(bar.end_ms);
         if self.halted {
             return;
         }
-        let day_key = bar.end_time / 86_400_000;
+        let day_key = bar.end_ms / 86_400_000;
         let mark_before = self.total_equity(bar.open);
 
         // Daily session rollover: reset watermark and circuit breaker at 00:00:00 UTC day boundary
         if self.current_day_utc != Some(day_key) {
             self.current_day_utc = Some(day_key);
-            self.daily.observe(bar.end_time, mark_before);
+            self.daily.observe(bar.end_ms, mark_before);
             self.daily_circuit_breaker_tripped = false;
         }
 
         // Monthly session rollover: the reference is the equity at the start of the UTC month.
-        let month_key = utc_month_key(bar.end_time);
+        let month_key = utc_month_key(bar.end_ms);
         if self.current_month_key != Some(month_key) {
             self.current_month_key = Some(month_key);
             self.monthly_open_equity = mark_before;
         }
 
-        // Funding settles on the position held since the previous bar, marked at this open.
+        // Funding settles on the position held since the previous event, marked at this open.
         if let Some(previous_end) = previous_bar_end {
             self.core
-                .settle_funding(previous_end, bar, &self.config, &mut self.equity);
+                .settle_funding(previous_end, *bar, &self.config, &mut self.equity);
         }
 
-        // 0. A market order submitted on the previous bar fills at this bar's open.
-        if let Some(pending) = self.core.take_pending() {
+        // 0. A market order submitted on an earlier event fills at this event's open once due.
+        if let Some(pending) = self.core.take_due_pending(bar.start_ms) {
             if !self.halted {
                 self.core
-                    .fill_entry(pending, bar, &self.config, &mut self.equity);
+                    .fill_entry(pending, *bar, &self.config, &mut self.equity);
             }
         }
 
@@ -245,7 +270,7 @@ impl BacktestEngine {
         // 1. If an active position exists, evaluate liquidation and the protective exits.
         if had_position {
             self.core.evaluate_exits(
-                bar,
+                *bar,
                 &self.config,
                 &mut self.equity,
                 &mut self.open_excursion,
@@ -264,21 +289,15 @@ impl BacktestEngine {
                 };
                 let (exit_price, slip) =
                     market_fill_price(close_side, bar.close, self.config.slippage_pct);
-                self.execute_close(
-                    bar.end_time,
-                    exit_price,
-                    slip,
-                    true,
-                    "MonthlyCircuitBreaker",
-                );
+                self.execute_close(bar.end_ms, exit_price, slip, true, "MonthlyCircuitBreaker");
             }
         }
 
-        // 2. The strategy sees every bar so its rolling state matches the live session; a
+        // 2. The strategy sees every event so its rolling state matches the live session; a
         //    signal only becomes an order when flat. A time-barrier close is sent at the end of
-        //    the bar and is still settling live, so that bar cannot open a new trade.
+        //    the event and is still settling live, so that event cannot open a new trade.
         if !self.halted {
-            let signal = match strategy.on_event(&MarketEvent::DollarBar(bar)) {
+            let signal = match decide() {
                 Some(Decision::Entry(intent)) => Some(intent),
                 Some(Decision::Target(_)) => {
                     // Target execution arrives with the execution core (odd swarm-consensus T5.3).
@@ -297,7 +316,8 @@ impl BacktestEngine {
                     && self.core.pending().is_none()
                     && !closed_by_time_barrier
                 {
-                    self.submit_entry(intent, bar.close);
+                    let due_ms = bar.end_ms.saturating_add(self.config.latency_ms);
+                    self.submit_entry(intent, bar.close, due_ms);
                 }
             }
         }
@@ -307,7 +327,7 @@ impl BacktestEngine {
         if total_val > self.peak_equity {
             self.peak_equity = total_val;
         }
-        self.daily.observe(bar.end_time, total_val);
+        self.daily.observe(bar.end_ms, total_val);
 
         let dd_amount = self.peak_equity - total_val;
         if dd_amount > self.max_drawdown_amount {
@@ -332,8 +352,8 @@ impl BacktestEngine {
         //    drawdown sample to the trade that just closed.
         if self.core.position().is_some() {
             self.open_excursion
-                .get_or_insert_with(|| TradeExcursion::start(bar.end_time, total_val))
-                .observe_equity(bar.end_time, total_val);
+                .get_or_insert_with(|| TradeExcursion::start(bar.end_ms, total_val))
+                .observe_equity(bar.end_ms, total_val);
             if let Some(excursion) = self.open_excursion.as_mut() {
                 excursion.observe_drawdown(dd_amount, dd_pct);
             }
@@ -345,8 +365,8 @@ impl BacktestEngine {
     }
 
     /// Gates and sizes a signal exactly like the live gateway (at the signal price) and queues
-    /// the market order; it fills at the next bar's open.
-    fn submit_entry(&mut self, intent: domain::OrderIntent, mark_price: Decimal) {
+    /// the market order; it fills at the open of the first event starting at or after `due_ms`.
+    fn submit_entry(&mut self, intent: domain::OrderIntent, mark_price: Decimal, due_ms: i64) {
         // If daily circuit breaker is tripped, halt trading for the remainder of today
         if self.daily_circuit_breaker_tripped {
             self.count_rejection(crate::metrics::DAILY_HALT_REJECTION);
@@ -367,7 +387,9 @@ impl BacktestEngine {
                 )
             });
         match sized {
-            Ok(quantity) => self.core.submit(PendingEntry { intent, quantity }),
+            Ok(quantity) => self
+                .core
+                .submit_due(PendingEntry { intent, quantity }, due_ms),
             Err(error) => self.count_rejection(error.kind()),
         }
     }
@@ -1582,5 +1604,68 @@ mod tests {
         let (_, trades) = engine.finish_with_trades(None);
         // Entry 0.98 x 20; exit: the target at 110 sold 1.1 below, x 20.
         assert_eq!(trades[0].slippage_paid, dec!(41.6));
+    }
+
+    fn trade_event(timestamp: i64, price: Decimal) -> PriceEvent {
+        PriceEvent::from(&domain::Trade {
+            timestamp,
+            price,
+            quantity: dec!(1),
+            side: Side::Buy,
+        })
+    }
+
+    /// Feeds trade events at `times`; the event at `times[0]` decides one long entry.
+    fn run_scripted_events(latency_ms: i64, times: &[(i64, Decimal)]) -> Vec<Option<Position>> {
+        let mut engine = BacktestEngine::new(BacktestConfig {
+            latency_ms,
+            slippage_pct: dec!(0),
+            max_daily_drawdown_pct: dec!(0.50),
+            ..BacktestConfig::default()
+        });
+        let mut entry = Some(Decision::Entry(
+            domain::OrderIntent::new(times[0].0, Side::Buy, times[0].1, dec!(90), dec!(200), 50)
+                .unwrap(),
+        ));
+        times
+            .iter()
+            .map(|&(t, price)| {
+                engine.process_event(&trade_event(t, price), &mut || entry.take());
+                engine.active_position().cloned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_decision_is_never_filled_on_the_event_that_made_it() {
+        let positions = run_scripted_events(0, &[(1_000, dec!(100)), (1_000, dec!(101))]);
+        assert!(positions[0].is_none());
+        assert_eq!(
+            positions[1].as_ref().map(|p| p.entry_price),
+            Some(dec!(101))
+        );
+    }
+
+    #[test]
+    fn a_latency_delays_the_fill_to_the_first_event_at_or_after_the_due_time() {
+        let positions = run_scripted_events(
+            100,
+            &[
+                (1_000, dec!(100)),
+                (1_050, dec!(101)),
+                (1_099, dec!(102)),
+                (1_100, dec!(103)),
+                (1_200, dec!(104)),
+            ],
+        );
+        assert!(positions[..3].iter().all(Option::is_none));
+        assert_eq!(
+            positions[3].as_ref().map(|p| p.entry_price),
+            Some(dec!(103))
+        );
+        assert_eq!(
+            positions[4].as_ref().map(|p| p.entry_price),
+            Some(dec!(103))
+        );
     }
 }

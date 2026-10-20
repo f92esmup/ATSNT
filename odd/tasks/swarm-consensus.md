@@ -169,7 +169,7 @@ Risk: item 3 and item 1-adjacent (the accounting every runner reports). An indep
     - the close accounting (`:622-688`).
   - `BacktestEngine` keeps its loop and its breaker, kill-switch, MTM, and excursion code, and delegates to the core.
   - Tests: every `engine.rs` test (`:789-1809`) and `tests/trade_excursion.rs` pass unchanged; the goldens are identical.
-- [ ] T5.2 S6: price events and decision scheduling. Route: inline.
+- [x] T5.2 S6: price events and decision scheduling. Route: delegated writer (context backstop). Done: `price_event.rs` (`PriceEvent` with `start_ms` and `end_ms`, `bucket_trades`), `BacktestError::InvalidPriceBucket`, `BacktestEngine::process_event`, and `process_bar` as a wrapper. `BacktestConfig.latency_ms` defaults to 0, is skipped when serialised, and is validated `>= 0`. `due_ms = end_ms + latency_ms`. 13 new tests; RED was 18 compile errors; a mutation check on `take_due_pending` was done. Goldens byte-identical; workspace 647 passed.
   - `PriceEvent { start_ms, open, high, low, close }`, `From<&DollarBar>`, `From<&Trade>`, and `bucket_trades(iter, bucket_ms)`.
   - `BacktestEngine::process_event(&PriceEvent, decide: &mut dyn FnMut() -> Option<Decision>)`. `process_bar` becomes `process_event(bar.into(), || strategy.on_event(Bar))`, with the same steps in the same order (spec §11.2).
   - New optional `BacktestConfig.latency_ms`, with serde default 0 and validation `≥ 0`. The pending order carries `due_ms`.
@@ -419,4 +419,9 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
   - Parent decision: a mechanical migration of those 18 lines (`engine.active_position.` → `engine.active_position().`, and one write → `engine.core.set_position_for_test(..)`). A normalised diff proved that only the access path changed and no assertion changed.
   - The goldens also normalise `git_sha` when it is `null` (a tree without `.git`), as found by the writer.
   - Evidence: fmt clean, clippy clean, `cargo test --workspace` 634 passed, 0 failed, goldens unchanged.
-- Next: T5.2 (price events and decision scheduling with `latency_ms`).
+- T5.2 deviations accepted:
+  - `PriceEvent` carries `end_ms` as well as `start_ms`, because rollovers, the funding window and exit times read the bar's end time (spec §11.1 amended).
+  - `due_ms` lives in the core next to the pending order.
+  - Core functions take `impl Into<PriceEvent>`, so existing core tests stay unchanged.
+  - Parent spot check: fmt clean, clippy clean, `cargo test --workspace` 647 passed, 0 failed. The only test-file edit is an addition in `execution_config_contract.rs` (no line removed).
+- Next: T5.3 (`Decision::Target` in the core), then the independent verifier for Phase 5.

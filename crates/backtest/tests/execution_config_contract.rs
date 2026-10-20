@@ -44,3 +44,45 @@ fn the_200_usdt_execution_config_keeps_the_policy_default_caps() {
         (defaults.max_order_notional, defaults.max_position_notional)
     );
 }
+
+#[test]
+fn every_shipped_execution_config_parses_without_a_latency_and_defaults_it_to_zero() {
+    let dir = format!("{}/../../configs", env!("CARGO_MANIFEST_DIR"));
+    let mut parsed = 0;
+    for entry in std::fs::read_dir(&dir).expect("configs directory") {
+        let path = entry.expect("directory entry").path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if !(name.starts_with("execution_") && name.ends_with(".json")) {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).expect("execution config file");
+        assert!(
+            !content.contains("latency_ms"),
+            "{name} already sets a latency"
+        );
+        let config: BacktestConfig =
+            serde_json::from_str(&content).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(config.latency_ms, 0, "{name}");
+        config
+            .validate()
+            .unwrap_or_else(|e| panic!("{name} must validate: {e}"));
+        parsed += 1;
+    }
+    assert!(
+        parsed >= 2,
+        "expected the shipped execution configs, found {parsed}"
+    );
+}
+
+#[test]
+fn a_negative_latency_fails_validation() {
+    let config = BacktestConfig {
+        latency_ms: -1,
+        ..load("execution_real_500eur.json")
+    };
+    assert!(config.validate().is_err());
+}

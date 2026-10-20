@@ -11,12 +11,15 @@
 //! byte-identical to the pre-extraction engine (proved by `tests/golden_execution.rs`).
 
 use domain::futures;
-use domain::{DollarBar, OrderIntent, Position, PositionSide, ProtectiveExits, Side};
+#[cfg(test)]
+use domain::DollarBar;
+use domain::{OrderIntent, Position, PositionSide, ProtectiveExits, Side};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
 use crate::config::BacktestConfig;
 use crate::metrics::{ClosedTrade, TradeExcursion};
+use crate::price_event::PriceEvent;
 
 /// A submitted entry: the strategy intent and the quantity sized when it was signalled.
 #[derive(Debug, Clone)]
@@ -70,19 +73,21 @@ fn opening_side(side: PositionSide) -> Side {
     }
 }
 
-/// Evaluates the protective exits of a position on `side` against one bar.
+/// Evaluates the protective exits of a position on `side` against one price event (a
+/// [`domain::DollarBar`] converts into one with the same OHLC).
 ///
-/// Barrier exits are market orders: they fill at the trigger or, when the bar gapped through
+/// Barrier exits are market orders: they fill at the trigger or, when the event gapped through
 /// it, at the open, and pay slippage against the position. The stop is checked first, then
 /// the take profit (when there is one), then the time limit (when there is one) at the close.
 /// The reported stop slippage is measured against the trigger so it includes the gap.
 pub fn barrier_exit(
     side: PositionSide,
     exits: &ProtectiveExits,
-    bar: &DollarBar,
+    event: impl Into<PriceEvent>,
     bars_held: usize,
     slippage_pct: Decimal,
 ) -> Option<BarrierExit> {
+    let bar = event.into();
     let close_side = closing_side(side);
     let time_due = exits.max_bars.is_some_and(|max_bars| bars_held >= max_bars);
     match side {
@@ -189,8 +194,10 @@ pub struct ExecutionCore {
     position: Option<Position>,
     intent: Option<OrderIntent>,
     exits: Option<ProtectiveExits>,
-    /// Market order sized at the signal bar and waiting for the next bar's open to fill.
+    /// Market order sized at the signal event and waiting for its due time to fill.
     pending: Option<PendingEntry>,
+    /// Earliest event start, in Unix milliseconds, at which `pending` may fill.
+    pending_due_ms: i64,
     bars_held: usize,
     entry_time: Option<i64>,
     entry_fee: Decimal,
@@ -228,14 +235,35 @@ impl ExecutionCore {
         self.pending.as_ref()
     }
 
-    /// Queues a market order; it fills on the next [`ExecutionCore::fill_entry`].
+    /// Queues a market order that is due immediately: it fills on the next event.
     pub fn submit(&mut self, pending: PendingEntry) {
-        self.pending = Some(pending);
+        self.submit_due(pending, i64::MIN);
     }
 
-    /// Removes and returns the pending market order.
+    /// Queues a market order that may fill on the first event starting at or after `due_ms`.
+    pub fn submit_due(&mut self, pending: PendingEntry, due_ms: i64) {
+        self.pending = Some(pending);
+        self.pending_due_ms = due_ms;
+    }
+
+    /// Earliest event start at which the pending order may fill, if one is pending.
+    pub fn pending_due_ms(&self) -> Option<i64> {
+        self.pending.as_ref().map(|_| self.pending_due_ms)
+    }
+
+    /// Removes and returns the pending market order, whether or not it is due.
     pub fn take_pending(&mut self) -> Option<PendingEntry> {
         self.pending.take()
+    }
+
+    /// Removes and returns the pending market order when it is due on an event starting at
+    /// `event_start_ms` (`due_ms <= event_start_ms`); otherwise leaves it pending.
+    pub fn take_due_pending(&mut self, event_start_ms: i64) -> Option<PendingEntry> {
+        if self.pending_due_ms <= event_start_ms {
+            self.pending.take()
+        } else {
+            None
+        }
     }
 
     /// Bars the open position has been held.
@@ -264,21 +292,22 @@ impl ExecutionCore {
         self.position = Some(position);
     }
 
-    /// Charges every funding settlement in `(previous_end, bar.end_time]` to the open position,
-    /// marked at the bar's open.
+    /// Charges every funding settlement in `(previous_end, event.end_ms]` to the open position,
+    /// marked at the event's open.
     pub fn settle_funding(
         &mut self,
         previous_end: i64,
-        bar: &DollarBar,
+        event: impl Into<PriceEvent>,
         config: &BacktestConfig,
         equity: &mut Decimal,
     ) {
+        let bar = event.into();
         let Some(position) = &self.position else {
             return;
         };
         let side = opening_side(position.side);
         let settlements =
-            futures::funding_settlements(futures::FUNDING_INTERVAL_MS, previous_end, bar.end_time);
+            futures::funding_settlements(futures::FUNDING_INTERVAL_MS, previous_end, bar.end_ms);
         for _ in settlements {
             let payment = futures::funding_payment(
                 side,
@@ -291,17 +320,19 @@ impl ExecutionCore {
         }
     }
 
-    /// Fills a pending market order at the bar's open plus adverse slippage.
+    /// Fills a pending market order at the event's open plus adverse slippage; the entry time
+    /// is the event's start.
     ///
     /// The exchange runs the position at the lowest leverage the balance can margin; an order
     /// it cannot margin at any supported leverage is dropped.
     pub fn fill_entry(
         &mut self,
         pending: PendingEntry,
-        bar: &DollarBar,
+        event: impl Into<PriceEvent>,
         config: &BacktestConfig,
         equity: &mut Decimal,
     ) {
+        let bar = event.into();
         let PendingEntry { intent, quantity } = pending;
         let (fill_price, slip) = market_fill_price(intent.side, bar.open, config.slippage_pct);
 
@@ -338,7 +369,7 @@ impl ExecutionCore {
             self.exits = Some(ProtectiveExits::from_intent(&intent));
             self.intent = Some(intent);
             self.bars_held = 0;
-            self.entry_time = Some(bar.start_time);
+            self.entry_time = Some(bar.start_ms);
             self.entry_fee = entry_fee;
             self.entry_slippage = adverse_per_unit * quantity;
             self.margin = notional / Decimal::from(leverage);
@@ -346,17 +377,18 @@ impl ExecutionCore {
         }
     }
 
-    /// Counts one more bar held and closes the position when it is liquidated or a protective
-    /// exit triggers on this bar. Liquidation is evaluated first.
+    /// Counts one more event held and closes the position when it is liquidated or a protective
+    /// exit triggers on this event, at the event's end time. Liquidation is evaluated first.
     pub fn evaluate_exits(
         &mut self,
-        bar: &DollarBar,
+        event: impl Into<PriceEvent>,
         config: &BacktestConfig,
         equity: &mut Decimal,
         excursion: &mut Option<TradeExcursion>,
     ) {
+        let bar = event.into();
         self.bars_held += 1;
-        if self.liquidate_if_due(bar, config, equity, excursion) {
+        if self.liquidate_if_due(&bar, config, equity, excursion) {
             return;
         }
         let (Some(exits), Some(position)) = (self.exits, &self.position) else {
@@ -370,7 +402,7 @@ impl ExecutionCore {
             config.slippage_pct,
         ) {
             self.execute_close(
-                bar.end_time,
+                bar.end_ms,
                 exit.price,
                 exit.slippage_per_unit,
                 true,
@@ -400,7 +432,7 @@ impl ExecutionCore {
     /// this bar: the mark reaches the liquidation price before the stop trades, or gaps through.
     fn liquidate_if_due(
         &mut self,
-        bar: &DollarBar,
+        bar: &PriceEvent,
         config: &BacktestConfig,
         equity: &mut Decimal,
         excursion: &mut Option<TradeExcursion>,
@@ -434,7 +466,7 @@ impl ExecutionCore {
             self.margin,
         );
         self.close_with_fee_rate(
-            bar.end_time,
+            bar.end_ms,
             bankruptcy,
             Decimal::ZERO,
             Decimal::ZERO,

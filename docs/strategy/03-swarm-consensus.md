@@ -747,8 +747,8 @@ These rules are part of the single execution model (Section 3). They are written
 
 ### 11.1 Price events
 
-The core consumes **price events**: OHLC buckets of trades, stamped with the timestamp of their
-first trade.
+The core consumes **price events**: OHLC buckets of trades, with the timestamps of their first
+(`start_ms`) and last (`end_ms`) trade; a dollar bar maps to its own start and end times.
 
 | Run | Price event | Source |
 | :--- | :--- | :--- |

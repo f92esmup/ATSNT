@@ -16,6 +16,7 @@ pub mod operator_alerts;
 pub mod optimization;
 pub mod paper;
 pub mod parity;
+pub mod price_event;
 pub mod recording;
 pub mod registry;
 pub mod run;
@@ -57,6 +58,7 @@ pub use paper::{
     PaperSessionOwner, PaperSessionRuntime, PaperTradingConfig, PaperTradingEvent,
     PaperTradingSession, TelemetryConfig, TelemetryEnvelope,
 };
+pub use price_event::{bucket_trades, PriceEvent};
 pub use recording::{
     now_unix_ms, record_backtest, record_closed_trade, record_hpo, record_monte_carlo,
     record_run_status, DataWindow, RunContext, RunStatus, GIT_SHA,

@@ -15,6 +15,10 @@ pub enum BacktestError {
     #[error("domain error: {0}")]
     Domain(#[from] domain::DomainError),
 
+    /// A price bucket width that is not a positive number of milliseconds.
+    #[error("price bucket must be a positive number of milliseconds, got {0}")]
+    InvalidPriceBucket(i64),
+
     #[error("{0}")]
     General(String),
 }

@@ -33,8 +33,8 @@ fn default_maintenance_margin_rate() -> Decimal {
 /// Friction parameters and account risk settings for 1:1 realistic simulation.
 ///
 /// Targets the Zero-Toy-Assumption Principle specified in AGENTS.md. Today it models fee
-/// schedules and a fixed per-fill slippage; bid/ask spread, latency and funding are not yet
-/// modeled (see `odd/tasks/sim-live-fidelity.md`).
+/// schedules, a fixed per-fill slippage, funding, isolated margin and an order latency
+/// (`latency_ms`); bid/ask spread is not yet modeled (see `odd/tasks/sim-live-fidelity.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BacktestConfig {
     /// Starting capital in quote currency (USDT).
@@ -87,6 +87,17 @@ pub struct BacktestConfig {
     /// isolated position (a flat stand-in for the exchange's notional brackets).
     #[serde(default = "default_maintenance_margin_rate")]
     pub maintenance_margin_rate: Decimal,
+    /// Delay, in milliseconds, between a decision and the earliest price event its order can
+    /// fill on: the order is due at the deciding event's end time plus this latency and fills
+    /// at the first event that starts at or after that time. `0` (the default, and the value of
+    /// every legacy execution context) fills at the next event, i.e. the next bar's open. It is
+    /// omitted from the serialized form while it is `0`, so existing contexts serialize as before.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub latency_ms: i64,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 impl BacktestConfig {
@@ -192,6 +203,12 @@ impl BacktestConfig {
                 self.maintenance_margin_rate
             )));
         }
+        if self.latency_ms < 0 {
+            return Err(crate::error::BacktestError::General(format!(
+                "latency_ms must be at least 0, got {}",
+                self.latency_ms
+            )));
+        }
         Ok(())
     }
 }
@@ -214,6 +231,7 @@ impl Default for BacktestConfig {
             max_position_notional: None,
             funding_rate_pct: default_funding_rate_pct(),
             maintenance_margin_rate: default_maintenance_margin_rate(),
+            latency_ms: 0,
         }
     }
 }
@@ -362,5 +380,33 @@ mod tests {
             ..BacktestConfig::default()
         }
         .has_explicit_notional_caps());
+    }
+
+    #[test]
+    fn latency_defaults_to_zero_and_a_negative_latency_is_rejected() {
+        assert_eq!(BacktestConfig::default().latency_ms, 0);
+        let config = BacktestConfig {
+            latency_ms: 100,
+            ..BacktestConfig::default()
+        };
+        assert!(config.validate().is_ok());
+        let config = BacktestConfig {
+            latency_ms: -1,
+            ..BacktestConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn a_zero_latency_serializes_exactly_as_before_and_a_set_one_round_trips() {
+        let json = serde_json::to_string(&BacktestConfig::default()).unwrap();
+        assert!(!json.contains("latency_ms"), "{json}");
+        let config = BacktestConfig {
+            latency_ms: 100,
+            ..BacktestConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: BacktestConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
     }
 }
