@@ -213,7 +213,7 @@ Risk: item 3 and item 1-adjacent (the accounting every runner reports). An indep
 
 New module `crates/strategies/src/swarm_consensus/` with `mod.rs`, `genome.rs`, `agent.rs`, `rules.rs`, `ensemble.rs`, `audit.rs`, and `policy.rs`. Route: inline. It is one coherent unit, with no parallel reason.
 
-- [ ] T6.1 S1, S4: genome (spec §7).
+- [x] T6.1 S1, S4: genome (spec §7). Route: delegated writer A (parallel with T6.5). Done: 8 tests; RED by single mutations (the writer coded and tested in one pass).
   - `GenePrior` table, `sample_swarm(seed, agents_per_feed)`, Box–Muller in `Decimal` from `StdRng`, clamps (including `atr_contraction < atr_expansion`), and per-gene clamp-hit counters.
   - Tests:
     - the same seed gives the same swarm, and a different seed a different one;
@@ -221,13 +221,13 @@ New module `crates/strategies/src/swarm_consensus/` with `mod.rs`, `genome.rs`, 
     - every gene within its clamp;
     - over 20,000 draws the sample mean is within 4 standard errors;
     - a source-scan test finds no `f32`/`f64` in the module.
-- [ ] T6.2 S1, S4: macro and micro detectors in `agent.rs` (spec §8.1–8.2).
+- [x] T6.2 S1, S4: macro and micro detectors in `agent.rs` (spec §8.1–8.2). Done: 12 tests; RED against stubbed detectors (8 failed).
   - Tests:
     - one positive and one negative case per state and per pattern;
     - an equal-to-threshold value does not fire;
     - a flat bar is no pin bar (C10);
     - the break of structure needs an earlier bar and uses its margin in ATR units.
-- [ ] T6.3 S2, S4, S5: rule table, mirror, and resolution in `rules.rs` (spec §8.3–8.4).
+- [x] T6.3 S2, S4, S5: rule table, mirror, and resolution in `rules.rs` (spec §8.3–8.4). Done: 13 tests, including rotation and reversal permutations over 500 seeded inputs and reflection symmetry; RED by mutations (a first-match `break`, no noise veto, etc.).
   - Tests:
     - E1–X4 and their mirrors fire on their minimal inputs;
     - X2 and X2′ fire together;
@@ -237,7 +237,7 @@ New module `crates/strategies/src/swarm_consensus/` with `mod.rs`, `genome.rs`, 
     - opposite entries give `(0, 0)`;
     - the noise veto;
     - long-only never votes short.
-- [ ] T6.4 S1, S3: ensemble and audit in `ensemble.rs` and `audit.rs` (spec §9, §16).
+- [x] T6.4 S1, S3: ensemble and audit in `ensemble.rs` and `audit.rs` (spec §9, §16). Done: 15 tests; RED by mutations (readiness checked only on feed 0, stop reference taken from feed 0, ×10 scale, audit sum).
   - `SwarmEnsemble` implements `FeatureExtractor<Features = ConsensusSample>`.
   - Tests:
     - one sample per trade even when several feeds close on it;
@@ -248,7 +248,7 @@ New module `crates/strategies/src/swarm_consensus/` with `mod.rs`, `genome.rs`, 
     - deterministic replay;
     - `reset()` equals fresh;
     - the audit counters sum to the number of agent evaluations.
-- [ ] T6.5 S2, S6: `ConsensusPolicy` and `SwarmPolicySpace` in `policy.rs` (spec §10, §14.2).
+- [x] T6.5 S2, S6: `ConsensusPolicy` and `SwarmPolicySpace` in `policy.rs` (spec §10, §14.2). Route: delegated writer B (parallel). Done: 18 tests, including the §18 worked example; RED against `todo!()` (17 failed). The grid is pinned at 1,470 candidates after A8.
   - Tests:
     - the worked example of spec §18, table-driven;
     - a jump from 0 to 3;
@@ -258,7 +258,7 @@ New module `crates/strategies/src/swarm_consensus/` with `mod.rs`, `genome.rs`, 
     - the grid count after the A8 filter is pinned;
     - every neighbour is on the grid;
     - it emits only on change.
-- [ ] T6.6 S1, S10: `SwarmConsensusStrategy` in `mod.rs`. Route: inline.
+- [x] T6.6 S1, S10: `SwarmConsensusStrategy` in `mod.rs`. Route: inline. Done (commit d0ef041): `Strategy` (input `Trades`, `on_event` = extractor + `on_features`, `audit`) and `OptimizableStrategy` (`SwarmConfig` / `PolicyConfig` / `SwarmPolicySpace` / `SwarmEnsemble`). One registry line (`swarm`). `Strategy::audit` added with a default of `None`. RED: 7 compile errors, then 3 tests green; the generic contract suite now runs for the swarm.
   - It implements `OptimizableStrategy` with id `swarm_consensus` and alias `swarm`, `input_kind = Trades`. It is registered with **one line** in the existing `register_strategies!` macro, plus `pub mod` in `lib.rs`.
   - `Strategy::audit()` is a new trait method that defaults to `None` and returns `serde_json::Value`. The swarm overrides it with its audit.
   - Tests: the generic contract suite passes for the swarm through the existing `every_registered_strategy_honours_the_contract`; the `SharedConfig` and `Config` JSON round-trip.
@@ -443,4 +443,14 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
   - Advisories fixed in T5.4: A1, 4b, A2, A3.
   - Accepted and written into the spec: 4a (a Target during an Entry position is `UnsupportedDecision`), 4c (the liquidation clip before the fill), A6 (a level that sizes to 0 is `TargetExit`, documented).
   - Left: A4 (a flip's closed trade misses its post-exit drawdown sample) and A5 (the reduction leverage fallback); both minor.
-- Next: Phase 6 (the swarm strategy: genome, detectors, rules, ensemble, policy, registration).
+- L16 (2026-10-20) User: "yes" (start Phase 6); L17 "continua" (resume after writer A hit an API session limit; its saved work was resumed, not restarted).
+  - Phase 6 evidence (commit d0ef041):
+    - The parent wrote `sample.rs` (`ConsensusSample`) and the module skeleton first, so the two writers had disjoint surfaces.
+    - Seam check: fmt clean, clippy clean, `cargo test --workspace` 743 passed, 0 failed, goldens unchanged.
+  - Writer A findings:
+    - (1) Doji asymmetry in spec §8.2: a dragonfly doji (C=O=H>L) is a bullish pin bar, but its reflection (a gravestone doji) is not a bearish one, because the bearish detector requires C<O. Implemented exactly as specified. The reflection test uses bars with a body. **Open for the user:** add a symmetric guard?
+    - (2) Exact reflection also reflects the RSI genes (`ob' = 100 - os`).
+    - (3) Rule firing counts are taken before the noise veto.
+    - (4) A warm feed whose next bar yields no snapshot (ATR 0) votes as cold until it recovers.
+    - (5) The default `SwarmConfig` tick, volume and range thresholds are placeholders until calibrated.
+- Next: Phase 7 (optimiser tape, run_hpo for Trades strategies, backtest CLI, calibrate_feeds).
