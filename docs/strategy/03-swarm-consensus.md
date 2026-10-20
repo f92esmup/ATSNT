@@ -522,7 +522,7 @@ runs; none short-circuits another. The result is a **set** of `(pattern, directi
 | Pattern | Direction | Condition |
 | :--- | :--- | :--- |
 | Pin bar | Up | `C0 ≥ O0`, `H0 > L0`, lower wick `O0 - L0 > 0`, `O0 - L0 ≥ pinbar_long_ratio · body0`, `H0 - C0 ≤ pinbar_short_ratio · body0` |
-| Pin bar | Down | `C0 < O0`, upper wick `H0 - O0 ≥ pinbar_long_ratio · body0`, lower wick `C0 - L0 ≤ pinbar_short_ratio · body0` |
+| Pin bar | Down | `C0 ≤ O0`, `H0 > L0`, upper wick `H0 - O0 > 0`, `H0 - O0 ≥ pinbar_long_ratio · body0`, `C0 - L0 ≤ pinbar_short_ratio · body0` |
 | Engulfing | Up | `C0 > O0`, `C1 < O1`, `O0 ≤ C1`, `C0 ≥ O1`, `(C0 - O0) > engulfing_ratio · (O1 - C1)` |
 | Engulfing | Down | `C0 < O0`, `C1 > O1`, `O0 ≥ C1`, `C0 ≤ O1`, `(O0 - C0) > engulfing_ratio · (C1 - O1)` |
 | Inside bar | Neutral | `H0 < H1`, `L0 > L1`, `(H0 - L0) ≤ insidebar_ratio · (H1 - L1)` |
@@ -534,7 +534,7 @@ Notes on fidelity:
 - The pin-bar-up detector adds `H0 > L0` and a strictly positive lower wick (correction C10). In
   the original, a flat bar (`O = H = L = C`) satisfied the bullish pin bar: zero body makes both
   wick inequalities trivially true. Flat bars are common on small tick bars.
-- The pin-bar-down detector needs no extra guard: `C0 < O0` already forces a non-zero body.
+- The pin-bar-down detector is the exact mirror of the up detector (user decision, 2026-10-20). The original required `C0 < O0`, so a gravestone doji (`O = C = L < H`) was never a bearish pin bar, while its mirror, the dragonfly doji, was a bullish one. That asymmetry broke the reflection invariant of §8.4.
 - The break of structure compares against every bar in the 50-bar window, as the CLIPS
   `(not (vela ...))` pattern did. The margin is now in ATR units (correction C5).
 - An empty micro set is **noise**.

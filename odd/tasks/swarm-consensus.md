@@ -453,4 +453,10 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
     - (3) Rule firing counts are taken before the noise veto.
     - (4) A warm feed whose next bar yields no snapshot (ATR 0) votes as cold until it recovers.
     - (5) The default `SwarmConfig` tick, volume and range thresholds are placeholders until calibrated.
+- L18 (2026-10-20) User: "si, la hacemos simétrica. Y si, continua con la fase 7"
+  - Decision: the bearish pin bar is now the exact mirror of the bullish one (`C0 ≤ O0`, `H0 > L0`, positive upper wick). A gravestone doji counts as bearish, as the dragonfly doji counts as bullish. Spec §8.2 updated.
+  - Evidence:
+    - RED: the new test `dojis_are_pin_bars_symmetrically` failed on the gravestone, then went GREEN.
+    - The reflection test fixture now includes dojis (1 in 10) and passes.
+    - `cargo test -p strategies` 105 passed; clippy clean.
 - Next: Phase 7 (optimiser tape, run_hpo for Trades strategies, backtest CLI, calibrate_feeds).

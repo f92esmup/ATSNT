@@ -240,8 +240,11 @@ pub fn micro_patterns(genome: &Genome, window: &[FeedBar], atr: Decimal) -> Micr
     {
         set.insert(Pattern::PinBar, Direction::Up);
     }
-    // Pin bar down: `C0 < O0` already forces a non-zero body.
-    if c0 < o0
+    // Pin bar down, the exact mirror of the up case: positive range and a positive upper wick,
+    // so a gravestone doji is a bearish pin bar as a dragonfly doji is a bullish one.
+    if c0 <= o0
+        && h0 > l0
+        && h0 - o0 > Decimal::ZERO
         && h0 - o0 >= genome.pinbar_long_ratio * body0
         && c0 - l0 <= genome.pinbar_short_ratio * body0
     {
@@ -446,6 +449,20 @@ pub(crate) mod tests {
         assert!(micro(&[yes]).contains(Pattern::PinBar, Direction::Down));
         let short_wick = bar(dec!(10.5), dec!(11), dec!(9.9), dec!(10));
         assert!(!micro(&[short_wick]).contains(Pattern::PinBar, Direction::Down));
+    }
+
+    #[test]
+    fn dojis_are_pin_bars_symmetrically() {
+        // Dragonfly doji: O = C = H above a long lower wick.
+        let dragonfly = bar(dec!(10), dec!(10), dec!(9), dec!(10));
+        let set = micro(&[dragonfly]);
+        assert!(set.contains(Pattern::PinBar, Direction::Up));
+        assert!(!set.contains(Pattern::PinBar, Direction::Down));
+        // Its mirror, the gravestone doji: O = C = L below a long upper wick.
+        let gravestone = bar(dec!(10), dec!(11), dec!(10), dec!(10));
+        let set = micro(&[gravestone]);
+        assert!(set.contains(Pattern::PinBar, Direction::Down));
+        assert!(!set.contains(Pattern::PinBar, Direction::Up));
     }
 
     #[test]

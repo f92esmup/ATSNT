@@ -777,13 +777,14 @@ mod tests {
         Decimal::new(rng.gen_range(9_000..11_000), 2)
     }
 
-    /// A random candle with a non-zero body (see the doji note in the report of §8.2).
+    /// A random candle; one in ten is a doji, whose pin-bar rules are mirror images too.
     fn random_bar(rng: &mut StdRng) -> FeedBar {
         let open = price(rng);
-        let mut close = price(rng);
-        if close == open {
-            close += dec!(0.01);
-        }
+        let close = if rng.gen_range(0..10) == 0 {
+            open
+        } else {
+            price(rng)
+        };
         let high = open.max(close) + Decimal::new(rng.gen_range(0..300), 2);
         let low = open.min(close) - Decimal::new(rng.gen_range(0..300), 2);
         bar(open, high, low, close)
