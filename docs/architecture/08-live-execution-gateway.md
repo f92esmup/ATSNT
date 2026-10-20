@@ -57,6 +57,11 @@ The Live Execution Gateway (`crates/adapters`) represents the final frontier: tr
    - REST endpoints submit and cancel orders.
    - The WebSocket User Data Stream reconciles fills, partial fills, slippage, and commissions in real time.
 
+5. **Product Gate & Target Decision Rejection**:
+   - `live_trading` asserts that the configured strategy does not emit target decisions (`strategy.emits_targets() == false`). Strategies emitting targets (e.g. `SwarmConsensusStrategy`) are rejected offline before any network calls:
+     `strategy '<id>' emits target-position decisions, which paper_trading and live_trading do not accept yet`.
+   - The gateway implements `submit_order` (`place_market_order`) for explicit market orders with `reduce_only` protection, and `place_stop_exit` when conditional take-profit orders are omitted.
+
 ---
 
 ## 2. Environments: Testnet vs Production

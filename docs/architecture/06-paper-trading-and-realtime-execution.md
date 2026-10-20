@@ -59,6 +59,12 @@ pub trait AsyncMarketDataStream {
 - Aggressor resolution: `is_buyer_maker == true` $\rightarrow$ `Side::Sell`, `false` $\rightarrow$ `Side::Buy`.
 - Resilience: Background task with exponential backoff reconnection, periodic Ping/Pong heartbeats, and bounded MPSC backpressure buffer (`capacity: 10,000`).
 
+### 2.3 Decision Scope & Product Gate
+- **Decision Models**: The engine unifies execution under `Decision::Entry` (triple-barrier signals with entry price, stop loss, take profit, max bars) and `Decision::Target` (target allocation levels).
+- **Product Gate**: Strategies declaring `Strategy::emits_targets() == true` (e.g. `SwarmConsensusStrategy`) are rejected offline by `paper_trading` prior to establishing any WebSocket connection:
+  `strategy '<id>' emits target-position decisions, which paper_trading and live_trading do not accept yet`.
+- **Venue Abstraction**: Venues implement `ExecutionVenue::submit_order` for explicit market orders with `reduce_only` protection, and `ExitGateway::place_exits` takes `take_profit: Option<Decimal>` allowing single-leg stop exits.
+
 ---
 
 ## 3. Real-Time Order Matching & Friction Modeling

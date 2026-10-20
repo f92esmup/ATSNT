@@ -51,11 +51,12 @@ cargo fmt --check
 
 ### CLI Tools & Binaries Index
 
-The repository provides 9 specialized CLI binaries built with `clap` (run any with `--help` for full parameter documentation):
+The repository provides 10 specialized CLI binaries built with `clap` (run any with `--help` for full parameter documentation):
 
 | Binary / Tool | Crate | Purpose | Quick Command | Detailed Guide |
 | :--- | :--- | :--- | :--- | :--- |
 | `fetch_data` | `adapters` | Official Binance ETL: downloads historical `aggTrades` & converts to Parquet | `cargo run -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2026 --month 1` | [Step 1](#step-1-download--convert-real-market-data-binance-etl) |
+| `calibrate_feeds` | `backtest` | Calibrates multi-timeframe tick, volume, and range bar thresholds from historical trades | `cargo run -p backtest --bin calibrate_feeds -- --data <PATH> --from 2025-01-01 --to 2025-02-01 -o swarm_shared.json` | [Swarm Consensus Guide](docs/strategy/03-swarm-consensus.md) |
 | `backtest` | `backtest` | Deterministic 1:1 event simulator and Monte Carlo stress testing (BigQuery & GCS export) | `cargo run -p backtest -- --data data/sample_trades.csv --strategy dollar_bars_cusum --capital 200 --gcp-bigquery` | [Step 2](#step-2-run-deterministic-11-backtest) & [Step 3](#step-3-run-monte-carlo-stress-simulation) |
 | `run_hpo` | `backtest` | Multi-core CPU parallel hyperparameter optimization (Rayon + WFO, BigQuery export) | `cargo run -p backtest --bin run_hpo -- --data <PATH> --strategy dollar_bars_cusum --capital 200 --folds 3 --gcp-bigquery` | [Step 4](#step-4-run-parallel-walk-forward-hyperparameter-optimization-hpo) |
 | `stream_trades`| `adapters` | Live Binance WebSocket feed accumulating and printing Dollar Bars | `cargo run -p adapters --bin stream_trades -- --symbol btcusdt --threshold 50000` | [Step 5](#step-5-live-market-data-ingestion--dollar-bar-streaming) |
@@ -252,7 +253,43 @@ cargo run -p backtest --bin run_hpo -- \
 
 ---
 
-### Step 5: Live Market Data Ingestion & Dollar Bar Streaming
+### Step 4b: Swarm Consensus Strategy (Multi-Feed & Multi-Agent Ensemble)
+The Swarm Consensus strategy operates directly on raw trades across 16 multi-timeframe bar feeds (time, tick, volume, range) and an ensemble of 96 diverse agents with dynamic consensus voting:
+
+1. **Calibrate Feed Thresholds**:
+   Calculates tick, volume, and range bar thresholds using data strictly prior to the evaluated period:
+   ```bash
+   cargo run -p backtest --bin calibrate_feeds -- \
+     --data <aggTrades> \
+     --from 2025-01-01 --to 2025-02-01 \
+     -o swarm_shared.json
+   ```
+
+2. **Run Walk-Forward HPO on Feature Tape**:
+   Evaluates 96-agent ensemble features once and explores policy candidates over 1-second price buckets:
+   ```bash
+   cargo run -p backtest --bin run_hpo -- \
+     --strategy swarm \
+     --data <aggTrades> \
+     --shared-config swarm_shared.json \
+     --price-bucket-ms 1000 \
+     --embargo-ms 86400000 \
+     --candidates 1470
+   ```
+
+3. **Deterministic Backtest & Audit**:
+   Backtest at trade resolution or high-fidelity tick level (`--fill-model tick`):
+   ```bash
+   cargo run -p backtest -- \
+     --strategy swarm \
+     --data <aggTrades> \
+     --shared-config swarm_shared.json \
+     --strategy-config configs/hpo_results.json \
+     --fill-model tick
+   ```
+   Outputs full ensemble audit metrics (agent evaluations, vote agreement, rule activations) alongside standard trade metrics.
+
+---
 Subscribe to the real-time Binance WebSocket feed and stream live ticks into the `DollarBarAggregator`:
 
 ```bash

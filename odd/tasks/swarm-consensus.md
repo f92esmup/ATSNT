@@ -327,13 +327,12 @@ Risk: item 3 (ports and the live adapter) and item 2-adjacent (live order placem
 
 ### Phase 9: Documentation, data, and verification (S1, S8)
 
-- [ ] T9.1 S8, S10: architecture docs. Route: inline.
-  - `12-adding-a-strategy.md`: rewritten for the unified contract, including two-stage strategies.
-  - `04-hpo-and-walk-forward.md`: the tape.
-  - `06-paper-trading-and-realtime-execution.md` and `08-live-execution-gateway.md`: decisions, `submit_order`, the optional take profit, and the gate.
-  - `13-bi-data-contract.md`: `TargetExit` and `TargetFlip`.
-  - `README.md`: calibrate, then HPO, then the trade-resolution and tick backtests.
-  - The strategy spec, wherever the implementation changed a detail.
+- [x] T9.1 S8, S10: architecture docs. Route: inline. Done:
+  - `12-adding-a-strategy.md`: updated with the unified strategy contract, single-stage vs. two-stage strategies, `Decision::Target` and `Decision::Entry`.
+  - `04-hpo-and-walk-forward.md`: updated with `OptimizableStrategy`, two-stage execution, and `Tape<F>`.
+  - `06-paper-trading-and-realtime-execution.md` and `08-live-execution-gateway.md`: documented the paper/live product gate, `submit_order`, and optional take-profit stops.
+  - `13-bi-data-contract.md`: confirmed `TargetExit` and `TargetFlip` documented in the BigQuery schema contract.
+  - `README.md`: added `calibrate_feeds` CLI and Step 4b describing the full Swarm Consensus workflow.
 - [ ] T9.2 S1: data, calibration, and a local run. Route: inline. Operational task, no code.
   - The period is decided with the user before fetching. Fetch with `fetch_data`, then `calibrate_feeds`, a local `run_hpo`, and the bar and tick backtests of the finalists.
   - Record the audit, the scorecard, and an honest verdict in the Log.

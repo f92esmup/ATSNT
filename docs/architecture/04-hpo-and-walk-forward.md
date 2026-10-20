@@ -150,37 +150,58 @@ pub trait HyperparameterSpace: Send + Sync + Clone {
 }
 
 pub trait OptimizableStrategy: Strategy + Sync + Sized {
-    type Config: Clone + Send + Sync + Serialize + DeserializeOwned + Debug + Display + 'static;
+    type SharedConfig: Clone + Send + Sync + Serialize + DeserializeOwned + Debug + Display + 'static;
+    type Config: Clone + Send + Sync + Serialize + DeserializeOwned + Debug + Display + Default + 'static;
     type Space: HyperparameterSpace<Config = Self::Config>;
+    type Features: Clone + Send + Sync + 'static;
+    type Extractor: FeatureExtractor<Features = Self::Features>;
+    type Policy: FeaturePolicy<Features = Self::Features>;
 
-    /// Canonical identifier for the strategy (e.g. "dollar_bars_cusum").
+    /// Canonical identifier for the strategy (e.g. "dollar_bars_cusum", "swarm_consensus").
     fn id() -> &'static str;
 
-    /// Constructs a strategy instance from its parameters.
-    fn from_config(config: Self::Config) -> Result<Self, DomainError>;
+    /// Constructs a strategy instance from shared configuration and candidate parameters.
+    fn from_config(shared: &Self::SharedConfig, config: Self::Config) -> Result<Self, DomainError>;
 
     /// Provides the default hyperparameter search space.
     fn default_space() -> Self::Space;
+
+    /// Constructs the feature extractor for two-stage optimization.
+    fn extractor(shared: &Self::SharedConfig) -> Self::Extractor;
+
+    /// Evaluates candidate policy against extracted features.
+    fn on_features(policy: &mut Self::Policy, features: &Self::Features) -> Option<Decision>;
 }
 ```
 
-### 4.2 Decoupled Engine Execution
+### 4.2 Decoupled Engine Execution & The Feature Tape (`Tape<F>`)
 The `WalkForwardOptimizer<S: OptimizableStrategy>` operates agnostically across Rayon worker threads:
+- **Feature Tape (`Tape<F>`)**: Evaluates computationally intensive indicators or multi-feed ensemble models **once** across the dataset into a `Tape<F> { features: Vec<(i64, F)>, prices: Vec<PriceEvent> }`.
+  - For single-stage dollar bar strategies (`DollarBarsCusum`, `OrderFlowImbalance`), the tape wraps dollar bars (`Tape<DollarBar>`) with zero-copy price events.
+  - For two-stage strategies (`SwarmConsensus`), trades pass through `FeatureExtractor` once into `Tape<ConsensusSample>`, while market prices are downsampled into uniform buckets (e.g. 1 s `--price-bucket-ms`).
 - **Candidate Generation**: Delegated to `parameter_space.generate_candidates(max_candidates)`.
 - **Plateau Stability**: Evaluated mathematically via `calculate_parameter_stability::<S>()`, delegating local coordinate perturbation to `space.perturb_neighbors(base)`.
-- **Simulation**: Executed in isolation across folds via `run_backtest_slice::<S>(config, candidate, slice)`.
+- **Simulation**: Executed in isolation across folds via `run_tape_slice::<S>(engine_config, policy, tape, slice)` through `BacktestEngine::process_event`.
 
 ### 4.3 Integrating a New Strategy
 To enable automated hyperparameter optimization for any new strategy, implement `HyperparameterSpace` and `OptimizableStrategy`:
 
 ```rust
 impl OptimizableStrategy for MyNewStrategy {
+    type SharedConfig = ();
     type Config = MyNewConfig;
     type Space = MyNewSpace;
+    type Features = DollarBar;
+    type Extractor = BarPassThrough;
+    type Policy = Self;
 
     fn id() -> &'static str { "my_new_strategy" }
-    fn from_config(config: Self::Config) -> Result<Self, DomainError> { Self::new(config) }
+    fn from_config(_shared: &(), config: Self::Config) -> Result<Self, DomainError> { Self::new(config) }
     fn default_space() -> Self::Space { MyNewSpace::default() }
+    fn extractor(_shared: &()) -> Self::Extractor { BarPassThrough }
+    fn on_features(policy: &mut Self, features: &DollarBar) -> Option<Decision> {
+        policy.on_bar(features).map(Decision::Entry)
+    }
 }
 
 // Optimization runs seamlessly with zero engine modifications:
