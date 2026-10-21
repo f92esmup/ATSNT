@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
-use super::sample::ConsensusSample;
+use super::sample::{ConsensusSample, FeedWeights, FeedWeightsError};
 use crate::strategy::HyperparameterSpace;
 
 /// Highest level of one axis (and the highest absolute target level).
@@ -46,6 +46,9 @@ pub enum PolicyConfigError {
     /// `decay_horizon_seconds` must be strictly positive when set.
     #[error("decay_horizon_seconds must be > 0, got {0}")]
     NonPositiveDecayHorizon(u64),
+    /// `feed_weights` is invalid.
+    #[error("invalid feed_weights: {0}")]
+    InvalidFeedWeights(#[from] FeedWeightsError),
 }
 
 /// Parameters of the consensus policy, searched by HPO (strategy spec §14.2).
@@ -71,6 +74,9 @@ pub struct PolicyConfig {
     /// Optional max holding horizon in seconds before forced flat exit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decay_horizon_seconds: Option<u64>,
+    /// Optional feed weights for heterogeneous consensus voting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_weights: Option<FeedWeights>,
 }
 
 impl Default for PolicyConfig {
@@ -84,6 +90,7 @@ impl Default for PolicyConfig {
             stop_atr_multiplier: dec!(3.0),
             take_profit_atr_multiplier: None,
             decay_horizon_seconds: None,
+            feed_weights: None,
         }
     }
 }
@@ -105,6 +112,9 @@ impl std::fmt::Display for PolicyConfig {
         }
         if let Some(decay) = self.decay_horizon_seconds {
             write!(f, "|Decay:{decay}s")?;
+        }
+        if let Some(ref weights) = self.feed_weights {
+            write!(f, "|W:{weights}")?;
         }
         Ok(())
     }
@@ -179,6 +189,9 @@ impl PolicyConfig {
             if decay == 0 {
                 return Err(PolicyConfigError::NonPositiveDecayHorizon(decay));
             }
+        }
+        if let Some(ref weights) = self.feed_weights {
+            weights.validate()?;
         }
         Ok(())
     }
@@ -272,9 +285,16 @@ impl ConsensusPolicy {
     pub fn on_sample(&mut self, sample: &ConsensusSample, allow_short: bool) -> Option<Decision> {
         let (l1, l2, l3) = self.config.thresholds();
         let h = self.config.hysteresis;
-        self.long_level = axis_update(self.long_level, sample.long_net(), l1, l2, l3, h);
+        let (long_net, short_net) = match &self.config.feed_weights {
+            Some(weights) => (
+                sample.weighted_long_net(weights),
+                sample.weighted_short_net(weights),
+            ),
+            None => (sample.long_net(), sample.short_net()),
+        };
+        self.long_level = axis_update(self.long_level, long_net, l1, l2, l3, h);
         self.short_level = if allow_short {
-            axis_update(self.short_level, sample.short_net(), l1, l2, l3, h)
+            axis_update(self.short_level, short_net, l1, l2, l3, h)
         } else {
             0
         };
@@ -349,6 +369,10 @@ fn default_take_profit_multipliers() -> Vec<Option<Decimal>> {
     ]
 }
 
+fn default_feed_weights_options() -> Vec<Option<FeedWeights>> {
+    vec![None]
+}
+
 /// HPO search space of [`PolicyConfig`] (strategy spec §14.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmPolicySpace {
@@ -367,6 +391,9 @@ pub struct SwarmPolicySpace {
     /// Values of `take_profit_atr_multiplier` (None for no take profit, or multiple of ATR).
     #[serde(default = "default_take_profit_multipliers")]
     pub take_profit_atr_multipliers: Vec<Option<Decimal>>,
+    /// Values of `feed_weights` (None for equal/unweighted, or weighted profile).
+    #[serde(default = "default_feed_weights_options")]
+    pub feed_weights_options: Vec<Option<FeedWeights>>,
     /// Account policy cap: candidates whose level-3 risk exceeds it are never generated.
     #[serde(default = "default_max_level_risk")]
     pub max_level_risk: Decimal,
@@ -390,6 +417,7 @@ impl Default for SwarmPolicySpace {
             risk_increments: vec![dec!(0.005), dec!(0.010), dec!(0.015), dec!(0.020)],
             stop_atr_multipliers: vec![dec!(1.5), dec!(2.0), dec!(2.5), dec!(3.0), dec!(4.0)],
             take_profit_atr_multipliers: default_take_profit_multipliers(),
+            feed_weights_options: default_feed_weights_options(),
             max_level_risk: default_max_level_risk(),
         }
     }
@@ -399,6 +427,14 @@ impl SwarmPolicySpace {
     /// Whether a configuration is valid and within the level-3 risk cap.
     pub fn admits(&self, config: &PolicyConfig) -> bool {
         config.validate().is_ok() && config.top_level_risk() <= self.max_level_risk
+    }
+
+    /// Enables exploration of standard feed weighting and pruning profiles.
+    pub fn with_standard_feed_profiles(mut self) -> Self {
+        let mut profiles: Vec<Option<FeedWeights>> = vec![None];
+        profiles.extend(FeedWeights::standard_profiles().into_iter().map(Some));
+        self.feed_weights_options = profiles;
+        self
     }
 }
 
@@ -417,18 +453,21 @@ impl HyperparameterSpace for SwarmPolicySpace {
                             for &stop_atr_multiplier in &self.stop_atr_multipliers {
                                 for &take_profit_atr_multiplier in &self.take_profit_atr_multipliers
                                 {
-                                    let config = PolicyConfig {
-                                        threshold_base,
-                                        threshold_step,
-                                        hysteresis,
-                                        base_risk,
-                                        risk_increment,
-                                        stop_atr_multiplier,
-                                        take_profit_atr_multiplier,
-                                        decay_horizon_seconds: None,
-                                    };
-                                    if self.admits(&config) {
-                                        configs.push(config);
+                                    for feed_weights in &self.feed_weights_options {
+                                        let config = PolicyConfig {
+                                            threshold_base,
+                                            threshold_step,
+                                            hysteresis,
+                                            base_risk,
+                                            risk_increment,
+                                            stop_atr_multiplier,
+                                            take_profit_atr_multiplier,
+                                            decay_horizon_seconds: None,
+                                            feed_weights: feed_weights.clone(),
+                                        };
+                                        if self.admits(&config) {
+                                            configs.push(config);
+                                        }
                                     }
                                 }
                             }
@@ -525,6 +564,28 @@ impl HyperparameterSpace for SwarmPolicySpace {
                 neighbors.push(candidate);
             }
         }
+        if self.feed_weights_options.len() > 1 {
+            let idx = self
+                .feed_weights_options
+                .iter()
+                .position(|opt| opt == &base.feed_weights);
+            let below = idx
+                .and_then(|i| i.checked_sub(1))
+                .and_then(|i| self.feed_weights_options.get(i))
+                .cloned();
+            let above = idx
+                .and_then(|i| self.feed_weights_options.get(i + 1))
+                .cloned();
+            for val in [below, above].into_iter().flatten() {
+                let candidate = PolicyConfig {
+                    feed_weights: val,
+                    ..base.clone()
+                };
+                if self.admits(&candidate) {
+                    neighbors.push(candidate);
+                }
+            }
+        }
         neighbors
     }
 }
@@ -569,6 +630,8 @@ fn adjacent_option_grid_values(
 
 #[cfg(test)]
 mod tests {
+    use super::super::genome::FEED_COUNT;
+    use super::super::sample::FeedVote;
     use super::*;
 
     fn sample(timestamp: i64, long_net: i64, short_net: i64, atr: Decimal) -> ConsensusSample {
@@ -578,12 +641,15 @@ mod tests {
         ConsensusSample {
             timestamp,
             agents: 100,
+            agents_per_feed: 6,
             long_up,
             long_down,
             short_up,
             short_down,
             waits: 0,
             conflicts: 0,
+            feed_long: [FeedVote::default(); FEED_COUNT],
+            feed_short: [FeedVote::default(); FEED_COUNT],
             atr_stop_reference: atr,
             price: dec!(40000),
         }
@@ -942,6 +1008,7 @@ mod tests {
             && space
                 .take_profit_atr_multipliers
                 .contains(&c.take_profit_atr_multiplier)
+            && space.feed_weights_options.contains(&c.feed_weights)
     }
 
     #[test]
@@ -990,6 +1057,7 @@ mod tests {
             stop_atr_multiplier: dec!(3.0),
             take_profit_atr_multiplier: Some(dec!(3.0)),
             decay_horizon_seconds: None,
+            feed_weights: None,
         };
         let n = space.perturb_neighbors(&base);
         assert_eq!(n.len(), 14);
@@ -1091,5 +1159,75 @@ mod tests {
             .remove("max_level_risk");
         let back: SwarmPolicySpace = serde_json::from_value(value).expect("deserialise");
         assert_eq!(back.max_level_risk, dec!(0.05));
+    }
+
+    #[test]
+    fn policy_with_feed_weights_and_pruning() {
+        // Build a sample with 6 agents per feed (96 total):
+        // Feed 0 (time): 6 agents vote long down (-1.0)
+        // Feed 4 (tick): 6 agents vote long up (+1.0)
+        // Feeds 1..3 and 5..15: 0 votes
+        let mut s = ConsensusSample {
+            timestamp: 1_000,
+            agents: 96,
+            agents_per_feed: 6,
+            long_up: 6,
+            long_down: 6,
+            short_up: 0,
+            short_down: 0,
+            waits: 84,
+            conflicts: 0,
+            feed_long: [FeedVote::default(); FEED_COUNT],
+            feed_short: [FeedVote::default(); FEED_COUNT],
+            atr_stop_reference: dec!(500),
+            price: dec!(40000),
+        };
+        s.feed_long[0] = FeedVote { up: 0, down: 6 };
+        s.feed_long[4] = FeedVote { up: 6, down: 0 };
+
+        // 1. Unweighted policy: net vote is 0 -> remains flat (level 0)
+        let mut unweighted_policy = ConsensusPolicy::new(PolicyConfig {
+            threshold_base: dec!(0.20),
+            ..PolicyConfig::default()
+        })
+        .unwrap();
+        assert_eq!(unweighted_policy.on_sample(&s, false), None);
+        assert_eq!(unweighted_policy.long_level(), 0);
+
+        // 2. Policy pruning time feeds:
+        // Category weights: time=0, tick=1, vol=0, range=0 -> tick feeds get 0.25 each
+        let prune_time_weights =
+            FeedWeights::from_categories(dec!(0), dec!(1), dec!(0), dec!(0)).unwrap();
+        let mut pruned_policy = ConsensusPolicy::new(PolicyConfig {
+            threshold_base: dec!(0.20),
+            threshold_step: dec!(0.10),
+            feed_weights: Some(prune_time_weights),
+            ..PolicyConfig::default()
+        })
+        .unwrap();
+
+        // Feed 4 has +1.0 * 0.25 = +0.25 net vote (between L1=0.20 and L2=0.30) -> triggers level 1!
+        let decision = pruned_policy.on_sample(&s, false);
+        assert!(decision.is_some());
+        assert_eq!(pruned_policy.long_level(), 1);
+    }
+
+    #[test]
+    fn policy_space_with_feed_weights_exploration() {
+        let space = SwarmPolicySpace::default().with_standard_feed_profiles();
+        // 6 profiles (None + 5 standard profiles)
+        assert_eq!(space.feed_weights_options.len(), 6);
+
+        // Test neighbor transitions on feed weights
+        let base = PolicyConfig {
+            feed_weights: Some(FeedWeights::equal()),
+            ..PolicyConfig::default()
+        };
+        let neighbors = space.perturb_neighbors(&base);
+        // Should have adjacent weight neighbors
+        assert!(neighbors.iter().any(|n| n.feed_weights.is_none()));
+        assert!(neighbors
+            .iter()
+            .any(|n| n.feed_weights.is_some() && n.feed_weights != base.feed_weights));
     }
 }

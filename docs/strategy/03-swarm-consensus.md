@@ -664,17 +664,21 @@ only `MarketEvent::Trade`; any other event is ignored.
 ConsensusSample {
   timestamp: i64,              // the trade that closed the feed(s)
   agents: u32,                 // N
-  long_votes:  (up: u32, down: u32),
-  short_votes: (up: u32, down: u32),
+  agents_per_feed: u16,        // N / 16 (default 6)
+  long_up: u32, long_down: u32,
+  short_up: u32, short_down: u32,
   waits: u32,                  // agents with vote (0, 0)
   conflicts: u32,              // agents whose last evaluation had a conflict
+  feed_long:  [FeedVote; 16],  // (up: u16, down: u16) per feed
+  feed_short: [FeedVote; 16],  // (up: u16, down: u16) per feed
   atr_stop_reference: Decimal, // ATR (price units) of feed 1 (time 1h)
   price: Decimal,              // the trade price, for audit only
 }
 ```
 
-From it: `long_net = (long_up - long_down) / N` and `short_net = (short_up - short_down) / N`, both
-in [-1, 1].
+From it:
+- Unweighted (pure democracy): `long_net = (long_up - long_down) / N` and `short_net = (short_up - short_down) / N`, both in [-1, 1].
+- Weighted / Pruned: when `PolicyConfig.feed_weights` is set, `weighted_net = (1 / agents_per_feed) · Σ w_f · (up_f - down_f)`. Feeds with weight 0 are pruned. Normalization ensures the active weights sum to 1, preserving the [-1, 1] bounds for the level machine.
 
 ---
 

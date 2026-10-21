@@ -127,7 +127,15 @@ En criptoactivos de alta volatilidad como Bitcoin, el precio suele experimentar 
 
 ---
 
-## 4. Bloque C: Ponderación Heterogénea y Selección de Feeds (Feed Weighting & Pruning)
+## 4. Bloque C: Ponderación Heterogénea y Selección de Feeds (Feed Weighting & Pruning) [COMPLETADO]
+
+> [!NOTE]
+> **Estado de Implementación:** Bloque C implementado y verificado.
+> - `FeedVote` y desglose de votos por feed en [`ConsensusSample`](file:///home/f92esmup/Projects/ATSNT/crates/strategies/src/swarm_consensus/sample.rs).
+> - Agregación single-pass en [`SwarmEnsemble::sample`](file:///home/f92esmup/Projects/ATSNT/crates/strategies/src/swarm_consensus/ensemble.rs) (~6x más eficiente).
+> - Ponderación heterogénea y poda de feeds con `FeedWeights` y perfiles curados en [`PolicyConfig`](file:///home/f92esmup/Projects/ATSNT/crates/strategies/src/swarm_consensus/policy.rs).
+> - Exploración de perfiles de peso en el espacio HPO [`SwarmPolicySpace`](file:///home/f92esmup/Projects/ATSNT/crates/strategies/src/swarm_consensus/policy.rs).
+> - 100% test pass workspace, non-regression en snapshots golden CUSUM/OFI y runners del enjambre.
 
 ### 4.1 Justificación Teórica y Cuantitativa
 Actualmente, los 16 feeds se tratan con **pesos idénticos**:

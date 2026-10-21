@@ -15,7 +15,7 @@ pub use ensemble::{SwarmConfig, SwarmEnsemble};
 pub use genome::{sample_swarm, Agent, Genome, Swarm};
 pub use policy::{axis_update, ConsensusPolicy, PolicyConfig, PolicyConfigError, SwarmPolicySpace};
 pub use rules::{AgentVote, ConflictKind};
-pub use sample::ConsensusSample;
+pub use sample::{ConsensusSample, FeedVote, FeedWeights, FeedWeightsError};
 
 use domain::DomainError;
 

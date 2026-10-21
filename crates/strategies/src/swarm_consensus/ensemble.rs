@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use super::audit::SwarmAudit;
 use super::genome::{sample_swarm, Swarm, FEED_COUNT};
 use super::rules::{evaluate_agent, rule_book, AgentVote, ConflictKind, Rule};
-use super::sample::ConsensusSample;
+use super::sample::{ConsensusSample, FeedVote};
 use crate::strategy::{FeatureExtractor, MarketEvent};
 
 /// Horizons of the four time feeds (ids 0–3): 5m, 1h, 4h, 1d (§5.1).
@@ -299,16 +299,72 @@ impl SwarmEnsemble {
     }
 
     fn sample(&self, trade: &Trade, atr_stop_reference: Decimal) -> ConsensusSample {
-        let count = |pred: fn(&AgentVote) -> bool| self.votes.iter().filter(|v| pred(v)).count();
+        let per_feed = self.config.agents_per_feed as usize;
+        let mut feed_long = [FeedVote::default(); FEED_COUNT];
+        let mut feed_short = [FeedVote::default(); FEED_COUNT];
+        let mut long_up = 0u32;
+        let mut long_down = 0u32;
+        let mut short_up = 0u32;
+        let mut short_down = 0u32;
+        let mut waits = 0u32;
+        let mut conflicts = 0u32;
+
+        for f in 0..FEED_COUNT {
+            let start = f * per_feed;
+            let end = (start + per_feed).min(self.votes.len());
+            let slice = if start < self.votes.len() {
+                &self.votes[start..end]
+            } else {
+                &[]
+            };
+            let mut f_l_up = 0u16;
+            let mut f_l_down = 0u16;
+            let mut f_s_up = 0u16;
+            let mut f_s_down = 0u16;
+            for v in slice {
+                if v.long > 0 {
+                    f_l_up += 1;
+                } else if v.long < 0 {
+                    f_l_down += 1;
+                }
+                if v.short > 0 {
+                    f_s_up += 1;
+                } else if v.short < 0 {
+                    f_s_down += 1;
+                }
+                if v.long == 0 && v.short == 0 {
+                    waits += 1;
+                }
+                if v.conflict != ConflictKind::None {
+                    conflicts += 1;
+                }
+            }
+            feed_long[f] = FeedVote {
+                up: f_l_up,
+                down: f_l_down,
+            };
+            feed_short[f] = FeedVote {
+                up: f_s_up,
+                down: f_s_down,
+            };
+            long_up += f_l_up as u32;
+            long_down += f_l_down as u32;
+            short_up += f_s_up as u32;
+            short_down += f_s_down as u32;
+        }
+
         ConsensusSample {
             timestamp: trade.timestamp,
             agents: self.votes.len() as u32,
-            long_up: count(|v| v.long > 0) as u32,
-            long_down: count(|v| v.long < 0) as u32,
-            short_up: count(|v| v.short > 0) as u32,
-            short_down: count(|v| v.short < 0) as u32,
-            waits: count(|v| v.long == 0 && v.short == 0) as u32,
-            conflicts: count(|v| v.conflict != ConflictKind::None) as u32,
+            agents_per_feed: self.config.agents_per_feed as u16,
+            long_up,
+            long_down,
+            short_up,
+            short_down,
+            waits,
+            conflicts,
+            feed_long,
+            feed_short,
             atr_stop_reference,
             price: trade.price,
         }

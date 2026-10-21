@@ -20,4 +20,7 @@ pub use strategy::{
     BarPassThrough, Decision, FeatureExtractor, HyperparameterSpace, InputKind, MarketEvent,
     MarketType, OptimizableStrategy, Strategy,
 };
-pub use swarm_consensus::{PolicyConfig, SwarmConfig, SwarmConsensusStrategy, SwarmPolicySpace};
+pub use swarm_consensus::{
+    FeedVote, FeedWeights, FeedWeightsError, PolicyConfig, SwarmConfig, SwarmConsensusStrategy,
+    SwarmPolicySpace,
+};

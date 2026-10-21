@@ -213,8 +213,9 @@ impl SwarmAudit {
 
 #[cfg(test)]
 mod tests {
-    use super::super::genome::sample_swarm;
+    use super::super::genome::{sample_swarm, FEED_COUNT};
     use super::super::rules::AgentVote;
+    use super::super::sample::FeedVote;
     use super::*;
     use rust_decimal_macros::dec;
 
@@ -261,12 +262,15 @@ mod tests {
         let sample = ConsensusSample {
             timestamp: 0,
             agents: 16,
+            agents_per_feed: 1,
             long_up: 8,
             long_down: 2,
             short_up: 1,
             short_down: 1,
             waits: 6,
             conflicts: 0,
+            feed_long: [FeedVote::default(); FEED_COUNT],
+            feed_short: [FeedVote::default(); FEED_COUNT],
             atr_stop_reference: dec!(1),
             price: dec!(1),
         };
