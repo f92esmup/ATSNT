@@ -11,34 +11,36 @@
 
 ## 1. Tabla Comparativa de Ejecuciones en Google Cloud Batch
 
-| Dimensión / Métrica | Run 1 (Línea Base) | Run 2 (Perfil Intradía) | Run 3 (Histéresis $H \ge L_1$) | Run 4 (Alta Convicción Entrada) |
-| :--- | :--- | :--- | :--- | :--- |
-| **Job ID Batch** | `hpo-...-110341` | `hpo-...-135738` | `hpo-...-145442` | `hpo-...-155257` |
-| **Fecha de Ejecución** | 2026-10-21 11:03 UTC | 2026-10-21 13:57 UTC | 2026-10-21 14:54 UTC | 2026-10-21 15:52 UTC |
-| **Duración Pipeline** | 1,677 s (~28 min) | 1,607 s (~26 min) | 1,826 s (~30 min) | 1,677 s (~28 min) |
-| **Candidatos HPO** | 500 | 500 | 500 | **250** (dominado por ingesta) |
-| **Horizontes Feeds** | 5m, 1h, 4h, 1D | **15m, 30m, 1h, 2h** | **15m, 30m, 1h, 2h** | **15m, 30m, 1h, 2h** |
-| **Warm-Up Requerido** | 64 días | **5.3 días** | **5.3 días** | **5.3 días** |
-| **Consenso Base ($L_1$)** | `0.25` | `0.55` | `0.30` | **`0.425`** |
-| **Histéresis ($H$)** | `0.25` | `0.125` | `0.55` ($H > L_1$) | **`0.65` ($L_1 - H = -0.225$)** |
-| **Take-Profit (TP)** | `None` (inexistente) | `Some(4.0 ATR)` | `Some(2.0 ATR)` | **`Some(1.75 ATR)`** |
-| **Stop-Loss (SL)** | `3.0 ATR` | `1.75 ATR` | `2.75 ATR` | **`2.75 ATR`** |
-| **Trades en Backtest** | 1,775 | 118 | 93 | **75** |
-| **Duración Mediana Trade**| ~2 min | 6.4 min | 7.11 horas | **6.47 horas** |
-| **Salidas Take-Profit** | 0 (0%) | 0 (0%) | 26 trades (28.0%) | **28 trades (37.3%)** |
-| **Efectividad en TPs** | 0% | 0% | 88.5% (23 de 26) | **71.4% (20 de 28)** |
-| **Ganancia Neta en TPs** | $0.00 | $0.00 | +$128.95 | **+$119.84** |
-| **Salidas Stop-Loss** | — | — | 14 trades (-$73.65) | **5 trades (-$51.93)** |
-| **Salidas TargetExit** | 1,775 (100%) | 118 (100%) | 50 trades (-$157.04) | **42 trades (-$220.32)** |
-| **PnL Neto Solo Brackets**| -$759 | -$115.75 | **+$55.39** | **+$67.91 (Neto Positivo)** |
-| **Win Rate Global** | ~10.0% | 8.47% | 30.10% | **33.33%** |
-| **Beneficio Bruto** | ~$50.00 | $9.54 | $150.14 | **$164.62** |
-| **Pérdida Bruta** | ~$809.00 | $125.29 | $271.82 | **$317.03** |
-| **Profit Factor** | 0.10 | 0.07 | 0.55 | **0.52** |
-| **Payoff Ratio** | 0.80 | 0.82 | 1.28 | **1.04** |
-| **PnL Neto Cuenta ($500)**| -$759 (cuenta liquidada)| -$115.75 (breaker 23%) | -$121.68 (breaker 26%) | **-$152.41** |
-| **Fricción (Comisiones+Slip)**| $444.60 | $78.71 | $77.87 | **$96.56** |
-| **Sortino Ratio (Backtest)**| -0.80 | -0.60 | -0.31 | **-0.32** |
+| Dimensión / Métrica | Run 1 (Línea Base) | Run 2 (Perfil Intradía) | Run 3 (Histéresis $H \ge L_1$) | Run 4 (Alta Convicción Entrada) | Run 5 (Guard X3 + 1,000 Cand) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Job ID Batch** | `hpo-...-110341` | `hpo-...-135738` | `hpo-...-145442` | `hpo-...-155257` | `hpo-...-180256` |
+| **Fecha de Ejecución** | 2026-10-21 11:03 UTC | 2026-10-21 13:57 UTC | 2026-10-21 14:54 UTC | 2026-10-21 15:52 UTC | 2026-10-21 18:02 UTC |
+| **Duración Pipeline** | 1,677 s (~28 min) | 1,607 s (~26 min) | 1,826 s (~30 min) | 1,677 s (~28 min) | **1,787 s (~29.7 min)** |
+| **Candidatos HPO** | 500 | 500 | 500 | 250 (dominado por ingesta) | **1,000** (resolución 4x) |
+| **Horizontes Feeds** | 5m, 1h, 4h, 1D | **15m, 30m, 1h, 2h** | **15m, 30m, 1h, 2h** | **15m, 30m, 1h, 2h** | **15m, 30m, 1h, 2h** |
+| **Warm-Up Requerido** | 64 días | **5.3 días** | **5.3 días** | **5.3 días** | **5.3 días** |
+| **Consenso Base ($L_1$)** | `0.25` | `0.55` | `0.30` | `0.425` | **`0.45`** |
+| **Histéresis ($H$)** | `0.25` | `0.125` | `0.55` ($H > L_1$) | `0.65` ($L_1 - H = -0.225$) | **`0.45` ($L_1 - H = 0.00$)** |
+| **Take-Profit (TP)** | `None` (inexistente) | `Some(4.0 ATR)` | `Some(2.0 ATR)` | `Some(1.75 ATR)` | **`Some(1.25 ATR)`** |
+| **Stop-Loss (SL)** | `3.0 ATR` | `1.75 ATR` | `2.75 ATR` | `2.75 ATR` | **`2.00 ATR`** |
+| **Trades en Backtest** | 1,775 | 118 | 93 | 75 | **76** |
+| **Duración Media Trade**| ~2 min | 6.4 min | 7.11 horas | 6.47 horas | **73.7 min** (4,421 s) |
+| **Disparos Regla X3** | — | — | ~150,000 | 157,073 | **27,243 (-82.7%)** |
+| **Salidas Take-Profit** | 0 (0%) | 0 (0%) | 26 trades (28.0%) | 28 trades (37.3%) | **11 trades (14.5%)** |
+| **Efectividad en TPs** | 0% | 0% | 88.5% (23 de 26) | 71.4% (20 de 28) | **100% (11 de 11)** |
+| **Ganancia Neta en TPs** | $0.00 | $0.00 | +$128.95 | +$119.84 | **+$77.16 (+15.4% capital)** |
+| **Salidas Stop-Loss** | — | — | 14 trades (-$73.65) | 5 trades (-$51.93) | **0 trades ($0.00)** |
+| **Salidas TargetExit** | 1,775 (100%) | 118 (100%) | 50 trades (-$157.04) | 42 trades (-$220.32) | **64 trades (-$187.53)** |
+| **Salidas Breaker** | — | — | — | — | **1 trade (-$3.72)** |
+| **PnL Neto Solo Brackets**| -$759 | -$115.75 | **+$55.39** | **+$67.91** | **+$77.16 (Neto Positivo)** |
+| **Win Rate Global** | ~10.0% | 8.47% | 30.10% | 33.33% | **34.21%** (26 win, 50 loss) |
+| **Beneficio Bruto** | ~$50.00 | $9.54 | $150.14 | $164.62 | **$105.73** |
+| **Pérdida Bruta** | ~$809.00 | $125.29 | $271.82 | $317.03 | **$219.82** |
+| **Profit Factor** | 0.10 | 0.07 | 0.55 | 0.52 | **0.48** |
+| **Payoff Ratio** | 0.80 | 0.82 | 1.28 | 1.04 | **0.92** |
+| **PnL Neto Cuenta ($500)**| -$759 (liquidada) | -$115.75 (breaker 23%) | -$121.68 (breaker 26%) | -$152.41 (breaker 30%) | **-$114.09 (breaker 24%)** |
+| **Fricción (Comisiones+Slip)**| $444.60 | $78.71 | $77.87 | $96.56 | **$100.90** |
+| **Sortino Ratio (Backtest)**| -0.80 | -0.60 | -0.31 | -0.32 | **-0.37** |
 
 ---
 
@@ -84,6 +86,24 @@
   - Reducir de 500 a 250 candidatos **no redujo el tiempo total del Batch Job** (28 minutos en ambos casos).
   - Causa técnica: La ingesta y descompresión de 179 millones de ticks desde GCS (~20 min) y el cómputo de las 16 series de velas (~4 min) dominan el 85% del tiempo. El barrido de folds en 30 vCPUs con Rayon tarda solo ~2-4 min.
   - Conclusión: Se debe mantener 500 candidatos para maximizar la resolución del espacio sin penalización de tiempo.
+
+### Run 5: Blindaje Micro de X3, Prioridad de Brackets y 1,000 Candidatos
+- **Hipótesis**: Al implementar el guard de patrones micro en la regla $X_3$ (`PinBar↓`, `Engulfing↓`, `BoS↓`), habilitar `bracket_priority` para que las posiciones no se malvendan en neutralidad de consenso ($k=0$), expandir la rejilla de histéresis y evaluar **1,000 candidatos**, el enjambre alcanzará un perfil rentable dominado por Take-Profits.
+- **Resultado Cuantitativo**:
+  - Duración del job: **1,787 s (~29.7 min)** para 1,000 candidatos (solo +1.8 min frente a 250 candidatos, confirmando la escalabilidad casi gratuita de Rayon).
+  - Disparos de la regla $X_3$: Se desplomaron de **157,073 a 27,243 (reducción del 82.7%)**, erradicando el ruido masivo de salidas prematuras.
+  - Salidas Take-Profit: **11 trades ejecutados con 100% de efectividad (11 de 11 ganadores)**, aportando **+$77.16 netos** (+15.4% del capital de la cuenta).
+  - Salidas Stop-Loss: **0 trades** (ninguna posición tocó el SL pasivo).
+- **Diagnóstico del "Smoking Gun" en Run 5 (The Box Trait Forwarding Bug)**:
+  - Pese a que el ganador seleccionó `bracket_priority: true`, el backtest reportó 64 salidas por `TargetExit` (-$187.53).
+  - **Causa Raíz en el Código Identificada**:
+    - `LoadedStrategy` empaqueta la estrategia en un `Box<dyn Strategy>`.
+    - La implementación `impl<S: ?Sized + Strategy> Strategy for Box<S>` en `crates/strategies/src/strategy.rs` omitió reenviar el método `bracket_priority(&self) -> bool { (**self).bracket_priority() }`.
+    - Como resultado, el trait `Strategy` invocó su implementación por defecto (`false`), desactivando silenciosamente la prioridad de brackets durante la ejecución del binario `backtest`.
+    - En el optimizador HPO (`optimization.rs`), al usar el tipo genérico concreto `S: OptimizableStrategy`, sí evaluó `bracket_priority: true`.
+  - **Corrección Aplicada**:
+    - Se agregó el forwarder explícito de `bracket_priority` a `impl<S: ?Sized + Strategy> Strategy for Box<S>`.
+    - Se incorporaron pruebas unitarias en `strategies` que validan `boxed.bracket_priority()` a través de `Box<dyn Strategy>`.
 
 ---
 

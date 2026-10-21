@@ -134,8 +134,10 @@ mod tests {
             SwarmConsensusStrategy::from_config(&SwarmConfig::default(), PolicyConfig::default())
                 .unwrap();
         assert!(strategy.emits_targets());
+        assert!(strategy.bracket_priority());
         let boxed: Box<dyn Strategy> = Box::new(strategy);
         assert!(boxed.emits_targets());
+        assert!(boxed.bracket_priority());
     }
 
     #[test]

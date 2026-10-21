@@ -211,6 +211,10 @@ impl<S: ?Sized + Strategy> Strategy for Box<S> {
     fn emits_targets(&self) -> bool {
         (**self).emits_targets()
     }
+
+    fn bracket_priority(&self) -> bool {
+        (**self).bracket_priority()
+    }
 }
 
 #[cfg(test)]
