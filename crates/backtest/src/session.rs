@@ -145,6 +145,7 @@ enum Phase {
         entry_time_ms: i64,
         exit_fills: Fills,
         stop_distance: Option<Decimal>,
+        take_profit_distance: Option<Decimal>,
     },
     Adjusting {
         position: Option<(Side, Decimal, Decimal)>,
@@ -664,6 +665,7 @@ impl<S: Strategy> TradingSession<S> {
                 entry_time_ms,
                 mut exit_fills,
                 stop_distance,
+                take_profit_distance,
             } => {
                 exit_fills.add(report);
                 if report.liquidation {
@@ -685,11 +687,15 @@ impl<S: Strategy> TradingSession<S> {
                         events.extend(
                             self.close_target_position(
                                 venue,
-                                side,
-                                entry_price,
-                                quantity,
-                                exit_fills.average_price(),
-                                report.time_ms,
+                                ClosedTarget {
+                                    side,
+                                    entry_price,
+                                    quantity,
+                                    exit_price: exit_fills.average_price(),
+                                    exit_time_ms: report.time_ms,
+                                    stop_distance,
+                                    take_profit_distance,
+                                },
                             )
                             .await,
                         );
@@ -703,6 +709,7 @@ impl<S: Strategy> TradingSession<S> {
                         entry_time_ms,
                         exit_fills,
                         stop_distance,
+                        take_profit_distance,
                     };
                 }
             }
@@ -748,9 +755,13 @@ impl<S: Strategy> TradingSession<S> {
                             Side::Buy => fill_price - target.stop_distance(),
                             Side::Sell => fill_price + target.stop_distance(),
                         };
+                        let take_profit = target.take_profit_distance().map(|tp_dist| match side {
+                            Side::Buy => fill_price + tp_dist,
+                            Side::Sell => fill_price - tp_dist,
+                        });
                         let _ = venue.cancel_orders(&self.config.symbol).await;
                         let _ = venue
-                            .place_exits(&self.config.symbol, side, stop, None)
+                            .place_exits(&self.config.symbol, side, stop, take_profit)
                             .await;
 
                         self.campaign = Some(campaign);
@@ -763,6 +774,7 @@ impl<S: Strategy> TradingSession<S> {
                                 entry_time_ms: report.time_ms,
                                 exit_fills: Fills::default(),
                                 stop_distance: Some(target.stop_distance()),
+                                take_profit_distance: target.take_profit_distance(),
                             };
                         } else {
                             self.phase = Phase::Adjusting {
@@ -794,9 +806,14 @@ impl<S: Strategy> TradingSession<S> {
                                 Side::Buy => report.last_price - target.stop_distance(),
                                 Side::Sell => report.last_price + target.stop_distance(),
                             };
+                            let take_profit =
+                                target.take_profit_distance().map(|tp_dist| match pos_side {
+                                    Side::Buy => report.last_price + tp_dist,
+                                    Side::Sell => report.last_price - tp_dist,
+                                });
                             let _ = venue.cancel_orders(&self.config.symbol).await;
                             let _ = venue
-                                .place_exits(&self.config.symbol, pos_side, stop, None)
+                                .place_exits(&self.config.symbol, pos_side, stop, take_profit)
                                 .await;
 
                             if report.order_filled {
@@ -808,6 +825,7 @@ impl<S: Strategy> TradingSession<S> {
                                     entry_time_ms: report.time_ms,
                                     exit_fills: Fills::default(),
                                     stop_distance: Some(target.stop_distance()),
+                                    take_profit_distance: target.take_profit_distance(),
                                 };
                             } else {
                                 self.phase = Phase::Adjusting {
@@ -841,9 +859,14 @@ impl<S: Strategy> TradingSession<S> {
                                     Side::Buy => report.last_price - target.stop_distance(),
                                     Side::Sell => report.last_price + target.stop_distance(),
                                 };
+                                let take_profit =
+                                    target.take_profit_distance().map(|tp_dist| match pos_side {
+                                        Side::Buy => report.last_price + tp_dist,
+                                        Side::Sell => report.last_price - tp_dist,
+                                    });
                                 let _ = venue.cancel_orders(&self.config.symbol).await;
                                 let _ = venue
-                                    .place_exits(&self.config.symbol, pos_side, stop, None)
+                                    .place_exits(&self.config.symbol, pos_side, stop, take_profit)
                                     .await;
 
                                 if report.order_filled {
@@ -855,6 +878,7 @@ impl<S: Strategy> TradingSession<S> {
                                         entry_time_ms: report.time_ms,
                                         exit_fills: Fills::default(),
                                         stop_distance: Some(target.stop_distance()),
+                                        take_profit_distance: target.take_profit_distance(),
                                     };
                                 } else {
                                     self.phase = Phase::Adjusting {
@@ -1162,6 +1186,7 @@ impl<S: Strategy> TradingSession<S> {
             entry_time_ms: time_ms,
             exit_fills: Fills::default(),
             stop_distance: None,
+            take_profit_distance: None,
         };
         vec![SessionEvent::PositionOpened {
             side,
@@ -1256,32 +1281,50 @@ impl<S: Strategy> TradingSession<S> {
     async fn close_target_position<V: ExecutionVenue>(
         &mut self,
         venue: &V,
-        side: Side,
-        entry_price: Decimal,
-        quantity: Decimal,
-        exit_price: Decimal,
-        exit_time_ms: i64,
+        closed: ClosedTarget,
     ) -> Vec<SessionEvent> {
         let cleanup = self.exits.on_position_closed_by_exchange(venue).await;
         let mut campaign = self
             .campaign
             .take()
-            .unwrap_or_else(|| Campaign::starting(exit_time_ms));
+            .unwrap_or_else(|| Campaign::starting(closed.exit_time_ms));
 
-        let gross = match side {
-            Side::Buy => (exit_price - entry_price) * quantity,
-            Side::Sell => (entry_price - exit_price) * quantity,
+        let gross = match closed.side {
+            Side::Buy => (closed.exit_price - closed.entry_price) * closed.quantity,
+            Side::Sell => (closed.entry_price - closed.exit_price) * closed.quantity,
         };
         let fees = self.fees.take().unwrap_or(
-            (entry_price * quantity + exit_price * quantity) * self.config.fallback_fee_pct,
+            (closed.entry_price * closed.quantity + closed.exit_price * closed.quantity)
+                * self.config.fallback_fee_pct,
         );
         let funding = std::mem::take(&mut self.funding);
-        let reason = self.exit_hint.take().unwrap_or("StopLoss");
+        let reason = self.exit_hint.take().unwrap_or_else(|| {
+            match (closed.stop_distance, closed.take_profit_distance) {
+                (Some(s_dist), Some(tp_dist)) => {
+                    let s_price = match closed.side {
+                        Side::Buy => closed.entry_price - s_dist,
+                        Side::Sell => closed.entry_price + s_dist,
+                    };
+                    let tp_price = match closed.side {
+                        Side::Buy => closed.entry_price + tp_dist,
+                        Side::Sell => closed.entry_price - tp_dist,
+                    };
+                    let to_s = (closed.exit_price - s_price).abs();
+                    let to_tp = (closed.exit_price - tp_price).abs();
+                    if to_tp < to_s {
+                        "TakeProfit"
+                    } else {
+                        "StopLoss"
+                    }
+                }
+                _ => "StopLoss",
+            }
+        });
         let slippage = Decimal::ZERO;
 
-        campaign.add_reduction(exit_price, quantity, gross, fees, slippage);
+        campaign.add_reduction(closed.exit_price, closed.quantity, gross, fees, slippage);
 
-        let pos_side = match side {
+        let pos_side = match closed.side {
             Side::Buy => PositionSide::Long,
             Side::Sell => PositionSide::Short,
         };
@@ -1292,8 +1335,8 @@ impl<S: Strategy> TradingSession<S> {
         let exit_equity = entry_equity + net;
         let excursion = self
             .excursion
-            .close(exit_time_ms, exit_equity)
-            .unwrap_or_else(|| TradeExcursion::start(exit_time_ms, exit_equity));
+            .close(closed.exit_time_ms, exit_equity)
+            .unwrap_or_else(|| TradeExcursion::start(closed.exit_time_ms, exit_equity));
 
         let trade = self
             .ledger
@@ -1301,10 +1344,10 @@ impl<S: Strategy> TradingSession<S> {
                 campaign,
                 CampaignClose {
                     side: pos_side,
-                    exit_time: exit_time_ms,
-                    last_entry_price: entry_price,
-                    last_exit_price: exit_price,
-                    last_quantity: quantity,
+                    exit_time: closed.exit_time_ms,
+                    last_entry_price: closed.entry_price,
+                    last_exit_price: closed.exit_price,
+                    last_quantity: closed.quantity,
                     funding_paid: funding,
                     exit_reason: reason,
                     excursion,
@@ -1317,6 +1360,16 @@ impl<S: Strategy> TradingSession<S> {
             SessionEvent::PositionClosed(Box::new(trade)),
         ]
     }
+}
+
+struct ClosedTarget {
+    side: Side,
+    entry_price: Decimal,
+    quantity: Decimal,
+    exit_price: Decimal,
+    exit_time_ms: i64,
+    stop_distance: Option<Decimal>,
+    take_profit_distance: Option<Decimal>,
 }
 
 struct ClosedPosition {

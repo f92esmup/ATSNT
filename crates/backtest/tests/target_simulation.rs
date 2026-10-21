@@ -182,3 +182,71 @@ async fn a_scale_in_scale_out_flip_and_stop_out_match_between_bar_and_tick_engin
     assert_eq!(bar_trades[1].exit_reason, "StopLoss");
     assert_eq!(tick_trades[1].exit_reason, "StopLoss");
 }
+
+#[tokio::test]
+async fn target_position_with_take_profit_closes_at_tp_and_blocks_rearm() {
+    let mut trades = Vec::new();
+    let start_ts = 2_000_000;
+    let mut push_trades = |ts: i64, price: Decimal| {
+        trades.push(trade(ts, price, dec!(100), Side::Buy));
+        trades.push(trade(ts + 1, price, dec!(100), Side::Sell));
+    };
+
+    // 10 trades at 100 (entry)
+    for i in 0..10 {
+        push_trades(start_ts + i * 100, dec!(100));
+    }
+    // 10 trades rising to 112 to hit the TP level (100 + 10 = 110)
+    for i in 10..20 {
+        let price = dec!(100) + Decimal::from(i - 9); // 101..111
+        push_trades(start_ts + i * 100, price);
+    }
+    // 10 trades at 111 where the strategy tries to re-enter long (must be blocked by anti-whipsaw)
+    for i in 20..30 {
+        push_trades(start_ts + i * 100, dec!(111));
+    }
+
+    let script = vec![
+        // Open long at level 1 with TP of 10: entry 100, stop 95, TP 110
+        (
+            start_ts,
+            TargetPosition::with_exits(start_ts, 1, dec!(0.01), dec!(5), Some(dec!(10))).unwrap(),
+        ),
+        // After TP hits at 110, try to re-enter long at start_ts + 2000: should be ignored!
+        (
+            start_ts + 2000,
+            TargetPosition::with_exits(start_ts + 2000, 1, dec!(0.01), dec!(5), Some(dec!(10)))
+                .unwrap(),
+        ),
+    ];
+
+    let config = BacktestConfig {
+        initial_capital: dec!(10_000),
+        taker_fee_pct: Decimal::ZERO,
+        slippage_pct: Decimal::ZERO,
+        min_order_quantity: dec!(0.01),
+        min_order_notional: dec!(5),
+        max_order_notional: Some(dec!(100_000)),
+        max_position_notional: Some(dec!(100_000)),
+        max_leverage: dec!(10),
+        latency_ms: 0,
+        ..BacktestConfig::default()
+    };
+
+    let mut bar_strat = ScriptedTargetStrategy {
+        targets: script.into(),
+    };
+    let mut bar_engine = BacktestEngine::new(config);
+    for t in &trades {
+        bar_engine.process_event(&PriceEvent::from(t), &mut || {
+            bar_strat.on_event(&MarketEvent::Trade(t))
+        });
+    }
+
+    let bar_trades = bar_engine.closed_trades();
+    // Exactly 1 trade occurred: it closed on TakeProfit, and the re-entry was blocked
+    assert_eq!(bar_trades.len(), 1);
+    assert_eq!(bar_trades[0].side, PositionSide::Long);
+    assert_eq!(bar_trades[0].exit_reason, "TakeProfit");
+    assert!(bar_trades[0].pnl_net > Decimal::ZERO);
+}

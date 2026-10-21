@@ -40,6 +40,12 @@ pub enum PolicyConfigError {
     /// `stop_atr_multiplier` must be strictly positive.
     #[error("stop_atr_multiplier must be > 0, got {0}")]
     NonPositiveStopMultiplier(Decimal),
+    /// `take_profit_atr_multiplier` must be strictly positive when set.
+    #[error("take_profit_atr_multiplier must be > 0, got {0}")]
+    NonPositiveTakeProfitMultiplier(Decimal),
+    /// `decay_horizon_seconds` must be strictly positive when set.
+    #[error("decay_horizon_seconds must be > 0, got {0}")]
+    NonPositiveDecayHorizon(u64),
 }
 
 /// Parameters of the consensus policy, searched by HPO (strategy spec §14.2).
@@ -57,8 +63,14 @@ pub struct PolicyConfig {
     pub base_risk: Decimal,
     /// Extra risk fraction per level above 1.
     pub risk_increment: Decimal,
-    /// Stop distance in multiples of the feed-1 ATR (fixed at 3.0 in the search).
+    /// Stop distance in multiples of the feed-1 ATR.
     pub stop_atr_multiplier: Decimal,
+    /// Optional take-profit distance in multiples of the feed-1 ATR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_profit_atr_multiplier: Option<Decimal>,
+    /// Optional max holding horizon in seconds before forced flat exit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decay_horizon_seconds: Option<u64>,
 }
 
 impl Default for PolicyConfig {
@@ -70,6 +82,8 @@ impl Default for PolicyConfig {
             base_risk: dec!(0.010),
             risk_increment: dec!(0.005),
             stop_atr_multiplier: dec!(3.0),
+            take_profit_atr_multiplier: None,
+            decay_horizon_seconds: None,
         }
     }
 }
@@ -85,7 +99,14 @@ impl std::fmt::Display for PolicyConfig {
             self.base_risk,
             self.risk_increment,
             self.stop_atr_multiplier
-        )
+        )?;
+        if let Some(tp) = self.take_profit_atr_multiplier {
+            write!(f, "|TP:{tp}")?;
+        }
+        if let Some(decay) = self.decay_horizon_seconds {
+            write!(f, "|Decay:{decay}s")?;
+        }
+        Ok(())
     }
 }
 
@@ -149,6 +170,16 @@ impl PolicyConfig {
                 self.stop_atr_multiplier,
             ));
         }
+        if let Some(tp) = self.take_profit_atr_multiplier {
+            if tp <= Decimal::ZERO {
+                return Err(PolicyConfigError::NonPositiveTakeProfitMultiplier(tp));
+            }
+        }
+        if let Some(decay) = self.decay_horizon_seconds {
+            if decay == 0 {
+                return Err(PolicyConfigError::NonPositiveDecayHorizon(decay));
+            }
+        }
         Ok(())
     }
 }
@@ -194,6 +225,7 @@ pub struct ConsensusPolicy {
     long_level: u8,
     short_level: u8,
     last_level: i8,
+    level_entry_timestamp: Option<i64>,
 }
 
 impl ConsensusPolicy {
@@ -205,6 +237,7 @@ impl ConsensusPolicy {
             long_level: 0,
             short_level: 0,
             last_level: 0,
+            level_entry_timestamp: None,
         })
     }
 
@@ -246,25 +279,50 @@ impl ConsensusPolicy {
             0
         };
         // Both levels are at most 3, so the difference always fits an `i8`.
-        let k = if self.long_level > 0 && self.short_level > 0 {
+        let mut k = if self.long_level > 0 && self.short_level > 0 {
             0
         } else {
             self.long_level as i8 - self.short_level as i8
         };
+
+        // Temporal decay / max holding horizon check:
+        if self.last_level != 0 {
+            if let (Some(horizon_s), Some(entry_ts)) = (
+                self.config.decay_horizon_seconds,
+                self.level_entry_timestamp,
+            ) {
+                if sample.timestamp.saturating_sub(entry_ts) >= (horizon_s as i64) * 1000 {
+                    // Holding horizon expired without consensus naturally flipping: force flat exit
+                    self.long_level = 0;
+                    self.short_level = 0;
+                    k = 0;
+                }
+            }
+        }
+
         if k == self.last_level {
             return None;
         }
-        let (risk, stop) = if k == 0 {
-            (Decimal::ZERO, Decimal::ZERO)
+        let (risk, stop, take_profit) = if k == 0 {
+            (Decimal::ZERO, Decimal::ZERO, None)
         } else {
             (
                 self.config.risk_fraction(k.unsigned_abs()),
                 self.config.stop_atr_multiplier * sample.atr_stop_reference,
+                self.config
+                    .take_profit_atr_multiplier
+                    .map(|m| m * sample.atr_stop_reference),
             )
         };
         // Invalid only for a non-zero level with a non-positive ATR (the config is validated).
-        let target = TargetPosition::new(sample.timestamp, k, risk, stop).ok()?;
+        let target =
+            TargetPosition::with_exits(sample.timestamp, k, risk, stop, take_profit).ok()?;
         self.last_level = k;
+        if k != 0 {
+            self.level_entry_timestamp = Some(sample.timestamp);
+        } else {
+            self.level_entry_timestamp = None;
+        }
         Some(Decision::Target(target))
     }
 
@@ -273,11 +331,22 @@ impl ConsensusPolicy {
         self.long_level = 0;
         self.short_level = 0;
         self.last_level = 0;
+        self.level_entry_timestamp = None;
     }
 }
 
 fn default_max_level_risk() -> Decimal {
     dec!(0.05)
+}
+
+fn default_take_profit_multipliers() -> Vec<Option<Decimal>> {
+    vec![
+        None,
+        Some(dec!(2.0)),
+        Some(dec!(3.0)),
+        Some(dec!(4.0)),
+        Some(dec!(5.0)),
+    ]
 }
 
 /// HPO search space of [`PolicyConfig`] (strategy spec §14.2).
@@ -293,8 +362,11 @@ pub struct SwarmPolicySpace {
     pub base_risks: Vec<Decimal>,
     /// Grid of `risk_increment`.
     pub risk_increments: Vec<Decimal>,
-    /// Values of `stop_atr_multiplier` (a single fixed value; not perturbed).
+    /// Values of `stop_atr_multiplier`.
     pub stop_atr_multipliers: Vec<Decimal>,
+    /// Values of `take_profit_atr_multiplier` (None for no take profit, or multiple of ATR).
+    #[serde(default = "default_take_profit_multipliers")]
+    pub take_profit_atr_multipliers: Vec<Option<Decimal>>,
     /// Account policy cap: candidates whose level-3 risk exceeds it are never generated.
     #[serde(default = "default_max_level_risk")]
     pub max_level_risk: Decimal,
@@ -317,6 +389,7 @@ impl Default for SwarmPolicySpace {
             base_risks: vec![dec!(0.005), dec!(0.010), dec!(0.015), dec!(0.020)],
             risk_increments: vec![dec!(0.005), dec!(0.010), dec!(0.015), dec!(0.020)],
             stop_atr_multipliers: vec![dec!(1.5), dec!(2.0), dec!(2.5), dec!(3.0), dec!(4.0)],
+            take_profit_atr_multipliers: default_take_profit_multipliers(),
             max_level_risk: default_max_level_risk(),
         }
     }
@@ -342,16 +415,21 @@ impl HyperparameterSpace for SwarmPolicySpace {
                     for &base_risk in &self.base_risks {
                         for &risk_increment in &self.risk_increments {
                             for &stop_atr_multiplier in &self.stop_atr_multipliers {
-                                let config = PolicyConfig {
-                                    threshold_base,
-                                    threshold_step,
-                                    hysteresis,
-                                    base_risk,
-                                    risk_increment,
-                                    stop_atr_multiplier,
-                                };
-                                if self.admits(&config) {
-                                    configs.push(config);
+                                for &take_profit_atr_multiplier in &self.take_profit_atr_multipliers
+                                {
+                                    let config = PolicyConfig {
+                                        threshold_base,
+                                        threshold_step,
+                                        hysteresis,
+                                        base_risk,
+                                        risk_increment,
+                                        stop_atr_multiplier,
+                                        take_profit_atr_multiplier,
+                                        decay_horizon_seconds: None,
+                                    };
+                                    if self.admits(&config) {
+                                        configs.push(config);
+                                    }
                                 }
                             }
                         }
@@ -371,11 +449,11 @@ impl HyperparameterSpace for SwarmPolicySpace {
         configs
     }
 
-    /// One step down and one step up the grid for each of the six searched parameters, the
-    /// others held: up to 12 neighbours, keeping only admitted ones. A value off the grid steps
+    /// One step down and one step up the grid for each of the seven searched parameters, the
+    /// others held: up to 14 neighbours, keeping only admitted ones. A value off the grid steps
     /// to the nearest grid values around it.
     fn perturb_neighbors(&self, base: &PolicyConfig) -> Vec<PolicyConfig> {
-        let mut neighbors = Vec::with_capacity(12);
+        let mut neighbors = Vec::with_capacity(14);
         let push = |neighbors: &mut Vec<PolicyConfig>,
                     (below, above): (Option<Decimal>, Option<Decimal>),
                     set: &dyn Fn(Decimal) -> PolicyConfig| {
@@ -434,6 +512,19 @@ impl HyperparameterSpace for SwarmPolicySpace {
                 ..base.clone()
             },
         );
+        let (tp_below, tp_above) = adjacent_option_grid_values(
+            &self.take_profit_atr_multipliers,
+            base.take_profit_atr_multiplier,
+        );
+        for value in [tp_below, tp_above].into_iter().flatten() {
+            let candidate = PolicyConfig {
+                take_profit_atr_multiplier: value,
+                ..base.clone()
+            };
+            if self.admits(&candidate) {
+                neighbors.push(candidate);
+            }
+        }
         neighbors
     }
 }
@@ -443,6 +534,36 @@ impl HyperparameterSpace for SwarmPolicySpace {
 fn adjacent_grid_values(grid: &[Decimal], value: Decimal) -> (Option<Decimal>, Option<Decimal>) {
     let below = grid.iter().copied().filter(|v| *v < value).max();
     let above = grid.iter().copied().filter(|v| *v > value).min();
+    (below, above)
+}
+
+/// Nearest grid values strictly below and strictly above `value` for an option grid where None
+/// is considered the lowest element and Some(v) are ordered by Decimal value.
+fn adjacent_option_grid_values(
+    grid: &[Option<Decimal>],
+    value: Option<Decimal>,
+) -> (Option<Option<Decimal>>, Option<Option<Decimal>>) {
+    let below = match value {
+        None => None,
+        Some(v) => {
+            let lower_somes = grid.iter().copied().flatten().filter(|x| *x < v).max();
+            match lower_somes {
+                Some(s) => Some(Some(s)),
+                None if grid.contains(&None) => Some(None),
+                None => None,
+            }
+        }
+    };
+    let above = match value {
+        None => grid.iter().copied().flatten().min().map(Some),
+        Some(v) => grid
+            .iter()
+            .copied()
+            .flatten()
+            .filter(|x| *x > v)
+            .min()
+            .map(Some),
+    };
     (below, above)
 }
 
@@ -771,6 +892,20 @@ mod tests {
                 },
                 PolicyConfigError::NonPositiveStopMultiplier(Decimal::ZERO),
             ),
+            (
+                PolicyConfig {
+                    take_profit_atr_multiplier: Some(Decimal::ZERO),
+                    ..d()
+                },
+                PolicyConfigError::NonPositiveTakeProfitMultiplier(Decimal::ZERO),
+            ),
+            (
+                PolicyConfig {
+                    decay_horizon_seconds: Some(0),
+                    ..d()
+                },
+                PolicyConfigError::NonPositiveDecayHorizon(0),
+            ),
         ];
         for (config, expected) in cases {
             assert_eq!(config.validate(), Err(expected.clone()), "{config}");
@@ -804,6 +939,9 @@ mod tests {
             && space.base_risks.contains(&c.base_risk)
             && space.risk_increments.contains(&c.risk_increment)
             && space.stop_atr_multipliers.contains(&c.stop_atr_multiplier)
+            && space
+                .take_profit_atr_multipliers
+                .contains(&c.take_profit_atr_multiplier)
     }
 
     #[test]
@@ -812,10 +950,10 @@ mod tests {
         //   increment 0.005, 0.010, 0.015 → all 4 base risks (top 0.030, 0.040, 0.050);
         //   increment 0.020 → base 0.005, 0.010 only (0.045, 0.050; 0.055 and 0.060 exceed).
         // 4 + 4 + 4 + 2 = 14 pairs; thresholds never exceed L3 = 0.55 + 0.30 = 0.85 ≤ 1.
-        // 7 bases · 3 steps · 5 hysteresis · 14 risk pairs · 5 stops = 7,350 of 8,400.
+        // 7 bases · 3 steps · 5 hysteresis · 14 risk pairs · 5 stops · 5 TPs = 36,750 of 42,000.
         let space = SwarmPolicySpace::default();
         let all = space.generate_candidates(usize::MAX);
-        assert_eq!(all.len(), 7_350);
+        assert_eq!(all.len(), 36_750);
         assert!(all.iter().all(|c| c.top_level_risk() <= dec!(0.05)));
         assert!(all.contains(&PolicyConfig::default()));
     }
@@ -850,9 +988,11 @@ mod tests {
             base_risk: dec!(0.010),
             risk_increment: dec!(0.010),
             stop_atr_multiplier: dec!(3.0),
+            take_profit_atr_multiplier: Some(dec!(3.0)),
+            decay_horizon_seconds: None,
         };
         let n = space.perturb_neighbors(&base);
-        assert_eq!(n.len(), 12);
+        assert_eq!(n.len(), 14);
         assert!(n.contains(&PolicyConfig {
             threshold_base: dec!(0.35),
             ..base.clone()
@@ -869,6 +1009,26 @@ mod tests {
             stop_atr_multiplier: dec!(4.0),
             ..base.clone()
         }));
+        assert!(n.contains(&PolicyConfig {
+            take_profit_atr_multiplier: Some(dec!(2.0)),
+            ..base.clone()
+        }));
+        assert!(n.contains(&PolicyConfig {
+            take_profit_atr_multiplier: Some(dec!(4.0)),
+            ..base.clone()
+        }));
+
+        let base_none = PolicyConfig {
+            take_profit_atr_multiplier: None,
+            ..base.clone()
+        };
+        let n_none = space.perturb_neighbors(&base_none);
+        assert_eq!(n_none.len(), 13);
+        assert!(n_none.contains(&PolicyConfig {
+            take_profit_atr_multiplier: Some(dec!(2.0)),
+            ..base_none.clone()
+        }));
+
         // At the risk cap, the step up in either risk parameter is filtered out.
         let capped = PolicyConfig {
             base_risk: dec!(0.010),
@@ -876,8 +1036,44 @@ mod tests {
             ..base.clone()
         };
         let n = space.perturb_neighbors(&capped);
-        assert_eq!(n.len(), 10);
+        assert_eq!(n.len(), 12);
         assert!(n.iter().all(|c| c.top_level_risk() <= dec!(0.05)));
+    }
+
+    #[test]
+    fn policy_emits_target_with_take_profit_distance() {
+        let config = PolicyConfig {
+            take_profit_atr_multiplier: Some(dec!(2.0)),
+            ..worked_example_config()
+        };
+        let mut p = policy(config);
+        let Some(Decision::Target(target)) = p.on_sample(&sample(1, 52, 0, dec!(500)), true) else {
+            panic!("expected target");
+        };
+        assert_eq!(target.level(), 1);
+        assert_eq!(target.stop_distance(), dec!(1500)); // 3.0 * 500
+        assert_eq!(target.take_profit_distance(), Some(dec!(1000))); // 2.0 * 500
+    }
+
+    #[test]
+    fn policy_forces_flat_exit_after_decay_horizon() {
+        let config = PolicyConfig {
+            decay_horizon_seconds: Some(3600), // 1 hour
+            ..worked_example_config()
+        };
+        let mut p = policy(config);
+        // Level 1 entered at timestamp 10_000
+        let out1 = p.on_sample(&sample(10_000, 52, 0, dec!(500)), true);
+        assert_eq!(emitted_level(out1), Some(1));
+
+        // Intermediate tick within the horizon: no change emitted
+        let out2 = p.on_sample(&sample(10_000 + 1800 * 1000, 52, 0, dec!(500)), true);
+        assert_eq!(out2, None);
+
+        // Tick at exactly horizon expiry: forced flat target emitted
+        let out3 = p.on_sample(&sample(10_000 + 3600 * 1000, 52, 0, dec!(500)), true);
+        assert_eq!(emitted_level(out3), Some(0));
+        assert_eq!(p.last_level(), 0);
     }
 
     #[test]

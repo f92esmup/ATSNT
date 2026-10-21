@@ -770,42 +770,31 @@ impl ExecutionCore {
             return false;
         }
         let (fill_price, slip) = market_fill_price(side, bar.open, config.slippage_pct);
-        let stop_distance = pending.target.stop_distance();
+        let target_pos = &pending.target;
         // After a flip `current` is 0, so it is flat or on the target's side here.
         if target.abs() > current.abs() {
-            let plan = match self.plan_increase(
-                side,
-                quantity,
-                fill_price,
-                stop_distance,
-                config,
-                *equity,
-            ) {
-                Ok(plan) => plan,
-                Err(PlanFailure::Unmarginable) => return false,
-                Err(PlanFailure::InvalidStop) => {
-                    counters.push(invalid_stop_kind());
-                    return false;
-                }
-                Err(PlanFailure::LiquidationBeforeStop) => {
-                    counters.push(STOP_BEYOND_LIQUIDATION_CLIP);
-                    let Some(plan) = self.largest_safe_increase(
-                        side,
-                        quantity,
-                        fill_price,
-                        stop_distance,
-                        config,
-                        *equity,
-                    ) else {
-                        return false;
-                    };
-                    if let Some(kind) = order_limit_rejection(plan.quantity, bar.open, config) {
-                        counters.push(kind);
+            let plan =
+                match self.plan_increase(side, quantity, fill_price, target_pos, config, *equity) {
+                    Ok(plan) => plan,
+                    Err(PlanFailure::Unmarginable) => return false,
+                    Err(PlanFailure::InvalidStop) => {
+                        counters.push(invalid_stop_kind());
                         return false;
                     }
-                    plan
-                }
-            };
+                    Err(PlanFailure::LiquidationBeforeStop) => {
+                        counters.push(STOP_BEYOND_LIQUIDATION_CLIP);
+                        let Some(plan) = self.largest_safe_increase(
+                            side, quantity, fill_price, target_pos, config, *equity,
+                        ) else {
+                            return false;
+                        };
+                        if let Some(kind) = order_limit_rejection(plan.quantity, bar.open, config) {
+                            counters.push(kind);
+                            return false;
+                        }
+                        plan
+                    }
+                };
             *equity -= plan.fee;
             if self.position.is_none() {
                 self.bars_held = 0;
@@ -831,9 +820,12 @@ impl ExecutionCore {
             let Some(mut position) = self.position.clone() else {
                 return false;
             };
-            let Ok(exits) =
-                ProtectiveExits::for_target(opening_side(position.side), fill_price, stop_distance)
-            else {
+            let Ok(exits) = ProtectiveExits::for_target(
+                opening_side(position.side),
+                fill_price,
+                target_pos.stop_distance(),
+                target_pos.take_profit_distance(),
+            ) else {
                 counters.push(invalid_stop_kind());
                 return false;
             };
@@ -866,7 +858,7 @@ impl ExecutionCore {
         side: Side,
         quantity: Decimal,
         fill_price: Decimal,
-        stop_distance: Decimal,
+        target: &TargetPosition,
         config: &BacktestConfig,
         equity: Decimal,
     ) -> Result<IncreasePlan, PlanFailure> {
@@ -881,8 +873,13 @@ impl ExecutionCore {
             None => Position::new(position_side(side), quantity, fill_price)
                 .map_err(|_| PlanFailure::Unmarginable)?,
         };
-        let exits = ProtectiveExits::for_target(side, fill_price, stop_distance)
-            .map_err(|_| PlanFailure::InvalidStop)?;
+        let exits = ProtectiveExits::for_target(
+            side,
+            fill_price,
+            target.stop_distance(),
+            target.take_profit_distance(),
+        )
+        .map_err(|_| PlanFailure::InvalidStop)?;
         let fee = fill_fee(fill_price, quantity, config.taker_fee_pct);
         let notional = position.entry_price * position.quantity;
         let leverage =
@@ -915,7 +912,7 @@ impl ExecutionCore {
         side: Side,
         quantity: Decimal,
         fill_price: Decimal,
-        stop_distance: Decimal,
+        target: &TargetPosition,
         config: &BacktestConfig,
         equity: Decimal,
     ) -> Option<IncreasePlan> {
@@ -933,7 +930,7 @@ impl ExecutionCore {
                 side,
                 Decimal::from(middle) * step,
                 fill_price,
-                stop_distance,
+                target,
                 config,
                 equity,
             ) {
@@ -1155,7 +1152,7 @@ impl ExecutionCore {
         if is_target
             && matches!(
                 exit_reason,
-                "StopLoss" | "Liquidation" | "MonthlyCircuitBreaker"
+                "StopLoss" | "TakeProfit" | "TimeBarrier" | "Liquidation" | "MonthlyCircuitBreaker"
             )
         {
             self.rearm_blocked = Some(pos.side);

@@ -83,7 +83,7 @@ Al mantener `stop_atr_multiplier = 3.0` fijo, el HPO está atado de manos: no pu
 
 ---
 
-## 3. Bloque B: Take-Profit Dinámico y Salida Temporal / Trailing Stop
+## 3. Bloque B: Take-Profit Dinámico y Salida Temporal / Trailing Stop [COMPLETADO]
 
 ### 3.1 Justificación Teórica y Cuantitativa
 El TFM original en MetaTrader 5 cerraba órdenes por dos vías: o tocaba el stop loss de emergencia, o esperaba a que el bloque de reglas CLIPS arrojara un voto de cierre o contradicción.

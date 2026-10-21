@@ -728,16 +728,16 @@ Both axes keep their own state across samples, including during a conflict.
 This is the original rule. With the thesis-selected 1% and 2%, level 3 risks 5% of equity, so the
 search space bounds keep the user's account policy in mind (Section 14.2).
 
-### 10.5 Stop distance
+### 10.5 Protective exits: Stop loss, Take Profit, and Temporal Decay
 
-`stop_distance = stop_atr_multiplier · atr_stop_reference`, with `stop_atr_multiplier = 3.0`
-(not searched). The original anchored it on MT5's native H1 ATR(14). ATSNT uses the ATR(14) of
-feed 1 (time, 1h), with identical semantics.
+- **Stop distance**: `stop_distance = stop_atr_multiplier · atr_stop_reference`. In HPO, `stop_atr_multiplier` is searched in `[1.5, 2.0, 2.5, 3.0, 4.0]` (anchored on feed 1 H1 ATR).
+- **Take-Profit (TP)**: `take_profit_distance = take_profit_atr_multiplier · atr_stop_reference` (optional). When configured (e.g. `[None, 2.0, 3.0, 4.0, 5.0]`), the engine arms a protective take-profit barrier on the winning side (`fill + tp` for long, `fill - tp` for short).
+- **Anti-whipsaw protection (`rearm_blocked`)**: When a target position exits on `TakeProfit` (or `StopLoss`), the execution core blocks re-entering on that same side until the consensus returns to flat (`k = 0`) or flips. This prevents buying at the absolute top immediately after collecting profits while the swarm vote remains momentarily high.
+- **Temporal decay (`decay_horizon_seconds`)**: If configured, once a level has been held past `decay_horizon_seconds`, the policy forces a flat target exit (`k = 0`) to prevent holding stagnant positions across market regimes.
 
 ### 10.6 Emission
 
-The policy emits `Decision::Target(TargetPosition { timestamp, level: k, risk_fraction,
-stop_distance })` **only when `k` changes**, including a return to 0. The original recomputed the target lot on every
+The policy emits `Decision::Target(TargetPosition::with_exits(timestamp, level: k, risk_fraction, stop_distance, take_profit_distance))` **only when `k` changes**, including a return to 0. The original recomputed the target lot on every
 update, so changes in balance or ATR alone triggered small rebalancing orders that paid fees for
 nothing (correction C6). ATSNT sizes once per level change.
 

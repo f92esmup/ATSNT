@@ -82,6 +82,7 @@ fn space() -> SwarmPolicySpace {
         base_risks: vec![dec!(0.01)],
         risk_increments: vec![dec!(0.005)],
         stop_atr_multipliers: vec![dec!(3.0)],
+        take_profit_atr_multipliers: vec![None],
         ..SwarmPolicySpace::default()
     }
 }

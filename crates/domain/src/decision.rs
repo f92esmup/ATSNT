@@ -55,10 +55,11 @@ pub struct TargetPosition {
     level: i8,
     risk_fraction: Decimal,
     stop_distance: Decimal,
+    take_profit_distance: Option<Decimal>,
 }
 
 impl TargetPosition {
-    /// Builds a validated target.
+    /// Builds a validated target with no take-profit barrier.
     ///
     /// The level lies in `-3..=3`; `risk_fraction` lies in `[0, 1]` and is 0 exactly when the
     /// level is 0; an open level needs a positive `stop_distance` (price units).
@@ -67,6 +68,19 @@ impl TargetPosition {
         level: i8,
         risk_fraction: Decimal,
         stop_distance: Decimal,
+    ) -> Result<Self, DomainError> {
+        Self::with_exits(timestamp, level, risk_fraction, stop_distance, None)
+    }
+
+    /// Builds a validated target with an optional take-profit distance.
+    ///
+    /// If `take_profit_distance` is specified, it must be positive and the level must not be 0.
+    pub fn with_exits(
+        timestamp: i64,
+        level: i8,
+        risk_fraction: Decimal,
+        stop_distance: Decimal,
+        take_profit_distance: Option<Decimal>,
     ) -> Result<Self, DomainError> {
         if !(-MAX_TARGET_LEVEL..=MAX_TARGET_LEVEL).contains(&level) {
             return Err(DomainError::InvalidTarget(format!(
@@ -88,11 +102,24 @@ impl TargetPosition {
                 "stop distance {stop_distance} must be positive for level {level}"
             )));
         }
+        if level == 0 && take_profit_distance.is_some() {
+            return Err(DomainError::InvalidTarget(
+                "take profit distance cannot be set for a flat (level 0) target".to_string(),
+            ));
+        }
+        if let Some(tp) = take_profit_distance {
+            if tp <= Decimal::ZERO {
+                return Err(DomainError::InvalidTarget(format!(
+                    "take profit distance {tp} must be positive for level {level}"
+                )));
+            }
+        }
         Ok(Self {
             timestamp,
             level,
             risk_fraction,
             stop_distance,
+            take_profit_distance,
         })
     }
 
@@ -116,6 +143,11 @@ impl TargetPosition {
         self.stop_distance
     }
 
+    /// Distance from the fill price to the protective take-profit barrier, in price units.
+    pub fn take_profit_distance(&self) -> Option<Decimal> {
+        self.take_profit_distance
+    }
+
     /// Side of the requested exposure; `None` for flat.
     pub fn side(&self) -> Option<Side> {
         match self.level {
@@ -132,7 +164,7 @@ impl TargetPosition {
 pub struct ProtectiveExits {
     /// Stop price on the losing side of the position.
     pub stop: Decimal,
-    /// Take-profit price on the winning side; `None` for targets.
+    /// Take-profit price on the winning side; `None` for targets without a TP.
     pub take_profit: Option<Decimal>,
     /// Bars to hold before a forced exit; `None` for targets.
     pub max_bars: Option<usize>,
@@ -148,12 +180,13 @@ impl ProtectiveExits {
         }
     }
 
-    /// A stop `stop_distance` away from `fill_price` on the losing side of `side`, and nothing
-    /// else.
+    /// A stop `stop_distance` away from `fill_price` on the losing side of `side`, and an
+    /// optional take profit `take_profit_distance` away on the winning side.
     pub fn for_target(
         side: Side,
         fill_price: Decimal,
         stop_distance: Decimal,
+        take_profit_distance: Option<Decimal>,
     ) -> Result<Self, DomainError> {
         if stop_distance <= Decimal::ZERO {
             return Err(DomainError::InvalidTarget(format!(
@@ -169,9 +202,29 @@ impl ProtectiveExits {
                 "stop {stop} must be a positive price"
             )));
         }
+        let take_profit = match take_profit_distance {
+            Some(tp_dist) => {
+                if tp_dist <= Decimal::ZERO {
+                    return Err(DomainError::InvalidTarget(format!(
+                        "take profit distance {tp_dist} must be positive"
+                    )));
+                }
+                let tp = match side {
+                    Side::Buy => fill_price + tp_dist,
+                    Side::Sell => fill_price - tp_dist,
+                };
+                if tp <= Decimal::ZERO {
+                    return Err(DomainError::InvalidTarget(format!(
+                        "take profit {tp} must be a positive price"
+                    )));
+                }
+                Some(tp)
+            }
+            None => None,
+        };
         Ok(Self {
             stop,
-            take_profit: None,
+            take_profit,
             max_bars: None,
         })
     }
@@ -281,9 +334,9 @@ mod tests {
     }
 
     #[test]
-    fn exits_for_a_target_hold_only_a_stop_on_the_losing_side() {
+    fn exits_for_a_target_hold_a_stop_and_optional_take_profit() {
         assert_eq!(
-            ProtectiveExits::for_target(Side::Buy, dec!(40000), dec!(1200)).unwrap(),
+            ProtectiveExits::for_target(Side::Buy, dec!(40000), dec!(1200), None).unwrap(),
             ProtectiveExits {
                 stop: dec!(38800),
                 take_profit: None,
@@ -291,21 +344,55 @@ mod tests {
             }
         );
         assert_eq!(
-            ProtectiveExits::for_target(Side::Sell, dec!(40000), dec!(1200))
+            ProtectiveExits::for_target(Side::Sell, dec!(40000), dec!(1200), None)
                 .unwrap()
                 .stop,
             dec!(41200)
         );
+        let long_with_tp =
+            ProtectiveExits::for_target(Side::Buy, dec!(40000), dec!(1200), Some(dec!(2400)))
+                .unwrap();
+        assert_eq!(long_with_tp.stop, dec!(38800));
+        assert_eq!(long_with_tp.take_profit, Some(dec!(42400)));
+
+        let short_with_tp =
+            ProtectiveExits::for_target(Side::Sell, dec!(40000), dec!(1200), Some(dec!(2400)))
+                .unwrap();
+        assert_eq!(short_with_tp.stop, dec!(41200));
+        assert_eq!(short_with_tp.take_profit, Some(dec!(37600)));
     }
 
     #[test]
-    fn exits_for_a_target_reject_a_stop_at_or_below_zero() {
+    fn exits_for_a_target_reject_invalid_parameters() {
         assert!(matches!(
-            ProtectiveExits::for_target(Side::Buy, dec!(100), dec!(100)),
+            ProtectiveExits::for_target(Side::Buy, dec!(100), dec!(100), None),
             Err(DomainError::InvalidTarget(_))
         ));
         assert!(matches!(
-            ProtectiveExits::for_target(Side::Buy, dec!(100), dec!(0)),
+            ProtectiveExits::for_target(Side::Buy, dec!(100), dec!(0), None),
+            Err(DomainError::InvalidTarget(_))
+        ));
+        assert!(matches!(
+            ProtectiveExits::for_target(Side::Buy, dec!(100), dec!(10), Some(dec!(0))),
+            Err(DomainError::InvalidTarget(_))
+        ));
+        assert!(matches!(
+            ProtectiveExits::for_target(Side::Sell, dec!(100), dec!(10), Some(dec!(100))),
+            Err(DomainError::InvalidTarget(_))
+        ));
+    }
+
+    #[test]
+    fn target_with_exits_validates_take_profit() {
+        let ok = TargetPosition::with_exits(1, 2, dec!(0.02), dec!(500), Some(dec!(1000))).unwrap();
+        assert_eq!(ok.take_profit_distance(), Some(dec!(1000)));
+
+        assert!(matches!(
+            TargetPosition::with_exits(1, 0, Decimal::ZERO, Decimal::ZERO, Some(dec!(1000))),
+            Err(DomainError::InvalidTarget(_))
+        ));
+        assert!(matches!(
+            TargetPosition::with_exits(1, 1, dec!(0.01), dec!(500), Some(Decimal::ZERO)),
             Err(DomainError::InvalidTarget(_))
         ));
     }
