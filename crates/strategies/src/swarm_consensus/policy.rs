@@ -82,7 +82,7 @@ pub struct PolicyConfig {
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
-            threshold_base: dec!(0.35),
+            threshold_base: dec!(0.45),
             threshold_step: dec!(0.075),
             hysteresis: dec!(0.55),
             base_risk: dec!(0.010),
@@ -407,16 +407,16 @@ impl Default for SwarmPolicySpace {
     fn default() -> Self {
         Self {
             threshold_bases: vec![
-                dec!(0.30),
-                dec!(0.325),
-                dec!(0.35),
-                dec!(0.375),
                 dec!(0.40),
                 dec!(0.425),
                 dec!(0.45),
                 dec!(0.475),
                 dec!(0.50),
+                dec!(0.525),
                 dec!(0.55),
+                dec!(0.575),
+                dec!(0.60),
+                dec!(0.65),
             ],
             threshold_steps: vec![dec!(0.05), dec!(0.075), dec!(0.10), dec!(0.125), dec!(0.15)],
             hysteresis_values: vec![
@@ -930,7 +930,7 @@ mod tests {
         assert_eq!(c.validate(), Ok(()));
         assert_eq!(
             c.to_string(),
-            "B:0.35|S:0.075|H:0.55|R:0.010|Ri:0.005|Stop:3.0|TP:2.0"
+            "B:0.45|S:0.075|H:0.55|R:0.010|Ri:0.005|Stop:3.0|TP:2.0"
         );
         let json = serde_json::to_string(&c).expect("serialise");
         let back: PolicyConfig = serde_json::from_str(&json).expect("deserialise");
@@ -1091,7 +1091,7 @@ mod tests {
         }
         // Interior point: 2 neighbours per parameter, except the risk ones the cap removes.
         let base = PolicyConfig {
-            threshold_base: dec!(0.40),
+            threshold_base: dec!(0.45),
             threshold_step: dec!(0.10),
             hysteresis: dec!(0.55),
             base_risk: dec!(0.010),
@@ -1104,11 +1104,11 @@ mod tests {
         let n = space.perturb_neighbors(&base);
         assert_eq!(n.len(), 14);
         assert!(n.contains(&PolicyConfig {
-            threshold_base: dec!(0.375),
+            threshold_base: dec!(0.425),
             ..base.clone()
         }));
         assert!(n.contains(&PolicyConfig {
-            threshold_base: dec!(0.425),
+            threshold_base: dec!(0.475),
             ..base.clone()
         }));
         assert!(n.contains(&PolicyConfig {
