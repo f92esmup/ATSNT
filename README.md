@@ -57,6 +57,7 @@ The repository provides 10 specialized CLI binaries built with `clap` (run any w
 | :--- | :--- | :--- | :--- | :--- |
 | `fetch_data` | `adapters` | Official Binance ETL: downloads historical `aggTrades` & converts to Parquet | `cargo run -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2026 --month 1` | [Step 1](#step-1-download--convert-real-market-data-binance-etl) |
 | `calibrate_feeds` | `backtest` | Calibrates multi-timeframe tick, volume, and range bar thresholds from historical trades | `cargo run -p backtest --bin calibrate_feeds -- --data <PATH> --from 2025-01-01 --to 2025-02-01 -o swarm_shared.json` | [Swarm Consensus Guide](docs/strategy/03-swarm-consensus.md) |
+| `prune_swarm` | `backtest` | Evaluates candidate agents by Information Coefficient and exports an elite population | `cargo run -p backtest --bin prune_swarm -- --data <PATH> --from 2025-01-01 --to 2025-02-01 --shared-config swarm_shared.json -o swarm_pruned.json` | [Swarm Consensus Guide](docs/strategy/03-swarm-consensus.md) |
 | `backtest` | `backtest` | Deterministic 1:1 event simulator and Monte Carlo stress testing (BigQuery & GCS export) | `cargo run -p backtest -- --data data/sample_trades.csv --strategy dollar_bars_cusum --capital 200 --gcp-bigquery` | [Step 2](#step-2-run-deterministic-11-backtest) & [Step 3](#step-3-run-monte-carlo-stress-simulation) |
 | `run_hpo` | `backtest` | Multi-core CPU parallel hyperparameter optimization (Rayon + WFO, BigQuery export) | `cargo run -p backtest --bin run_hpo -- --data <PATH> --strategy dollar_bars_cusum --capital 200 --folds 3 --gcp-bigquery` | [Step 4](#step-4-run-parallel-walk-forward-hyperparameter-optimization-hpo) |
 | `stream_trades`| `adapters` | Live Binance WebSocket feed accumulating and printing Dollar Bars | `cargo run -p adapters --bin stream_trades -- --symbol btcusdt --threshold 50000` | [Step 5](#step-5-live-market-data-ingestion--dollar-bar-streaming) |
@@ -254,40 +255,52 @@ cargo run -p backtest --bin run_hpo -- \
 ---
 
 ### Step 4b: Swarm Consensus Strategy (Multi-Feed & Multi-Agent Ensemble)
-The Swarm Consensus strategy operates directly on raw trades across 16 multi-timeframe bar feeds (time, tick, volume, range) and an ensemble of 96 diverse agents with dynamic consensus voting:
+The Swarm Consensus strategy operates directly on raw trades across 16 multi-timeframe bar feeds (time, tick, volume, range) and an ensemble of rule-based agents with dynamic consensus voting:
 
-1. **Calibrate Feed Thresholds**:
-   Calculates tick, volume, and range bar thresholds using data strictly prior to the evaluated period:
+1. **Calibrate Feed Thresholds & Meta-Priors**:
+   Calculates multi-timeframe bar thresholds and derives empirical distribution priors (RSI, wicks, momentum) strictly prior to the evaluated period:
    ```bash
    cargo run -p backtest --bin calibrate_feeds -- \
      --data <aggTrades> \
      --from 2025-01-01 --to 2025-02-01 \
+     --calibrate-priors \
      -o swarm_shared.json
    ```
 
-2. **Run Walk-Forward HPO on Feature Tape**:
-   Evaluates 96-agent ensemble features once and explores policy candidates over 1-second price buckets:
+2. **Stratified Agent Pruning by Information Coefficient (IC)**:
+   Simulates candidate agents on calibration trades, scores their directional predictive accuracy, and retains the top elite agents per feed (e.g. 4 or 6 agents per feed):
    ```bash
-   cargo run -p backtest --bin run_hpo -- \
-     --strategy swarm \
+   cargo run -p backtest --bin prune_swarm -- \
      --data <aggTrades> \
+     --from 2025-01-01 --to 2025-02-01 \
      --shared-config swarm_shared.json \
-     --price-bucket-ms 1000 \
-     --embargo-ms 86400000 \
-     --candidates 1470
+     --candidates-per-feed 12 --keep-per-feed 6 \
+     -o swarm_pruned.json
    ```
 
-3. **Deterministic Backtest & Audit**:
-   Backtest at trade resolution or high-fidelity tick level (`--fill-model tick`):
+3. **Run Walk-Forward HPO on Feature Tape**:
+   Evaluates ensemble features once in Stage 1, then explores policy candidates (consensus thresholds, stop loss ATR, dynamic take-profit, feed weights) across temporal folds in Stage 2 (Rayon parallel search):
+   ```bash
+   cargo run -p backtest --bin run_hpo -- \
+     --strategy swarm_consensus \
+     --data <aggTrades> \
+     --shared-config swarm_pruned.json \
+     --price-bucket-ms 1000 \
+     --embargo-ms 86400000 \
+     --candidates 200 \
+     -o configs/hpo_swarm_results.json
+   ```
+
+4. **Deterministic Backtest & Performance Audit**:
+   Backtests the winning artifact at trade resolution or high-fidelity tick level (`--fill-model tick`):
    ```bash
    cargo run -p backtest -- \
-     --strategy swarm \
+     --strategy swarm_consensus \
      --data <aggTrades> \
-     --shared-config swarm_shared.json \
-     --strategy-config configs/hpo_results.json \
-     --fill-model tick
+     --config configs/hpo_swarm_results.json \
+     --fill-model bar
    ```
-   Outputs full ensemble audit metrics (agent evaluations, vote agreement, rule activations) alongside standard trade metrics.
+   Outputs the Quantitative Performance Report (Win Rate, Profit Factor, PnL, Max Drawdown) alongside the full ensemble audit metrics (agent evaluations, vote agreement, rule activations).
 
 ---
 Subscribe to the real-time Binance WebSocket feed and stream live ticks into the `DollarBarAggregator`:

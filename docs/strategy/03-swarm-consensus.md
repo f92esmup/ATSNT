@@ -980,10 +980,11 @@ position side is an increase, and a fill on the opposite side is a reduction.
 | `range_thresholds` | `[Decimal; 4]` | calibrated | Relative range, feeds 12–15 |
 | `calibration_end_ms` | `i64` | from calibration | Last timestamp used to calibrate |
 | `allow_short` | `bool` | `true` | `false` reproduces the thesis's long-only axis |
+| `priors` | `Option<SwarmPriorsConfig>` | `None` (`GENE_PRIORS`) | Configurable empirical distribution priors (§7.4) |
+| `custom_agents` | `Option<Vec<Agent>>` | `None` (sampled from seed) | Pre-selected elite agents from stratified pruning (`prune_swarm`) |
 
-Indicator periods (14, 14, 9/0.85/6, 50, and 50 for the ATR ratio) and the genome priors are
-constants of the strategy, written in its source and in this document. They are not
-configuration.
+Indicator periods (14, 14, 9/0.85/6, 50, and 50 for the ATR ratio) are constants of the strategy,
+written in its source and in this document. Baseline genome priors are defined in §7.1.
 
 ### 14.2 Policy configuration (`Config`, searched by HPO; Stage B)
 
@@ -994,15 +995,14 @@ configuration.
 | `hysteresis` | `Decimal` | `0.25` | 0.10, 0.15, 0.20, 0.25, 0.30 |
 | `base_risk` | `Decimal` | `0.010` | 0.005, 0.010, 0.015, 0.020 |
 | `risk_increment` | `Decimal` | `0.005` | 0.005, 0.010, 0.015, 0.020 |
-| `stop_atr_multiplier` | `Decimal` | `3.0` | fixed |
+| `stop_atr_multiplier` | `Decimal` | `3.0` | 1.5, 2.0, 2.5, 3.0, 4.0 (Bloque A) |
+| `take_profit_atr_multiplier` | `Option<Decimal>` | `None` | None, Some(1.5), Some(2.5), Some(4.0) (Bloque B) |
+| `decay_horizon_seconds` | `Option<u64>` | `None` | Optional max stall time before level 0 exit |
+| `feed_weights` | `Option<FeedWeights>` | `None` (equal 1/16) | Standard macro profiles or pruned feeds (Bloque C) |
 
-These are the thesis ranges, converted to fractions: 25–55 votes in steps of 5, step 5–15,
-hysteresis 10–30, and risk 0.5–2% for both risk parameters. The full grid has
-`7 · 3 · 5 · 4 · 4 = 1,680` combinations. Candidates whose level-3 risk
-`base_risk + 2·risk_increment` exceeds `max_level_risk = 0.05` are not generated.
+Candidates whose level-3 risk `base_risk + 2·risk_increment` exceeds `max_level_risk = 0.05` are not generated.
 
-`perturb_neighbors` returns the adjacent grid values of each of the five searched parameters, as
-for the other strategies.
+`perturb_neighbors` returns the adjacent grid values of each searched parameter dimension across the multi-dimensional grid.
 
 ---
 
