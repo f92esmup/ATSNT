@@ -286,6 +286,7 @@ async fn main() -> Result<()> {
     let (metrics, closed_trades) = match args.fill_model {
         FillModelArg::Bar if input_kind == InputKind::Trades => {
             let mut engine = BacktestEngine::new(engine_config);
+            engine.set_bracket_priority(strategy.bracket_priority());
             let mut last_price = Decimal::ZERO;
             while let Some(trade) = stream.next_trade()? {
                 total_trades_processed += 1;
@@ -314,6 +315,7 @@ async fn main() -> Result<()> {
         }
         FillModelArg::Bar => {
             let mut engine = BacktestEngine::new(engine_config);
+            engine.set_bracket_priority(strategy.bracket_priority());
             let mut last_price = Decimal::ZERO;
             while let Some(trade) = stream.next_trade()? {
                 total_trades_processed += 1;

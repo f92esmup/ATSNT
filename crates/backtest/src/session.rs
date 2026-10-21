@@ -445,6 +445,19 @@ impl<S: Strategy> TradingSession<S> {
             }
         }
 
+        if level == 0
+            && self.strategy.bracket_priority()
+            && matches!(
+                self.phase,
+                Phase::Open {
+                    take_profit_distance: Some(_),
+                    ..
+                }
+            )
+        {
+            return Vec::new();
+        }
+
         if !self.account_ok || self.is_halted() {
             if self.is_halted() && level != 0 {
                 return vec![SessionEvent::SignalSkipped(SkipReason::Halted)];
@@ -1300,18 +1313,12 @@ impl<S: Strategy> TradingSession<S> {
         let funding = std::mem::take(&mut self.funding);
         let reason = self.exit_hint.take().unwrap_or_else(|| {
             match (closed.stop_distance, closed.take_profit_distance) {
-                (Some(s_dist), Some(tp_dist)) => {
-                    let s_price = match closed.side {
-                        Side::Buy => closed.entry_price - s_dist,
-                        Side::Sell => closed.entry_price + s_dist,
+                (Some(_), Some(_)) => {
+                    let is_profit = match closed.side {
+                        Side::Buy => closed.exit_price >= closed.entry_price,
+                        Side::Sell => closed.exit_price <= closed.entry_price,
                     };
-                    let tp_price = match closed.side {
-                        Side::Buy => closed.entry_price + tp_dist,
-                        Side::Sell => closed.entry_price - tp_dist,
-                    };
-                    let to_s = (closed.exit_price - s_price).abs();
-                    let to_tp = (closed.exit_price - tp_price).abs();
-                    if to_tp < to_s {
+                    if is_profit {
                         "TakeProfit"
                     } else {
                         "StopLoss"

@@ -297,7 +297,18 @@ pub const LONG_RULES: &[Rule] = &[
         Action::LongExit,
         &All(&[Macro(Stretched), Micro(InsideBar, Neutral)]),
     ),
-    original(RuleName::X3, Action::LongExit, &Macro(Bearish)),
+    original(
+        RuleName::X3,
+        Action::LongExit,
+        &All(&[
+            Macro(Bearish),
+            Any(&[
+                Micro(PinBar, Down),
+                Micro(Engulfing, Down),
+                Micro(BreakOfStructure, Down),
+            ]),
+        ]),
+    ),
     original(
         RuleName::X4,
         Action::LongExit,
@@ -504,7 +515,7 @@ mod tests {
             RuleName::E5 => (m(&[Bullish, High]), u(&[(BreakOfStructure, Up)])),
             RuleName::X1 => (m(&[Overbought]), u(&[(PinBar, Down)])),
             RuleName::X2 => (m(&[Stretched]), u(&[(InsideBar, Neutral)])),
-            RuleName::X3 => (m(&[Bearish]), MicroSet::default()),
+            RuleName::X3 => (m(&[Bearish]), u(&[(PinBar, Down)])),
             RuleName::X4 => (m(&[Low, Overbought]), MicroSet::default()),
         }
     }
@@ -539,7 +550,11 @@ mod tests {
                 "Oversold ∧ (PinBar↑ ∨ BoS↑)",
             ),
             ("X2", "Stretched ∧ InsideBar", "Stretched ∧ InsideBar"),
-            ("X3", "Bearish", "Bullish"),
+            (
+                "X3",
+                "Bearish ∧ (PinBar↓ ∨ Engulfing↓ ∨ BoS↓)",
+                "Bullish ∧ (PinBar↑ ∨ Engulfing↑ ∨ BoS↑)",
+            ),
             ("X4", "Low ∧ Overbought", "Low ∧ Oversold"),
         ];
         assert_eq!(LONG_RULES.len(), expected.len());
@@ -676,9 +691,10 @@ mod tests {
             true,
         );
         assert_eq!(vote, AgentVote::WAIT);
-        // Bearish alone fires the macro-only X3; with no pattern the vote is still (0, 0).
+        // Low + Overbought alone fires the macro-only X4; with no pattern the vote is still (0, 0).
         let mut snapshot = neutral_snapshot();
-        snapshot.alma_slope = dec!(-1);
+        snapshot.atr_ratio = dec!(0.5);
+        snapshot.rsi = dec!(75);
         let flat = bar(dec!(10), dec!(10), dec!(10), dec!(10));
         let evaluation = evaluate_agent(
             &reference_genome(),
@@ -689,7 +705,7 @@ mod tests {
         );
         assert!(evaluation.noise);
         assert_ne!(
-            evaluation.fired_rules & (1 << rule(RuleName::X3).id.index()),
+            evaluation.fired_rules & (1 << rule(RuleName::X4).id.index()),
             0
         );
         assert_eq!(evaluation.vote, AgentVote::WAIT);

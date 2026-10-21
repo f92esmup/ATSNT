@@ -64,6 +64,12 @@ pub trait Strategy: Send {
         false
     }
 
+    /// Whether open positions with active bracket exits (TP/SL) prioritize holding until TP/SL or
+    /// opposite-side flip, rather than market-closing on neutral consensus decay (k = 0).
+    fn bracket_priority(&self) -> bool {
+        false
+    }
+
     /// Strategy-specific audit written into reports as `strategy_audit`; `None` by default.
     fn audit(&self) -> Option<serde_json::Value> {
         None

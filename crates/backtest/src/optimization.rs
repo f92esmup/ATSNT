@@ -269,6 +269,7 @@ pub fn run_tape_slice<S: OptimizableStrategy>(
     let mut strategy = S::from_config(shared, strat_config.clone())
         .map_err(|e| BacktestError::Strategy(e.to_string()))?;
     let mut engine = BacktestEngine::new(config);
+    engine.set_bracket_priority(strategy.bracket_priority());
 
     for (index, event) in range.zip(prices) {
         let features = tape.features_at(index);

@@ -67,6 +67,10 @@ impl Strategy for SwarmConsensusStrategy {
     fn emits_targets(&self) -> bool {
         true
     }
+
+    fn bracket_priority(&self) -> bool {
+        self.policy.config().bracket_priority
+    }
 }
 
 impl OptimizableStrategy for SwarmConsensusStrategy {

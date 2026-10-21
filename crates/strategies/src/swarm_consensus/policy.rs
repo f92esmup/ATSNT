@@ -77,6 +77,14 @@ pub struct PolicyConfig {
     /// Optional feed weights for heterogeneous consensus voting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feed_weights: Option<FeedWeights>,
+    /// Whether open positions with active bracket exits (TP/SL) prioritize holding until TP/SL or
+    /// opposite-side flip, rather than market-closing on neutral consensus decay (k = 0).
+    #[serde(default = "default_bracket_priority")]
+    pub bracket_priority: bool,
+}
+
+fn default_bracket_priority() -> bool {
+    true
 }
 
 impl Default for PolicyConfig {
@@ -91,6 +99,7 @@ impl Default for PolicyConfig {
             take_profit_atr_multiplier: Some(dec!(2.0)),
             decay_horizon_seconds: None,
             feed_weights: None,
+            bracket_priority: true,
         }
     }
 }
@@ -115,6 +124,9 @@ impl std::fmt::Display for PolicyConfig {
         }
         if let Some(ref weights) = self.feed_weights {
             write!(f, "|W:{weights}")?;
+        }
+        if self.bracket_priority {
+            write!(f, "|BP")?;
         }
         Ok(())
     }
@@ -377,6 +389,10 @@ fn default_feed_weights_options() -> Vec<Option<FeedWeights>> {
     vec![None]
 }
 
+fn default_bracket_priority_options() -> Vec<bool> {
+    vec![true]
+}
+
 /// HPO search space of [`PolicyConfig`] (strategy spec §14.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmPolicySpace {
@@ -398,6 +414,9 @@ pub struct SwarmPolicySpace {
     /// Values of `feed_weights` (None for equal/unweighted, or weighted profile).
     #[serde(default = "default_feed_weights_options")]
     pub feed_weights_options: Vec<Option<FeedWeights>>,
+    /// Values of `bracket_priority`.
+    #[serde(default = "default_bracket_priority_options")]
+    pub bracket_priority_options: Vec<bool>,
     /// Account policy cap: candidates whose level-3 risk exceeds it are never generated.
     #[serde(default = "default_max_level_risk")]
     pub max_level_risk: Decimal,
@@ -420,15 +439,15 @@ impl Default for SwarmPolicySpace {
             ],
             threshold_steps: vec![dec!(0.05), dec!(0.075), dec!(0.10), dec!(0.125), dec!(0.15)],
             hysteresis_values: vec![
-                dec!(0.15),
-                dec!(0.25),
                 dec!(0.35),
                 dec!(0.45),
                 dec!(0.55),
                 dec!(0.65),
                 dec!(0.75),
                 dec!(0.85),
-                dec!(1.00),
+                dec!(0.95),
+                dec!(1.05),
+                dec!(1.15),
             ],
             base_risks: vec![
                 dec!(0.005),
@@ -459,6 +478,7 @@ impl Default for SwarmPolicySpace {
             ],
             take_profit_atr_multipliers: default_take_profit_multipliers(),
             feed_weights_options: default_feed_weights_options(),
+            bracket_priority_options: default_bracket_priority_options(),
             max_level_risk: default_max_level_risk(),
         }
     }
@@ -495,19 +515,22 @@ impl HyperparameterSpace for SwarmPolicySpace {
                                 for &take_profit_atr_multiplier in &self.take_profit_atr_multipliers
                                 {
                                     for feed_weights in &self.feed_weights_options {
-                                        let config = PolicyConfig {
-                                            threshold_base,
-                                            threshold_step,
-                                            hysteresis,
-                                            base_risk,
-                                            risk_increment,
-                                            stop_atr_multiplier,
-                                            take_profit_atr_multiplier,
-                                            decay_horizon_seconds: None,
-                                            feed_weights: feed_weights.clone(),
-                                        };
-                                        if self.admits(&config) {
-                                            configs.push(config);
+                                        for &bracket_priority in &self.bracket_priority_options {
+                                            let config = PolicyConfig {
+                                                threshold_base,
+                                                threshold_step,
+                                                hysteresis,
+                                                base_risk,
+                                                risk_increment,
+                                                stop_atr_multiplier,
+                                                take_profit_atr_multiplier,
+                                                decay_horizon_seconds: None,
+                                                feed_weights: feed_weights.clone(),
+                                                bracket_priority,
+                                            };
+                                            if self.admits(&config) {
+                                                configs.push(config);
+                                            }
                                         }
                                     }
                                 }
@@ -930,7 +953,7 @@ mod tests {
         assert_eq!(c.validate(), Ok(()));
         assert_eq!(
             c.to_string(),
-            "B:0.45|S:0.075|H:0.55|R:0.010|Ri:0.005|Stop:3.0|TP:2.0"
+            "B:0.45|S:0.075|H:0.55|R:0.010|Ri:0.005|Stop:3.0|TP:2.0|BP"
         );
         let json = serde_json::to_string(&c).expect("serialise");
         let back: PolicyConfig = serde_json::from_str(&json).expect("deserialise");
@@ -1100,6 +1123,7 @@ mod tests {
             take_profit_atr_multiplier: Some(dec!(3.0)),
             decay_horizon_seconds: None,
             feed_weights: None,
+            bracket_priority: true,
         };
         let n = space.perturb_neighbors(&base);
         assert_eq!(n.len(), 14);

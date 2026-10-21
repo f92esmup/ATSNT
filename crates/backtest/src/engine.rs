@@ -58,6 +58,7 @@ pub struct BacktestEngine {
     monthly_open_equity: Decimal,
     monthly_trip_drawdown_pct: Option<Decimal>,
     halted: bool,
+    bracket_priority: bool,
     /// Signals that did not become orders, per reason (see `BacktestMetrics::rejected_orders`).
     rejected_orders: BTreeMap<String, usize>,
 }
@@ -87,8 +88,15 @@ impl BacktestEngine {
             monthly_open_equity: initial,
             monthly_trip_drawdown_pct: None,
             halted: false,
+            bracket_priority: false,
             rejected_orders: BTreeMap::new(),
         }
+    }
+
+    /// Sets whether open target positions with active take-profit exits prioritize running to
+    /// their bracket limits rather than market-closing on level 0 decisions.
+    pub fn set_bracket_priority(&mut self, enabled: bool) {
+        self.bracket_priority = enabled;
     }
 
     /// Current loss versus the equity at the start of the UTC month (never negative).
@@ -230,6 +238,7 @@ impl BacktestEngine {
     /// A thin wrapper over [`BacktestEngine::process_event`]: the bar is the price event and the
     /// strategy's decision on it is the decision step.
     pub fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &DollarBar) {
+        self.bracket_priority = strategy.bracket_priority();
         self.process_event(&PriceEvent::from(bar), &mut || {
             strategy.on_event(&MarketEvent::DollarBar(bar))
         });
@@ -453,6 +462,13 @@ impl BacktestEngine {
                 return;
             }
             self.core.clear_rearm();
+        }
+        if target.level() == 0
+            && self.bracket_priority
+            && self.core.position().is_some()
+            && self.active_exits().is_some_and(|e| e.take_profit.is_some())
+        {
+            return;
         }
         let tripped = self.daily_circuit_breaker_tripped;
         let sized = self
