@@ -468,6 +468,16 @@ run_stage() {
     stage_timing "${name}" "${stage_start}"
 }
 
+link_into() {
+    local dir="$1" file absolute
+    shift
+    mkdir -p "${dir}" || return 1
+    for file in "$@"; do
+        absolute="$(cd "$(dirname "${file}")" && pwd)/$(basename "${file}")" || return 1
+        ln -s "${absolute}" "${dir}/" || return 1
+    done
+}
+
 # Splits the year's files by month into train/ and holdout/ symlink directories. In dry-run it
 # only reports the split. Both sides must hold data, otherwise the run would be meaningless.
 prepare_holdout_split() {
@@ -503,16 +513,6 @@ prepare_holdout_split() {
     mkdir -p "$(dirname "${SPLIT_ROOT}")"
     local staging
     staging="$(mktemp -d "${SPLIT_ROOT}.staging.XXXXXX")"
-    # Every step checks its own status: bash ignores `set -e` inside an `if` condition.
-    link_into() {
-        local dir="$1" file absolute
-        shift
-        mkdir -p "${dir}" || return 1
-        for file in "$@"; do
-            absolute="$(cd "$(dirname "${file}")" && pwd)/$(basename "${file}")" || return 1
-            ln -s "${absolute}" "${dir}/" || return 1
-        done
-    }
     if ! link_into "${staging}/train" "${train[@]}" || ! link_into "${staging}/holdout" "${holdout[@]}"; then
         rm -rf "${staging}"
         echo "[ERROR] --holdout-from-month ${HOLDOUT_PADDED}: could not link the split into ${SPLIT_ROOT}"
@@ -520,6 +520,69 @@ prepare_holdout_split() {
     fi
     rm -rf "${SPLIT_ROOT}"
     mv "${staging}" "${SPLIT_ROOT}"
+}
+
+# For swarm_consensus, data evaluated in HPO and backtest must start strictly after the
+# calibration period (Zero Look-Ahead Bias, §15.2). Symlinks all files starting from CALIB_TO month.
+prepare_swarm_eval_split() {
+    [ "${STRATEGY}" = "swarm_consensus" ] || [ "${STRATEGY}" = "swarm" ] || return 0
+    [ -z "${HOLDOUT_PADDED}" ] || return 0
+    [ -z "${MONTH_PADDED}" ] || return 0
+
+    local calib_end_month
+    local calib_target_to="${CALIBRATION_TO:-${YEAR}-02-01}"
+    if [[ "${calib_target_to}" =~ ^[0-9]{4}-([0-9]{2})-[0-9]{2}$ ]]; then
+        calib_end_month="${BASH_REMATCH[1]}"
+    else
+        calib_end_month="02"
+    fi
+
+    local eval_root="${OUTPUT_DIR}/splits/${SYMBOL}-${YEAR}-swarm-eval"
+
+    if [ "${DRY_RUN}" = "true" ] && [ "${SKIP_FETCH}" = "false" ]; then
+        echo "[DRY-RUN] would link evaluation files (months ${calib_end_month}-12) into ${eval_root}"
+        HPO_DATA="${eval_root}"
+        BACKTEST_DATA="${eval_root}"
+        return 0
+    fi
+
+    local eval_files=() file name month
+    for file in "${DATA_PATH}/${SYMBOL}-aggTrades-${YEAR}-"*.parquet; do
+        [ -e "${file}" ] || continue
+        name="$(basename "${file}")"
+        if [[ "${name}" =~ ^${SYMBOL}-aggTrades-${YEAR}-([0-9]{2})(-[0-9]{2})?\.parquet$ ]]; then
+            month="${BASH_REMATCH[1]}"
+            if [ $((10#${month})) -ge $((10#${calib_end_month})) ]; then
+                eval_files+=("${file}")
+            fi
+        fi
+    done
+
+    if [ "${#eval_files[@]}" -eq 0 ]; then
+        echo "[ERROR] No evaluation data found after calibration period ending month ${calib_end_month}"
+        exit 1
+    fi
+
+    echo "[*] Swarm evaluation split: ${#eval_files[@]} file(s) (months ${calib_end_month}-12, zero look-ahead)"
+    if [ "${DRY_RUN}" = "true" ]; then
+        echo "[DRY-RUN] would link ${#eval_files[@]} file(s) into ${eval_root}"
+        HPO_DATA="${eval_root}"
+        BACKTEST_DATA="${eval_root}"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "${eval_root}")"
+    local staging
+    staging="$(mktemp -d "${eval_root}.staging.XXXXXX")"
+    if ! link_into "${staging}" "${eval_files[@]}"; then
+        rm -rf "${staging}"
+        echo "[ERROR] Could not link swarm evaluation files into ${eval_root}"
+        exit 1
+    fi
+    rm -rf "${eval_root}"
+    mv "${staging}" "${eval_root}"
+    HPO_DATA="${eval_root}"
+    BACKTEST_DATA="${eval_root}"
 }
 
 # Fails fast when --month points at a monthly file that does not exist, instead of
@@ -619,6 +682,11 @@ if [ "${STRATEGY}" = "swarm_consensus" ] || [ "${STRATEGY}" = "swarm" ]; then
         run_stage prune "${BIN_PATH}/prune_swarm" "${PRUNE_ARGS[@]}"
         SHARED_CONFIG="${PRUNED_OUT}"
     fi
+fi
+
+# For swarm_consensus, isolate the evaluation dataset strictly after calibration (zero look-ahead)
+if [ "${STRATEGY}" = "swarm_consensus" ] || [ "${STRATEGY}" = "swarm" ]; then
+    prepare_swarm_eval_split
 fi
 
 # Step 2: Parallel Walk-Forward HPO
