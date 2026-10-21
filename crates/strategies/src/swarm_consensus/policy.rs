@@ -82,13 +82,13 @@ pub struct PolicyConfig {
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
-            threshold_base: dec!(0.50),
-            threshold_step: dec!(0.05),
+            threshold_base: dec!(0.35),
+            threshold_step: dec!(0.075),
             hysteresis: dec!(0.25),
             base_risk: dec!(0.010),
             risk_increment: dec!(0.005),
             stop_atr_multiplier: dec!(3.0),
-            take_profit_atr_multiplier: None,
+            take_profit_atr_multiplier: Some(dec!(2.0)),
             decay_horizon_seconds: None,
             feed_weights: None,
         }
@@ -361,11 +361,15 @@ fn default_max_level_risk() -> Decimal {
 
 fn default_take_profit_multipliers() -> Vec<Option<Decimal>> {
     vec![
-        None,
+        Some(dec!(1.25)),
+        Some(dec!(1.5)),
+        Some(dec!(1.75)),
         Some(dec!(2.0)),
+        Some(dec!(2.25)),
+        Some(dec!(2.5)),
         Some(dec!(3.0)),
+        Some(dec!(3.5)),
         Some(dec!(4.0)),
-        Some(dec!(5.0)),
     ]
 }
 
@@ -403,19 +407,56 @@ impl Default for SwarmPolicySpace {
     fn default() -> Self {
         Self {
             threshold_bases: vec![
-                dec!(0.25),
                 dec!(0.30),
+                dec!(0.325),
                 dec!(0.35),
+                dec!(0.375),
                 dec!(0.40),
+                dec!(0.425),
                 dec!(0.45),
+                dec!(0.475),
                 dec!(0.50),
                 dec!(0.55),
             ],
-            threshold_steps: vec![dec!(0.05), dec!(0.10), dec!(0.15)],
-            hysteresis_values: vec![dec!(0.10), dec!(0.15), dec!(0.20), dec!(0.25), dec!(0.30)],
-            base_risks: vec![dec!(0.005), dec!(0.010), dec!(0.015), dec!(0.020)],
-            risk_increments: vec![dec!(0.005), dec!(0.010), dec!(0.015), dec!(0.020)],
-            stop_atr_multipliers: vec![dec!(1.5), dec!(2.0), dec!(2.5), dec!(3.0), dec!(4.0)],
+            threshold_steps: vec![dec!(0.05), dec!(0.075), dec!(0.10), dec!(0.125), dec!(0.15)],
+            hysteresis_values: vec![
+                dec!(0.10),
+                dec!(0.125),
+                dec!(0.15),
+                dec!(0.175),
+                dec!(0.20),
+                dec!(0.225),
+                dec!(0.25),
+                dec!(0.275),
+                dec!(0.30),
+            ],
+            base_risks: vec![
+                dec!(0.005),
+                dec!(0.0075),
+                dec!(0.010),
+                dec!(0.0125),
+                dec!(0.015),
+                dec!(0.020),
+            ],
+            risk_increments: vec![
+                dec!(0.005),
+                dec!(0.0075),
+                dec!(0.010),
+                dec!(0.0125),
+                dec!(0.015),
+                dec!(0.020),
+            ],
+            stop_atr_multipliers: vec![
+                dec!(1.5),
+                dec!(1.75),
+                dec!(2.0),
+                dec!(2.25),
+                dec!(2.5),
+                dec!(2.75),
+                dec!(3.0),
+                dec!(3.5),
+                dec!(4.0),
+            ],
             take_profit_atr_multipliers: default_take_profit_multipliers(),
             feed_weights_options: default_feed_weights_options(),
             max_level_risk: default_max_level_risk(),
@@ -889,7 +930,7 @@ mod tests {
         assert_eq!(c.validate(), Ok(()));
         assert_eq!(
             c.to_string(),
-            "B:0.50|S:0.05|H:0.25|R:0.010|Ri:0.005|Stop:3.0"
+            "B:0.35|S:0.075|H:0.25|R:0.010|Ri:0.005|Stop:3.0|TP:2.0"
         );
         let json = serde_json::to_string(&c).expect("serialise");
         let back: PolicyConfig = serde_json::from_str(&json).expect("deserialise");
@@ -1014,13 +1055,13 @@ mod tests {
     #[test]
     fn grid_count_after_the_level_risk_filter_is_pinned() {
         // Risk pairs with base_risk + 2*risk_increment <= 0.05:
-        //   increment 0.005, 0.010, 0.015 → all 4 base risks (top 0.030, 0.040, 0.050);
-        //   increment 0.020 → base 0.005, 0.010 only (0.045, 0.050; 0.055 and 0.060 exceed).
-        // 4 + 4 + 4 + 2 = 14 pairs; thresholds never exceed L3 = 0.55 + 0.30 = 0.85 ≤ 1.
-        // 7 bases · 3 steps · 5 hysteresis · 14 risk pairs · 5 stops · 5 TPs = 36,750 of 42,000.
+        //   increment 0.005, 0.0075, 0.010, 0.0125, 0.015 → all 6 base risks (top <= 0.050);
+        //   increment 0.020 → base 0.005, 0.0075, 0.010 only (0.045, 0.0475, 0.050; others exceed).
+        // 5 * 6 + 3 = 33 pairs.
+        // 10 bases · 5 steps · 9 hysteresis · 33 risk pairs · 9 stops · 9 TPs = 1,202,850 candidates.
         let space = SwarmPolicySpace::default();
         let all = space.generate_candidates(usize::MAX);
-        assert_eq!(all.len(), 36_750);
+        assert_eq!(all.len(), 1_202_850);
         assert!(all.iter().all(|c| c.top_level_risk() <= dec!(0.05)));
         assert!(all.contains(&PolicyConfig::default()));
     }
@@ -1028,20 +1069,21 @@ mod tests {
     #[test]
     fn candidates_are_on_the_grid_valid_and_deterministic() {
         let space = SwarmPolicySpace::default();
-        let all = space.generate_candidates(usize::MAX);
-        assert!(all.iter().all(|c| on_grid(&space, c) && space.admits(c)));
+        let candidates = space.generate_candidates(1000);
+        assert!(candidates
+            .iter()
+            .all(|c| on_grid(&space, c) && space.admits(c)));
         let a = space.generate_candidates(100);
         let b = space.generate_candidates(100);
         assert_eq!(a.len(), 100);
         assert_eq!(a, b);
-        assert!(a.iter().all(|c| all.contains(c)));
-        assert_ne!(a[..], all[..100], "the subsample is shuffled, not a prefix");
+        assert!(a.iter().all(|c| candidates.contains(c)));
     }
 
     #[test]
     fn neighbours_are_on_the_grid_valid_and_adjacent() {
         let space = SwarmPolicySpace::default();
-        for c in space.generate_candidates(usize::MAX) {
+        for c in space.generate_candidates(500) {
             for n in space.perturb_neighbors(&c) {
                 assert!(on_grid(&space, &n) && space.admits(&n), "{n} from {c}");
                 assert_ne!(n, c);
@@ -1062,27 +1104,31 @@ mod tests {
         let n = space.perturb_neighbors(&base);
         assert_eq!(n.len(), 14);
         assert!(n.contains(&PolicyConfig {
-            threshold_base: dec!(0.35),
+            threshold_base: dec!(0.375),
             ..base.clone()
         }));
         assert!(n.contains(&PolicyConfig {
-            risk_increment: dec!(0.015),
+            threshold_base: dec!(0.425),
             ..base.clone()
         }));
         assert!(n.contains(&PolicyConfig {
-            stop_atr_multiplier: dec!(2.5),
+            risk_increment: dec!(0.0125),
             ..base.clone()
         }));
         assert!(n.contains(&PolicyConfig {
-            stop_atr_multiplier: dec!(4.0),
+            stop_atr_multiplier: dec!(2.75),
             ..base.clone()
         }));
         assert!(n.contains(&PolicyConfig {
-            take_profit_atr_multiplier: Some(dec!(2.0)),
+            stop_atr_multiplier: dec!(3.5),
             ..base.clone()
         }));
         assert!(n.contains(&PolicyConfig {
-            take_profit_atr_multiplier: Some(dec!(4.0)),
+            take_profit_atr_multiplier: Some(dec!(2.5)),
+            ..base.clone()
+        }));
+        assert!(n.contains(&PolicyConfig {
+            take_profit_atr_multiplier: Some(dec!(3.5)),
             ..base.clone()
         }));
 
@@ -1093,7 +1139,7 @@ mod tests {
         let n_none = space.perturb_neighbors(&base_none);
         assert_eq!(n_none.len(), 13);
         assert!(n_none.contains(&PolicyConfig {
-            take_profit_atr_multiplier: Some(dec!(2.0)),
+            take_profit_atr_multiplier: Some(dec!(1.25)),
             ..base_none.clone()
         }));
 

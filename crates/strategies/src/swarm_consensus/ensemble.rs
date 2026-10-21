@@ -25,11 +25,11 @@ use super::rules::{evaluate_agent, rule_book, AgentVote, ConflictKind, Rule};
 use super::sample::{ConsensusSample, FeedVote};
 use crate::strategy::{FeatureExtractor, MarketEvent};
 
-/// Horizons of the four time feeds (ids 0–3): 5m, 1h, 4h, 1d (§5.1).
-pub const TIME_HORIZONS_MS: [i64; 4] = [300_000, 3_600_000, 14_400_000, 86_400_000];
+/// Horizons of the four time feeds (ids 0–3): 15m, 30m, 1h, 2h.
+pub const TIME_HORIZONS_MS: [i64; 4] = [900_000, 1_800_000, 3_600_000, 7_200_000];
 
-/// Feed whose ATR is the reference of the disaster stop: time 1h (§9.3).
-pub const STOP_REFERENCE_FEED: usize = 1;
+/// Feed whose ATR is the reference of the disaster stop: time 1h (id 2).
+pub const STOP_REFERENCE_FEED: usize = 2;
 
 /// Structural configuration of the swarm (Stage A, frozen during HPO; spec §14.1).
 ///
@@ -546,11 +546,11 @@ mod tests {
     fn no_sample_is_emitted_before_every_feed_is_warm() {
         let trades = standard_fixture();
         let mut ensemble = SwarmEnsemble::new(&test_config()).unwrap();
-        let mut daily = TimeBarAggregator::new(DAY_MS).unwrap();
-        let mut daily_bars = 0;
+        let mut slowest = TimeBarAggregator::new(TIME_HORIZONS_MS[3]).unwrap();
+        let mut slowest_bars = 0;
         let mut first_sample = None;
         for (index, trade) in trades.iter().enumerate() {
-            daily_bars += usize::from(daily.process_trade(trade).is_some());
+            slowest_bars += usize::from(slowest.process_trade(trade).is_some());
             let sample = ensemble.on_event(&MarketEvent::Trade(trade));
             if !ensemble.is_ready() {
                 assert!(sample.is_none(), "sample before readiness at {index}");
@@ -558,7 +558,7 @@ mod tests {
             if sample.is_some() && first_sample.is_none() {
                 first_sample = Some(index);
                 // The slowest feed needs 64 closed bars (§6.5).
-                assert!(daily_bars >= 64, "{daily_bars}");
+                assert!(slowest_bars >= 64, "{slowest_bars}");
             }
         }
         assert!(first_sample.is_some_and(|i| i > 0));

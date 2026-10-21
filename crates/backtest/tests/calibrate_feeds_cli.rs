@@ -60,8 +60,8 @@ fn the_output_parses_and_ends_at_the_last_trade_before_to() {
     let config: SwarmConfig =
         serde_json::from_str(&std::fs::read_to_string(&output).unwrap()).unwrap();
     assert_eq!(config.calibration_end_ms, DAY_2 - 60_000);
-    // 1,440 trades over 1,439 minutes: 5m holds ceil(1440 · 5 / 1439) = 6 trades.
-    assert_eq!(config.tick_thresholds[0], 6);
+    // 1,440 trades over 1,439 minutes: 15m holds ceil(1440 · 15 / 1439) = 16 trades.
+    assert_eq!(config.tick_thresholds[0], 16);
     // The structural fields keep their defaults.
     let defaults = SwarmConfig::default();
     assert_eq!(config.genome_seed, defaults.genome_seed);
