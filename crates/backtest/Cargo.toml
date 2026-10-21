@@ -57,6 +57,10 @@ path = "src/bin/calibrate_feeds.rs"
 name = "prune_swarm"
 path = "src/bin/prune_swarm.rs"
 
+[[bin]]
+name = "generate_pipeline_test_data"
+path = "src/bin/generate_pipeline_test_data.rs"
+
 
 [dev-dependencies]
 tempfile = "3"
