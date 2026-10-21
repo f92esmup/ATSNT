@@ -84,7 +84,7 @@ impl Default for PolicyConfig {
         Self {
             threshold_base: dec!(0.35),
             threshold_step: dec!(0.075),
-            hysteresis: dec!(0.25),
+            hysteresis: dec!(0.55),
             base_risk: dec!(0.010),
             risk_increment: dec!(0.005),
             stop_atr_multiplier: dec!(3.0),
@@ -420,15 +420,15 @@ impl Default for SwarmPolicySpace {
             ],
             threshold_steps: vec![dec!(0.05), dec!(0.075), dec!(0.10), dec!(0.125), dec!(0.15)],
             hysteresis_values: vec![
-                dec!(0.10),
-                dec!(0.125),
                 dec!(0.15),
-                dec!(0.175),
-                dec!(0.20),
-                dec!(0.225),
                 dec!(0.25),
-                dec!(0.275),
-                dec!(0.30),
+                dec!(0.35),
+                dec!(0.45),
+                dec!(0.55),
+                dec!(0.65),
+                dec!(0.75),
+                dec!(0.85),
+                dec!(1.00),
             ],
             base_risks: vec![
                 dec!(0.005),
@@ -930,7 +930,7 @@ mod tests {
         assert_eq!(c.validate(), Ok(()));
         assert_eq!(
             c.to_string(),
-            "B:0.35|S:0.075|H:0.25|R:0.010|Ri:0.005|Stop:3.0|TP:2.0"
+            "B:0.35|S:0.075|H:0.55|R:0.010|Ri:0.005|Stop:3.0|TP:2.0"
         );
         let json = serde_json::to_string(&c).expect("serialise");
         let back: PolicyConfig = serde_json::from_str(&json).expect("deserialise");
@@ -1093,7 +1093,7 @@ mod tests {
         let base = PolicyConfig {
             threshold_base: dec!(0.40),
             threshold_step: dec!(0.10),
-            hysteresis: dec!(0.20),
+            hysteresis: dec!(0.55),
             base_risk: dec!(0.010),
             risk_increment: dec!(0.010),
             stop_atr_multiplier: dec!(3.0),
@@ -1129,6 +1129,14 @@ mod tests {
         }));
         assert!(n.contains(&PolicyConfig {
             take_profit_atr_multiplier: Some(dec!(3.5)),
+            ..base.clone()
+        }));
+        assert!(n.contains(&PolicyConfig {
+            hysteresis: dec!(0.45),
+            ..base.clone()
+        }));
+        assert!(n.contains(&PolicyConfig {
+            hysteresis: dec!(0.65),
             ..base.clone()
         }));
 
