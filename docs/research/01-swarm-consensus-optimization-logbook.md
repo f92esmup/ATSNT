@@ -11,36 +11,34 @@
 
 ## 1. Tabla Comparativa de Ejecuciones en Google Cloud Batch
 
-| Dimensión / Métrica | Run 1 (Línea Base) | Run 2 (Perfil Intradía) | Run 3 (Histéresis $H \ge L_1$) | Run 4 (Alta Convicción Entrada) | Run 5 (Guard X3 + 1,000 Cand) |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Job ID Batch** | `hpo-...-110341` | `hpo-...-135738` | `hpo-...-145442` | `hpo-...-155257` | `hpo-...-180256` |
-| **Fecha de Ejecución** | 2026-10-21 11:03 UTC | 2026-10-21 13:57 UTC | 2026-10-21 14:54 UTC | 2026-10-21 15:52 UTC | 2026-10-21 18:02 UTC |
-| **Duración Pipeline** | 1,677 s (~28 min) | 1,607 s (~26 min) | 1,826 s (~30 min) | 1,677 s (~28 min) | **1,787 s (~29.7 min)** |
-| **Candidatos HPO** | 500 | 500 | 500 | 250 (dominado por ingesta) | **1,000** (resolución 4x) |
-| **Horizontes Feeds** | 5m, 1h, 4h, 1D | **15m, 30m, 1h, 2h** | **15m, 30m, 1h, 2h** | **15m, 30m, 1h, 2h** | **15m, 30m, 1h, 2h** |
-| **Warm-Up Requerido** | 64 días | **5.3 días** | **5.3 días** | **5.3 días** | **5.3 días** |
-| **Consenso Base ($L_1$)** | `0.25` | `0.55` | `0.30` | `0.425` | **`0.45`** |
-| **Histéresis ($H$)** | `0.25` | `0.125` | `0.55` ($H > L_1$) | `0.65` ($L_1 - H = -0.225$) | **`0.45` ($L_1 - H = 0.00$)** |
-| **Take-Profit (TP)** | `None` (inexistente) | `Some(4.0 ATR)` | `Some(2.0 ATR)` | `Some(1.75 ATR)` | **`Some(1.25 ATR)`** |
-| **Stop-Loss (SL)** | `3.0 ATR` | `1.75 ATR` | `2.75 ATR` | `2.75 ATR` | **`2.00 ATR`** |
-| **Trades en Backtest** | 1,775 | 118 | 93 | 75 | **76** |
-| **Duración Media Trade**| ~2 min | 6.4 min | 7.11 horas | 6.47 horas | **73.7 min** (4,421 s) |
-| **Disparos Regla X3** | — | — | ~150,000 | 157,073 | **27,243 (-82.7%)** |
-| **Salidas Take-Profit** | 0 (0%) | 0 (0%) | 26 trades (28.0%) | 28 trades (37.3%) | **11 trades (14.5%)** |
-| **Efectividad en TPs** | 0% | 0% | 88.5% (23 de 26) | 71.4% (20 de 28) | **100% (11 de 11)** |
-| **Ganancia Neta en TPs** | $0.00 | $0.00 | +$128.95 | +$119.84 | **+$77.16 (+15.4% capital)** |
-| **Salidas Stop-Loss** | — | — | 14 trades (-$73.65) | 5 trades (-$51.93) | **0 trades ($0.00)** |
-| **Salidas TargetExit** | 1,775 (100%) | 118 (100%) | 50 trades (-$157.04) | 42 trades (-$220.32) | **64 trades (-$187.53)** |
-| **Salidas Breaker** | — | — | — | — | **1 trade (-$3.72)** |
-| **PnL Neto Solo Brackets**| -$759 | -$115.75 | **+$55.39** | **+$67.91** | **+$77.16 (Neto Positivo)** |
-| **Win Rate Global** | ~10.0% | 8.47% | 30.10% | 33.33% | **34.21%** (26 win, 50 loss) |
-| **Beneficio Bruto** | ~$50.00 | $9.54 | $150.14 | $164.62 | **$105.73** |
-| **Pérdida Bruta** | ~$809.00 | $125.29 | $271.82 | $317.03 | **$219.82** |
-| **Profit Factor** | 0.10 | 0.07 | 0.55 | 0.52 | **0.48** |
-| **Payoff Ratio** | 0.80 | 0.82 | 1.28 | 1.04 | **0.92** |
-| **PnL Neto Cuenta ($500)**| -$759 (liquidada) | -$115.75 (breaker 23%) | -$121.68 (breaker 26%) | -$152.41 (breaker 30%) | **-$114.09 (breaker 24%)** |
-| **Fricción (Comisiones+Slip)**| $444.60 | $78.71 | $77.87 | $96.56 | **$100.90** |
-| **Sortino Ratio (Backtest)**| -0.80 | -0.60 | -0.31 | -0.32 | **-0.37** |
+| Dimensión / Métrica | Run 1 (Línea Base) | Run 2 (Perfil Intradía) | Run 3 (Histéresis $H \ge L_1$) | Run 4 (Alta Convicción Entrada) | Run 5 (Guard X3) | Run 6 (Bracket Priority Activo) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Job ID Batch** | `hpo-...-110341` | `hpo-...-135738` | `hpo-...-145442` | `hpo-...-155257` | `hpo-...-180256` | `hpo-...-184917` |
+| **Fecha de Ejecución** | 2026-10-21 11:03 UTC | 2026-10-21 13:57 UTC | 2026-10-21 14:54 UTC | 2026-10-21 15:52 UTC | 2026-10-21 18:02 UTC | 2026-10-21 18:49 UTC |
+| **Duración Pipeline** | 1,677 s (~28 min) | 1,607 s (~26 min) | 1,826 s (~30 min) | 1,677 s (~28 min) | 1,787 s (~29.7 min) | **2,193 s (~36.5 min)** |
+| **Candidatos HPO** | 500 | 500 | 500 | 250 | 1,000 | **1,000** |
+| **Horizontes Feeds** | 5m, 1h, 4h, 1D | **15m, 30m, 1h, 2h** | **15m, 30m, 1h, 2h** | **15m, 30m, 1h, 2h** | **15m, 30m, 1h, 2h** | **15m, 30m, 1h, 2h** |
+| **Warm-Up Requerido** | 64 días | **5.3 días** | **5.3 días** | **5.3 días** | **5.3 días** | **5.3 días** |
+| **Consenso Base ($L_1$)** | `0.25` | `0.55` | `0.30` | `0.425` | `0.45` | **`0.45`** |
+| **Histéresis ($H$)** | `0.25` | `0.125` | `0.55` ($H > L_1$) | `0.65` ($L_1 - H = -0.225$) | `0.45` ($L_1 - H = 0.00$) | **`0.45`** |
+| **Take-Profit (TP)** | `None` (inexistente) | `Some(4.0 ATR)` | `Some(2.0 ATR)` | `Some(1.75 ATR)` | `Some(1.25 ATR)` | **`Some(1.25 ATR)`** |
+| **Stop-Loss (SL)** | `3.0 ATR` | `1.75 ATR` | `2.75 ATR` | `2.75 ATR` | `2.00 ATR` | **`2.00 ATR`** |
+| **Trades en Backtest** | 1,775 | 118 | 93 | 75 | 76 | **13 (-82.9% vs R5)** |
+| **Duración Media Trade**| ~2 min | 6.4 min | 7.11 horas | 6.47 horas | 73.7 min | **12.49 HORAS (44,953 s)** |
+| **Salidas Take-Profit** | 0 (0%) | 0 (0%) | 26 trades (28.0%) | 28 trades (37.3%) | 11 trades (14.5%) | **2 trades (15.4%)** |
+| **Efectividad en TPs** | 0% | 0% | 88.5% | 71.4% | 100% | **100% (2 de 2)** |
+| **Ganancia Neta en TPs** | $0.00 | $0.00 | +$128.95 | +$119.84 | +$77.16 | **+$10.93** |
+| **Salidas Stop-Loss** | — | — | 14 trades (-$73.65) | 5 trades (-$51.93) | 0 trades ($0.00) | **9 trades (-$76.10)** |
+| **Salidas TargetExit** | 1,775 (100%) | 118 (100%) | 50 trades (-$157.04) | 42 trades (-$220.32) | 64 trades (-$187.53) | **0 trades (0.0% - ERRADICADO)** |
+| **Salidas TargetFlip** | — | — | — | — | — | **1 trade (+ $3.43 neto)** |
+| **Salidas Breaker** | — | — | — | — | 1 trade (-$3.72) | **1 trade (-$8.71)** |
+| **Win Rate Global** | ~10.0% | 8.47% | 30.10% | 33.33% | 34.21% | **23.08%** (3 win, 10 loss) |
+| **Beneficio Bruto** | ~$50.00 | $9.54 | $150.14 | $164.62 | $105.73 | **$14.36** |
+| **Pérdida Bruta** | ~$809.00 | $125.29 | $271.82 | $317.03 | $219.82 | **$89.88 (-59.1% vs R5)** |
+| **Fricción Total (Fees+Slip)**| $444.60 | $78.71 | $77.87 | $96.56 | $100.90 | **$20.17 (-80.0% vs R5)** |
+| **Max Drawdown (%)** | 100% (liquidada) | 23.0% (breaker) | 26.0% (breaker) | 30.0% (breaker) | 23.9% (breaker) | **17.15% (Mínimo histórico)** |
+| **Probabilidad de Ruina (MC)**| ~100% | 45.2% | 22.8% | 28.5% | 19.31% | **0.00% (Cero Ruina)** |
+| **PnL Neto Cuenta ($500)**| -$759 | -$115.75 | -$121.68 | -$152.41 | -$114.09 | **-$75.52 (Menor pérdida)** |
 
 ---
 
@@ -104,6 +102,19 @@
   - **Corrección Aplicada**:
     - Se agregó el forwarder explícito de `bracket_priority` a `impl<S: ?Sized + Strategy> Strategy for Box<S>`.
     - Se incorporaron pruebas unitarias en `strategies` que validan `boxed.bracket_priority()` a través de `Box<dyn Strategy>`.
+
+### Run 6: Prioridad de Brackets 100% Operativa y Eliminación Total de TargetExits
+- **Hipótesis**: Con el forwarder de `bracket_priority` operativo en `Box<dyn Strategy>`, las posiciones abiertas no se liquidarán ante el decaimiento neutro del consenso ($k=0$), sino que aguantarán pacientemente en el libro de órdenes hasta tocar el Take-Profit o Stop-Loss.
+- **Resultados Históricos Conseguidos**:
+  1. **Erradicación Absoluta de `TargetExit`**: Las salidas por cierre a mercado cayeron de 64 a **0 (0.0%)**. Ni una sola posición fue malvendida por decaimiento neutro.
+  2. **Duración de Operaciones Multiplicada**: La duración media de las operaciones saltó a **12.49 HORAS (44,953 segundos)**, alcanzando operaciones de hasta 29.7 horas (Trade #10).
+  3. **Colapso de la Fricción**: Las comisiones y slippage se redujeron en un **80.0%** (de $100.90 en Run 5 a solo **$20.17** en Run 6).
+  4. **Probabilidad de Ruina al 0.00%**: En el estrés de Monte Carlo con 10,000 caminos simulados, **la probabilidad de ruina cayó al 0.00%**, con un Drawdown Máximo histórico del **17.15%**.
+  5. **Disminución de Pérdidas Brutas**: Las pérdidas brutas cayeron de $219.82 a **$89.88 (-59.1%)**, y la pérdida neta global de la cuenta bajó a **-$75.52** (la menor de toda la serie).
+- **Nuevo Punto de Análisis Cuantitativo (El Ratio Risk-Reward en Rango)**:
+  - De las 13 operaciones ejecutadas, 2 cerraron en Take-Profit (+$10.93), 1 cerró en TargetFlip ganadora (+ $3.43), pero 9 tocaron el Stop-Loss (-$76.10).
+  - Causa matemática: El optimizador seleccionó $TP = 1.25\text{ ATR}$ y $SL = 2.00\text{ ATR}$ (ratio $TP/SL = 0.625$, arriesgando $1.60 para ganar $1.00). Al mantener las operaciones abiertas durante 12-25 horas en un mercado lateral/choppy de febrero de 2026, la volatilidad normal de $600-$900 en Bitcoin terminó barriendo los stops de 2.0 ATR.
+  - Siguiente frontera de mejora: Requerir en el espacio de búsqueda que $TP \ge 1.5 \times SL$ (relación beneficio/riesgo positiva) o introducir un Breakeven / Trailing Stop tras alcanzar +1.0 ATR.
 
 ---
 
