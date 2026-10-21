@@ -485,6 +485,16 @@ Clamping puts a small probability mass at the bounds. That is accepted and audit
 - The original used `i % 16` with 100 agents, which gave feeds 0–3 seven agents and the rest six:
   a 17% extra weight on four feeds that nobody chose. Stratified assignment removes it.
 
+### 7.4 Meta-Priors and Stratified Agent Pruning (Bloque D)
+
+To adapt the agent population to cryptocurrency microstructures without dimensional explosion ($1\,056$ independent genes):
+1. **Configurable Meta-Priors (`SwarmPriorsConfig`)**:
+   Instead of hardcoding [`GENE_PRIORS`], the prior means $\boldsymbol{\mu}$, standard deviations $\boldsymbol{\sigma}$, and clamp limits are encapsulated in `SwarmPriorsConfig` within `SwarmConfig`.
+2. **Empirical Prior Calibration**:
+   The `calibrate_feeds` binary supports `--calibrate-priors`. It analyzes empirical distributions (RSI quantiles, wick-to-body ratios, ALMA momentum dispersion, and bar ratios) over the warm-up trades to derive asset-tailored priors.
+3. **Stratified Agent Pruning (`prune_swarm`)**:
+   An expanded candidate swarm ($N_{\text{cand}} = 16 \times 12 = 192$ agents) is simulated over calibration trades. Each agent's votes are scored against their feed's forward returns ($S_i = \sum v_{i,t} \cdot R_{t \to t+1}$). The top $K=6$ agents per feed are preserved in `SwarmConfig.custom_agents`, eliminating noise while maintaining strict feed balance.
+
 ---
 
 ## 8. The Agent

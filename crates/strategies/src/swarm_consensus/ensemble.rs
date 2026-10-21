@@ -18,7 +18,9 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
 use super::audit::SwarmAudit;
-use super::genome::{sample_swarm, Swarm, FEED_COUNT};
+use super::genome::{
+    sample_swarm, sample_swarm_with_priors, Agent, Swarm, SwarmPriorsConfig, FEED_COUNT,
+};
 use super::rules::{evaluate_agent, rule_book, AgentVote, ConflictKind, Rule};
 use super::sample::{ConsensusSample, FeedVote};
 use crate::strategy::{FeatureExtractor, MarketEvent};
@@ -53,6 +55,12 @@ pub struct SwarmConfig {
     pub calibration_end_ms: i64,
     /// `false` reproduces the thesis's long-only axis.
     pub allow_short: bool,
+    /// Optional configurable gene priors for sampling (§7.1). If `None`, uses default [`GENE_PRIORS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priors: Option<SwarmPriorsConfig>,
+    /// Optional pre-selected or pruned agent population. If `Some`, overrides sampling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_agents: Option<Vec<Agent>>,
 }
 
 impl Default for SwarmConfig {
@@ -67,6 +75,8 @@ impl Default for SwarmConfig {
             range_thresholds: [dec!(0.002), dec!(0.007), dec!(0.014), dec!(0.035)],
             calibration_end_ms: 0,
             allow_short: true,
+            priors: None,
+            custom_agents: None,
         }
     }
 }
@@ -79,6 +89,18 @@ impl SwarmConfig {
         self.volume_thresholds = thresholds.volume;
         self.range_thresholds = thresholds.range;
         self.calibration_end_ms = thresholds.calibration_end_ms;
+        self
+    }
+
+    /// Sets or replaces the configurable gene priors.
+    pub fn with_priors(mut self, priors: SwarmPriorsConfig) -> Self {
+        self.priors = Some(priors);
+        self
+    }
+
+    /// Sets or replaces the custom agent population.
+    pub fn with_custom_agents(mut self, agents: Vec<Agent>) -> Self {
+        self.custom_agents = Some(agents);
         self
     }
 
@@ -104,6 +126,12 @@ impl SwarmConfig {
             if *threshold <= Decimal::ZERO {
                 return Err(DomainError::InvalidThreshold(threshold.to_string()));
             }
+        }
+        if let Some(ref priors) = self.priors {
+            priors.validate()?;
+        }
+        if let Some(ref agents) = self.custom_agents {
+            Swarm::from_agents(agents.clone(), self.agents_per_feed)?;
         }
         Ok(())
     }
@@ -209,7 +237,17 @@ impl SwarmEnsemble {
     /// Validates `config`, samples the swarm, and builds the 16 feeds.
     pub fn new(config: &SwarmConfig) -> Result<Self, DomainError> {
         config.validate()?;
-        let swarm = sample_swarm(config.genome_seed, config.agents_per_feed)?;
+        let swarm = if let Some(ref agents) = config.custom_agents {
+            Swarm::from_agents(agents.clone(), config.agents_per_feed)?
+        } else if let Some(ref priors) = config.priors {
+            sample_swarm_with_priors(
+                config.genome_seed,
+                config.agents_per_feed,
+                &priors.to_gene_priors(),
+            )?
+        } else {
+            sample_swarm(config.genome_seed, config.agents_per_feed)?
+        };
         let audit = SwarmAudit::new(&swarm);
         Ok(Self {
             config: config.clone(),
@@ -744,5 +782,22 @@ mod tests {
         {
             assert_eq!((sample.short_up, sample.short_down), (0, 0));
         }
+    }
+
+    #[test]
+    fn ensemble_supports_custom_priors_and_custom_agents() {
+        let priors = SwarmPriorsConfig::default();
+        let config_with_priors = test_config().with_priors(priors);
+        let ensemble_priors = SwarmEnsemble::new(&config_with_priors).unwrap();
+        assert_eq!(ensemble_priors.swarm().agents().len(), 96);
+
+        // Pre-sampled custom agents
+        let agents = ensemble_priors.swarm().agents().to_vec();
+        let config_with_agents = test_config().with_custom_agents(agents);
+        let ensemble_custom = SwarmEnsemble::new(&config_with_agents).unwrap();
+        assert_eq!(
+            ensemble_custom.swarm().agents(),
+            ensemble_priors.swarm().agents()
+        );
     }
 }

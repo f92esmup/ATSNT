@@ -13,9 +13,11 @@ use adapters::{BinanceCsvReader, BinanceParquetReader, MarketDataStream};
 use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
 use clap::Parser;
-use domain::{calibrate, FeedThresholds, Trade};
+use domain::{
+    calibrate, calibrate_empirical_priors, BarAggregator, FeedThresholds, TimeBarAggregator, Trade,
+};
 use strategies::swarm_consensus::ensemble::TIME_HORIZONS_MS;
-use strategies::SwarmConfig;
+use strategies::{SwarmConfig, SwarmPriorsConfig};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -42,6 +44,10 @@ struct Args {
     /// Optional swarm SharedConfig (JSON) to start from; defaults to the built-in defaults
     #[arg(long)]
     base: Option<PathBuf>,
+
+    /// Optional flag to calibrate empirical gene priors from the calibration trades
+    #[arg(long, default_value_t = false)]
+    calibrate_priors: bool,
 }
 
 /// The calibration period `[start_ms, end_ms)` in Unix milliseconds.
@@ -96,13 +102,40 @@ where
 }
 
 /// Calibrates the thresholds on `trades` and applies them to `base`.
-fn build_config(base: SwarmConfig, trades: &[Trade]) -> Result<(SwarmConfig, FeedThresholds)> {
+fn build_config(
+    base: SwarmConfig,
+    trades: &[Trade],
+    calibrate_priors: bool,
+) -> Result<(SwarmConfig, FeedThresholds)> {
     if trades.is_empty() {
         bail!("no trades in the calibration period");
     }
     let thresholds = calibrate(trades, TIME_HORIZONS_MS)
         .map_err(|e| anyhow::anyhow!("calibration failed: {e}"))?;
-    let config = base.with_thresholds(&thresholds);
+    let mut config = base.with_thresholds(&thresholds);
+
+    if calibrate_priors {
+        let mut aggregator = TimeBarAggregator::new(3_600_000)
+            .map_err(|e| anyhow::anyhow!("failed to create 1h bar aggregator: {e}"))?;
+        let mut bars = Vec::new();
+        for trade in trades {
+            if let Some(bar) = aggregator.process_trade(trade) {
+                bars.push(bar);
+            }
+        }
+        if bars.len() >= 64 {
+            let empirical = calibrate_empirical_priors(&bars)
+                .map_err(|e| anyhow::anyhow!("empirical prior calibration failed: {e}"))?;
+            let priors = SwarmPriorsConfig::from_empirical(&empirical);
+            config = config.with_priors(priors);
+        } else {
+            eprintln!(
+                "warning: only {} 1h bars generated (need 64); keeping base priors",
+                bars.len()
+            );
+        }
+    }
+
     config
         .validate()
         .map_err(|e| anyhow::anyhow!("calibrated configuration is invalid: {e}"))?;
@@ -151,7 +184,7 @@ fn main() -> Result<()> {
             args.data.display()
         );
     }
-    let (config, thresholds) = build_config(base, &trades)?;
+    let (config, thresholds) = build_config(base, &trades, args.calibrate_priors)?;
 
     let json = serde_json::to_string_pretty(&config)?;
     std::fs::write(&args.output, json + "\n")
@@ -252,7 +285,7 @@ mod tests {
             allow_short: false,
             ..SwarmConfig::default()
         };
-        let (config, thresholds) = build_config(base, &kept).unwrap();
+        let (config, thresholds) = build_config(base, &kept, false).unwrap();
 
         assert_eq!(thresholds.calibration_end_ms, DAY_2 - 60_000);
         assert_eq!(config.calibration_end_ms, DAY_2 - 60_000);
@@ -270,7 +303,7 @@ mod tests {
 
     #[test]
     fn an_empty_period_is_refused() {
-        let err = build_config(SwarmConfig::default(), &[]).unwrap_err();
+        let err = build_config(SwarmConfig::default(), &[], false).unwrap_err();
         assert!(err
             .to_string()
             .contains("no trades in the calibration period"));

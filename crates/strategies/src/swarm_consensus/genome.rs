@@ -5,7 +5,7 @@
 //! (§7.2), so a seed fully determines the swarm on every platform. Agent `i` watches feed
 //! `i / agents_per_feed` (stratified assignment, §7.3).
 
-use domain::DomainError;
+use domain::{DomainError, EmpiricalPriors};
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use rust_decimal::{Decimal, MathematicalOps};
@@ -42,6 +42,179 @@ pub struct GenePrior {
     /// Upper clamp bound. For `atr_contraction` the effective bound is also at most
     /// `atr_expansion - ATR_GAP`.
     pub max: Decimal,
+}
+
+/// The configurable prior parameters of one gene (mean, std, min, max).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriorParam {
+    /// Mean of the normal prior.
+    pub mean: Decimal,
+    /// Standard deviation of the normal prior.
+    pub std: Decimal,
+    /// Lower clamp bound.
+    pub min: Decimal,
+    /// Upper clamp bound.
+    pub max: Decimal,
+}
+
+impl PriorParam {
+    /// Creates a new prior parameter set.
+    pub const fn new(mean: Decimal, std: Decimal, min: Decimal, max: Decimal) -> Self {
+        Self {
+            mean,
+            std,
+            min,
+            max,
+        }
+    }
+
+    /// Converts to a `GenePrior` with the given static name.
+    pub const fn to_gene_prior(&self, name: &'static str) -> GenePrior {
+        GenePrior {
+            name,
+            mean: self.mean,
+            std: self.std,
+            min: self.min,
+            max: self.max,
+        }
+    }
+
+    /// Validates internal consistency: std > 0, min < max, and min <= mean <= max.
+    pub fn validate(&self, gene_name: &str) -> Result<(), DomainError> {
+        if self.std <= Decimal::ZERO {
+            return Err(DomainError::InvalidThreshold(format!(
+                "gene '{gene_name}' std must be strictly positive, got {}",
+                self.std
+            )));
+        }
+        if self.min >= self.max {
+            return Err(DomainError::InvalidThreshold(format!(
+                "gene '{gene_name}' min ({}) must be strictly less than max ({})",
+                self.min, self.max
+            )));
+        }
+        if self.mean < self.min || self.mean > self.max {
+            return Err(DomainError::InvalidThreshold(format!(
+                "gene '{gene_name}' mean ({}) must be within [min, max] = [{}, {}]",
+                self.mean, self.min, self.max
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl From<GenePrior> for PriorParam {
+    fn from(p: GenePrior) -> Self {
+        Self {
+            mean: p.mean,
+            std: p.std,
+            min: p.min,
+            max: p.max,
+        }
+    }
+}
+
+/// Configurable distribution priors for the 11 genes of the swarm genome (§7.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPriorsConfig {
+    pub rsi_overbought: PriorParam,
+    pub rsi_oversold: PriorParam,
+    pub atr_expansion: PriorParam,
+    pub atr_contraction: PriorParam,
+    pub vwap_deviation: PriorParam,
+    pub alma_slope: PriorParam,
+    pub pinbar_long_ratio: PriorParam,
+    pub pinbar_short_ratio: PriorParam,
+    pub engulfing_ratio: PriorParam,
+    pub bos_margin: PriorParam,
+    pub insidebar_ratio: PriorParam,
+}
+
+impl Default for SwarmPriorsConfig {
+    fn default() -> Self {
+        Self {
+            rsi_overbought: PriorParam::from(GENE_PRIORS[0]),
+            rsi_oversold: PriorParam::from(GENE_PRIORS[1]),
+            atr_expansion: PriorParam::from(GENE_PRIORS[2]),
+            atr_contraction: PriorParam::from(GENE_PRIORS[3]),
+            vwap_deviation: PriorParam::from(GENE_PRIORS[4]),
+            alma_slope: PriorParam::from(GENE_PRIORS[5]),
+            pinbar_long_ratio: PriorParam::from(GENE_PRIORS[6]),
+            pinbar_short_ratio: PriorParam::from(GENE_PRIORS[7]),
+            engulfing_ratio: PriorParam::from(GENE_PRIORS[8]),
+            bos_margin: PriorParam::from(GENE_PRIORS[9]),
+            insidebar_ratio: PriorParam::from(GENE_PRIORS[10]),
+        }
+    }
+}
+
+impl SwarmPriorsConfig {
+    /// Creates a swarm priors configuration from empirical distribution means,
+    /// retaining the standard deviations and min/max clamp bounds of the baseline priors.
+    pub fn from_empirical(empirical: &EmpiricalPriors) -> Self {
+        let mut config = Self::default();
+        config.rsi_overbought.mean = empirical.rsi_overbought_mean;
+        config.rsi_oversold.mean = empirical.rsi_oversold_mean;
+        config.atr_expansion.mean = empirical.atr_expansion_mean;
+        config.atr_contraction.mean = empirical.atr_contraction_mean;
+        config.vwap_deviation.mean = empirical.vwap_deviation_mean;
+        config.alma_slope.mean = empirical.alma_slope_mean;
+        config.pinbar_long_ratio.mean = empirical.pinbar_long_ratio_mean;
+        config.pinbar_short_ratio.mean = empirical.pinbar_short_ratio_mean;
+        config.engulfing_ratio.mean = empirical.engulfing_ratio_mean;
+        config.bos_margin.mean = empirical.bos_margin_mean;
+        config.insidebar_ratio.mean = empirical.insidebar_ratio_mean;
+        config
+    }
+
+    /// Returns the 11 gene priors in spec §7.1 table order.
+    pub fn to_gene_priors(&self) -> [GenePrior; GENE_COUNT] {
+        [
+            self.rsi_overbought.to_gene_prior("rsi_overbought"),
+            self.rsi_oversold.to_gene_prior("rsi_oversold"),
+            self.atr_expansion.to_gene_prior("atr_expansion"),
+            self.atr_contraction.to_gene_prior("atr_contraction"),
+            self.vwap_deviation.to_gene_prior("vwap_deviation"),
+            self.alma_slope.to_gene_prior("alma_slope"),
+            self.pinbar_long_ratio.to_gene_prior("pinbar_long_ratio"),
+            self.pinbar_short_ratio.to_gene_prior("pinbar_short_ratio"),
+            self.engulfing_ratio.to_gene_prior("engulfing_ratio"),
+            self.bos_margin.to_gene_prior("bos_margin"),
+            self.insidebar_ratio.to_gene_prior("insidebar_ratio"),
+        ]
+    }
+
+    /// Validates all 11 gene priors and cross-gene constraints.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.rsi_overbought.validate("rsi_overbought")?;
+        self.rsi_oversold.validate("rsi_oversold")?;
+        self.atr_expansion.validate("atr_expansion")?;
+        self.atr_contraction.validate("atr_contraction")?;
+        self.vwap_deviation.validate("vwap_deviation")?;
+        self.alma_slope.validate("alma_slope")?;
+        self.pinbar_long_ratio.validate("pinbar_long_ratio")?;
+        self.pinbar_short_ratio.validate("pinbar_short_ratio")?;
+        self.engulfing_ratio.validate("engulfing_ratio")?;
+        self.bos_margin.validate("bos_margin")?;
+        self.insidebar_ratio.validate("insidebar_ratio")?;
+
+        if self.atr_contraction.min >= self.atr_expansion.min {
+            return Err(DomainError::InvalidThreshold(
+                "atr_contraction min must be less than atr_expansion min".into(),
+            ));
+        }
+        if self.atr_contraction.mean >= self.atr_expansion.mean {
+            return Err(DomainError::InvalidThreshold(
+                "atr_contraction mean must be less than atr_expansion mean".into(),
+            ));
+        }
+        if self.rsi_oversold.mean >= self.rsi_overbought.mean {
+            return Err(DomainError::InvalidThreshold(
+                "rsi_oversold mean must be strictly less than rsi_overbought mean".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 const fn prior(
@@ -207,6 +380,41 @@ pub struct Swarm {
 }
 
 impl Swarm {
+    /// Builds a swarm from pre-selected or pruned agents.
+    ///
+    /// Validates that:
+    /// - `agents.len() == agents_per_feed * FEED_COUNT`
+    /// - Each agent has `feed == id / agents_per_feed`
+    pub fn from_agents(agents: Vec<Agent>, agents_per_feed: u32) -> Result<Self, DomainError> {
+        if agents_per_feed == 0 {
+            return Err(DomainError::InvalidThreshold(
+                "agents_per_feed must be at least 1".to_string(),
+            ));
+        }
+        let expected_total = (agents_per_feed as usize) * FEED_COUNT;
+        if agents.len() != expected_total {
+            return Err(DomainError::InvalidThreshold(format!(
+                "expected {expected_total} agents for agents_per_feed {agents_per_feed}, got {}",
+                agents.len()
+            )));
+        }
+        let per_feed = agents_per_feed as usize;
+        for (i, agent) in agents.iter().enumerate() {
+            let expected_feed = i / per_feed;
+            if agent.feed != expected_feed {
+                return Err(DomainError::InvalidThreshold(format!(
+                    "agent at index {i} has feed {}, expected {expected_feed}",
+                    agent.feed
+                )));
+            }
+        }
+        Ok(Self {
+            agents,
+            agents_per_feed,
+            clamp_hits: [0u32; GENE_COUNT],
+        })
+    }
+
     /// Agents in id order.
     pub fn agents(&self) -> &[Agent] {
         &self.agents
@@ -224,10 +432,21 @@ impl Swarm {
 }
 
 /// Samples the whole swarm: `16 · agents_per_feed` agents, in id order, genes in table order,
-/// from one `StdRng::seed_from_u64(seed)` (§7.2–7.3).
+/// from one `StdRng::seed_from_u64(seed)` using default [`GENE_PRIORS`] (§7.2–7.3).
 ///
 /// Errors when `agents_per_feed` is 0.
 pub fn sample_swarm(seed: u64, agents_per_feed: u32) -> Result<Swarm, DomainError> {
+    sample_swarm_with_priors(seed, agents_per_feed, &GENE_PRIORS)
+}
+
+/// Samples the whole swarm with custom priors (§7.1–7.3).
+///
+/// Errors when `agents_per_feed` is 0.
+pub fn sample_swarm_with_priors(
+    seed: u64,
+    agents_per_feed: u32,
+    priors: &[GenePrior; GENE_COUNT],
+) -> Result<Swarm, DomainError> {
     if agents_per_feed == 0 {
         return Err(DomainError::InvalidThreshold(
             "agents_per_feed must be at least 1".to_string(),
@@ -243,7 +462,7 @@ pub fn sample_swarm(seed: u64, agents_per_feed: u32) -> Result<Swarm, DomainErro
     let mut agents = Vec::with_capacity(total as usize);
     for id in 0..total {
         let mut genes = [Decimal::ZERO; GENE_COUNT];
-        for (index, prior) in GENE_PRIORS.iter().enumerate() {
+        for (index, prior) in priors.iter().enumerate() {
             let max = if index == ATR_CONTRACTION {
                 prior.max.min(genes[ATR_EXPANSION] - ATR_GAP)
             } else {
@@ -408,6 +627,79 @@ mod tests {
         let genes: [Decimal; GENE_COUNT] = std::array::from_fn(|i| Decimal::from(i as u32));
         assert_eq!(Genome::from_genes(genes).genes(), genes);
         assert_eq!(Genome::from_genes(genes).bos_margin, dec!(9));
+    }
+
+    #[test]
+    fn swarm_priors_config_default_matches_gene_priors() {
+        let default_config = SwarmPriorsConfig::default();
+        let priors = default_config.to_gene_priors();
+        assert_eq!(priors.len(), GENE_COUNT);
+        for (i, p) in priors.iter().enumerate() {
+            assert_eq!(p.name, GENE_PRIORS[i].name);
+            assert_eq!(p.mean, GENE_PRIORS[i].mean);
+            assert_eq!(p.std, GENE_PRIORS[i].std);
+            assert_eq!(p.min, GENE_PRIORS[i].min);
+            assert_eq!(p.max, GENE_PRIORS[i].max);
+        }
+        assert!(default_config.validate().is_ok());
+    }
+
+    #[test]
+    fn swarm_priors_config_serde_roundtrip() {
+        let original = SwarmPriorsConfig::default();
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: SwarmPriorsConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn swarm_priors_config_validation_rejects_invalid_values() {
+        let mut config = SwarmPriorsConfig::default();
+        config.rsi_overbought.std = dec!(0);
+        assert!(config.validate().is_err());
+
+        let mut config = SwarmPriorsConfig::default();
+        config.rsi_overbought.min = dec!(90);
+        config.rsi_overbought.max = dec!(80);
+        assert!(config.validate().is_err());
+
+        let mut config = SwarmPriorsConfig::default();
+        config.rsi_oversold.mean = dec!(80);
+        config.rsi_overbought.mean = dec!(70);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn sample_swarm_with_priors_is_deterministic() {
+        let priors = SwarmPriorsConfig::default().to_gene_priors();
+        let s1 = sample_swarm_with_priors(999, 6, &priors).unwrap();
+        let s2 = sample_swarm_with_priors(999, 6, &priors).unwrap();
+        let s3 = sample_swarm(999, 6).unwrap();
+        assert_eq!(s1.agents(), s2.agents());
+        assert_eq!(s1.agents(), s3.agents());
+    }
+
+    #[test]
+    fn swarm_from_agents_validates_counts_and_feed_ordering() {
+        let valid_swarm = sample_swarm(42, 6).unwrap();
+        let agents = valid_swarm.agents().to_vec();
+        assert_eq!(agents.len(), 96);
+
+        let rebuilt = Swarm::from_agents(agents.clone(), 6).unwrap();
+        assert_eq!(rebuilt.agents(), valid_swarm.agents());
+
+        // Zero agents per feed fails
+        assert!(Swarm::from_agents(agents.clone(), 0).is_err());
+
+        // Wrong total agents fails
+        let mut truncated = agents.clone();
+        truncated.pop();
+        assert!(Swarm::from_agents(truncated, 6).is_err());
+
+        // Wrong feed fails
+        let mut corrupted = agents;
+        corrupted[0].feed = 1; // Agent 0 must have feed 0
+        assert!(Swarm::from_agents(corrupted, 6).is_err());
     }
 
     /// No floating-point type appears anywhere in the swarm module (§13 C14, S4).

@@ -53,6 +53,10 @@ path = "src/bin/live_trading.rs"
 name = "calibrate_feeds"
 path = "src/bin/calibrate_feeds.rs"
 
+[[bin]]
+name = "prune_swarm"
+path = "src/bin/prune_swarm.rs"
+
 
 [dev-dependencies]
 tempfile = "3"

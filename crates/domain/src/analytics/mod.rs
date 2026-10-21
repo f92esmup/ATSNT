@@ -14,6 +14,7 @@ pub mod calibration;
 pub mod feeds;
 pub mod filters;
 pub mod indicators;
+pub mod priors_calibration;
 pub mod sampling;
 pub mod stats;
 
@@ -27,5 +28,6 @@ pub use indicators::{
     AlmaSlope, AtrRatio, BarInput, FeedIndicators, IndicatorSnapshot, VwapDeviation, WilderAtr,
     WilderRsi,
 };
+pub use priors_calibration::{calibrate_empirical_priors, EmpiricalPriors};
 pub use sampling::DollarBarAggregator;
 pub use stats::{RollingZScore, ZScoreResult};

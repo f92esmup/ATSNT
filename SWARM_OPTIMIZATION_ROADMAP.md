@@ -189,7 +189,7 @@ Existen dos arquitecturas posibles. Seleccionamos la **Opción 1** por su total 
 
 ---
 
-## 5. Bloque D: Optimización de los Meta-Priors del Enjambre (ADN de los Agentes)
+## 5. Bloque D: Optimización de los Meta-Priors del Enjambre (ADN de los Agentes) [COMPLETADO]
 
 ### 5.1 Justificación Teórica y Cuantitativa
 El enjambre genera a sus 96 agentes a partir de la tabla fija [`GENE_PRIORS`](file:///home/f92esmup/Projects/ATSNT/crates/strategies/src/swarm_consensus/genome.rs#L64-L118).

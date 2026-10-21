@@ -21,6 +21,6 @@ pub use strategy::{
     MarketType, OptimizableStrategy, Strategy,
 };
 pub use swarm_consensus::{
-    FeedVote, FeedWeights, FeedWeightsError, PolicyConfig, SwarmConfig, SwarmConsensusStrategy,
-    SwarmPolicySpace,
+    Agent, FeedVote, FeedWeights, FeedWeightsError, PolicyConfig, PriorParam, SwarmConfig,
+    SwarmConsensusStrategy, SwarmEnsemble, SwarmPolicySpace, SwarmPriorsConfig,
 };

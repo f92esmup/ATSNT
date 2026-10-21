@@ -12,7 +12,10 @@ pub mod sample;
 
 pub use audit::SwarmAudit;
 pub use ensemble::{SwarmConfig, SwarmEnsemble};
-pub use genome::{sample_swarm, Agent, Genome, Swarm};
+pub use genome::{
+    sample_swarm, sample_swarm_with_priors, Agent, GenePrior, Genome, PriorParam, Swarm,
+    SwarmPriorsConfig, GENE_COUNT, GENE_PRIORS,
+};
 pub use policy::{axis_update, ConsensusPolicy, PolicyConfig, PolicyConfigError, SwarmPolicySpace};
 pub use rules::{AgentVote, ConflictKind};
 pub use sample::{ConsensusSample, FeedVote, FeedWeights, FeedWeightsError};

@@ -19,10 +19,10 @@ pub use analytics::stats;
 
 // Re-exports of core domain and analytical types
 pub use analytics::{
-    calibrate, AlmaSlope, AtrRatio, BarAggregator, BarInput, CusumEvent, CusumFilter,
-    DollarBarAggregator, FeedBar, FeedIndicators, FeedThresholds, IndicatorSnapshot,
-    RangeBarAggregator, RollingZScore, TickBarAggregator, TimeBarAggregator, VolumeBarAggregator,
-    VwapDeviation, WilderAtr, WilderRsi, ZScoreResult,
+    calibrate, calibrate_empirical_priors, AlmaSlope, AtrRatio, BarAggregator, BarInput,
+    CusumEvent, CusumFilter, DollarBarAggregator, EmpiricalPriors, FeedBar, FeedIndicators,
+    FeedThresholds, IndicatorSnapshot, RangeBarAggregator, RollingZScore, TickBarAggregator,
+    TimeBarAggregator, VolumeBarAggregator, VwapDeviation, WilderAtr, WilderRsi, ZScoreResult,
 };
 pub use bar::DollarBar;
 pub use decision::{
