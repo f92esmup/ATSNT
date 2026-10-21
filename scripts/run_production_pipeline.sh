@@ -45,6 +45,13 @@ BIN_DIR=""
 STRICT_SINKS=false
 UPLOAD_WINNER=false
 ARTIFACT_SUFFIX=""
+SHARED_CONFIG=""
+CALIBRATION_FROM=""
+CALIBRATION_TO=""
+CANDIDATES_PER_FEED="12"
+KEEP_PER_FEED="6"
+PRICE_BUCKET_MS="1000"
+EMBARGO_MS="86400000"
 
 show_help() {
     cat << EOF
@@ -72,7 +79,17 @@ Options:
   -i, --mc-iterations <N>    Monte Carlo bootstrap paths (default: ${MC_ITERATIONS})
   -o, --output-dir <DIR>     Root destination for Parquet dataset (default: data/historical_<YEAR>)
       --config <PATH>        Output/input path for winning HPO configuration JSON
-      --strategy <NAME>      Target strategy identifier: 'dollar_bars_cusum' or 'order_flow_imbalance' (default: ${STRATEGY})
+      --strategy <NAME>      Target strategy identifier: 'dollar_bars_cusum', 'order_flow_imbalance', or 'swarm_consensus' (default: ${STRATEGY})
+      --shared-config <PATH> Optional path to pre-existing swarm SharedConfig JSON (skips calibrate & prune)
+      --calibration-from <DATE>
+                             In-sample calibration start date YYYY-MM-DD for swarm_consensus (default: ${YEAR}-01-01)
+      --calibration-to <DATE>
+                             In-sample calibration end date YYYY-MM-DD for swarm_consensus (default: ${YEAR}-02-01)
+      --candidates-per-feed <N>
+                             Candidate agents per feed for prune_swarm (default: ${CANDIDATES_PER_FEED})
+      --keep-per-feed <N>    Elite agents to keep per feed for prune_swarm (default: ${KEEP_PER_FEED})
+      --price-bucket-ms <MS> Price bucket width in ms for swarm HPO (default: ${PRICE_BUCKET_MS})
+      --embargo-ms <MS>      Quarantined embargo in ms for swarm HPO (default: ${EMBARGO_MS})
       --param-space <PATH>   Optional JSON path overriding default search space
       --execution-context <PATH>
                              Optional JSON execution context for the HPO (capital, fees, slippage,
@@ -163,6 +180,34 @@ while [[ $# -gt 0 ]]; do
             ;;
         --strategy)
             STRATEGY="$2"
+            shift 2
+            ;;
+        --shared-config)
+            SHARED_CONFIG="$2"
+            shift 2
+            ;;
+        --calibration-from)
+            CALIBRATION_FROM="$2"
+            shift 2
+            ;;
+        --calibration-to)
+            CALIBRATION_TO="$2"
+            shift 2
+            ;;
+        --candidates-per-feed)
+            CANDIDATES_PER_FEED="$2"
+            shift 2
+            ;;
+        --keep-per-feed)
+            KEEP_PER_FEED="$2"
+            shift 2
+            ;;
+        --price-bucket-ms)
+            PRICE_BUCKET_MS="$2"
+            shift 2
+            ;;
+        --embargo-ms)
+            EMBARGO_MS="$2"
             shift 2
             ;;
         --param-space)
@@ -333,6 +378,13 @@ FORWARD_ARGS=(
 [ -n "${CAPITAL}" ] && FORWARD_ARGS+=(--capital "${CAPITAL}")
 [ -n "${BIN_DIR}" ] && FORWARD_ARGS+=(--bin-dir "${BIN_DIR}")
 [ -n "${ARTIFACT_SUFFIX}" ] && FORWARD_ARGS+=(--artifact-suffix "${ARTIFACT_SUFFIX}")
+[ -n "${SHARED_CONFIG}" ] && FORWARD_ARGS+=(--shared-config "${SHARED_CONFIG}")
+[ -n "${CALIBRATION_FROM}" ] && FORWARD_ARGS+=(--calibration-from "${CALIBRATION_FROM}")
+[ -n "${CALIBRATION_TO}" ] && FORWARD_ARGS+=(--calibration-to "${CALIBRATION_TO}")
+[ -n "${CANDIDATES_PER_FEED}" ] && FORWARD_ARGS+=(--candidates-per-feed "${CANDIDATES_PER_FEED}")
+[ -n "${KEEP_PER_FEED}" ] && FORWARD_ARGS+=(--keep-per-feed "${KEEP_PER_FEED}")
+[ -n "${PRICE_BUCKET_MS}" ] && FORWARD_ARGS+=(--price-bucket-ms "${PRICE_BUCKET_MS}")
+[ -n "${EMBARGO_MS}" ] && FORWARD_ARGS+=(--embargo-ms "${EMBARGO_MS}")
 [ "${GCP_BIGQUERY}" = "true" ] && FORWARD_ARGS+=(--gcp-bigquery)
 [ "${STRICT_SINKS}" = "true" ] && FORWARD_ARGS+=(--strict-sinks)
 [ "${UPLOAD_WINNER}" = "true" ] && FORWARD_ARGS+=(--upload-winner)
@@ -481,10 +533,15 @@ require_target_data() {
 }
 
 # Step 0: Ensure binaries are compiled in release mode
+REQUIRED_BINS=("fetch_data" "run_hpo" "backtest")
+if [ "${STRATEGY}" = "swarm_consensus" ] || [ "${STRATEGY}" = "swarm" ]; then
+    REQUIRED_BINS+=("calibrate_feeds" "prune_swarm")
+fi
+
 if [ -n "${BIN_DIR}" ]; then
     echo "[0/3] [SKIPPED] Compilation (using prebuilt binaries in ${BIN_PATH})"
     if [ "${DRY_RUN}" = "false" ]; then
-        for bin in fetch_data run_hpo backtest; do
+        for bin in "${REQUIRED_BINS[@]}"; do
             if [ ! -x "${BIN_PATH}/${bin}" ]; then
                 echo "[ERROR] Prebuilt binary ${BIN_PATH}/${bin} not found or not executable."
                 exit 1
@@ -493,13 +550,18 @@ if [ -n "${BIN_DIR}" ]; then
     fi
 elif [ "${DRY_RUN}" = "true" ]; then
     echo "[0/3] Compiling optimized release binaries..."
-    echo "[DRY-RUN] cargo build --release -p adapters --bin fetch_data -p backtest --bin run_hpo -p backtest --bin backtest"
+    if [ "${STRATEGY}" = "swarm_consensus" ] || [ "${STRATEGY}" = "swarm" ]; then
+        echo "[DRY-RUN] cargo build --release -p adapters --bin fetch_data -p backtest --bin run_hpo -p backtest --bin backtest -p backtest --bin calibrate_feeds -p backtest --bin prune_swarm"
+    else
+        echo "[DRY-RUN] cargo build --release -p adapters --bin fetch_data -p backtest --bin run_hpo -p backtest --bin backtest"
+    fi
 else
     echo "[0/3] Compiling optimized release binaries..."
-    cargo build --release \
-        -p adapters --bin fetch_data \
-        -p backtest --bin run_hpo \
-        -p backtest --bin backtest
+    CARGO_BUILD_PKGS=(-p adapters --bin fetch_data -p backtest --bin run_hpo -p backtest --bin backtest)
+    if [ "${STRATEGY}" = "swarm_consensus" ] || [ "${STRATEGY}" = "swarm" ]; then
+        CARGO_BUILD_PKGS+=(-p backtest --bin calibrate_feeds -p backtest --bin prune_swarm)
+    fi
+    cargo build --release "${CARGO_BUILD_PKGS[@]}"
     echo "      [OK] Binaries built successfully."
 fi
 
@@ -526,6 +588,39 @@ if [ "${DRY_RUN}" = "false" ] || [ "${SKIP_FETCH}" = "true" ]; then
     prepare_holdout_split
 fi
 
+# Step 1b & 1c: Calibrate Feeds & Prune Swarm (Swarm Consensus only)
+if [ "${STRATEGY}" = "swarm_consensus" ] || [ "${STRATEGY}" = "swarm" ]; then
+    if [ "${SKIP_HPO}" = "false" ] && [ -z "${SHARED_CONFIG}" ]; then
+        CALIB_FROM="${CALIBRATION_FROM:-${YEAR}-01-01}"
+        CALIB_TO="${CALIBRATION_TO:-${YEAR}-02-01}"
+        CALIB_OUT="${OUTPUT_DIR}/swarm_shared_${SYMBOL,,}_${PERIOD}.json"
+        PRUNED_OUT="${OUTPUT_DIR}/swarm_pruned_${SYMBOL,,}_${PERIOD}.json"
+
+        echo -e "\n[1b/3] Calibrating Multi-Feed Thresholds & Meta-Priors..."
+        CALIBRATE_ARGS=(
+            "--data" "${HPO_DATA}"
+            "--from" "${CALIB_FROM}"
+            "--to" "${CALIB_TO}"
+            "--calibrate-priors"
+            "--output" "${CALIB_OUT}"
+        )
+        run_stage calibrate "${BIN_PATH}/calibrate_feeds" "${CALIBRATE_ARGS[@]}"
+
+        echo -e "\n[1c/3] Stratified Agent Pruning by Information Coefficient..."
+        PRUNE_ARGS=(
+            "--data" "${HPO_DATA}"
+            "--from" "${CALIB_FROM}"
+            "--to" "${CALIB_TO}"
+            "--shared-config" "${CALIB_OUT}"
+            "--candidates-per-feed" "${CANDIDATES_PER_FEED}"
+            "--keep-per-feed" "${KEEP_PER_FEED}"
+            "--output" "${PRUNED_OUT}"
+        )
+        run_stage prune "${BIN_PATH}/prune_swarm" "${PRUNE_ARGS[@]}"
+        SHARED_CONFIG="${PRUNED_OUT}"
+    fi
+fi
+
 # Step 2: Parallel Walk-Forward HPO
 if [ "${SKIP_HPO}" = "true" ]; then
     echo -e "\n[2/3] [SKIPPED] Walk-Forward HPO (Using existing config: ${CONFIG_PATH})"
@@ -539,13 +634,25 @@ else
         "--strategy" "${STRATEGY}"
         "--symbol" "${SYMBOL}"
         "--data" "${HPO_DATA}"
-        "--dollar-bar" "${DOLLAR_BAR}"
         "--folds" "${FOLDS}"
         "--train-ratio" "${TRAIN_RATIO}"
-        "--embargo-bars" "${EMBARGO_BARS}"
         "--candidates" "${CANDIDATES}"
         "--output-config" "${CONFIG_PATH}"
     )
+    if [ "${STRATEGY}" = "swarm_consensus" ] || [ "${STRATEGY}" = "swarm" ]; then
+        if [ -n "${SHARED_CONFIG}" ]; then
+            HPO_ARGS+=("--shared-config" "${SHARED_CONFIG}")
+        fi
+        HPO_ARGS+=(
+            "--price-bucket-ms" "${PRICE_BUCKET_MS}"
+            "--embargo-ms" "${EMBARGO_MS}"
+        )
+    else
+        HPO_ARGS+=(
+            "--dollar-bar" "${DOLLAR_BAR}"
+            "--embargo-bars" "${EMBARGO_BARS}"
+        )
+    fi
     if [ -n "${PARAM_SPACE}" ]; then
         HPO_ARGS+=("--param-space" "${PARAM_SPACE}")
     fi
@@ -577,12 +684,14 @@ fi
 echo -e "\n[3/3] Running 1:1 Backtest & Monte Carlo Stress-Testing..."
 BACKTEST_ARGS=(
     "--data" "${BACKTEST_DATA}"
-    "--dollar-bar" "${DOLLAR_BAR}"
     "--config" "${CONFIG_PATH}"
     "--strategy" "${STRATEGY}"
     "--monte-carlo"
     "--mc-iterations" "${MC_ITERATIONS}"
 )
+if [ "${STRATEGY}" != "swarm_consensus" ] && [ "${STRATEGY}" != "swarm" ]; then
+    BACKTEST_ARGS+=("--dollar-bar" "${DOLLAR_BAR}")
+fi
 if [ -n "${CAPITAL}" ]; then
     BACKTEST_ARGS+=("--capital" "${CAPITAL}")
 fi

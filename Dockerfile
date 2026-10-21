@@ -29,8 +29,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         -p adapters --bin fetch_data \
         -p backtest --bin run_hpo \
         -p backtest --bin backtest \
+        -p backtest --bin calibrate_feeds \
+        -p backtest --bin prune_swarm \
     && mkdir -p /out \
-    && cp target/release/fetch_data target/release/run_hpo target/release/backtest /out/
+    && cp target/release/fetch_data target/release/run_hpo target/release/backtest target/release/calibrate_feeds target/release/prune_swarm /out/
 
 FROM debian:${DEBIAN_SUITE}-slim AS runtime
 

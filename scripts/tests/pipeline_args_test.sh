@@ -192,6 +192,26 @@ check "detach: dry-run takes precedence (nothing dispatched)" '[ "${STATUS}" -eq
 run --bogus-flag
 check "unknown option: still rejected" '[ "${STATUS}" -ne 0 ] && has "Unknown option: --bogus-flag"'
 
+# Swarm consensus strategy tests
+run --skip-fetch --strategy swarm_consensus
+check "swarm: exit 0" '[ "${STATUS}" -eq 0 ]'
+check "swarm build: compiles calibrate_feeds and prune_swarm" 'has "calibrate_feeds" && has "prune_swarm"'
+check "swarm: runs calibrate_feeds stage" 'has "/calibrate_feeds "'
+check "swarm: runs prune_swarm stage" 'has "/prune_swarm "'
+check "swarm: run_hpo gets --shared-config" '[[ "$(line_with "/run_hpo ")" == *"--shared-config "* ]]'
+check "swarm: run_hpo gets --price-bucket-ms" '[[ "$(line_with "/run_hpo ")" == *"--price-bucket-ms 1000"* ]]'
+check "swarm: run_hpo gets --embargo-ms" '[[ "$(line_with "/run_hpo ")" == *"--embargo-ms 86400000"* ]]'
+check "swarm: run_hpo does NOT get --dollar-bar" '! [[ "$(line_with "/run_hpo ")" == *"--dollar-bar"* ]]'
+check "swarm: backtest does NOT get --dollar-bar" '! [[ "$(line_with "backtest --data")" == *"--dollar-bar"* ]]'
+
+# Swarm consensus with pre-existing shared-config skips calibrate and prune
+touch "${WORK_DIR}/custom_shared.json"
+run --skip-fetch --strategy swarm_consensus --shared-config "${WORK_DIR}/custom_shared.json"
+check "swarm pre-existing: exit 0" '[ "${STATUS}" -eq 0 ]'
+check "swarm pre-existing: skips calibrate_feeds" '! has "/calibrate_feeds "'
+check "swarm pre-existing: skips prune_swarm" '! has "/prune_swarm "'
+check "swarm pre-existing: run_hpo receives the custom shared config" '[[ "$(line_with "/run_hpo ")" == *"--shared-config ${WORK_DIR}/custom_shared.json"* ]]'
+
 echo ""
 echo "${PASSED} passed, ${FAILED} failed"
 [ "${FAILED}" -eq 0 ]
