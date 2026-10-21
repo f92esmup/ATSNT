@@ -44,10 +44,16 @@ pub struct OrderIntent {
     pub take_profit: Decimal,
     /// Horizontal time barrier (maximum bars to hold before forced exit).
     pub max_bars_hold: usize,
+    /// Optional position risk fraction calculated at entry (e.g. from consensus conviction).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_fraction: Option<Decimal>,
+    /// Optional ATR distance for adaptive breakeven and trailing stop ratchet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trailing_atr: Option<Decimal>,
 }
 
 impl OrderIntent {
-    /// Constructs a validated OrderIntent.
+    /// Constructs a validated OrderIntent with default portfolio risk.
     pub fn new(
         timestamp: i64,
         side: Side,
@@ -55,6 +61,52 @@ impl OrderIntent {
         stop_loss: Decimal,
         take_profit: Decimal,
         max_bars_hold: usize,
+    ) -> Result<Self, DomainError> {
+        Self::with_risk_and_trailing(
+            timestamp,
+            side,
+            price,
+            stop_loss,
+            take_profit,
+            max_bars_hold,
+            None,
+            None,
+        )
+    }
+
+    /// Constructs a validated OrderIntent with an optional conviction risk fraction.
+    pub fn with_risk(
+        timestamp: i64,
+        side: Side,
+        price: Decimal,
+        stop_loss: Decimal,
+        take_profit: Decimal,
+        max_bars_hold: usize,
+        risk_fraction: Option<Decimal>,
+    ) -> Result<Self, DomainError> {
+        Self::with_risk_and_trailing(
+            timestamp,
+            side,
+            price,
+            stop_loss,
+            take_profit,
+            max_bars_hold,
+            risk_fraction,
+            None,
+        )
+    }
+
+    /// Constructs a validated OrderIntent with optional risk fraction and trailing ATR distance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_risk_and_trailing(
+        timestamp: i64,
+        side: Side,
+        price: Decimal,
+        stop_loss: Decimal,
+        take_profit: Decimal,
+        max_bars_hold: usize,
+        risk_fraction: Option<Decimal>,
+        trailing_atr: Option<Decimal>,
     ) -> Result<Self, DomainError> {
         if price <= Decimal::ZERO {
             return Err(DomainError::InvalidPrice(price.to_string()));
@@ -65,6 +117,20 @@ impl OrderIntent {
         if take_profit <= Decimal::ZERO {
             return Err(DomainError::InvalidPrice(take_profit.to_string()));
         }
+        if let Some(risk) = risk_fraction {
+            if risk <= Decimal::ZERO || risk > Decimal::ONE {
+                return Err(DomainError::InvalidTarget(format!(
+                    "risk fraction {risk} outside (0, 1]"
+                )));
+            }
+        }
+        if let Some(atr) = trailing_atr {
+            if atr <= Decimal::ZERO {
+                return Err(DomainError::InvalidTarget(format!(
+                    "trailing ATR distance {atr} must be positive"
+                )));
+            }
+        }
         Ok(Self {
             timestamp,
             side,
@@ -72,6 +138,8 @@ impl OrderIntent {
             stop_loss,
             take_profit,
             max_bars_hold,
+            risk_fraction,
+            trailing_atr,
         })
     }
 }

@@ -1193,6 +1193,10 @@ fn announce_exit_event(telegram: &Option<AlertQueue>, symbol: &str, event: &Exit
             true,
             format!("Monthly halt could not confirm a flat position ({reason}); retrying"),
         ),
+        ExitEvent::StopUpdated { new_stop } => (
+            false,
+            format!("Adaptive stop updated to {new_stop} (breakeven/trailing ratchet)"),
+        ),
     };
     if critical {
         eprintln!("[CRITICAL] {symbol}: {text}");

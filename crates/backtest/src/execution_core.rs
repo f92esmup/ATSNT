@@ -18,6 +18,7 @@ use domain::{
 };
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 use crate::config::BacktestConfig;
 use crate::metrics::{
@@ -982,7 +983,7 @@ impl ExecutionCore {
         if self.liquidate_if_due(&bar, config, equity, excursion) {
             return;
         }
-        let (Some(exits), Some(position)) = (self.exits, &self.position) else {
+        let (Some(mut exits), Some(position)) = (self.exits, &self.position) else {
             return;
         };
         if let Some(exit) = barrier_exit(
@@ -1002,6 +1003,42 @@ impl ExecutionCore {
                 equity,
                 excursion,
             );
+            return;
+        }
+
+        // Trailing / Breakeven stop ratchet for subsequent events (AFML Ch. 10):
+        if let Some(atr) = exits.step_trailing_atr {
+            if atr > Decimal::ZERO {
+                match position.side {
+                    PositionSide::Long => {
+                        let fav_excursion = bar.high - position.entry_price;
+                        let new_stop = if fav_excursion >= dec!(2.0) * atr {
+                            position.entry_price + atr
+                        } else if fav_excursion >= dec!(1.5) * atr {
+                            position.entry_price + dec!(0.5) * atr
+                        } else if fav_excursion >= dec!(1.0) * atr {
+                            position.entry_price
+                        } else {
+                            exits.stop
+                        };
+                        exits.stop = exits.stop.max(new_stop);
+                    }
+                    PositionSide::Short => {
+                        let fav_excursion = position.entry_price - bar.low;
+                        let new_stop = if fav_excursion >= dec!(2.0) * atr {
+                            position.entry_price - atr
+                        } else if fav_excursion >= dec!(1.5) * atr {
+                            position.entry_price - dec!(0.5) * atr
+                        } else if fav_excursion >= dec!(1.0) * atr {
+                            position.entry_price
+                        } else {
+                            exits.stop
+                        };
+                        exits.stop = exits.stop.min(new_stop);
+                    }
+                }
+                self.exits = Some(exits);
+            }
         }
     }
 
@@ -1286,6 +1323,7 @@ mod tests {
             stop,
             take_profit: Some(take_profit),
             max_bars: Some(max_bars),
+            step_trailing_atr: None,
         }
     }
 
@@ -1294,6 +1332,7 @@ mod tests {
             stop,
             take_profit: None,
             max_bars: None,
+            step_trailing_atr: None,
         }
     }
 
@@ -1430,5 +1469,172 @@ mod tests {
         assert_eq!(trade.fees_paid, dec!(0.42));
         assert_eq!(trade.pnl_net, dec!(19.58));
         assert_eq!(equity, dec!(10_019.58));
+    }
+
+    #[test]
+    fn position_moves_to_breakeven_on_favorable_excursion() {
+        let config = BacktestConfig {
+            slippage_pct: dec!(0),
+            taker_fee_pct: dec!(0),
+            ..BacktestConfig::default()
+        };
+        let mut equity = dec!(10_000);
+        let mut excursion = None;
+        let mut core = ExecutionCore::new();
+        let intent = OrderIntent::with_risk_and_trailing(
+            1,
+            Side::Buy,
+            dec!(100),
+            dec!(95),
+            dec!(115),
+            5,
+            Some(dec!(0.01)),
+            Some(dec!(5)), // ATR = 5
+        )
+        .expect("valid intent");
+        core.submit(PendingEntry {
+            intent,
+            quantity: dec!(1),
+        });
+        let pending = core.take_pending().expect("queued");
+        core.fill_entry(
+            pending,
+            &bar(dec!(100), dec!(100), dec!(100), dec!(100)),
+            &config,
+            &mut equity,
+        );
+        assert_eq!(core.exits().map(|e| e.stop), Some(dec!(95)));
+
+        // Bar 1: Favorable excursion reaches 106 (+1.2 ATR >= 1.0 ATR)
+        core.evaluate_exits(
+            &bar(dec!(100), dec!(106), dec!(99), dec!(105)),
+            &config,
+            &mut equity,
+            &mut excursion,
+        );
+        // Position still open, stop raised to breakeven (100)
+        assert!(core.position().is_some());
+        assert_eq!(core.exits().map(|e| e.stop), Some(dec!(100)));
+    }
+
+    #[test]
+    fn breakeven_prevents_loss_on_subsequent_reversal() {
+        let config = BacktestConfig {
+            slippage_pct: dec!(0),
+            taker_fee_pct: dec!(0),
+            ..BacktestConfig::default()
+        };
+        let mut equity = dec!(10_000);
+        let mut excursion = None;
+        let mut core = ExecutionCore::new();
+        let intent = OrderIntent::with_risk_and_trailing(
+            1,
+            Side::Buy,
+            dec!(100),
+            dec!(95),
+            dec!(115),
+            5,
+            Some(dec!(0.01)),
+            Some(dec!(5)),
+        )
+        .expect("valid intent");
+        core.submit(PendingEntry {
+            intent,
+            quantity: dec!(1),
+        });
+        let pending = core.take_pending().expect("queued");
+        core.fill_entry(
+            pending,
+            &bar(dec!(100), dec!(100), dec!(100), dec!(100)),
+            &config,
+            &mut equity,
+        );
+
+        // Bar 1: High reaches 105.5 (+1.1 ATR) -> stop ratchets to breakeven (100)
+        core.evaluate_exits(
+            &bar(dec!(100), dec!(105.5), dec!(99), dec!(104)),
+            &config,
+            &mut equity,
+            &mut excursion,
+        );
+        assert_eq!(core.exits().map(|e| e.stop), Some(dec!(100)));
+
+        // Bar 2: Sharp reversal drops below breakeven (low 98)
+        core.evaluate_exits(
+            &bar(dec!(104), dec!(104), dec!(98), dec!(98.5)),
+            &config,
+            &mut equity,
+            &mut excursion,
+        );
+        assert!(core.position().is_none());
+        let trade = &core.ledger().trades()[0];
+        assert_eq!(trade.exit_reason, "StopLoss");
+        assert_eq!(trade.exit_price, dec!(100));
+        assert_eq!(trade.pnl_gross, dec!(0)); // Zero loss thanks to breakeven!
+    }
+
+    #[test]
+    fn position_trails_to_lock_in_profits() {
+        let config = BacktestConfig {
+            slippage_pct: dec!(0),
+            taker_fee_pct: dec!(0),
+            ..BacktestConfig::default()
+        };
+        let mut equity = dec!(10_000);
+        let mut excursion = None;
+        let mut core = ExecutionCore::new();
+        let intent = OrderIntent::with_risk_and_trailing(
+            1,
+            Side::Buy,
+            dec!(100),
+            dec!(95),
+            dec!(120),
+            5,
+            Some(dec!(0.01)),
+            Some(dec!(5)),
+        )
+        .expect("valid intent");
+        core.submit(PendingEntry {
+            intent,
+            quantity: dec!(1),
+        });
+        let pending = core.take_pending().expect("queued");
+        core.fill_entry(
+            pending,
+            &bar(dec!(100), dec!(100), dec!(100), dec!(100)),
+            &config,
+            &mut equity,
+        );
+
+        // Bar 1: High reaches 108 (+1.6 ATR >= 1.5 ATR) -> Stop ratchets to entry + 0.5 ATR = 102.5
+        core.evaluate_exits(
+            &bar(dec!(100), dec!(108), dec!(99), dec!(107)),
+            &config,
+            &mut equity,
+            &mut excursion,
+        );
+        assert_eq!(core.exits().map(|e| e.stop), Some(dec!(102.5)));
+
+        // Bar 2: High reaches 111 (+2.2 ATR >= 2.0 ATR) -> Stop ratchets to entry + 1.0 ATR = 105.0
+        core.evaluate_exits(
+            &bar(dec!(107), dec!(111), dec!(106), dec!(110)),
+            &config,
+            &mut equity,
+            &mut excursion,
+        );
+        assert_eq!(core.exits().map(|e| e.stop), Some(dec!(105.0)));
+
+        // Bar 3: Reversal drops to 104, triggering the trailed stop at 105.0
+        core.evaluate_exits(
+            &bar(dec!(110), dec!(110), dec!(104), dec!(104.5)),
+            &config,
+            &mut equity,
+            &mut excursion,
+        );
+        assert!(core.position().is_none());
+        let trade = &core.ledger().trades()[0];
+        assert_eq!(trade.exit_reason, "StopLoss");
+        assert_eq!(trade.exit_price, dec!(105.0));
+        assert_eq!(trade.pnl_gross, dec!(5.0)); // Locked in profit!
     }
 }

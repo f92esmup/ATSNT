@@ -262,9 +262,16 @@ impl RiskPolicy {
             });
         }
 
+        let effective_risk = intent.risk_fraction.unwrap_or(risk_per_trade_pct);
+        if effective_risk <= Decimal::ZERO || effective_risk > Decimal::ONE {
+            return Err(RiskError::InvalidParameters(
+                "effective risk must be greater than 0 and at most 1".to_string(),
+            ));
+        }
+
         let quantity = self.quantity_for_risk(
             mark_to_market_equity,
-            risk_per_trade_pct,
+            effective_risk,
             stop_distance,
             execution_price,
         );

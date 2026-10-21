@@ -46,6 +46,20 @@ pub enum PolicyConfigError {
     /// `decay_horizon_seconds` must be strictly positive when set.
     #[error("decay_horizon_seconds must be > 0, got {0}")]
     NonPositiveDecayHorizon(u64),
+    /// In classifier mode, `take_profit_atr_multiplier` must be at least 1.5x `stop_atr_multiplier`.
+    #[error("take profit multiplier {0} must be >= 1.5x stop multiplier {1}")]
+    InvertedPayoff(Decimal, Decimal),
+    /// In classifier mode, `take_profit_atr_multiplier` must be specified.
+    #[error("take profit multiplier must be specified in classifier mode")]
+    MissingTakeProfitInClassifierMode,
+    /// In classifier mode, `decay_horizon_seconds` must be specified and between 7200s (2h) and 43200s (12h).
+    #[error(
+        "decay horizon must be between 7200s (2h) and 43200s (12h) in classifier mode, got {0:?}"
+    )]
+    InvalidDecayHorizonInClassifierMode(Option<u64>),
+    /// In classifier mode, `stop_atr_multiplier` must not exceed 1.50 ATR.
+    #[error("stop ATR multiplier must be <= 1.50 in classifier mode, got {0}")]
+    ExcessiveStopInClassifierMode(Decimal),
     /// `feed_weights` is invalid.
     #[error("invalid feed_weights: {0}")]
     InvalidFeedWeights(#[from] FeedWeightsError),
@@ -81,6 +95,10 @@ pub struct PolicyConfig {
     /// opposite-side flip, rather than market-closing on neutral consensus decay (k = 0).
     #[serde(default = "default_bracket_priority")]
     pub bracket_priority: bool,
+    /// Whether to run in Classifier Mode (emitting triple-barrier `Decision::Entry(OrderIntent)`)
+    /// instead of the legacy multi-level target state machine (`Decision::Target`).
+    #[serde(default)]
+    pub classifier_mode: bool,
 }
 
 fn default_bracket_priority() -> bool {
@@ -100,6 +118,26 @@ impl Default for PolicyConfig {
             decay_horizon_seconds: None,
             feed_weights: None,
             bracket_priority: true,
+            classifier_mode: false,
+        }
+    }
+}
+
+impl PolicyConfig {
+    /// Recommended defaults for Classifier Mode with Triple Barrier protection.
+    pub fn classifier_default() -> Self {
+        Self {
+            threshold_base: dec!(0.45),
+            threshold_step: dec!(0.075),
+            hysteresis: dec!(0.55),
+            base_risk: dec!(0.010),
+            risk_increment: dec!(0.010),
+            stop_atr_multiplier: dec!(1.0),
+            take_profit_atr_multiplier: Some(dec!(2.0)),
+            decay_horizon_seconds: Some(14400),
+            feed_weights: None,
+            bracket_priority: true,
+            classifier_mode: true,
         }
     }
 }
@@ -127,6 +165,9 @@ impl std::fmt::Display for PolicyConfig {
         }
         if self.bracket_priority {
             write!(f, "|BP")?;
+        }
+        if self.classifier_mode {
+            write!(f, "|Classifier")?;
         }
         Ok(())
     }
@@ -205,6 +246,34 @@ impl PolicyConfig {
         if let Some(ref weights) = self.feed_weights {
             weights.validate()?;
         }
+        if self.classifier_mode {
+            if self.stop_atr_multiplier > dec!(1.50) {
+                return Err(PolicyConfigError::ExcessiveStopInClassifierMode(
+                    self.stop_atr_multiplier,
+                ));
+            }
+            match self.take_profit_atr_multiplier {
+                Some(tp) => {
+                    if tp < dec!(1.5) * self.stop_atr_multiplier {
+                        return Err(PolicyConfigError::InvertedPayoff(
+                            tp,
+                            self.stop_atr_multiplier,
+                        ));
+                    }
+                }
+                None => {
+                    return Err(PolicyConfigError::MissingTakeProfitInClassifierMode);
+                }
+            }
+            match self.decay_horizon_seconds {
+                Some(s) if (7200..=43200).contains(&s) => {}
+                other => {
+                    return Err(PolicyConfigError::InvalidDecayHorizonInClassifierMode(
+                        other,
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -251,6 +320,7 @@ pub struct ConsensusPolicy {
     short_level: u8,
     last_level: i8,
     level_entry_timestamp: Option<i64>,
+    in_signal_side: Option<domain::Side>,
 }
 
 impl ConsensusPolicy {
@@ -263,6 +333,7 @@ impl ConsensusPolicy {
             short_level: 0,
             last_level: 0,
             level_entry_timestamp: None,
+            in_signal_side: None,
         })
     }
 
@@ -295,6 +366,93 @@ impl ConsensusPolicy {
     /// emitted and the last emitted level is kept: the change is emitted by the next sample
     /// that carries a positive ATR, if the target still differs then.
     pub fn on_sample(&mut self, sample: &ConsensusSample, allow_short: bool) -> Option<Decision> {
+        if self.config.classifier_mode {
+            if sample.atr_stop_reference <= Decimal::ZERO || sample.price <= Decimal::ZERO {
+                return None;
+            }
+
+            let (long_net, short_net) = match &self.config.feed_weights {
+                Some(weights) => (
+                    sample.weighted_long_net(weights),
+                    sample.weighted_short_net(weights),
+                ),
+                None => (sample.long_net(), sample.short_net()),
+            };
+
+            let theta = self.config.threshold_base;
+
+            let (candidate_side, conviction) = if long_net >= theta && short_net < theta {
+                (Some(domain::Side::Buy), long_net)
+            } else if allow_short && short_net >= theta && long_net < theta {
+                (Some(domain::Side::Sell), short_net)
+            } else {
+                (None, Decimal::ZERO)
+            };
+
+            let Some(side) = candidate_side else {
+                self.in_signal_side = None;
+                self.last_level = 0;
+                self.long_level = 0;
+                self.short_level = 0;
+                return None;
+            };
+
+            if self.in_signal_side == Some(side) {
+                return None;
+            }
+
+            let denom = Decimal::ONE - theta;
+            let fraction = if denom > Decimal::ZERO {
+                ((conviction - theta) / denom)
+                    .max(Decimal::ZERO)
+                    .min(Decimal::ONE)
+            } else {
+                Decimal::ZERO
+            };
+            let calculated_risk = self.config.base_risk + fraction * self.config.risk_increment;
+            let top_risk = self.config.top_level_risk();
+            let risk = calculated_risk.min(top_risk);
+
+            let stop_distance = self.config.stop_atr_multiplier * sample.atr_stop_reference;
+            let tp_distance = match self.config.take_profit_atr_multiplier {
+                Some(tp_mult) => tp_mult * sample.atr_stop_reference,
+                None => dec!(1.5) * stop_distance,
+            };
+
+            let (stop_loss, take_profit) = match side {
+                domain::Side::Buy => (sample.price - stop_distance, sample.price + tp_distance),
+                domain::Side::Sell => (sample.price + stop_distance, sample.price - tp_distance),
+            };
+
+            let max_bars_hold = self
+                .config
+                .decay_horizon_seconds
+                .map_or(12, |s| ((s / 3600) as usize).max(1));
+
+            let intent = domain::OrderIntent::with_risk_and_trailing(
+                sample.timestamp,
+                side,
+                sample.price,
+                stop_loss,
+                take_profit,
+                max_bars_hold,
+                Some(risk),
+                Some(sample.atr_stop_reference),
+            )
+            .ok()?;
+
+            self.in_signal_side = Some(side);
+            self.last_level = match side {
+                domain::Side::Buy => 1,
+                domain::Side::Sell => -1,
+            };
+            self.long_level = if side == domain::Side::Buy { 1 } else { 0 };
+            self.short_level = if side == domain::Side::Sell { 1 } else { 0 };
+            self.level_entry_timestamp = Some(sample.timestamp);
+
+            return Some(Decision::Entry(intent));
+        }
+
         let (l1, l2, l3) = self.config.thresholds();
         let h = self.config.hysteresis;
         let (long_net, short_net) = match &self.config.feed_weights {
@@ -364,6 +522,7 @@ impl ConsensusPolicy {
         self.short_level = 0;
         self.last_level = 0;
         self.level_entry_timestamp = None;
+        self.in_signal_side = None;
     }
 }
 
@@ -393,6 +552,10 @@ fn default_bracket_priority_options() -> Vec<bool> {
     vec![true]
 }
 
+fn default_decay_horizon_options() -> Vec<Option<u64>> {
+    vec![None]
+}
+
 /// HPO search space of [`PolicyConfig`] (strategy spec §14.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmPolicySpace {
@@ -417,9 +580,15 @@ pub struct SwarmPolicySpace {
     /// Values of `bracket_priority`.
     #[serde(default = "default_bracket_priority_options")]
     pub bracket_priority_options: Vec<bool>,
+    /// Optional decay / time barrier horizons in seconds.
+    #[serde(default = "default_decay_horizon_options")]
+    pub decay_horizon_options: Vec<Option<u64>>,
     /// Account policy cap: candidates whose level-3 risk exceeds it are never generated.
     #[serde(default = "default_max_level_risk")]
     pub max_level_risk: Decimal,
+    /// Whether this space optimizes Classifier Mode policies.
+    #[serde(default)]
+    pub classifier_mode: bool,
 }
 
 impl Default for SwarmPolicySpace {
@@ -479,15 +648,84 @@ impl Default for SwarmPolicySpace {
             take_profit_atr_multipliers: default_take_profit_multipliers(),
             feed_weights_options: default_feed_weights_options(),
             bracket_priority_options: default_bracket_priority_options(),
+            decay_horizon_options: default_decay_horizon_options(),
             max_level_risk: default_max_level_risk(),
+            classifier_mode: false,
         }
     }
 }
 
 impl SwarmPolicySpace {
-    /// Whether a configuration is valid and within the level-3 risk cap.
+    /// Search space for Classifier Mode with Triple Barrier protection.
+    pub fn classifier_space() -> Self {
+        Self {
+            threshold_bases: vec![
+                dec!(0.30),
+                dec!(0.35),
+                dec!(0.40),
+                dec!(0.45),
+                dec!(0.50),
+                dec!(0.55),
+                dec!(0.60),
+            ],
+            threshold_steps: vec![dec!(0.075)],
+            hysteresis_values: vec![dec!(0.55)],
+            base_risks: vec![
+                dec!(0.005),
+                dec!(0.0075),
+                dec!(0.010),
+                dec!(0.0125),
+                dec!(0.015),
+                dec!(0.020),
+            ],
+            risk_increments: vec![
+                dec!(0.005),
+                dec!(0.0075),
+                dec!(0.010),
+                dec!(0.0125),
+                dec!(0.015),
+                dec!(0.020),
+            ],
+            stop_atr_multipliers: vec![dec!(0.75), dec!(1.0), dec!(1.25), dec!(1.50)],
+            take_profit_atr_multipliers: vec![
+                Some(dec!(1.50)),
+                Some(dec!(1.75)),
+                Some(dec!(2.0)),
+                Some(dec!(2.25)),
+                Some(dec!(2.50)),
+                Some(dec!(3.0)),
+                Some(dec!(3.50)),
+            ],
+            decay_horizon_options: vec![Some(7200), Some(14400), Some(28800), Some(43200)],
+            feed_weights_options: default_feed_weights_options(),
+            bracket_priority_options: default_bracket_priority_options(),
+            max_level_risk: default_max_level_risk(),
+            classifier_mode: true,
+        }
+    }
+
+    /// Whether a configuration is valid and within the level-3 risk cap and search space constraints.
     pub fn admits(&self, config: &PolicyConfig) -> bool {
-        config.validate().is_ok() && config.top_level_risk() <= self.max_level_risk
+        if config.validate().is_err() || config.top_level_risk() > self.max_level_risk {
+            return false;
+        }
+        if self.classifier_mode || config.classifier_mode {
+            if !config.classifier_mode {
+                return false;
+            }
+            if config.stop_atr_multiplier > dec!(1.50) {
+                return false;
+            }
+            match config.take_profit_atr_multiplier {
+                Some(tp) if tp >= dec!(1.5) * config.stop_atr_multiplier => {}
+                _ => return false,
+            }
+            match config.decay_horizon_seconds {
+                Some(s) if (7200..=43200).contains(&s) => {}
+                _ => return false,
+            }
+        }
+        true
     }
 
     /// Enables exploration of standard feed weighting and pruning profiles.
@@ -516,20 +754,25 @@ impl HyperparameterSpace for SwarmPolicySpace {
                                 {
                                     for feed_weights in &self.feed_weights_options {
                                         for &bracket_priority in &self.bracket_priority_options {
-                                            let config = PolicyConfig {
-                                                threshold_base,
-                                                threshold_step,
-                                                hysteresis,
-                                                base_risk,
-                                                risk_increment,
-                                                stop_atr_multiplier,
-                                                take_profit_atr_multiplier,
-                                                decay_horizon_seconds: None,
-                                                feed_weights: feed_weights.clone(),
-                                                bracket_priority,
-                                            };
-                                            if self.admits(&config) {
-                                                configs.push(config);
+                                            for &decay_horizon_seconds in
+                                                &self.decay_horizon_options
+                                            {
+                                                let config = PolicyConfig {
+                                                    threshold_base,
+                                                    threshold_step,
+                                                    hysteresis,
+                                                    base_risk,
+                                                    risk_increment,
+                                                    stop_atr_multiplier,
+                                                    take_profit_atr_multiplier,
+                                                    decay_horizon_seconds,
+                                                    feed_weights: feed_weights.clone(),
+                                                    bracket_priority,
+                                                    classifier_mode: self.classifier_mode,
+                                                };
+                                                if self.admits(&config) {
+                                                    configs.push(config);
+                                                }
                                             }
                                         }
                                     }
@@ -628,6 +871,21 @@ impl HyperparameterSpace for SwarmPolicySpace {
                 neighbors.push(candidate);
             }
         }
+        if self.decay_horizon_options.len() > 1 {
+            let (decay_below, decay_above) = adjacent_option_grid_values(
+                &self.decay_horizon_options,
+                base.decay_horizon_seconds,
+            );
+            for value in [decay_below, decay_above].into_iter().flatten() {
+                let candidate = PolicyConfig {
+                    decay_horizon_seconds: value,
+                    ..base.clone()
+                };
+                if self.admits(&candidate) {
+                    neighbors.push(candidate);
+                }
+            }
+        }
         if self.feed_weights_options.len() > 1 {
             let idx = self
                 .feed_weights_options
@@ -663,11 +921,11 @@ fn adjacent_grid_values(grid: &[Decimal], value: Decimal) -> (Option<Decimal>, O
 }
 
 /// Nearest grid values strictly below and strictly above `value` for an option grid where None
-/// is considered the lowest element and Some(v) are ordered by Decimal value.
-fn adjacent_option_grid_values(
-    grid: &[Option<Decimal>],
-    value: Option<Decimal>,
-) -> (Option<Option<Decimal>>, Option<Option<Decimal>>) {
+/// is considered the lowest element and Some(v) are ordered by value.
+fn adjacent_option_grid_values<T: Copy + Ord>(
+    grid: &[Option<T>],
+    value: Option<T>,
+) -> (Option<Option<T>>, Option<Option<T>>) {
     let below = match value {
         None => None,
         Some(v) => {
@@ -1124,6 +1382,7 @@ mod tests {
             decay_horizon_seconds: None,
             feed_weights: None,
             bracket_priority: true,
+            classifier_mode: false,
         };
         let n = space.perturb_neighbors(&base);
         assert_eq!(n.len(), 14);
@@ -1307,5 +1566,154 @@ mod tests {
         assert!(neighbors
             .iter()
             .any(|n| n.feed_weights.is_some() && n.feed_weights != base.feed_weights));
+    }
+
+    #[test]
+    fn long_entry_triggers_on_threshold() {
+        let mut p = ConsensusPolicy::new(PolicyConfig::classifier_default()).unwrap();
+        let s_below = sample(1000, 40, 0, dec!(500)); // long_net = 0.40 < 0.45
+        assert_eq!(p.on_sample(&s_below, true), None);
+
+        let s_cross = sample(2000, 50, 0, dec!(500)); // long_net = 0.50 >= 0.45
+        let decision = p.on_sample(&s_cross, true);
+        assert!(decision.is_some());
+        let Decision::Entry(intent) = decision.unwrap() else {
+            panic!("expected Entry decision");
+        };
+        assert_eq!(intent.side, domain::Side::Buy);
+        assert_eq!(intent.price, dec!(40000));
+        assert_eq!(intent.stop_loss, dec!(39500)); // 40000 - 1.0 * 500
+        assert_eq!(intent.take_profit, dec!(41000)); // 40000 + 2.0 * 500
+        assert_eq!(intent.max_bars_hold, 4); // 14400s / 3600s
+        assert!(intent.risk_fraction.is_some());
+
+        // While remaining in the active long signal, no duplicate entries are emitted
+        let s_still_long = sample(3000, 52, 0, dec!(500));
+        assert_eq!(p.on_sample(&s_still_long, true), None);
+
+        // When dropping back to neutral, policy re-arms without emitting
+        let s_neutral = sample(4000, 30, 0, dec!(500));
+        assert_eq!(p.on_sample(&s_neutral, true), None);
+
+        // Re-crossing threshold triggers a new entry
+        let s_recross = sample(5000, 48, 0, dec!(500));
+        assert!(matches!(
+            p.on_sample(&s_recross, true),
+            Some(Decision::Entry(_))
+        ));
+    }
+
+    #[test]
+    fn sizing_increases_with_consensus() {
+        let config = PolicyConfig {
+            threshold_base: dec!(0.40),
+            base_risk: dec!(0.010),
+            risk_increment: dec!(0.010),
+            classifier_mode: true,
+            decay_horizon_seconds: Some(14400),
+            stop_atr_multiplier: dec!(1.0),
+            take_profit_atr_multiplier: Some(dec!(2.0)),
+            ..PolicyConfig::default()
+        };
+
+        // 1. Threshold crossing at theta (0.40): fraction = 0 -> risk = base_risk = 0.010
+        let mut p1 = ConsensusPolicy::new(config.clone()).unwrap();
+        let Decision::Entry(i1) = p1.on_sample(&sample(1000, 40, 0, dec!(500)), true).unwrap()
+        else {
+            panic!("expected Entry");
+        };
+        assert_eq!(i1.risk_fraction, Some(dec!(0.010)));
+
+        // 2. Consensus at 0.70: halfway between 0.40 and 1.00 -> fraction = 0.50 -> risk = 0.015
+        let mut p2 = ConsensusPolicy::new(config.clone()).unwrap();
+        let Decision::Entry(i2) = p2.on_sample(&sample(1000, 70, 0, dec!(500)), true).unwrap()
+        else {
+            panic!("expected Entry");
+        };
+        assert_eq!(i2.risk_fraction, Some(dec!(0.015)));
+
+        // 3. Maximum consensus at 1.00: fraction = 1.00 -> risk = base + inc = 0.020
+        let mut p3 = ConsensusPolicy::new(config).unwrap();
+        let Decision::Entry(i3) = p3
+            .on_sample(&sample(1000, 100, 0, dec!(500)), true)
+            .unwrap()
+        else {
+            panic!("expected Entry");
+        };
+        assert_eq!(i3.risk_fraction, Some(dec!(0.020)));
+
+        assert!(i1.risk_fraction.unwrap() < i2.risk_fraction.unwrap());
+        assert!(i2.risk_fraction.unwrap() < i3.risk_fraction.unwrap());
+    }
+
+    #[test]
+    fn neutral_consensus_waits() {
+        let mut p = ConsensusPolicy::new(PolicyConfig::classifier_default()).unwrap();
+        // Sub-threshold neutral
+        assert_eq!(p.on_sample(&sample(1000, 20, 10, dec!(500)), true), None);
+        // Conflicting consensus (both axes above threshold)
+        assert_eq!(p.on_sample(&sample(2000, 50, 50, dec!(500)), true), None);
+    }
+
+    #[test]
+    fn admits_rejects_inverted_payoff() {
+        let space = SwarmPolicySpace::classifier_space();
+        let inverted = PolicyConfig {
+            classifier_mode: true,
+            stop_atr_multiplier: dec!(1.0),
+            take_profit_atr_multiplier: Some(dec!(1.25)), // 1.25 < 1.5 * 1.0
+            decay_horizon_seconds: Some(14400),
+            ..PolicyConfig::default()
+        };
+        assert!(!space.admits(&inverted));
+
+        let valid = PolicyConfig {
+            classifier_mode: true,
+            stop_atr_multiplier: dec!(1.0),
+            take_profit_atr_multiplier: Some(dec!(1.50)), // 1.50 >= 1.5 * 1.0
+            decay_horizon_seconds: Some(14400),
+            ..PolicyConfig::default()
+        };
+        assert!(space.admits(&valid));
+    }
+
+    #[test]
+    fn admits_rejects_excessive_stop() {
+        let space = SwarmPolicySpace::classifier_space();
+        let excessive = PolicyConfig {
+            classifier_mode: true,
+            stop_atr_multiplier: dec!(2.0), // > 1.50 ATR
+            take_profit_atr_multiplier: Some(dec!(3.0)),
+            decay_horizon_seconds: Some(14400),
+            ..PolicyConfig::default()
+        };
+        assert!(!space.admits(&excessive));
+
+        let valid = PolicyConfig {
+            classifier_mode: true,
+            stop_atr_multiplier: dec!(1.25), // <= 1.50 ATR
+            take_profit_atr_multiplier: Some(dec!(2.0)),
+            decay_horizon_seconds: Some(14400),
+            ..PolicyConfig::default()
+        };
+        assert!(space.admits(&valid));
+    }
+
+    #[test]
+    fn classifier_space_candidates_are_valid_and_deterministic() {
+        let space = SwarmPolicySpace::classifier_space();
+        let candidates = space.generate_candidates(500);
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().all(|c| {
+            space.admits(c)
+                && c.classifier_mode
+                && c.stop_atr_multiplier <= dec!(1.50)
+                && c.take_profit_atr_multiplier.unwrap() >= dec!(1.5) * c.stop_atr_multiplier
+                && c.decay_horizon_seconds.unwrap() <= 43200
+        }));
+
+        let c1 = space.generate_candidates(50);
+        let c2 = space.generate_candidates(50);
+        assert_eq!(c1, c2);
     }
 }

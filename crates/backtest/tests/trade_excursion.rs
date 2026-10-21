@@ -26,6 +26,8 @@ impl Strategy for ScriptedLong {
             stop_loss: bar.close - dec!(20),
             take_profit: bar.close + dec!(25),
             max_bars_hold: 4,
+            risk_fraction: None,
+            trailing_atr: None,
         })
     }
 

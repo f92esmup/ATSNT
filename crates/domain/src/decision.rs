@@ -168,15 +168,19 @@ pub struct ProtectiveExits {
     pub take_profit: Option<Decimal>,
     /// Bars to hold before a forced exit; `None` for targets.
     pub max_bars: Option<usize>,
+    /// Optional step-trailing ATR distance for adaptive breakeven and trailing stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_trailing_atr: Option<Decimal>,
 }
 
 impl ProtectiveExits {
-    /// The three barriers of a triple-barrier entry, copied unchanged.
+    /// The barriers of a triple-barrier entry, copied with trailing configuration.
     pub fn from_intent(intent: &OrderIntent) -> Self {
         Self {
             stop: intent.stop_loss,
             take_profit: Some(intent.take_profit),
             max_bars: Some(intent.max_bars_hold),
+            step_trailing_atr: intent.trailing_atr,
         }
     }
 
@@ -226,6 +230,7 @@ impl ProtectiveExits {
             stop,
             take_profit,
             max_bars: None,
+            step_trailing_atr: None,
         })
     }
 }
@@ -329,6 +334,7 @@ mod tests {
                 stop: dec!(98),
                 take_profit: Some(dec!(104)),
                 max_bars: Some(7),
+                step_trailing_atr: None,
             }
         );
     }
@@ -341,6 +347,7 @@ mod tests {
                 stop: dec!(38800),
                 take_profit: None,
                 max_bars: None,
+                step_trailing_atr: None,
             }
         );
         assert_eq!(

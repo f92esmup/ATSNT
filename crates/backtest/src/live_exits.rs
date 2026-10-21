@@ -6,6 +6,7 @@
 
 use domain::Side;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 pub use ports::ExitGateway;
 
@@ -44,12 +45,19 @@ pub enum ExitEvent {
     Halted,
     /// The kill-switch could not confirm a flat position; retried on the next call.
     HaltingFailed { reason: String },
+    /// Exchange stop-loss order was updated by the trailing/breakeven ratchet.
+    StopUpdated { new_stop: Decimal },
 }
 
 #[derive(Debug, Clone, Copy)]
 struct TrackedPosition {
+    entry_side: Side,
+    entry_price: Decimal,
+    stop_loss: Decimal,
+    take_profit: Decimal,
     max_bars_hold: usize,
     bars_held: usize,
+    trailing_atr: Option<Decimal>,
 }
 
 /// Owns the exit lifecycle of the single live position of one symbol.
@@ -96,9 +104,38 @@ impl ExitManager {
         take_profit: Decimal,
         max_bars_hold: usize,
     ) -> ExitEvent {
+        self.on_entry_filled_with_trailing(
+            gateway,
+            entry_side,
+            stop_loss,
+            stop_loss,
+            take_profit,
+            max_bars_hold,
+            None,
+        )
+        .await
+    }
+
+    /// Entry filled with optional trailing ATR protection.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn on_entry_filled_with_trailing<G: ExitGateway>(
+        &mut self,
+        gateway: &G,
+        entry_side: Side,
+        entry_price: Decimal,
+        stop_loss: Decimal,
+        take_profit: Decimal,
+        max_bars_hold: usize,
+        trailing_atr: Option<Decimal>,
+    ) -> ExitEvent {
         self.position = Some(TrackedPosition {
+            entry_side,
+            entry_price,
+            stop_loss,
+            take_profit,
             max_bars_hold,
             bars_held: 0,
+            trailing_atr,
         });
         let mut last_error = String::new();
         for _ in 0..MAX_ATTEMPTS {
@@ -126,6 +163,71 @@ impl ExitManager {
                     reason: format!("{last_error}; close failed: {close_error}"),
                 }
             }
+        }
+    }
+
+    /// Evaluates current price against trailing / breakeven thresholds and updates exchange stop.
+    pub async fn on_price_update<G: ExitGateway>(
+        &mut self,
+        gateway: &G,
+        current_price: Decimal,
+    ) -> Option<ExitEvent> {
+        let tracked = self.position.as_mut()?;
+        let atr = tracked.trailing_atr?;
+        if atr <= Decimal::ZERO {
+            return None;
+        }
+
+        let new_stop = match tracked.entry_side {
+            Side::Buy => {
+                let excursion = current_price - tracked.entry_price;
+                if excursion >= dec!(2.0) * atr {
+                    tracked.entry_price + atr
+                } else if excursion >= dec!(1.5) * atr {
+                    tracked.entry_price + dec!(0.5) * atr
+                } else if excursion >= dec!(1.0) * atr {
+                    tracked.entry_price
+                } else {
+                    tracked.stop_loss
+                }
+            }
+            Side::Sell => {
+                let excursion = tracked.entry_price - current_price;
+                if excursion >= dec!(2.0) * atr {
+                    tracked.entry_price - atr
+                } else if excursion >= dec!(1.5) * atr {
+                    tracked.entry_price - dec!(0.5) * atr
+                } else if excursion >= dec!(1.0) * atr {
+                    tracked.entry_price
+                } else {
+                    tracked.stop_loss
+                }
+            }
+        };
+
+        let should_update = match tracked.entry_side {
+            Side::Buy => new_stop > tracked.stop_loss,
+            Side::Sell => new_stop < tracked.stop_loss,
+        };
+
+        if should_update {
+            match gateway
+                .place_exits(
+                    &self.symbol,
+                    tracked.entry_side,
+                    new_stop,
+                    Some(tracked.take_profit),
+                )
+                .await
+            {
+                Ok(()) => {
+                    tracked.stop_loss = new_stop;
+                    Some(ExitEvent::StopUpdated { new_stop })
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
         }
     }
 
@@ -443,5 +545,45 @@ mod tests {
         let event = manager.halt(&gateway).await;
 
         assert_eq!(event, ExitEvent::Halted);
+    }
+
+    #[tokio::test]
+    async fn favorable_price_update_moves_stop_to_breakeven_on_gateway() {
+        let gateway = MockGateway::default();
+        let mut manager = ExitManager::new("BTCUSDT");
+        let entered = manager
+            .on_entry_filled_with_trailing(
+                &gateway,
+                Side::Buy,
+                dec!(100),
+                dec!(95),
+                dec!(115),
+                10,
+                Some(dec!(5)),
+            )
+            .await;
+        assert_eq!(entered, ExitEvent::Protected);
+
+        // Price at 105.5 (+1.1 ATR >= 1.0 ATR) -> Stop updated to breakeven (100)
+        let update1 = manager.on_price_update(&gateway, dec!(105.5)).await;
+        assert_eq!(
+            update1,
+            Some(ExitEvent::StopUpdated {
+                new_stop: dec!(100)
+            })
+        );
+
+        // Price at 108 (+1.6 ATR >= 1.5 ATR) -> Stop updated to 100 + 0.5 * 5 = 102.5
+        let update2 = manager.on_price_update(&gateway, dec!(108)).await;
+        assert_eq!(
+            update2,
+            Some(ExitEvent::StopUpdated {
+                new_stop: dec!(102.5)
+            })
+        );
+
+        // Adverse pullback to 104 -> Stop does not move backwards
+        let pullback = manager.on_price_update(&gateway, dec!(104)).await;
+        assert_eq!(pullback, None);
     }
 }

@@ -577,6 +577,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn paper_and_live_accept_swarm_classifier() {
+        let classifier_config =
+            serde_json::to_string(&strategies::PolicyConfig::classifier_default()).unwrap();
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), classifier_config).unwrap();
+        let loaded = load_strategy("swarm", Some(temp.path())).unwrap();
+        assert!(loaded.ensure_accepts_decisions().is_ok());
+    }
+
     fn swarm_shared(calibration_end_ms: i64) -> strategies::SwarmConfig {
         strategies::SwarmConfig {
             calibration_end_ms,

@@ -65,7 +65,7 @@ impl Strategy for SwarmConsensusStrategy {
     }
 
     fn emits_targets(&self) -> bool {
-        true
+        !self.policy.config().classifier_mode
     }
 
     fn bracket_priority(&self) -> bool {
@@ -102,7 +102,7 @@ impl OptimizableStrategy for SwarmConsensusStrategy {
     }
 
     fn default_space() -> SwarmPolicySpace {
-        SwarmPolicySpace::default()
+        SwarmPolicySpace::classifier_space()
     }
 }
 
@@ -147,5 +147,26 @@ mod tests {
             ..PolicyConfig::default()
         };
         assert!(SwarmConsensusStrategy::from_config(&SwarmConfig::default(), config).is_err());
+    }
+
+    #[test]
+    fn the_swarm_declares_emits_targets_false_in_classifier_mode() {
+        let strategy = SwarmConsensusStrategy::from_config(
+            &SwarmConfig::default(),
+            PolicyConfig::classifier_default(),
+        )
+        .unwrap();
+        assert!(!strategy.emits_targets());
+    }
+
+    #[test]
+    fn boxed_strategy_preserves_classifier_behavior() {
+        let strategy = SwarmConsensusStrategy::from_config(
+            &SwarmConfig::default(),
+            PolicyConfig::classifier_default(),
+        )
+        .unwrap();
+        let boxed: Box<dyn Strategy> = Box::new(strategy);
+        assert!(!boxed.emits_targets());
     }
 }

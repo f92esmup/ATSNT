@@ -307,6 +307,10 @@ impl<S: Strategy> TradingSession<S> {
 
         events.extend(self.resolve_stale_entry(venue, time_ms).await);
 
+        if let Some(event) = self.exits.on_price_update(venue, price).await {
+            events.push(SessionEvent::Exit(event));
+        }
+
         let retry_due = self
             .last_halt_attempt_ms
             .map_or(true, |at| time_ms - at >= self.config.halt_retry_ms);
@@ -1176,12 +1180,14 @@ impl<S: Strategy> TradingSession<S> {
         // Exits live on the venue so they survive a crash of this process.
         let protection = self
             .exits
-            .on_entry_filled(
+            .on_entry_filled_with_trailing(
                 venue,
                 side,
+                price,
                 intent.stop_loss,
                 intent.take_profit,
                 intent.max_bars_hold,
+                intent.trailing_atr,
             )
             .await;
         if matches!(
