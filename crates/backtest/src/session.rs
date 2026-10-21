@@ -311,6 +311,13 @@ impl<S: Strategy> TradingSession<S> {
             events.push(SessionEvent::Exit(event));
         }
 
+        if let Some(event) = self.exits.on_time_update(venue, time_ms).await {
+            if event == ExitEvent::TimeBarrierClosed {
+                self.exit_hint = Some("TimeBarrier");
+            }
+            events.push(SessionEvent::Exit(event));
+        }
+
         let retry_due = self
             .last_halt_attempt_ms
             .map_or(true, |at| time_ms - at >= self.config.halt_retry_ms);
@@ -1188,6 +1195,7 @@ impl<S: Strategy> TradingSession<S> {
                 intent.take_profit,
                 intent.max_bars_hold,
                 intent.trailing_atr,
+                intent.deadline_ms,
             )
             .await;
         if matches!(

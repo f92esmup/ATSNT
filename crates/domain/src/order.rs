@@ -50,6 +50,9 @@ pub struct OrderIntent {
     /// Optional ATR distance for adaptive breakeven and trailing stop ratchet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trailing_atr: Option<Decimal>,
+    /// Optional timestamp deadline in Unix ms for real-time / intraday time barriers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<i64>,
 }
 
 impl OrderIntent {
@@ -69,6 +72,7 @@ impl OrderIntent {
             stop_loss,
             take_profit,
             max_bars_hold,
+            None,
             None,
             None,
         )
@@ -93,10 +97,11 @@ impl OrderIntent {
             max_bars_hold,
             risk_fraction,
             None,
+            None,
         )
     }
 
-    /// Constructs a validated OrderIntent with optional risk fraction and trailing ATR distance.
+    /// Constructs a validated OrderIntent with optional risk fraction, trailing ATR distance, and deadline.
     #[allow(clippy::too_many_arguments)]
     pub fn with_risk_and_trailing(
         timestamp: i64,
@@ -107,6 +112,7 @@ impl OrderIntent {
         max_bars_hold: usize,
         risk_fraction: Option<Decimal>,
         trailing_atr: Option<Decimal>,
+        deadline_ms: Option<i64>,
     ) -> Result<Self, DomainError> {
         if price <= Decimal::ZERO {
             return Err(DomainError::InvalidPrice(price.to_string()));
@@ -140,6 +146,7 @@ impl OrderIntent {
             max_bars_hold,
             risk_fraction,
             trailing_atr,
+            deadline_ms,
         })
     }
 }

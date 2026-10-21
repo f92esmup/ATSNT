@@ -424,10 +424,10 @@ impl ConsensusPolicy {
                 domain::Side::Sell => (sample.price + stop_distance, sample.price - tp_distance),
             };
 
-            let max_bars_hold = self
+            let deadline_ms = self
                 .config
                 .decay_horizon_seconds
-                .map_or(12, |s| ((s / 3600) as usize).max(1));
+                .map(|s| sample.timestamp + (s as i64) * 1000);
 
             let intent = domain::OrderIntent::with_risk_and_trailing(
                 sample.timestamp,
@@ -435,9 +435,10 @@ impl ConsensusPolicy {
                 sample.price,
                 stop_loss,
                 take_profit,
-                max_bars_hold,
+                0,
                 Some(risk),
                 Some(sample.atr_stop_reference),
+                deadline_ms,
             )
             .ok()?;
 
@@ -1584,7 +1585,7 @@ mod tests {
         assert_eq!(intent.price, dec!(40000));
         assert_eq!(intent.stop_loss, dec!(39500)); // 40000 - 1.0 * 500
         assert_eq!(intent.take_profit, dec!(41000)); // 40000 + 2.0 * 500
-        assert_eq!(intent.max_bars_hold, 4); // 14400s / 3600s
+        assert_eq!(intent.deadline_ms, Some(2000 + 14400 * 1000));
         assert!(intent.risk_fraction.is_some());
 
         // While remaining in the active long signal, no duplicate entries are emitted

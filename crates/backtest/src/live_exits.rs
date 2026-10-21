@@ -58,6 +58,7 @@ struct TrackedPosition {
     max_bars_hold: usize,
     bars_held: usize,
     trailing_atr: Option<Decimal>,
+    deadline_ms: Option<i64>,
 }
 
 /// Owns the exit lifecycle of the single live position of one symbol.
@@ -112,11 +113,12 @@ impl ExitManager {
             take_profit,
             max_bars_hold,
             None,
+            None,
         )
         .await
     }
 
-    /// Entry filled with optional trailing ATR protection.
+    /// Entry filled with optional trailing ATR protection and real-time deadline.
     #[allow(clippy::too_many_arguments)]
     pub async fn on_entry_filled_with_trailing<G: ExitGateway>(
         &mut self,
@@ -127,6 +129,7 @@ impl ExitManager {
         take_profit: Decimal,
         max_bars_hold: usize,
         trailing_atr: Option<Decimal>,
+        deadline_ms: Option<i64>,
     ) -> ExitEvent {
         self.position = Some(TrackedPosition {
             entry_side,
@@ -136,6 +139,7 @@ impl ExitManager {
             max_bars_hold,
             bars_held: 0,
             trailing_atr,
+            deadline_ms,
         });
         let mut last_error = String::new();
         for _ in 0..MAX_ATTEMPTS {
@@ -241,6 +245,27 @@ impl ExitManager {
         self.try_cleanup(gateway).await
     }
 
+    /// Checks real-time deadline for intraday time barriers on trades or clock events.
+    pub async fn on_time_update<G: ExitGateway>(
+        &mut self,
+        gateway: &G,
+        now_ms: i64,
+    ) -> Option<ExitEvent> {
+        let tracked = self.position.as_mut()?;
+        if let Some(dl) = tracked.deadline_ms {
+            if now_ms >= dl {
+                return match self.flatten(gateway).await {
+                    Ok(()) => {
+                        self.position = None;
+                        Some(ExitEvent::TimeBarrierClosed)
+                    }
+                    Err(reason) => Some(ExitEvent::TimeBarrierCloseFailed { reason }),
+                };
+            }
+        }
+        None
+    }
+
     /// A bar closed: retry pending cleanup and enforce the time barrier.
     pub async fn on_bar_closed<G: ExitGateway>(&mut self, gateway: &G) -> Option<ExitEvent> {
         if self.unprotected {
@@ -260,8 +285,12 @@ impl ExitManager {
             return Some(self.try_cleanup(gateway).await);
         }
         let tracked = self.position.as_mut()?;
-        tracked.bars_held += 1;
-        if tracked.bars_held < tracked.max_bars_hold {
+        if tracked.deadline_ms.is_none() {
+            tracked.bars_held += 1;
+            if tracked.bars_held < tracked.max_bars_hold {
+                return None;
+            }
+        } else {
             return None;
         }
         // Close first and cancel afterwards: the exchange-held exits protect until the
@@ -560,6 +589,7 @@ mod tests {
                 dec!(115),
                 10,
                 Some(dec!(5)),
+                None,
             )
             .await;
         assert_eq!(entered, ExitEvent::Protected);

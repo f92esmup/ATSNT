@@ -286,7 +286,10 @@ pub fn barrier_exit(
 ) -> Option<BarrierExit> {
     let bar = event.into();
     let close_side = closing_side(side);
-    let time_due = exits.max_bars.is_some_and(|max_bars| bars_held >= max_bars);
+    let time_due = exits.max_bars.is_some_and(|max_bars| bars_held >= max_bars)
+        || exits
+            .deadline_ms
+            .is_some_and(|deadline| bar.end_ms >= deadline);
     match side {
         PositionSide::Long => {
             if bar.low <= exits.stop {
@@ -1324,6 +1327,7 @@ mod tests {
             take_profit: Some(take_profit),
             max_bars: Some(max_bars),
             step_trailing_atr: None,
+            deadline_ms: None,
         }
     }
 
@@ -1333,6 +1337,7 @@ mod tests {
             take_profit: None,
             max_bars: None,
             step_trailing_atr: None,
+            deadline_ms: None,
         }
     }
 
@@ -1490,6 +1495,7 @@ mod tests {
             5,
             Some(dec!(0.01)),
             Some(dec!(5)), // ATR = 5
+            None,
         )
         .expect("valid intent");
         core.submit(PendingEntry {
@@ -1536,6 +1542,7 @@ mod tests {
             5,
             Some(dec!(0.01)),
             Some(dec!(5)),
+            None,
         )
         .expect("valid intent");
         core.submit(PendingEntry {
@@ -1592,6 +1599,7 @@ mod tests {
             5,
             Some(dec!(0.01)),
             Some(dec!(5)),
+            None,
         )
         .expect("valid intent");
         core.submit(PendingEntry {

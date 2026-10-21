@@ -171,16 +171,24 @@ pub struct ProtectiveExits {
     /// Optional step-trailing ATR distance for adaptive breakeven and trailing stops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_trailing_atr: Option<Decimal>,
+    /// Optional timestamp deadline in Unix ms for real-time / intraday time barriers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<i64>,
 }
 
 impl ProtectiveExits {
-    /// The barriers of a triple-barrier entry, copied with trailing configuration.
+    /// The barriers of a triple-barrier entry, copied with trailing and deadline configuration.
     pub fn from_intent(intent: &OrderIntent) -> Self {
         Self {
             stop: intent.stop_loss,
             take_profit: Some(intent.take_profit),
-            max_bars: Some(intent.max_bars_hold),
+            max_bars: if intent.deadline_ms.is_some() {
+                None
+            } else {
+                Some(intent.max_bars_hold)
+            },
             step_trailing_atr: intent.trailing_atr,
+            deadline_ms: intent.deadline_ms,
         }
     }
 
@@ -231,6 +239,7 @@ impl ProtectiveExits {
             take_profit,
             max_bars: None,
             step_trailing_atr: None,
+            deadline_ms: None,
         })
     }
 }
@@ -335,6 +344,7 @@ mod tests {
                 take_profit: Some(dec!(104)),
                 max_bars: Some(7),
                 step_trailing_atr: None,
+                deadline_ms: None,
             }
         );
     }
@@ -348,6 +358,7 @@ mod tests {
                 take_profit: None,
                 max_bars: None,
                 step_trailing_atr: None,
+                deadline_ms: None,
             }
         );
         assert_eq!(
