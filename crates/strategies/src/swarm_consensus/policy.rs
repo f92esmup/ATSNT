@@ -316,7 +316,7 @@ impl Default for SwarmPolicySpace {
             hysteresis_values: vec![dec!(0.10), dec!(0.15), dec!(0.20), dec!(0.25), dec!(0.30)],
             base_risks: vec![dec!(0.005), dec!(0.010), dec!(0.015), dec!(0.020)],
             risk_increments: vec![dec!(0.005), dec!(0.010), dec!(0.015), dec!(0.020)],
-            stop_atr_multipliers: vec![dec!(3.0)],
+            stop_atr_multipliers: vec![dec!(1.5), dec!(2.0), dec!(2.5), dec!(3.0), dec!(4.0)],
             max_level_risk: default_max_level_risk(),
         }
     }
@@ -371,11 +371,11 @@ impl HyperparameterSpace for SwarmPolicySpace {
         configs
     }
 
-    /// One step down and one step up the grid for each of the five searched parameters, the
-    /// others held: up to 10 neighbours, keeping only admitted ones. A value off the grid steps
+    /// One step down and one step up the grid for each of the six searched parameters, the
+    /// others held: up to 12 neighbours, keeping only admitted ones. A value off the grid steps
     /// to the nearest grid values around it.
     fn perturb_neighbors(&self, base: &PolicyConfig) -> Vec<PolicyConfig> {
-        let mut neighbors = Vec::with_capacity(10);
+        let mut neighbors = Vec::with_capacity(12);
         let push = |neighbors: &mut Vec<PolicyConfig>,
                     (below, above): (Option<Decimal>, Option<Decimal>),
                     set: &dyn Fn(Decimal) -> PolicyConfig| {
@@ -423,6 +423,14 @@ impl HyperparameterSpace for SwarmPolicySpace {
             adjacent_grid_values(&self.risk_increments, base.risk_increment),
             &|risk_increment| PolicyConfig {
                 risk_increment,
+                ..base.clone()
+            },
+        );
+        push(
+            &mut neighbors,
+            adjacent_grid_values(&self.stop_atr_multipliers, base.stop_atr_multiplier),
+            &|stop_atr_multiplier| PolicyConfig {
+                stop_atr_multiplier,
                 ..base.clone()
             },
         );
@@ -804,10 +812,10 @@ mod tests {
         //   increment 0.005, 0.010, 0.015 → all 4 base risks (top 0.030, 0.040, 0.050);
         //   increment 0.020 → base 0.005, 0.010 only (0.045, 0.050; 0.055 and 0.060 exceed).
         // 4 + 4 + 4 + 2 = 14 pairs; thresholds never exceed L3 = 0.55 + 0.30 = 0.85 ≤ 1.
-        // 7 bases · 3 steps · 5 hysteresis · 14 risk pairs · 1 stop = 1,470 of 1,680.
+        // 7 bases · 3 steps · 5 hysteresis · 14 risk pairs · 5 stops = 7,350 of 8,400.
         let space = SwarmPolicySpace::default();
         let all = space.generate_candidates(usize::MAX);
-        assert_eq!(all.len(), 1_470);
+        assert_eq!(all.len(), 7_350);
         assert!(all.iter().all(|c| c.top_level_risk() <= dec!(0.05)));
         assert!(all.contains(&PolicyConfig::default()));
     }
@@ -832,7 +840,6 @@ mod tests {
             for n in space.perturb_neighbors(&c) {
                 assert!(on_grid(&space, &n) && space.admits(&n), "{n} from {c}");
                 assert_ne!(n, c);
-                assert_eq!(n.stop_atr_multiplier, c.stop_atr_multiplier);
             }
         }
         // Interior point: 2 neighbours per parameter, except the risk ones the cap removes.
@@ -845,13 +852,21 @@ mod tests {
             stop_atr_multiplier: dec!(3.0),
         };
         let n = space.perturb_neighbors(&base);
-        assert_eq!(n.len(), 10);
+        assert_eq!(n.len(), 12);
         assert!(n.contains(&PolicyConfig {
             threshold_base: dec!(0.35),
             ..base.clone()
         }));
         assert!(n.contains(&PolicyConfig {
             risk_increment: dec!(0.015),
+            ..base.clone()
+        }));
+        assert!(n.contains(&PolicyConfig {
+            stop_atr_multiplier: dec!(2.5),
+            ..base.clone()
+        }));
+        assert!(n.contains(&PolicyConfig {
+            stop_atr_multiplier: dec!(4.0),
             ..base.clone()
         }));
         // At the risk cap, the step up in either risk parameter is filtered out.
@@ -861,7 +876,7 @@ mod tests {
             ..base.clone()
         };
         let n = space.perturb_neighbors(&capped);
-        assert_eq!(n.len(), 8);
+        assert_eq!(n.len(), 10);
         assert!(n.iter().all(|c| c.top_level_risk() <= dec!(0.05)));
     }
 
