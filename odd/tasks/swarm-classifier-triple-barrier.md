@@ -77,6 +77,6 @@
   - Test: `paper_trading_accepts_swarm_classifier_artifact`.
 
 ### Phase 4: Production Pipeline & Cloud Batch Run 7
-- [ ] **T4.1**: Launch Run 7 in Google Cloud Batch with 1,000 candidates and the new Classifier + Triple Barrier space.
-- [ ] **T4.2**: Verify BigQuery telemetry, inspect trade durations (2h–12h), win rate, and drawdown.
-- [ ] **T4.3**: Update Research Logbook (`01-swarm-consensus-optimization-logbook.md`).
+- [x] **T4.1**: Launch Run 7 in Google Cloud Batch with 1,000 candidates and the new Classifier + Triple Barrier space.
+- [x] **T4.2**: Verify BigQuery telemetry, inspect trade durations (2h–12h), win rate, and drawdown.
+- [x] **T4.3**: Update Research Logbook (`01-swarm-consensus-optimization-logbook.md`).
