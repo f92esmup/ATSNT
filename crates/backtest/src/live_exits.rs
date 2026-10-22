@@ -189,7 +189,7 @@ impl ExitManager {
                     tracked.entry_price + atr
                 } else if excursion >= dec!(1.5) * atr {
                     tracked.entry_price + dec!(0.5) * atr
-                } else if excursion >= dec!(1.0) * atr {
+                } else if excursion >= dec!(0.75) * atr {
                     tracked.entry_price
                 } else {
                     tracked.stop_loss
@@ -201,7 +201,7 @@ impl ExitManager {
                     tracked.entry_price - atr
                 } else if excursion >= dec!(1.5) * atr {
                     tracked.entry_price - dec!(0.5) * atr
-                } else if excursion >= dec!(1.0) * atr {
+                } else if excursion >= dec!(0.75) * atr {
                     tracked.entry_price
                 } else {
                     tracked.stop_loss

@@ -660,36 +660,13 @@ impl SwarmPolicySpace {
     /// Search space for Classifier Mode with Triple Barrier protection.
     pub fn classifier_space() -> Self {
         Self {
-            threshold_bases: vec![
-                dec!(0.30),
-                dec!(0.35),
-                dec!(0.40),
-                dec!(0.45),
-                dec!(0.50),
-                dec!(0.55),
-                dec!(0.60),
-            ],
+            threshold_bases: vec![dec!(0.40), dec!(0.45), dec!(0.50), dec!(0.55), dec!(0.60)],
             threshold_steps: vec![dec!(0.075)],
             hysteresis_values: vec![dec!(0.55)],
-            base_risks: vec![
-                dec!(0.005),
-                dec!(0.0075),
-                dec!(0.010),
-                dec!(0.0125),
-                dec!(0.015),
-                dec!(0.020),
-            ],
-            risk_increments: vec![
-                dec!(0.005),
-                dec!(0.0075),
-                dec!(0.010),
-                dec!(0.0125),
-                dec!(0.015),
-                dec!(0.020),
-            ],
-            stop_atr_multipliers: vec![dec!(0.75), dec!(1.0), dec!(1.25), dec!(1.50)],
+            base_risks: vec![dec!(0.005), dec!(0.0075), dec!(0.010)],
+            risk_increments: vec![dec!(0.0025), dec!(0.005), dec!(0.0075)],
+            stop_atr_multipliers: vec![dec!(1.0), dec!(1.25), dec!(1.50)],
             take_profit_atr_multipliers: vec![
-                Some(dec!(1.50)),
                 Some(dec!(1.75)),
                 Some(dec!(2.0)),
                 Some(dec!(2.25)),

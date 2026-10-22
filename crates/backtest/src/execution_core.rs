@@ -1019,7 +1019,7 @@ impl ExecutionCore {
                             position.entry_price + atr
                         } else if fav_excursion >= dec!(1.5) * atr {
                             position.entry_price + dec!(0.5) * atr
-                        } else if fav_excursion >= dec!(1.0) * atr {
+                        } else if fav_excursion >= dec!(0.75) * atr {
                             position.entry_price
                         } else {
                             exits.stop
@@ -1032,7 +1032,7 @@ impl ExecutionCore {
                             position.entry_price - atr
                         } else if fav_excursion >= dec!(1.5) * atr {
                             position.entry_price - dec!(0.5) * atr
-                        } else if fav_excursion >= dec!(1.0) * atr {
+                        } else if fav_excursion >= dec!(0.75) * atr {
                             position.entry_price
                         } else {
                             exits.stop
