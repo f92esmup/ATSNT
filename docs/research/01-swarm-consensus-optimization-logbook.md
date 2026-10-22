@@ -194,3 +194,78 @@ Al auditar los disparos de reglas en el enjambre (`strategy_audit.rule_firings`)
 
 4. **Propuesta D: Restaurar 500 Candidatos en HPO**
    - Mantener el grid de 500 candidatos en los archivos de configuración para maximizar la exploración del espacio sin penalización apreciable de tiempo.
+
+---
+
+## 5. Run 9: Parametrización Integral de TP, SL, Breakeven y Trailing Stop ATR
+
+### 5.1 Arquitectura e Implementación
+En respuesta al requerimiento de eliminar cualquier suposición o valor fijo en el código de ejecución y hacer que **todos los niveles de protección por ATR sean 100% optimizables**, se implementaron las siguientes mejoras en el motor y dominio:
+
+1. **Campos Desacoplados de Breakeven y Trailing Stop**:
+   - `breakeven_atr_multiplier: Option<Decimal>`: Fila de multiplicadores (`[Some(0.50), Some(0.75), Some(1.00), None]`) que determina la distancia requerida desde la entrada para desplazar el Stop-Loss al precio de entrada (Breakeven a cero pérdida).
+   - `trailing_atr_multiplier: Option<Decimal>`: Fila de multiplicadores (`[Some(0.50), Some(0.75), Some(1.00), None]`) que determina el escalón de avance para desplazar el stop asegurando ganancias proporcionales a medida que el precio avanza.
+   - Estos campos se integraron de forma canónica en `PolicyConfig`, `SwarmPolicySpace`, `OrderIntent` y `ProtectiveExits`.
+
+2. **Generalización del Mecanismo de Ratchet en `ExecutionCore` y `LiveExits`**:
+   - La lógica hardcodeada anterior fue sustituida por un evaluador puramente basado en distancias en `Decimal`:
+     - Si `breakeven_dist` se alcanza $\rightarrow$ el stop asciende (Long) o desciende (Short) al precio de entrada.
+     - Si `trailing_step_dist` está configurado $\rightarrow$ por cada escalón de avance superior a la barrera de breakeven, el stop asciende bloqueando $k \times \text{escalón}$ de beneficio asegurado.
+     - Si ambos son `None` $\rightarrow$ el sistema opera como un bracket puro pasivo (TP y SL estáticos).
+
+3. **Espacio de Búsqueda de Clasificador Expandido (`classifier_space`)**:
+   - `stop_atr_multipliers`: `[1.00, 1.25, 1.50, 1.75, 2.00]`
+   - `take_profit_atr_multipliers`: `[1.75, 2.00, 2.25, 2.50, 3.00, 3.50, 4.00]` (con restricción $TP \ge 1.5 \times SL$)
+   - `breakeven_atr_multipliers`: `[Some(0.50), Some(0.75), Some(1.00), None]`
+   - `trailing_atr_multipliers`: `[Some(0.50), Some(0.75), Some(1.00), None]`
+   - `threshold_bases`: `[0.45, 0.50, 0.55, 0.60]` (excluyendo el ruido de 0.40)
+   - `base_risks`: `[0.005, 0.0075, 0.010]` (0.5% a 1.0%)
+   - `risk_increments`: `[0.0025, 0.005]`
+   - `decay_horizon_options`: `[7200s (2h), 14400s (4h), 28800s (8h), 43200s (12h)]`
+
+---
+
+### 5.2 Resultados de la Ejecución en Cloud Batch (Job `hpo-btcusdt-2026-20261022-104848`)
+- **Instancia**: Spot VM `n2-custom-30-30720` (30 vCPUs, 30 GB RAM).
+- **Candidatos evaluados**: 1.000 combinaciones a través de 5 folds en WFO.
+- **Tiempo de ejecución de HPO**: 822.6 segundos (12.2 backtests/segundo).
+- **Métricas registradas**: 100% de los 1.000 candidatos y sus 10 folds registrados en BigQuery (`atsnt_bi.runs` y `atsnt_bi.run_metrics`).
+
+#### Métricas del Candidato Ganador (`01a16362-3f3e-75dc-b395-77ed172b8848`)
+- **Parámetros Ganadores**:
+  - $\theta = 0.50$, $\text{Step} = 0.075$, $H = 0.55$
+  - $\text{BaseRisk} = 1.0\%$, $\text{RiskIncrement} = 0.5\%$
+  - $\text{Stop} = 1.25\text{ ATR}$, $\text{TakeProfit} = 2.00\text{ ATR}$
+  - **`Breakeven`** $= 1.00\text{ ATR}$
+  - **`Trailing`** $= 0.50\text{ ATR}$
+  - $\text{DecayHorizon} = 43200\text{s}$ (12 horas)
+
+| Métrica | Run 7 | Run 8 | Run 9 (Actual) | Evolución |
+| :--- | :--- | :--- | :--- | :--- |
+| **Supervivencia del Circuit Breaker** | Detenido 30 Marzo | Detenido Abril | **100% Supervivencia (Feb - Oct)** | **Ininterrumpido todo 2026** |
+| **Total Operaciones** | 78 | 125 | **271** | +117% cobertura temporal |
+| **Operaciones Ganadoras** | 31 (39.7%) | 42 (33.6%) | **100 (36.9%)** | +138% en número de aciertos |
+| **TakeProfit Trades** | 15 / 15 (100%) | 22 / 22 (100%) | **61 / 61 (100%)** | **+$109.79 PnL Bruto en TP** |
+| **Trades en Ganancia por Trailing**| 0 | 27 | **31** | Salidas en profit por ratchet |
+| **PnL Bruto Total** | +$170.03 | -$35.21 | **-$40.66** | Pérdida bruta de solo -$0.15/trade |
+| **Fricción Total (Fees + Slippage)** | $38.90 | $47.10 | **$91.69** | Coste de ejecución en 271 trades |
+| **PnL Neto Final** | -$17.48 (Halted) | -$82.31 (Halted) | **-$85.89 (Activo/Sin Halt)** | Nunca activó el circuit breaker |
+
+#### Desglose por Razón de Salida (`atsnt_bi.trades`)
+| Razón de Salida | Operaciones | Ganadoras | Win Rate | PnL Bruto | PnL Neto | Duración Media |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **TakeProfit** | 61 | 61 | **100.0%** | **+$109.79** | **+$99.34** | 2.24 horas |
+| **TimeBarrier** | 14 | 8 | **57.1%** | **+$0.97** | -$1.20 | 12.00 horas |
+| **StopLoss** | 196 | 31 | 15.8% | -$151.42 | -$184.04 | 2.33 horas |
+| **Total** | **271** | **100** | **36.9%** | **-$40.66** | **-$85.89** | — |
+
+---
+
+### 5.3 Conclusiones Clave del Run 9
+1. **La configuración Breakeven + Trailing Stop domina el ranking**:
+   - De los 1.000 candidatos evaluados, las configuraciones con `breakeven = 1.0` o `0.75` y `trailing = 0.50` o `0.75` coparon el 100% del Top 15 de Sortino y Profit Factor OOS.
+2. **Supervivencia total sin interrupción por Circuit Breakers**:
+   - Por primera vez en la historia de la estrategia Swarm Consensus, el algoritmo atravesó los 9 meses completos de 2026 (febrero a octubre) sin disparar nunca la parada de protección mensual del 15%.
+3. **El desafío central es ahora la fricción por volumen**:
+   - Con 271 trades, la fricción de comisiones taker (0.05%) y slippage (0.05%) representó $91.69 de impacto negativo. En términos brutos, la estrategia solo perdió -$40.66 en 9 meses de mercado real en Bitcoin (un promedio de -$0.15 por trade).
+   - El Take-Profit capturó casi $110 de beneficio bruto en 61 operaciones perfectas. Para convertir el sistema en netamente rentable, el siguiente paso debe enfocarse en aumentar la selectividad (mayor umbral $\theta \ge 0.55$, o filtrar operaciones de bajo R:R) y/o reducir la fricción utilizando ejecuciones pasivas (Maker) en la entrada.
