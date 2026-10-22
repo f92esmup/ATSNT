@@ -18,7 +18,6 @@ use domain::{
 };
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 
 use crate::config::BacktestConfig;
 use crate::metrics::{
@@ -1010,37 +1009,69 @@ impl ExecutionCore {
         }
 
         // Trailing / Breakeven stop ratchet for subsequent events (AFML Ch. 10):
-        if let Some(atr) = exits.step_trailing_atr {
-            if atr > Decimal::ZERO {
-                match position.side {
-                    PositionSide::Long => {
-                        let fav_excursion = bar.high - position.entry_price;
-                        let new_stop = if fav_excursion >= dec!(2.0) * atr {
-                            position.entry_price + atr
-                        } else if fav_excursion >= dec!(1.5) * atr {
-                            position.entry_price + dec!(0.5) * atr
-                        } else if fav_excursion >= dec!(0.75) * atr {
-                            position.entry_price
-                        } else {
-                            exits.stop
-                        };
-                        exits.stop = exits.stop.max(new_stop);
-                    }
-                    PositionSide::Short => {
-                        let fav_excursion = position.entry_price - bar.low;
-                        let new_stop = if fav_excursion >= dec!(2.0) * atr {
-                            position.entry_price - atr
-                        } else if fav_excursion >= dec!(1.5) * atr {
-                            position.entry_price - dec!(0.5) * atr
-                        } else if fav_excursion >= dec!(0.75) * atr {
-                            position.entry_price
-                        } else {
-                            exits.stop
-                        };
-                        exits.stop = exits.stop.min(new_stop);
+        if exits.breakeven_dist.is_some() || exits.step_trailing_atr.is_some() {
+            let fav_excursion = match position.side {
+                PositionSide::Long => bar.high - position.entry_price,
+                PositionSide::Short => position.entry_price - bar.low,
+            };
+
+            if fav_excursion > Decimal::ZERO {
+                let mut new_stop = exits.stop;
+
+                // 1. Breakeven check: move stop to entry_price once favorable excursion >= breakeven_dist
+                if let Some(be_dist) = exits.breakeven_dist {
+                    if be_dist > Decimal::ZERO && fav_excursion >= be_dist {
+                        match position.side {
+                            PositionSide::Long => {
+                                new_stop = new_stop.max(position.entry_price);
+                            }
+                            PositionSide::Short => {
+                                new_stop = new_stop.min(position.entry_price);
+                            }
+                        }
                     }
                 }
-                self.exits = Some(exits);
+
+                // 2. Trailing step ratchet check:
+                if let Some(step) = exits.step_trailing_atr {
+                    if step > Decimal::ZERO {
+                        match position.side {
+                            PositionSide::Long => {
+                                if let Some(be_dist) = exits.breakeven_dist {
+                                    if fav_excursion >= be_dist + step {
+                                        let k = ((fav_excursion - be_dist) / step).floor();
+                                        let trailing_stop = position.entry_price + k * step;
+                                        new_stop = new_stop.max(trailing_stop);
+                                    }
+                                } else if fav_excursion >= step {
+                                    let k = (fav_excursion / step).floor();
+                                    let trailing_stop =
+                                        position.entry_price + (k - Decimal::ONE) * step;
+                                    new_stop = new_stop.max(trailing_stop);
+                                }
+                            }
+                            PositionSide::Short => {
+                                if let Some(be_dist) = exits.breakeven_dist {
+                                    if fav_excursion >= be_dist + step {
+                                        let k = ((fav_excursion - be_dist) / step).floor();
+                                        let trailing_stop = position.entry_price - k * step;
+                                        new_stop = new_stop.min(trailing_stop);
+                                    }
+                                } else if fav_excursion >= step {
+                                    let k = (fav_excursion / step).floor();
+                                    let trailing_stop =
+                                        position.entry_price - (k - Decimal::ONE) * step;
+                                    new_stop = new_stop.min(trailing_stop);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if new_stop != exits.stop {
+                    exits.stop = new_stop;
+                    self.exits = Some(exits);
+                }
             }
         }
     }
@@ -1327,6 +1358,7 @@ mod tests {
             take_profit: Some(take_profit),
             max_bars: Some(max_bars),
             step_trailing_atr: None,
+            breakeven_dist: None,
             deadline_ms: None,
         }
     }
@@ -1337,6 +1369,7 @@ mod tests {
             take_profit: None,
             max_bars: None,
             step_trailing_atr: None,
+            breakeven_dist: None,
             deadline_ms: None,
         }
     }
@@ -1486,7 +1519,7 @@ mod tests {
         let mut equity = dec!(10_000);
         let mut excursion = None;
         let mut core = ExecutionCore::new();
-        let intent = OrderIntent::with_risk_and_trailing(
+        let intent = OrderIntent::with_risk_and_exits(
             1,
             Side::Buy,
             dec!(100),
@@ -1494,7 +1527,8 @@ mod tests {
             dec!(115),
             5,
             Some(dec!(0.01)),
-            Some(dec!(5)), // ATR = 5
+            None,
+            Some(dec!(3.75)), // 0.75 ATR (ATR = 5)
             None,
         )
         .expect("valid intent");
@@ -1511,7 +1545,7 @@ mod tests {
         );
         assert_eq!(core.exits().map(|e| e.stop), Some(dec!(95)));
 
-        // Bar 1: Favorable excursion reaches 106 (+1.2 ATR >= 1.0 ATR)
+        // Bar 1: Favorable excursion reaches 106 (+1.2 ATR >= 0.75 ATR)
         core.evaluate_exits(
             &bar(dec!(100), dec!(106), dec!(99), dec!(105)),
             &config,
@@ -1533,7 +1567,7 @@ mod tests {
         let mut equity = dec!(10_000);
         let mut excursion = None;
         let mut core = ExecutionCore::new();
-        let intent = OrderIntent::with_risk_and_trailing(
+        let intent = OrderIntent::with_risk_and_exits(
             1,
             Side::Buy,
             dec!(100),
@@ -1541,7 +1575,8 @@ mod tests {
             dec!(115),
             5,
             Some(dec!(0.01)),
-            Some(dec!(5)),
+            None,
+            Some(dec!(3.75)), // 0.75 ATR (ATR = 5)
             None,
         )
         .expect("valid intent");
@@ -1557,7 +1592,7 @@ mod tests {
             &mut equity,
         );
 
-        // Bar 1: High reaches 105.5 (+1.1 ATR) -> stop ratchets to breakeven (100)
+        // Bar 1: High reaches 105.5 (+1.1 ATR >= 0.75 ATR) -> stop ratchets to breakeven (100)
         core.evaluate_exits(
             &bar(dec!(100), dec!(105.5), dec!(99), dec!(104)),
             &config,
@@ -1590,7 +1625,7 @@ mod tests {
         let mut equity = dec!(10_000);
         let mut excursion = None;
         let mut core = ExecutionCore::new();
-        let intent = OrderIntent::with_risk_and_trailing(
+        let intent = OrderIntent::with_risk_and_exits(
             1,
             Side::Buy,
             dec!(100),
@@ -1598,7 +1633,8 @@ mod tests {
             dec!(120),
             5,
             Some(dec!(0.01)),
-            Some(dec!(5)),
+            Some(dec!(2.5)),  // 0.50 ATR step (ATR = 5)
+            Some(dec!(3.75)), // 0.75 ATR breakeven trigger
             None,
         )
         .expect("valid intent");

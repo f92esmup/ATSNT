@@ -46,6 +46,15 @@ pub enum PolicyConfigError {
     /// `decay_horizon_seconds` must be strictly positive when set.
     #[error("decay_horizon_seconds must be > 0, got {0}")]
     NonPositiveDecayHorizon(u64),
+    /// `breakeven_atr_multiplier` must be strictly positive when set.
+    #[error("breakeven_atr_multiplier must be > 0, got {0}")]
+    NonPositiveBreakevenMultiplier(Decimal),
+    /// `trailing_atr_multiplier` must be strictly positive when set.
+    #[error("trailing_atr_multiplier must be > 0, got {0}")]
+    NonPositiveTrailingMultiplier(Decimal),
+    /// In classifier mode, `breakeven_atr_multiplier` must be strictly less than `take_profit_atr_multiplier`.
+    #[error("breakeven multiplier {0} must be < take profit multiplier {1}")]
+    BreakevenAboveTakeProfit(Decimal, Decimal),
     /// In classifier mode, `take_profit_atr_multiplier` must be at least 1.5x `stop_atr_multiplier`.
     #[error("take profit multiplier {0} must be >= 1.5x stop multiplier {1}")]
     InvertedPayoff(Decimal, Decimal),
@@ -57,8 +66,8 @@ pub enum PolicyConfigError {
         "decay horizon must be between 7200s (2h) and 43200s (12h) in classifier mode, got {0:?}"
     )]
     InvalidDecayHorizonInClassifierMode(Option<u64>),
-    /// In classifier mode, `stop_atr_multiplier` must not exceed 1.50 ATR.
-    #[error("stop ATR multiplier must be <= 1.50 in classifier mode, got {0}")]
+    /// In classifier mode, `stop_atr_multiplier` must not exceed 2.00 ATR.
+    #[error("stop ATR multiplier must be <= 2.00 in classifier mode, got {0}")]
     ExcessiveStopInClassifierMode(Decimal),
     /// `feed_weights` is invalid.
     #[error("invalid feed_weights: {0}")]
@@ -85,6 +94,12 @@ pub struct PolicyConfig {
     /// Optional take-profit distance in multiples of the feed-1 ATR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take_profit_atr_multiplier: Option<Decimal>,
+    /// Optional breakeven ATR multiplier (favorable excursion to move SL to entry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakeven_atr_multiplier: Option<Decimal>,
+    /// Optional trailing step ATR multiplier (distance per trailing ratchet step).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trailing_atr_multiplier: Option<Decimal>,
     /// Optional max holding horizon in seconds before forced flat exit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decay_horizon_seconds: Option<u64>,
@@ -115,6 +130,8 @@ impl Default for PolicyConfig {
             risk_increment: dec!(0.005),
             stop_atr_multiplier: dec!(3.0),
             take_profit_atr_multiplier: Some(dec!(2.0)),
+            breakeven_atr_multiplier: None,
+            trailing_atr_multiplier: None,
             decay_horizon_seconds: None,
             feed_weights: None,
             bracket_priority: true,
@@ -134,6 +151,8 @@ impl PolicyConfig {
             risk_increment: dec!(0.010),
             stop_atr_multiplier: dec!(1.0),
             take_profit_atr_multiplier: Some(dec!(2.0)),
+            breakeven_atr_multiplier: Some(dec!(0.75)),
+            trailing_atr_multiplier: Some(dec!(0.50)),
             decay_horizon_seconds: Some(14400),
             feed_weights: None,
             bracket_priority: true,
@@ -156,6 +175,12 @@ impl std::fmt::Display for PolicyConfig {
         )?;
         if let Some(tp) = self.take_profit_atr_multiplier {
             write!(f, "|TP:{tp}")?;
+        }
+        if let Some(be) = self.breakeven_atr_multiplier {
+            write!(f, "|BE:{be}")?;
+        }
+        if let Some(tr) = self.trailing_atr_multiplier {
+            write!(f, "|Trail:{tr}")?;
         }
         if let Some(decay) = self.decay_horizon_seconds {
             write!(f, "|Decay:{decay}s")?;
@@ -238,6 +263,16 @@ impl PolicyConfig {
                 return Err(PolicyConfigError::NonPositiveTakeProfitMultiplier(tp));
             }
         }
+        if let Some(be) = self.breakeven_atr_multiplier {
+            if be <= Decimal::ZERO {
+                return Err(PolicyConfigError::NonPositiveBreakevenMultiplier(be));
+            }
+        }
+        if let Some(tr) = self.trailing_atr_multiplier {
+            if tr <= Decimal::ZERO {
+                return Err(PolicyConfigError::NonPositiveTrailingMultiplier(tr));
+            }
+        }
         if let Some(decay) = self.decay_horizon_seconds {
             if decay == 0 {
                 return Err(PolicyConfigError::NonPositiveDecayHorizon(decay));
@@ -247,7 +282,7 @@ impl PolicyConfig {
             weights.validate()?;
         }
         if self.classifier_mode {
-            if self.stop_atr_multiplier > dec!(1.50) {
+            if self.stop_atr_multiplier > dec!(2.00) {
                 return Err(PolicyConfigError::ExcessiveStopInClassifierMode(
                     self.stop_atr_multiplier,
                 ));
@@ -263,6 +298,14 @@ impl PolicyConfig {
                 }
                 None => {
                     return Err(PolicyConfigError::MissingTakeProfitInClassifierMode);
+                }
+            }
+            if let (Some(be), Some(tp)) = (
+                self.breakeven_atr_multiplier,
+                self.take_profit_atr_multiplier,
+            ) {
+                if be >= tp {
+                    return Err(PolicyConfigError::BreakevenAboveTakeProfit(be, tp));
                 }
             }
             match self.decay_horizon_seconds {
@@ -429,7 +472,16 @@ impl ConsensusPolicy {
                 .decay_horizon_seconds
                 .map(|s| sample.timestamp + (s as i64) * 1000);
 
-            let intent = domain::OrderIntent::with_risk_and_trailing(
+            let breakeven_atr = self
+                .config
+                .breakeven_atr_multiplier
+                .map(|m| m * sample.atr_stop_reference);
+            let trailing_atr = self
+                .config
+                .trailing_atr_multiplier
+                .map(|m| m * sample.atr_stop_reference);
+
+            let intent = domain::OrderIntent::with_risk_and_exits(
                 sample.timestamp,
                 side,
                 sample.price,
@@ -437,7 +489,8 @@ impl ConsensusPolicy {
                 take_profit,
                 0,
                 Some(risk),
-                Some(sample.atr_stop_reference),
+                trailing_atr,
+                breakeven_atr,
                 deadline_ms,
             )
             .ok()?;
@@ -545,6 +598,14 @@ fn default_take_profit_multipliers() -> Vec<Option<Decimal>> {
     ]
 }
 
+fn default_breakeven_multipliers() -> Vec<Option<Decimal>> {
+    vec![None]
+}
+
+fn default_trailing_multipliers() -> Vec<Option<Decimal>> {
+    vec![None]
+}
+
 fn default_feed_weights_options() -> Vec<Option<FeedWeights>> {
     vec![None]
 }
@@ -575,6 +636,12 @@ pub struct SwarmPolicySpace {
     /// Values of `take_profit_atr_multiplier` (None for no take profit, or multiple of ATR).
     #[serde(default = "default_take_profit_multipliers")]
     pub take_profit_atr_multipliers: Vec<Option<Decimal>>,
+    /// Values of `breakeven_atr_multiplier` (None for no breakeven, or multiple of ATR).
+    #[serde(default = "default_breakeven_multipliers")]
+    pub breakeven_atr_multipliers: Vec<Option<Decimal>>,
+    /// Values of `trailing_atr_multiplier` (None for no trailing ratchet, or multiple of ATR).
+    #[serde(default = "default_trailing_multipliers")]
+    pub trailing_atr_multipliers: Vec<Option<Decimal>>,
     /// Values of `feed_weights` (None for equal/unweighted, or weighted profile).
     #[serde(default = "default_feed_weights_options")]
     pub feed_weights_options: Vec<Option<FeedWeights>>,
@@ -647,6 +714,8 @@ impl Default for SwarmPolicySpace {
                 dec!(4.0),
             ],
             take_profit_atr_multipliers: default_take_profit_multipliers(),
+            breakeven_atr_multipliers: default_breakeven_multipliers(),
+            trailing_atr_multipliers: default_trailing_multipliers(),
             feed_weights_options: default_feed_weights_options(),
             bracket_priority_options: default_bracket_priority_options(),
             decay_horizon_options: default_decay_horizon_options(),
@@ -660,12 +729,12 @@ impl SwarmPolicySpace {
     /// Search space for Classifier Mode with Triple Barrier protection.
     pub fn classifier_space() -> Self {
         Self {
-            threshold_bases: vec![dec!(0.40), dec!(0.45), dec!(0.50), dec!(0.55), dec!(0.60)],
+            threshold_bases: vec![dec!(0.45), dec!(0.50), dec!(0.55), dec!(0.60)],
             threshold_steps: vec![dec!(0.075)],
             hysteresis_values: vec![dec!(0.55)],
             base_risks: vec![dec!(0.005), dec!(0.0075), dec!(0.010)],
-            risk_increments: vec![dec!(0.0025), dec!(0.005), dec!(0.0075)],
-            stop_atr_multipliers: vec![dec!(1.0), dec!(1.25), dec!(1.50)],
+            risk_increments: vec![dec!(0.0025), dec!(0.005)],
+            stop_atr_multipliers: vec![dec!(1.0), dec!(1.25), dec!(1.50), dec!(1.75), dec!(2.0)],
             take_profit_atr_multipliers: vec![
                 Some(dec!(1.75)),
                 Some(dec!(2.0)),
@@ -673,6 +742,19 @@ impl SwarmPolicySpace {
                 Some(dec!(2.50)),
                 Some(dec!(3.0)),
                 Some(dec!(3.50)),
+                Some(dec!(4.0)),
+            ],
+            breakeven_atr_multipliers: vec![
+                Some(dec!(0.50)),
+                Some(dec!(0.75)),
+                Some(dec!(1.0)),
+                None,
+            ],
+            trailing_atr_multipliers: vec![
+                Some(dec!(0.50)),
+                Some(dec!(0.75)),
+                Some(dec!(1.0)),
+                None,
             ],
             decay_horizon_options: vec![Some(7200), Some(14400), Some(28800), Some(43200)],
             feed_weights_options: default_feed_weights_options(),
@@ -691,12 +773,20 @@ impl SwarmPolicySpace {
             if !config.classifier_mode {
                 return false;
             }
-            if config.stop_atr_multiplier > dec!(1.50) {
+            if config.stop_atr_multiplier > dec!(2.00) {
                 return false;
             }
             match config.take_profit_atr_multiplier {
                 Some(tp) if tp >= dec!(1.5) * config.stop_atr_multiplier => {}
                 _ => return false,
+            }
+            if let (Some(be), Some(tp)) = (
+                config.breakeven_atr_multiplier,
+                config.take_profit_atr_multiplier,
+            ) {
+                if be >= tp {
+                    return false;
+                }
             }
             match config.decay_horizon_seconds {
                 Some(s) if (7200..=43200).contains(&s) => {}
@@ -730,26 +820,37 @@ impl HyperparameterSpace for SwarmPolicySpace {
                             for &stop_atr_multiplier in &self.stop_atr_multipliers {
                                 for &take_profit_atr_multiplier in &self.take_profit_atr_multipliers
                                 {
-                                    for feed_weights in &self.feed_weights_options {
-                                        for &bracket_priority in &self.bracket_priority_options {
-                                            for &decay_horizon_seconds in
-                                                &self.decay_horizon_options
-                                            {
-                                                let config = PolicyConfig {
-                                                    threshold_base,
-                                                    threshold_step,
-                                                    hysteresis,
-                                                    base_risk,
-                                                    risk_increment,
-                                                    stop_atr_multiplier,
-                                                    take_profit_atr_multiplier,
-                                                    decay_horizon_seconds,
-                                                    feed_weights: feed_weights.clone(),
-                                                    bracket_priority,
-                                                    classifier_mode: self.classifier_mode,
-                                                };
-                                                if self.admits(&config) {
-                                                    configs.push(config);
+                                    for &breakeven_atr_multiplier in &self.breakeven_atr_multipliers
+                                    {
+                                        for &trailing_atr_multiplier in
+                                            &self.trailing_atr_multipliers
+                                        {
+                                            for feed_weights in &self.feed_weights_options {
+                                                for &bracket_priority in
+                                                    &self.bracket_priority_options
+                                                {
+                                                    for &decay_horizon_seconds in
+                                                        &self.decay_horizon_options
+                                                    {
+                                                        let config = PolicyConfig {
+                                                            threshold_base,
+                                                            threshold_step,
+                                                            hysteresis,
+                                                            base_risk,
+                                                            risk_increment,
+                                                            stop_atr_multiplier,
+                                                            take_profit_atr_multiplier,
+                                                            breakeven_atr_multiplier,
+                                                            trailing_atr_multiplier,
+                                                            decay_horizon_seconds,
+                                                            feed_weights: feed_weights.clone(),
+                                                            bracket_priority,
+                                                            classifier_mode: self.classifier_mode,
+                                                        };
+                                                        if self.admits(&config) {
+                                                            configs.push(config);
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -773,11 +874,11 @@ impl HyperparameterSpace for SwarmPolicySpace {
         configs
     }
 
-    /// One step down and one step up the grid for each of the seven searched parameters, the
-    /// others held: up to 14 neighbours, keeping only admitted ones. A value off the grid steps
+    /// One step down and one step up the grid for each of the searched parameters, the
+    /// others held, keeping only admitted ones. A value off the grid steps
     /// to the nearest grid values around it.
     fn perturb_neighbors(&self, base: &PolicyConfig) -> Vec<PolicyConfig> {
-        let mut neighbors = Vec::with_capacity(14);
+        let mut neighbors = Vec::with_capacity(18);
         let push = |neighbors: &mut Vec<PolicyConfig>,
                     (below, above): (Option<Decimal>, Option<Decimal>),
                     set: &dyn Fn(Decimal) -> PolicyConfig| {
@@ -847,6 +948,36 @@ impl HyperparameterSpace for SwarmPolicySpace {
             };
             if self.admits(&candidate) {
                 neighbors.push(candidate);
+            }
+        }
+        if self.breakeven_atr_multipliers.len() > 1 {
+            let (be_below, be_above) = adjacent_option_grid_values(
+                &self.breakeven_atr_multipliers,
+                base.breakeven_atr_multiplier,
+            );
+            for value in [be_below, be_above].into_iter().flatten() {
+                let candidate = PolicyConfig {
+                    breakeven_atr_multiplier: value,
+                    ..base.clone()
+                };
+                if self.admits(&candidate) {
+                    neighbors.push(candidate);
+                }
+            }
+        }
+        if self.trailing_atr_multipliers.len() > 1 {
+            let (tr_below, tr_above) = adjacent_option_grid_values(
+                &self.trailing_atr_multipliers,
+                base.trailing_atr_multiplier,
+            );
+            for value in [tr_below, tr_above].into_iter().flatten() {
+                let candidate = PolicyConfig {
+                    trailing_atr_multiplier: value,
+                    ..base.clone()
+                };
+                if self.admits(&candidate) {
+                    neighbors.push(candidate);
+                }
             }
         }
         if self.decay_horizon_options.len() > 1 {
@@ -1272,6 +1403,20 @@ mod tests {
                 },
                 PolicyConfigError::NonPositiveDecayHorizon(0),
             ),
+            (
+                PolicyConfig {
+                    breakeven_atr_multiplier: Some(Decimal::ZERO),
+                    ..d()
+                },
+                PolicyConfigError::NonPositiveBreakevenMultiplier(Decimal::ZERO),
+            ),
+            (
+                PolicyConfig {
+                    trailing_atr_multiplier: Some(Decimal::ZERO),
+                    ..d()
+                },
+                PolicyConfigError::NonPositiveTrailingMultiplier(Decimal::ZERO),
+            ),
         ];
         for (config, expected) in cases {
             assert_eq!(config.validate(), Err(expected.clone()), "{config}");
@@ -1357,6 +1502,8 @@ mod tests {
             risk_increment: dec!(0.010),
             stop_atr_multiplier: dec!(3.0),
             take_profit_atr_multiplier: Some(dec!(3.0)),
+            breakeven_atr_multiplier: None,
+            trailing_atr_multiplier: None,
             decay_horizon_seconds: None,
             feed_weights: None,
             bracket_priority: true,
@@ -1660,8 +1807,8 @@ mod tests {
         let space = SwarmPolicySpace::classifier_space();
         let excessive = PolicyConfig {
             classifier_mode: true,
-            stop_atr_multiplier: dec!(2.0), // > 1.50 ATR
-            take_profit_atr_multiplier: Some(dec!(3.0)),
+            stop_atr_multiplier: dec!(2.5), // > 2.00 ATR
+            take_profit_atr_multiplier: Some(dec!(4.0)),
             decay_horizon_seconds: Some(14400),
             ..PolicyConfig::default()
         };
@@ -1669,8 +1816,32 @@ mod tests {
 
         let valid = PolicyConfig {
             classifier_mode: true,
-            stop_atr_multiplier: dec!(1.25), // <= 1.50 ATR
+            stop_atr_multiplier: dec!(1.75), // <= 2.00 ATR
+            take_profit_atr_multiplier: Some(dec!(3.0)),
+            decay_horizon_seconds: Some(14400),
+            ..PolicyConfig::default()
+        };
+        assert!(space.admits(&valid));
+    }
+
+    #[test]
+    fn admits_rejects_breakeven_above_take_profit() {
+        let space = SwarmPolicySpace::classifier_space();
+        let invalid = PolicyConfig {
+            classifier_mode: true,
+            stop_atr_multiplier: dec!(1.0),
             take_profit_atr_multiplier: Some(dec!(2.0)),
+            breakeven_atr_multiplier: Some(dec!(2.5)), // 2.5 >= 2.0
+            decay_horizon_seconds: Some(14400),
+            ..PolicyConfig::default()
+        };
+        assert!(!space.admits(&invalid));
+
+        let valid = PolicyConfig {
+            classifier_mode: true,
+            stop_atr_multiplier: dec!(1.0),
+            take_profit_atr_multiplier: Some(dec!(2.0)),
+            breakeven_atr_multiplier: Some(dec!(0.75)), // 0.75 < 2.0
             decay_horizon_seconds: Some(14400),
             ..PolicyConfig::default()
         };
@@ -1685,7 +1856,7 @@ mod tests {
         assert!(candidates.iter().all(|c| {
             space.admits(c)
                 && c.classifier_mode
-                && c.stop_atr_multiplier <= dec!(1.50)
+                && c.stop_atr_multiplier <= dec!(2.00)
                 && c.take_profit_atr_multiplier.unwrap() >= dec!(1.5) * c.stop_atr_multiplier
                 && c.decay_horizon_seconds.unwrap() <= 43200
         }));

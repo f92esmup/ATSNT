@@ -6,7 +6,6 @@
 
 use domain::Side;
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 
 pub use ports::ExitGateway;
 
@@ -58,6 +57,7 @@ struct TrackedPosition {
     max_bars_hold: usize,
     bars_held: usize,
     trailing_atr: Option<Decimal>,
+    breakeven_dist: Option<Decimal>,
     deadline_ms: Option<i64>,
 }
 
@@ -114,11 +114,12 @@ impl ExitManager {
             max_bars_hold,
             None,
             None,
+            None,
         )
         .await
     }
 
-    /// Entry filled with optional trailing ATR protection and real-time deadline.
+    /// Entry filled with optional trailing ATR protection, breakeven trigger, and real-time deadline.
     #[allow(clippy::too_many_arguments)]
     pub async fn on_entry_filled_with_trailing<G: ExitGateway>(
         &mut self,
@@ -129,6 +130,7 @@ impl ExitManager {
         take_profit: Decimal,
         max_bars_hold: usize,
         trailing_atr: Option<Decimal>,
+        breakeven_dist: Option<Decimal>,
         deadline_ms: Option<i64>,
     ) -> ExitEvent {
         self.position = Some(TrackedPosition {
@@ -139,6 +141,7 @@ impl ExitManager {
             max_bars_hold,
             bars_held: 0,
             trailing_atr,
+            breakeven_dist,
             deadline_ms,
         });
         let mut last_error = String::new();
@@ -177,37 +180,67 @@ impl ExitManager {
         current_price: Decimal,
     ) -> Option<ExitEvent> {
         let tracked = self.position.as_mut()?;
-        let atr = tracked.trailing_atr?;
-        if atr <= Decimal::ZERO {
+        if tracked.breakeven_dist.is_none() && tracked.trailing_atr.is_none() {
             return None;
         }
 
-        let new_stop = match tracked.entry_side {
-            Side::Buy => {
-                let excursion = current_price - tracked.entry_price;
-                if excursion >= dec!(2.0) * atr {
-                    tracked.entry_price + atr
-                } else if excursion >= dec!(1.5) * atr {
-                    tracked.entry_price + dec!(0.5) * atr
-                } else if excursion >= dec!(0.75) * atr {
-                    tracked.entry_price
-                } else {
-                    tracked.stop_loss
-                }
-            }
-            Side::Sell => {
-                let excursion = tracked.entry_price - current_price;
-                if excursion >= dec!(2.0) * atr {
-                    tracked.entry_price - atr
-                } else if excursion >= dec!(1.5) * atr {
-                    tracked.entry_price - dec!(0.5) * atr
-                } else if excursion >= dec!(0.75) * atr {
-                    tracked.entry_price
-                } else {
-                    tracked.stop_loss
-                }
-            }
+        let fav_excursion = match tracked.entry_side {
+            Side::Buy => current_price - tracked.entry_price,
+            Side::Sell => tracked.entry_price - current_price,
         };
+        if fav_excursion <= Decimal::ZERO {
+            return None;
+        }
+
+        let mut new_stop = tracked.stop_loss;
+
+        // 1. Breakeven check: move stop to entry_price once favorable excursion >= breakeven_dist
+        if let Some(be_dist) = tracked.breakeven_dist {
+            if be_dist > Decimal::ZERO && fav_excursion >= be_dist {
+                match tracked.entry_side {
+                    Side::Buy => {
+                        new_stop = new_stop.max(tracked.entry_price);
+                    }
+                    Side::Sell => {
+                        new_stop = new_stop.min(tracked.entry_price);
+                    }
+                }
+            }
+        }
+
+        // 2. Trailing step ratchet check:
+        if let Some(step) = tracked.trailing_atr {
+            if step > Decimal::ZERO {
+                match tracked.entry_side {
+                    Side::Buy => {
+                        if let Some(be_dist) = tracked.breakeven_dist {
+                            if fav_excursion >= be_dist + step {
+                                let k = ((fav_excursion - be_dist) / step).floor();
+                                let trailing_stop = tracked.entry_price + k * step;
+                                new_stop = new_stop.max(trailing_stop);
+                            }
+                        } else if fav_excursion >= step {
+                            let k = (fav_excursion / step).floor();
+                            let trailing_stop = tracked.entry_price + (k - Decimal::ONE) * step;
+                            new_stop = new_stop.max(trailing_stop);
+                        }
+                    }
+                    Side::Sell => {
+                        if let Some(be_dist) = tracked.breakeven_dist {
+                            if fav_excursion >= be_dist + step {
+                                let k = ((fav_excursion - be_dist) / step).floor();
+                                let trailing_stop = tracked.entry_price - k * step;
+                                new_stop = new_stop.min(trailing_stop);
+                            }
+                        } else if fav_excursion >= step {
+                            let k = (fav_excursion / step).floor();
+                            let trailing_stop = tracked.entry_price - (k - Decimal::ONE) * step;
+                            new_stop = new_stop.min(trailing_stop);
+                        }
+                    }
+                }
+            }
+        }
 
         let should_update = match tracked.entry_side {
             Side::Buy => new_stop > tracked.stop_loss,
@@ -588,7 +621,8 @@ mod tests {
                 dec!(95),
                 dec!(115),
                 10,
-                Some(dec!(5)),
+                Some(dec!(2.5)),  // 0.50 ATR trailing step
+                Some(dec!(3.75)), // 0.75 ATR breakeven trigger
                 None,
             )
             .await;

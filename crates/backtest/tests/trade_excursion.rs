@@ -28,6 +28,7 @@ impl Strategy for ScriptedLong {
             max_bars_hold: 4,
             risk_fraction: None,
             trailing_atr: None,
+            breakeven_atr: None,
             deadline_ms: None,
         })
     }

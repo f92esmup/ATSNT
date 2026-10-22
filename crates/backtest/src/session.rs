@@ -1195,6 +1195,7 @@ impl<S: Strategy> TradingSession<S> {
                 intent.take_profit,
                 intent.max_bars_hold,
                 intent.trailing_atr,
+                intent.breakeven_atr,
                 intent.deadline_ms,
             )
             .await;

@@ -50,6 +50,9 @@ pub struct OrderIntent {
     /// Optional ATR distance for adaptive breakeven and trailing stop ratchet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trailing_atr: Option<Decimal>,
+    /// Optional ATR or price distance for breakeven trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakeven_atr: Option<Decimal>,
     /// Optional timestamp deadline in Unix ms for real-time / intraday time barriers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<i64>,
@@ -65,13 +68,14 @@ impl OrderIntent {
         take_profit: Decimal,
         max_bars_hold: usize,
     ) -> Result<Self, DomainError> {
-        Self::with_risk_and_trailing(
+        Self::with_risk_and_exits(
             timestamp,
             side,
             price,
             stop_loss,
             take_profit,
             max_bars_hold,
+            None,
             None,
             None,
             None,
@@ -88,7 +92,7 @@ impl OrderIntent {
         max_bars_hold: usize,
         risk_fraction: Option<Decimal>,
     ) -> Result<Self, DomainError> {
-        Self::with_risk_and_trailing(
+        Self::with_risk_and_exits(
             timestamp,
             side,
             price,
@@ -96,6 +100,7 @@ impl OrderIntent {
             take_profit,
             max_bars_hold,
             risk_fraction,
+            None,
             None,
             None,
         )
@@ -112,6 +117,34 @@ impl OrderIntent {
         max_bars_hold: usize,
         risk_fraction: Option<Decimal>,
         trailing_atr: Option<Decimal>,
+        deadline_ms: Option<i64>,
+    ) -> Result<Self, DomainError> {
+        Self::with_risk_and_exits(
+            timestamp,
+            side,
+            price,
+            stop_loss,
+            take_profit,
+            max_bars_hold,
+            risk_fraction,
+            trailing_atr,
+            None,
+            deadline_ms,
+        )
+    }
+
+    /// Constructs a validated OrderIntent with optional risk fraction, trailing ATR distance, breakeven distance, and deadline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_risk_and_exits(
+        timestamp: i64,
+        side: Side,
+        price: Decimal,
+        stop_loss: Decimal,
+        take_profit: Decimal,
+        max_bars_hold: usize,
+        risk_fraction: Option<Decimal>,
+        trailing_atr: Option<Decimal>,
+        breakeven_atr: Option<Decimal>,
         deadline_ms: Option<i64>,
     ) -> Result<Self, DomainError> {
         if price <= Decimal::ZERO {
@@ -137,6 +170,13 @@ impl OrderIntent {
                 )));
             }
         }
+        if let Some(be) = breakeven_atr {
+            if be <= Decimal::ZERO {
+                return Err(DomainError::InvalidTarget(format!(
+                    "breakeven ATR distance {be} must be positive"
+                )));
+            }
+        }
         Ok(Self {
             timestamp,
             side,
@@ -146,6 +186,7 @@ impl OrderIntent {
             max_bars_hold,
             risk_fraction,
             trailing_atr,
+            breakeven_atr,
             deadline_ms,
         })
     }
