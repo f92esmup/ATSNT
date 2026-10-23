@@ -208,35 +208,18 @@ impl ExitManager {
             }
         }
 
-        // 2. Trailing step ratchet check:
+        // 2. Trailing step ratchet check (decoupled from breakeven):
         if let Some(step) = tracked.trailing_atr {
-            if step > Decimal::ZERO {
+            if step > Decimal::ZERO && fav_excursion >= step {
+                let k = (fav_excursion / step).floor();
                 match tracked.entry_side {
                     Side::Buy => {
-                        if let Some(be_dist) = tracked.breakeven_dist {
-                            if fav_excursion >= be_dist + step {
-                                let k = ((fav_excursion - be_dist) / step).floor();
-                                let trailing_stop = tracked.entry_price + k * step;
-                                new_stop = new_stop.max(trailing_stop);
-                            }
-                        } else if fav_excursion >= step {
-                            let k = (fav_excursion / step).floor();
-                            let trailing_stop = tracked.entry_price + (k - Decimal::ONE) * step;
-                            new_stop = new_stop.max(trailing_stop);
-                        }
+                        let trailing_stop = tracked.entry_price + (k - Decimal::ONE) * step;
+                        new_stop = new_stop.max(trailing_stop);
                     }
                     Side::Sell => {
-                        if let Some(be_dist) = tracked.breakeven_dist {
-                            if fav_excursion >= be_dist + step {
-                                let k = ((fav_excursion - be_dist) / step).floor();
-                                let trailing_stop = tracked.entry_price - k * step;
-                                new_stop = new_stop.min(trailing_stop);
-                            }
-                        } else if fav_excursion >= step {
-                            let k = (fav_excursion / step).floor();
-                            let trailing_stop = tracked.entry_price - (k - Decimal::ONE) * step;
-                            new_stop = new_stop.min(trailing_stop);
-                        }
+                        let trailing_stop = tracked.entry_price - (k - Decimal::ONE) * step;
+                        new_stop = new_stop.min(trailing_stop);
                     }
                 }
             }
@@ -628,21 +611,21 @@ mod tests {
             .await;
         assert_eq!(entered, ExitEvent::Protected);
 
-        // Price at 105.5 (+1.1 ATR >= 1.0 ATR) -> Stop updated to breakeven (100)
+        // Price at 105.5 (+1.1 ATR >= 1.0 ATR, k=2) -> Stop updated to 100 + 1 * 2.5 = 102.5
         let update1 = manager.on_price_update(&gateway, dec!(105.5)).await;
         assert_eq!(
             update1,
             Some(ExitEvent::StopUpdated {
-                new_stop: dec!(100)
+                new_stop: dec!(102.5)
             })
         );
 
-        // Price at 108 (+1.6 ATR >= 1.5 ATR) -> Stop updated to 100 + 0.5 * 5 = 102.5
+        // Price at 108 (+1.6 ATR >= 1.5 ATR, k=3) -> Stop updated to 100 + 2 * 2.5 = 105.0
         let update2 = manager.on_price_update(&gateway, dec!(108)).await;
         assert_eq!(
             update2,
             Some(ExitEvent::StopUpdated {
-                new_stop: dec!(102.5)
+                new_stop: dec!(105.0)
             })
         );
 

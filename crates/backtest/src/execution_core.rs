@@ -1032,37 +1032,20 @@ impl ExecutionCore {
                     }
                 }
 
-                // 2. Trailing step ratchet check:
+                // 2. Trailing step ratchet check (decoupled from breakeven):
                 if let Some(step) = exits.step_trailing_atr {
-                    if step > Decimal::ZERO {
+                    if step > Decimal::ZERO && fav_excursion >= step {
+                        let k = (fav_excursion / step).floor();
                         match position.side {
                             PositionSide::Long => {
-                                if let Some(be_dist) = exits.breakeven_dist {
-                                    if fav_excursion >= be_dist + step {
-                                        let k = ((fav_excursion - be_dist) / step).floor();
-                                        let trailing_stop = position.entry_price + k * step;
-                                        new_stop = new_stop.max(trailing_stop);
-                                    }
-                                } else if fav_excursion >= step {
-                                    let k = (fav_excursion / step).floor();
-                                    let trailing_stop =
-                                        position.entry_price + (k - Decimal::ONE) * step;
-                                    new_stop = new_stop.max(trailing_stop);
-                                }
+                                let trailing_stop =
+                                    position.entry_price + (k - Decimal::ONE) * step;
+                                new_stop = new_stop.max(trailing_stop);
                             }
                             PositionSide::Short => {
-                                if let Some(be_dist) = exits.breakeven_dist {
-                                    if fav_excursion >= be_dist + step {
-                                        let k = ((fav_excursion - be_dist) / step).floor();
-                                        let trailing_stop = position.entry_price - k * step;
-                                        new_stop = new_stop.min(trailing_stop);
-                                    }
-                                } else if fav_excursion >= step {
-                                    let k = (fav_excursion / step).floor();
-                                    let trailing_stop =
-                                        position.entry_price - (k - Decimal::ONE) * step;
-                                    new_stop = new_stop.min(trailing_stop);
-                                }
+                                let trailing_stop =
+                                    position.entry_price - (k - Decimal::ONE) * step;
+                                new_stop = new_stop.min(trailing_stop);
                             }
                         }
                     }
@@ -1650,25 +1633,25 @@ mod tests {
             &mut equity,
         );
 
-        // Bar 1: High reaches 108 (+1.6 ATR >= 1.5 ATR) -> Stop ratchets to entry + 0.5 ATR = 102.5
+        // Bar 1: High reaches 108 (+1.6 ATR >= 1.5 ATR, k=3) -> Stop ratchets to entry + 1.0 ATR = 105.0
         core.evaluate_exits(
             &bar(dec!(100), dec!(108), dec!(99), dec!(107)),
             &config,
             &mut equity,
             &mut excursion,
         );
-        assert_eq!(core.exits().map(|e| e.stop), Some(dec!(102.5)));
+        assert_eq!(core.exits().map(|e| e.stop), Some(dec!(105.0)));
 
-        // Bar 2: High reaches 111 (+2.2 ATR >= 2.0 ATR) -> Stop ratchets to entry + 1.0 ATR = 105.0
+        // Bar 2: High reaches 111 (+2.2 ATR >= 2.0 ATR, k=4) -> Stop ratchets to entry + 1.5 ATR = 107.5
         core.evaluate_exits(
             &bar(dec!(107), dec!(111), dec!(106), dec!(110)),
             &config,
             &mut equity,
             &mut excursion,
         );
-        assert_eq!(core.exits().map(|e| e.stop), Some(dec!(105.0)));
+        assert_eq!(core.exits().map(|e| e.stop), Some(dec!(107.5)));
 
-        // Bar 3: Reversal drops to 104, triggering the trailed stop at 105.0
+        // Bar 3: Reversal drops to 104, triggering the trailed stop at 107.5
         core.evaluate_exits(
             &bar(dec!(110), dec!(110), dec!(104), dec!(104.5)),
             &config,
@@ -1678,7 +1661,7 @@ mod tests {
         assert!(core.position().is_none());
         let trade = &core.ledger().trades()[0];
         assert_eq!(trade.exit_reason, "StopLoss");
-        assert_eq!(trade.exit_price, dec!(105.0));
-        assert_eq!(trade.pnl_gross, dec!(5.0)); // Locked in profit!
+        assert_eq!(trade.exit_price, dec!(107.5));
+        assert_eq!(trade.pnl_gross, dec!(7.5)); // Locked in profit!
     }
 }

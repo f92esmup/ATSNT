@@ -34,6 +34,9 @@ pub enum PolicyConfigError {
     /// `risk_increment` must be strictly positive.
     #[error("risk_increment must be > 0, got {0}")]
     NonPositiveRiskIncrement(Decimal),
+    /// `risk_increment` must not be negative in classifier mode.
+    #[error("risk_increment must be >= 0, got {0}")]
+    NegativeRiskIncrement(Decimal),
     /// The level-3 risk `base_risk + 2·risk_increment` must not exceed 1.
     #[error("level-3 risk (base_risk + 2*risk_increment) must be <= 1, got {0}")]
     TopRiskAboveOne(Decimal),
@@ -244,8 +247,13 @@ impl PolicyConfig {
         if self.base_risk <= Decimal::ZERO {
             return Err(PolicyConfigError::NonPositiveBaseRisk(self.base_risk));
         }
-        if self.risk_increment <= Decimal::ZERO {
+        if !self.classifier_mode && self.risk_increment <= Decimal::ZERO {
             return Err(PolicyConfigError::NonPositiveRiskIncrement(
+                self.risk_increment,
+            ));
+        }
+        if self.classifier_mode && self.risk_increment < Decimal::ZERO {
+            return Err(PolicyConfigError::NegativeRiskIncrement(
                 self.risk_increment,
             ));
         }
@@ -732,8 +740,8 @@ impl SwarmPolicySpace {
             threshold_bases: vec![dec!(0.50), dec!(0.525), dec!(0.55), dec!(0.575)],
             threshold_steps: vec![dec!(0.075)],
             hysteresis_values: vec![dec!(0.55)],
-            base_risks: vec![dec!(0.0075), dec!(0.010)],
-            risk_increments: vec![dec!(0.0025), dec!(0.005)],
+            base_risks: vec![dec!(0.010)],
+            risk_increments: vec![dec!(0.0), dec!(0.0025)],
             stop_atr_multipliers: vec![dec!(0.85), dec!(1.0), dec!(1.15)],
             take_profit_atr_multipliers: vec![
                 Some(dec!(1.60)),
@@ -1843,6 +1851,32 @@ mod tests {
             ..PolicyConfig::default()
         };
         assert!(space.admits(&valid));
+    }
+
+    #[test]
+    fn classifier_mode_accepts_flat_risk_and_rejects_negative() {
+        let flat = PolicyConfig {
+            classifier_mode: true,
+            risk_increment: Decimal::ZERO,
+            stop_atr_multiplier: dec!(1.0),
+            take_profit_atr_multiplier: Some(dec!(2.0)),
+            decay_horizon_seconds: Some(14400),
+            ..PolicyConfig::default()
+        };
+        assert!(flat.validate().is_ok());
+
+        let negative = PolicyConfig {
+            classifier_mode: true,
+            risk_increment: dec!(-0.005),
+            stop_atr_multiplier: dec!(1.0),
+            take_profit_atr_multiplier: Some(dec!(2.0)),
+            decay_horizon_seconds: Some(14400),
+            ..PolicyConfig::default()
+        };
+        assert_eq!(
+            negative.validate(),
+            Err(PolicyConfigError::NegativeRiskIncrement(dec!(-0.005)))
+        );
     }
 
     #[test]
