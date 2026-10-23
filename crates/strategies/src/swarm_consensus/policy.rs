@@ -64,9 +64,9 @@ pub enum PolicyConfigError {
     /// In classifier mode, `take_profit_atr_multiplier` must be specified.
     #[error("take profit multiplier must be specified in classifier mode")]
     MissingTakeProfitInClassifierMode,
-    /// In classifier mode, `decay_horizon_seconds` must be specified and between 7200s (2h) and 43200s (12h).
+    /// In classifier mode, `decay_horizon_seconds` must be specified and between 7200s (2h) and 86400s (24h).
     #[error(
-        "decay horizon must be between 7200s (2h) and 43200s (12h) in classifier mode, got {0:?}"
+        "decay horizon must be between 7200s (2h) and 86400s (24h) in classifier mode, got {0:?}"
     )]
     InvalidDecayHorizonInClassifierMode(Option<u64>),
     /// In classifier mode, `stop_atr_multiplier` must not exceed 2.00 ATR.
@@ -317,7 +317,7 @@ impl PolicyConfig {
                 }
             }
             match self.decay_horizon_seconds {
-                Some(s) if (7200..=43200).contains(&s) => {}
+                Some(s) if (7200..=86400).contains(&s) => {}
                 other => {
                     return Err(PolicyConfigError::InvalidDecayHorizonInClassifierMode(
                         other,
@@ -618,6 +618,12 @@ fn default_feed_weights_options() -> Vec<Option<FeedWeights>> {
     vec![None]
 }
 
+fn standard_feed_weights_options() -> Vec<Option<FeedWeights>> {
+    let mut profiles: Vec<Option<FeedWeights>> = vec![None];
+    profiles.extend(FeedWeights::standard_profiles().into_iter().map(Some));
+    profiles
+}
+
 fn default_bracket_priority_options() -> Vec<bool> {
     vec![true]
 }
@@ -737,32 +743,32 @@ impl SwarmPolicySpace {
     /// Search space for Classifier Mode with Triple Barrier protection.
     pub fn classifier_space() -> Self {
         Self {
-            threshold_bases: vec![dec!(0.50), dec!(0.525), dec!(0.55), dec!(0.575)],
+            threshold_bases: vec![dec!(0.50), dec!(0.525), dec!(0.55)],
             threshold_steps: vec![dec!(0.075)],
             hysteresis_values: vec![dec!(0.55)],
             base_risks: vec![dec!(0.010)],
-            risk_increments: vec![dec!(0.0), dec!(0.0025)],
-            stop_atr_multipliers: vec![dec!(0.85), dec!(1.0), dec!(1.15)],
+            risk_increments: vec![dec!(0.0)],
+            stop_atr_multipliers: vec![dec!(1.0), dec!(1.25), dec!(1.50)],
             take_profit_atr_multipliers: vec![
-                Some(dec!(1.60)),
-                Some(dec!(1.75)),
-                Some(dec!(2.0)),
                 Some(dec!(2.25)),
+                Some(dec!(2.75)),
+                Some(dec!(3.25)),
+                Some(dec!(4.0)),
             ],
             breakeven_atr_multipliers: vec![
-                Some(dec!(0.75)),
-                Some(dec!(0.85)),
                 Some(dec!(1.0)),
+                Some(dec!(1.25)),
+                Some(dec!(1.50)),
                 None,
             ],
             trailing_atr_multipliers: vec![
-                Some(dec!(0.65)),
                 Some(dec!(0.75)),
-                Some(dec!(0.85)),
+                Some(dec!(1.0)),
+                Some(dec!(1.25)),
                 None,
             ],
-            decay_horizon_options: vec![Some(14400), Some(21600), Some(28800), Some(43200)],
-            feed_weights_options: default_feed_weights_options(),
+            decay_horizon_options: vec![Some(28800), Some(43200), Some(86400)],
+            feed_weights_options: standard_feed_weights_options(),
             bracket_priority_options: default_bracket_priority_options(),
             max_level_risk: default_max_level_risk(),
             classifier_mode: true,
@@ -794,7 +800,7 @@ impl SwarmPolicySpace {
                 }
             }
             match config.decay_horizon_seconds {
-                Some(s) if (7200..=43200).contains(&s) => {}
+                Some(s) if (7200..=86400).contains(&s) => {}
                 _ => return false,
             }
         }
@@ -1889,7 +1895,7 @@ mod tests {
                 && c.classifier_mode
                 && c.stop_atr_multiplier <= dec!(2.00)
                 && c.take_profit_atr_multiplier.unwrap() >= dec!(1.5) * c.stop_atr_multiplier
-                && c.decay_horizon_seconds.unwrap() <= 43200
+                && c.decay_horizon_seconds.unwrap() <= 86400
         }));
 
         let c1 = space.generate_candidates(50);
