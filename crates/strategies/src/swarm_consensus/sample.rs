@@ -232,6 +232,9 @@ pub struct ConsensusSample {
     pub feed_short: [FeedVote; FEED_COUNT],
     /// ATR (price units) of feed 1 (time, 1h), the reference of the disaster stop.
     pub atr_stop_reference: Decimal,
+    /// ALMA slope of feed 2 (time 1h, `STOP_REFERENCE_FEED`), in ATR units per bar.
+    #[serde(default)]
+    pub macro_trend_slope: Decimal,
     /// Price of the trade that produced the sample (audit only).
     pub price: Decimal,
 }
@@ -341,6 +344,7 @@ mod tests {
             feed_long,
             feed_short,
             atr_stop_reference: dec!(500),
+            macro_trend_slope: Decimal::ZERO,
             price: dec!(40000),
         }
     }

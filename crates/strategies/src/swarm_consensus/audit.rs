@@ -272,6 +272,7 @@ mod tests {
             feed_long: [FeedVote::default(); FEED_COUNT],
             feed_short: [FeedVote::default(); FEED_COUNT],
             atr_stop_reference: dec!(1),
+            macro_trend_slope: Decimal::ZERO,
             price: dec!(1),
         };
         audit.record_sample(&sample);

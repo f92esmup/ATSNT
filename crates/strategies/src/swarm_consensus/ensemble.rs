@@ -330,13 +330,20 @@ impl SwarmEnsemble {
         if !self.closed.iter().any(|c| *c) || !self.is_ready() {
             return None;
         }
-        let atr_stop_reference = self.feeds[STOP_REFERENCE_FEED].snapshot?.atr;
-        let sample = self.sample(trade, atr_stop_reference);
+        let snapshot_ref = self.feeds[STOP_REFERENCE_FEED].snapshot?;
+        let atr_stop_reference = snapshot_ref.atr;
+        let macro_trend_slope = snapshot_ref.alma_slope;
+        let sample = self.sample(trade, atr_stop_reference, macro_trend_slope);
         self.audit.record_sample(&sample);
         Some(sample)
     }
 
-    fn sample(&self, trade: &Trade, atr_stop_reference: Decimal) -> ConsensusSample {
+    fn sample(
+        &self,
+        trade: &Trade,
+        atr_stop_reference: Decimal,
+        macro_trend_slope: Decimal,
+    ) -> ConsensusSample {
         let per_feed = self.config.agents_per_feed as usize;
         let mut feed_long = [FeedVote::default(); FEED_COUNT];
         let mut feed_short = [FeedVote::default(); FEED_COUNT];
@@ -404,6 +411,7 @@ impl SwarmEnsemble {
             feed_long,
             feed_short,
             atr_stop_reference,
+            macro_trend_slope,
             price: trade.price,
         }
     }
