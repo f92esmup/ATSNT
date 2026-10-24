@@ -532,7 +532,11 @@ fi
 # --- Download winner ----------------------------------------------------------
 echo "[5/5] Downloading winning artifact..."
 mkdir -p "${DOWNLOAD_DIR}"
-gcloud storage cp "${ARTIFACT_URI}" "${LOCAL_ARTIFACT}"
+if gcloud storage objects describe "${ARTIFACT_URI}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+    gcloud storage cp "${ARTIFACT_URI}" "${LOCAL_ARTIFACT}"
+else
+    echo "[INFO] No winner artifact uploaded to GCS (e.g. --skip-hpo run). Using local artifact."
+fi
 
 echo "============================================================"
 echo " [SUCCESS] Ephemeral HPO completed; the VM and its market data are gone."
