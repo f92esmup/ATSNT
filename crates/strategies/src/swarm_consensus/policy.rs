@@ -75,6 +75,12 @@ pub enum PolicyConfigError {
     /// `feed_weights` is invalid.
     #[error("invalid feed_weights: {0}")]
     InvalidFeedWeights(#[from] FeedWeightsError),
+    /// `macro_slope_min` must be non-negative.
+    #[error("macro_slope_min must be >= 0, got {0}")]
+    NegativeMacroSlopeMin(Decimal),
+    /// `short_threshold_delta` must be non-negative.
+    #[error("short_threshold_delta must be >= 0, got {0}")]
+    NegativeShortThresholdDelta(Decimal),
 }
 
 /// Parameters of the consensus policy, searched by HPO (strategy spec §14.2).
@@ -118,9 +124,16 @@ pub struct PolicyConfig {
     #[serde(default)]
     pub classifier_mode: bool,
     /// Whether to require trend alignment with the higher-timeframe feed (Feed 2, 1h).
-    /// Long entries require `macro_trend_slope >= 0`, short entries require `macro_trend_slope <= 0`.
+    /// Long entries require `macro_trend_slope >= macro_slope_min`, short entries require `macro_trend_slope <= -macro_slope_min`.
     #[serde(default)]
     pub macro_trend_filter: bool,
+    /// Minimum higher-timeframe ALMA slope required to enter. When `|macro_trend_slope| < macro_slope_min`,
+    /// the market is in choppy consolidation and entries are withheld.
+    #[serde(default)]
+    pub macro_slope_min: Decimal,
+    /// Additional consensus threshold required for short entries (`theta_short = theta_long + short_threshold_delta`).
+    #[serde(default)]
+    pub short_threshold_delta: Decimal,
 }
 
 fn default_bracket_priority() -> bool {
@@ -144,6 +157,8 @@ impl Default for PolicyConfig {
             bracket_priority: true,
             classifier_mode: false,
             macro_trend_filter: false,
+            macro_slope_min: Decimal::ZERO,
+            short_threshold_delta: Decimal::ZERO,
         }
     }
 }
@@ -166,6 +181,8 @@ impl PolicyConfig {
             bracket_priority: true,
             classifier_mode: true,
             macro_trend_filter: false,
+            macro_slope_min: Decimal::ZERO,
+            short_threshold_delta: Decimal::ZERO,
         }
     }
 }
@@ -205,6 +222,12 @@ impl std::fmt::Display for PolicyConfig {
         }
         if self.macro_trend_filter {
             write!(f, "|Macro")?;
+            if self.macro_slope_min > Decimal::ZERO {
+                write!(f, ":{}", self.macro_slope_min)?;
+            }
+        }
+        if self.short_threshold_delta > Decimal::ZERO {
+            write!(f, "|ShortDelta:{}", self.short_threshold_delta)?;
         }
         Ok(())
     }
@@ -334,6 +357,16 @@ impl PolicyConfig {
                 }
             }
         }
+        if self.macro_slope_min < Decimal::ZERO {
+            return Err(PolicyConfigError::NegativeMacroSlopeMin(
+                self.macro_slope_min,
+            ));
+        }
+        if self.short_threshold_delta < Decimal::ZERO {
+            return Err(PolicyConfigError::NegativeShortThresholdDelta(
+                self.short_threshold_delta,
+            ));
+        }
         Ok(())
     }
 }
@@ -439,23 +472,29 @@ impl ConsensusPolicy {
                 None => (sample.long_net(), sample.short_net()),
             };
 
-            let theta = self.config.threshold_base;
+            let theta_long = self.config.threshold_base;
+            let theta_short = self.config.threshold_base + self.config.short_threshold_delta;
 
-            let (candidate_side, conviction) = if long_net >= theta && short_net < theta {
-                if self.config.macro_trend_filter && sample.macro_trend_slope < Decimal::ZERO {
-                    (None, Decimal::ZERO)
+            let (candidate_side, conviction, theta) =
+                if long_net >= theta_long && short_net < theta_long {
+                    if self.config.macro_trend_filter
+                        && sample.macro_trend_slope < self.config.macro_slope_min
+                    {
+                        (None, Decimal::ZERO, theta_long)
+                    } else {
+                        (Some(domain::Side::Buy), long_net, theta_long)
+                    }
+                } else if allow_short && short_net >= theta_short && long_net < theta_short {
+                    if self.config.macro_trend_filter
+                        && sample.macro_trend_slope > -self.config.macro_slope_min
+                    {
+                        (None, Decimal::ZERO, theta_short)
+                    } else {
+                        (Some(domain::Side::Sell), short_net, theta_short)
+                    }
                 } else {
-                    (Some(domain::Side::Buy), long_net)
-                }
-            } else if allow_short && short_net >= theta && long_net < theta {
-                if self.config.macro_trend_filter && sample.macro_trend_slope > Decimal::ZERO {
-                    (None, Decimal::ZERO)
-                } else {
-                    (Some(domain::Side::Sell), short_net)
-                }
-            } else {
-                (None, Decimal::ZERO)
-            };
+                    (None, Decimal::ZERO, theta_long)
+                };
 
             let Some(side) = candidate_side else {
                 self.in_signal_side = None;
@@ -532,7 +571,10 @@ impl ConsensusPolicy {
             return Some(Decision::Entry(intent));
         }
 
-        let (l1, l2, l3) = self.config.thresholds();
+        let (l1_long, l2_long, l3_long) = self.config.thresholds();
+        let l1_short = l1_long + self.config.short_threshold_delta;
+        let l2_short = l2_long + self.config.short_threshold_delta;
+        let l3_short = l3_long + self.config.short_threshold_delta;
         let h = self.config.hysteresis;
         let (long_net, short_net) = match &self.config.feed_weights {
             Some(weights) => (
@@ -541,17 +583,17 @@ impl ConsensusPolicy {
             ),
             None => (sample.long_net(), sample.short_net()),
         };
-        self.long_level = axis_update(self.long_level, long_net, l1, l2, l3, h);
+        self.long_level = axis_update(self.long_level, long_net, l1_long, l2_long, l3_long, h);
         self.short_level = if allow_short {
-            axis_update(self.short_level, short_net, l1, l2, l3, h)
+            axis_update(self.short_level, short_net, l1_short, l2_short, l3_short, h)
         } else {
             0
         };
         if self.config.macro_trend_filter {
-            if sample.macro_trend_slope < Decimal::ZERO {
+            if sample.macro_trend_slope < self.config.macro_slope_min {
                 self.long_level = 0;
             }
-            if sample.macro_trend_slope > Decimal::ZERO {
+            if sample.macro_trend_slope > -self.config.macro_slope_min {
                 self.short_level = 0;
             }
         }
@@ -657,6 +699,14 @@ fn default_macro_trend_filter_options() -> Vec<bool> {
     vec![false]
 }
 
+fn default_macro_slope_min_options() -> Vec<Decimal> {
+    vec![Decimal::ZERO]
+}
+
+fn default_short_threshold_delta_options() -> Vec<Decimal> {
+    vec![Decimal::ZERO]
+}
+
 fn default_decay_horizon_options() -> Vec<Option<u64>> {
     vec![None]
 }
@@ -694,6 +744,12 @@ pub struct SwarmPolicySpace {
     /// Values of `macro_trend_filter`.
     #[serde(default = "default_macro_trend_filter_options")]
     pub macro_trend_filter_options: Vec<bool>,
+    /// Values of `macro_slope_min`.
+    #[serde(default = "default_macro_slope_min_options")]
+    pub macro_slope_min_options: Vec<Decimal>,
+    /// Values of `short_threshold_delta`.
+    #[serde(default = "default_short_threshold_delta_options")]
+    pub short_threshold_delta_options: Vec<Decimal>,
     /// Optional decay / time barrier horizons in seconds.
     #[serde(default = "default_decay_horizon_options")]
     pub decay_horizon_options: Vec<Option<u64>>,
@@ -765,6 +821,8 @@ impl Default for SwarmPolicySpace {
             feed_weights_options: default_feed_weights_options(),
             bracket_priority_options: default_bracket_priority_options(),
             macro_trend_filter_options: default_macro_trend_filter_options(),
+            macro_slope_min_options: default_macro_slope_min_options(),
+            short_threshold_delta_options: default_short_threshold_delta_options(),
             decay_horizon_options: default_decay_horizon_options(),
             max_level_risk: default_max_level_risk(),
             classifier_mode: false,
@@ -783,27 +841,19 @@ impl SwarmPolicySpace {
             risk_increments: vec![dec!(0.0)],
             stop_atr_multipliers: vec![dec!(1.0), dec!(1.25), dec!(1.50)],
             take_profit_atr_multipliers: vec![
-                Some(dec!(2.25)),
-                Some(dec!(2.75)),
-                Some(dec!(3.25)),
+                Some(dec!(3.5)),
                 Some(dec!(4.0)),
+                Some(dec!(5.0)),
+                Some(dec!(6.0)),
             ],
-            breakeven_atr_multipliers: vec![
-                Some(dec!(1.0)),
-                Some(dec!(1.25)),
-                Some(dec!(1.50)),
-                None,
-            ],
-            trailing_atr_multipliers: vec![
-                Some(dec!(0.75)),
-                Some(dec!(1.0)),
-                Some(dec!(1.25)),
-                None,
-            ],
-            decay_horizon_options: vec![Some(28800), Some(43200), Some(86400)],
+            breakeven_atr_multipliers: vec![Some(dec!(1.0)), Some(dec!(1.25)), Some(dec!(1.50))],
+            trailing_atr_multipliers: vec![Some(dec!(1.0)), Some(dec!(1.25)), None],
+            decay_horizon_options: vec![Some(43200), Some(86400)],
             feed_weights_options: standard_feed_weights_options(),
             bracket_priority_options: default_bracket_priority_options(),
-            macro_trend_filter_options: vec![false, true],
+            macro_trend_filter_options: vec![true],
+            macro_slope_min_options: vec![dec!(0.0), dec!(0.02), dec!(0.04)],
+            short_threshold_delta_options: vec![dec!(0.0), dec!(0.025), dec!(0.05)],
             max_level_risk: default_max_level_risk(),
             classifier_mode: true,
         }
@@ -812,12 +862,6 @@ impl SwarmPolicySpace {
     /// Whether a configuration is valid and within the level-3 risk cap and search space constraints.
     pub fn admits(&self, config: &PolicyConfig) -> bool {
         if config.validate().is_err() || config.top_level_risk() > self.max_level_risk {
-            return false;
-        }
-        if !self
-            .macro_trend_filter_options
-            .contains(&config.macro_trend_filter)
-        {
             return false;
         }
         if self.classifier_mode || config.classifier_mode {
@@ -879,32 +923,45 @@ impl HyperparameterSpace for SwarmPolicySpace {
                                             for &macro_trend_filter in
                                                 &self.macro_trend_filter_options
                                             {
-                                                for feed_weights in &self.feed_weights_options {
-                                                    for &bracket_priority in
-                                                        &self.bracket_priority_options
+                                                for &macro_slope_min in
+                                                    &self.macro_slope_min_options
+                                                {
+                                                    for &short_threshold_delta in
+                                                        &self.short_threshold_delta_options
                                                     {
-                                                        for &decay_horizon_seconds in
-                                                            &self.decay_horizon_options
+                                                        for feed_weights in
+                                                            &self.feed_weights_options
                                                         {
-                                                            let config = PolicyConfig {
-                                                                threshold_base,
-                                                                threshold_step,
-                                                                hysteresis,
-                                                                base_risk,
-                                                                risk_increment,
-                                                                stop_atr_multiplier,
-                                                                take_profit_atr_multiplier,
-                                                                breakeven_atr_multiplier,
-                                                                trailing_atr_multiplier,
-                                                                decay_horizon_seconds,
-                                                                feed_weights: feed_weights.clone(),
-                                                                bracket_priority,
-                                                                classifier_mode: self
-                                                                    .classifier_mode,
-                                                                macro_trend_filter,
-                                                            };
-                                                            if self.admits(&config) {
-                                                                configs.push(config);
+                                                            for &bracket_priority in
+                                                                &self.bracket_priority_options
+                                                            {
+                                                                for &decay_horizon_seconds in
+                                                                    &self.decay_horizon_options
+                                                                {
+                                                                    let config = PolicyConfig {
+                                                                        threshold_base,
+                                                                        threshold_step,
+                                                                        hysteresis,
+                                                                        base_risk,
+                                                                        risk_increment,
+                                                                        stop_atr_multiplier,
+                                                                        take_profit_atr_multiplier,
+                                                                        breakeven_atr_multiplier,
+                                                                        trailing_atr_multiplier,
+                                                                        decay_horizon_seconds,
+                                                                        feed_weights: feed_weights
+                                                                            .clone(),
+                                                                        bracket_priority,
+                                                                        classifier_mode: self
+                                                                            .classifier_mode,
+                                                                        macro_trend_filter,
+                                                                        macro_slope_min,
+                                                                        short_threshold_delta,
+                                                                    };
+                                                                    if self.admits(&config) {
+                                                                        configs.push(config);
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -1082,6 +1139,29 @@ impl HyperparameterSpace for SwarmPolicySpace {
             if self.admits(&candidate) {
                 neighbors.push(candidate);
             }
+        }
+        if self.macro_slope_min_options.len() > 1 {
+            push(
+                &mut neighbors,
+                adjacent_grid_values(&self.macro_slope_min_options, base.macro_slope_min),
+                &|macro_slope_min| PolicyConfig {
+                    macro_slope_min,
+                    ..base.clone()
+                },
+            );
+        }
+        if self.short_threshold_delta_options.len() > 1 {
+            push(
+                &mut neighbors,
+                adjacent_grid_values(
+                    &self.short_threshold_delta_options,
+                    base.short_threshold_delta,
+                ),
+                &|short_threshold_delta| PolicyConfig {
+                    short_threshold_delta,
+                    ..base.clone()
+                },
+            );
         }
         neighbors
     }
@@ -1484,6 +1564,20 @@ mod tests {
                 },
                 PolicyConfigError::NonPositiveTrailingMultiplier(Decimal::ZERO),
             ),
+            (
+                PolicyConfig {
+                    macro_slope_min: dec!(-0.01),
+                    ..d()
+                },
+                PolicyConfigError::NegativeMacroSlopeMin(dec!(-0.01)),
+            ),
+            (
+                PolicyConfig {
+                    short_threshold_delta: dec!(-0.01),
+                    ..d()
+                },
+                PolicyConfigError::NegativeShortThresholdDelta(dec!(-0.01)),
+            ),
         ];
         for (config, expected) in cases {
             assert_eq!(config.validate(), Err(expected.clone()), "{config}");
@@ -1576,6 +1670,8 @@ mod tests {
             bracket_priority: true,
             classifier_mode: false,
             macro_trend_filter: false,
+            macro_slope_min: Decimal::ZERO,
+            short_threshold_delta: Decimal::ZERO,
         };
         let n = space.perturb_neighbors(&base);
         assert_eq!(n.len(), 14);
@@ -2026,5 +2122,83 @@ mod tests {
         s2.macro_trend_slope = dec!(0.10);
         policy.on_sample(&s2, true);
         assert!(policy.long_level() > 0);
+    }
+
+    #[test]
+    fn macro_slope_min_filters_choppy_consolidation() {
+        let config = PolicyConfig {
+            classifier_mode: true,
+            macro_trend_filter: true,
+            macro_slope_min: dec!(0.02),
+            threshold_base: dec!(0.50),
+            stop_atr_multiplier: dec!(1.0),
+            take_profit_atr_multiplier: Some(dec!(2.0)),
+            decay_horizon_seconds: Some(14400),
+            ..PolicyConfig::default()
+        };
+        let mut policy = ConsensusPolicy::new(config).unwrap();
+
+        // 1. Bullish consensus (long_net = 0.60) but slope is only +0.01 (< 0.02) -> blocked (choppy)!
+        let mut s1 = sample(1000, 60, 0, dec!(500));
+        s1.macro_trend_slope = dec!(0.01);
+        assert_eq!(policy.on_sample(&s1, true), None);
+
+        // 2. Bullish consensus with strong slope (+0.03 >= 0.02) -> admitted!
+        let mut s2 = sample(2000, 60, 0, dec!(500));
+        s2.macro_trend_slope = dec!(0.03);
+        let d2 = policy.on_sample(&s2, true);
+        assert!(
+            matches!(d2, Some(Decision::Entry(ref intent)) if intent.side == domain::Side::Buy)
+        );
+
+        // Reset
+        policy.reset();
+
+        // 3. Bearish consensus (short_net = 0.60) but slope is only -0.01 (> -0.02) -> blocked (choppy)!
+        let mut s3 = sample(3000, 0, 60, dec!(500));
+        s3.macro_trend_slope = dec!(-0.01);
+        assert_eq!(policy.on_sample(&s3, true), None);
+
+        // 4. Bearish consensus with strong slope (-0.03 <= -0.02) -> admitted!
+        let mut s4 = sample(4000, 0, 60, dec!(500));
+        s4.macro_trend_slope = dec!(-0.03);
+        let d4 = policy.on_sample(&s4, true);
+        assert!(
+            matches!(d4, Some(Decision::Entry(ref intent)) if intent.side == domain::Side::Sell)
+        );
+    }
+
+    #[test]
+    fn short_threshold_delta_enforces_asymmetric_conviction() {
+        let config = PolicyConfig {
+            classifier_mode: true,
+            threshold_base: dec!(0.50),
+            short_threshold_delta: dec!(0.05), // theta_short = 0.55
+            stop_atr_multiplier: dec!(1.0),
+            take_profit_atr_multiplier: Some(dec!(2.0)),
+            decay_horizon_seconds: Some(14400),
+            ..PolicyConfig::default()
+        };
+        let mut policy = ConsensusPolicy::new(config).unwrap();
+
+        // 1. Long net vote = 0.52 >= theta_long (0.50) -> Long is admitted
+        let s_long = sample(1000, 52, 0, dec!(500));
+        let d_long = policy.on_sample(&s_long, true);
+        assert!(
+            matches!(d_long, Some(Decision::Entry(ref intent)) if intent.side == domain::Side::Buy)
+        );
+
+        policy.reset();
+
+        // 2. Short net vote = 0.52: >= theta_long (0.50) BUT < theta_short (0.55) -> Short is blocked!
+        let s_short_sub = sample(2000, 0, 52, dec!(500));
+        assert_eq!(policy.on_sample(&s_short_sub, true), None);
+
+        // 3. Short net vote = 0.56 >= theta_short (0.55) -> Short is admitted!
+        let s_short_ok = sample(3000, 0, 56, dec!(500));
+        let d_short = policy.on_sample(&s_short_ok, true);
+        assert!(
+            matches!(d_short, Some(Decision::Entry(ref intent)) if intent.side == domain::Side::Sell)
+        );
     }
 }
