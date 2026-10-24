@@ -1629,11 +1629,10 @@ fn test_gateway_endpoint_resolution() {
 #[tokio::test]
 async fn test_pre_trade_risk_rejection_blocks_order_dispatch() {
     let risk_policy = RiskPolicy::new(dec!(20_000.00), dec!(5_000.00), dec!(0.05)).unwrap();
-    let config = BinanceGatewayConfig {
-        risk_policy,
-        ..Default::default()
-    };
-    let gateway = BinanceGateway::new(config).unwrap();
+    let (base_url, _requests, server) =
+        spawn_futures_mock_server(valid_futures_responses(current_unix_time_ms().unwrap()));
+    let mut gateway = futures_submission_test_gateway(base_url);
+    gateway.config.risk_policy = risk_policy;
 
     let intent = OrderIntent::new(
         1704067200000,
@@ -1666,6 +1665,8 @@ async fn test_pre_trade_risk_rejection_blocks_order_dispatch() {
             RiskError::CircuitBreakerTriggered { .. }
         ))
     ));
+
+    server.join().unwrap();
 }
 
 #[test]
