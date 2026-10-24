@@ -8,5 +8,7 @@
   "min_take_profit_pcts": ["0.004", "0.008", "0.014", "0.022"],
   "min_well_depth_pcts": ["0.003", "0.006", "0.010", "0.016"],
   "opposite_wall_fractions": ["0.60", "0.80", "1.00", "1.25"],
-  "macro_trend_filter_options": [true, false]
+  "macro_trend_filter_options": [true, false],
+  "kinematic_windows": [2, 4, 6],
+  "min_wall_absorption_ratios": ["0.48", "0.52"]
 }

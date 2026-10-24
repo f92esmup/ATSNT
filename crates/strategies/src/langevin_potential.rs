@@ -573,6 +573,14 @@ fn default_macro_trend_filter() -> bool {
     true
 }
 
+fn default_kinematic_exhaustion_window() -> usize {
+    4
+}
+
+fn default_min_wall_absorption_ratio() -> Decimal {
+    dec!(0.50)
+}
+
 /// Hyperparameter configuration for Langevin Potential Well Strategy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LangevinConfig {
@@ -625,6 +633,14 @@ pub struct LangevinConfig {
     /// Window length of macro EMA history to measure trend slope.
     #[serde(default = "default_macro_slope_window")]
     pub macro_slope_window: usize,
+    /// Window size $k$ of recent bars to compute rolling kinematic deceleration $\frac{dv}{dt}$.
+    /// When 0 or 1, falls back to single-bar sign check.
+    #[serde(default = "default_kinematic_exhaustion_window")]
+    pub kinematic_exhaustion_window: usize,
+    /// Minimum fraction of trade volume absorbed in the direction of the bounce at the wall
+    /// (e.g. 0.50 = 50% buy volume on low wall, 50% sell volume on high wall).
+    #[serde(default = "default_min_wall_absorption_ratio")]
+    pub min_wall_absorption_ratio: Decimal,
 }
 
 impl Default for LangevinConfig {
@@ -649,6 +665,8 @@ impl Default for LangevinConfig {
             macro_trend_filter: true,
             macro_ema_period: 200,
             macro_slope_window: 50,
+            kinematic_exhaustion_window: 4,
+            min_wall_absorption_ratio: dec!(0.50),
         }
     }
 }
@@ -657,7 +675,7 @@ impl std::fmt::Display for LangevinConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "W:{}|Bf:{}|Eta:{}|Beta:{}|Tb:{}|MinTp:{}|MinDepth:{}|Owf:{}|Macro:{}|Kb:{}",
+            "W:{}|Bf:{}|Eta:{}|Beta:{}|Tb:{}|MinTp:{}|MinDepth:{}|Owf:{}|Macro:{}|Kw:{}|War:{}",
             self.window_size,
             self.bandwidth_factor,
             self.decay_eta,
@@ -667,9 +685,18 @@ impl std::fmt::Display for LangevinConfig {
             self.min_well_depth_pct,
             self.opposite_wall_fraction,
             self.macro_trend_filter,
-            self.enable_kramers_breakout
+            self.kinematic_exhaustion_window,
+            self.min_wall_absorption_ratio
         )
     }
+}
+
+fn default_kinematic_windows_space() -> Vec<usize> {
+    vec![2, 4, 6]
+}
+
+fn default_min_wall_absorption_ratios_space() -> Vec<Decimal> {
+    vec![dec!(0.48), dec!(0.52)]
 }
 
 /// Hyperparameter search space for automated optimization.
@@ -685,6 +712,10 @@ pub struct LangevinSpace {
     pub min_well_depth_pcts: Vec<Decimal>,
     pub opposite_wall_fractions: Vec<Decimal>,
     pub macro_trend_filter_options: Vec<bool>,
+    #[serde(default = "default_kinematic_windows_space")]
+    pub kinematic_windows: Vec<usize>,
+    #[serde(default = "default_min_wall_absorption_ratios_space")]
+    pub min_wall_absorption_ratios: Vec<Decimal>,
 }
 
 impl Default for LangevinSpace {
@@ -700,6 +731,8 @@ impl Default for LangevinSpace {
             min_well_depth_pcts: vec![dec!(0.0025), dec!(0.0035), dec!(0.0050)],
             opposite_wall_fractions: vec![dec!(0.40), dec!(0.60), dec!(0.80)],
             macro_trend_filter_options: vec![true, false],
+            kinematic_windows: vec![2, 4, 6],
+            min_wall_absorption_ratios: vec![dec!(0.48), dec!(0.52)],
         }
     }
 }
@@ -720,27 +753,33 @@ impl HyperparameterSpace for LangevinSpace {
                                     for &min_depth in &self.min_well_depth_pcts {
                                         for &owf in &self.opposite_wall_fractions {
                                             for &macro_filter in &self.macro_trend_filter_options {
-                                                configs.push(LangevinConfig {
-                                                    window_size: w,
-                                                    bandwidth_factor: bf,
-                                                    decay_eta: eta,
-                                                    vacuum_epsilon: dec!(0.001),
-                                                    beta_entry: beta,
-                                                    alpha_dissociation: dec!(0.25),
-                                                    zeta_thermal_tp: zeta,
-                                                    lambda_ema_period: 20,
-                                                    time_barrier_bars: tb,
-                                                    min_take_profit_pct: min_tp,
-                                                    min_well_depth_pct: min_depth,
-                                                    enable_kramers_breakout: true,
-                                                    kramers_lambda_threshold: dec!(1.5),
-                                                    kramers_tp_multiple: dec!(1.0),
-                                                    opposite_wall_fraction: owf,
-                                                    enable_dynamic_breakeven: true,
-                                                    macro_trend_filter: macro_filter,
-                                                    macro_ema_period: 200,
-                                                    macro_slope_window: 50,
-                                                });
+                                                for &kw in &self.kinematic_windows {
+                                                    for &war in &self.min_wall_absorption_ratios {
+                                                        configs.push(LangevinConfig {
+                                                            window_size: w,
+                                                            bandwidth_factor: bf,
+                                                            decay_eta: eta,
+                                                            vacuum_epsilon: dec!(0.001),
+                                                            beta_entry: beta,
+                                                            alpha_dissociation: dec!(0.25),
+                                                            zeta_thermal_tp: zeta,
+                                                            lambda_ema_period: 20,
+                                                            time_barrier_bars: tb,
+                                                            min_take_profit_pct: min_tp,
+                                                            min_well_depth_pct: min_depth,
+                                                            enable_kramers_breakout: true,
+                                                            kramers_lambda_threshold: dec!(1.5),
+                                                            kramers_tp_multiple: dec!(1.0),
+                                                            opposite_wall_fraction: owf,
+                                                            enable_dynamic_breakeven: true,
+                                                            macro_trend_filter: macro_filter,
+                                                            macro_ema_period: 200,
+                                                            macro_slope_window: 50,
+                                                            kinematic_exhaustion_window: kw,
+                                                            min_wall_absorption_ratio: war,
+                                                        });
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -764,7 +803,7 @@ impl HyperparameterSpace for LangevinSpace {
     }
 
     fn perturb_neighbors(&self, base: &Self::Config) -> Vec<Self::Config> {
-        let mut neighbors = Vec::with_capacity(18);
+        let mut neighbors = Vec::with_capacity(22);
         let windows = adjacent_grid_values(&self.window_sizes, base.window_size);
         let bfs = adjacent_grid_values(&self.bandwidth_factors, base.bandwidth_factor);
         let etas = adjacent_grid_values(&self.decay_etas, base.decay_eta);
@@ -774,6 +813,11 @@ impl HyperparameterSpace for LangevinSpace {
         let floors = adjacent_grid_values(&self.min_take_profit_pcts, base.min_take_profit_pct);
         let depths = adjacent_grid_values(&self.min_well_depth_pcts, base.min_well_depth_pct);
         let owfs = adjacent_grid_values(&self.opposite_wall_fractions, base.opposite_wall_fraction);
+        let kws = adjacent_grid_values(&self.kinematic_windows, base.kinematic_exhaustion_window);
+        let wars = adjacent_grid_values(
+            &self.min_wall_absorption_ratios,
+            base.min_wall_absorption_ratio,
+        );
 
         for value in [windows.0, windows.1].into_iter().flatten() {
             neighbors.push(LangevinConfig {
@@ -829,6 +873,18 @@ impl HyperparameterSpace for LangevinSpace {
                 ..base.clone()
             });
         }
+        for value in [kws.0, kws.1].into_iter().flatten() {
+            neighbors.push(LangevinConfig {
+                kinematic_exhaustion_window: value,
+                ..base.clone()
+            });
+        }
+        for value in [wars.0, wars.1].into_iter().flatten() {
+            neighbors.push(LangevinConfig {
+                min_wall_absorption_ratio: value,
+                ..base.clone()
+            });
+        }
         if self.macro_trend_filter_options.len() > 1 {
             neighbors.push(LangevinConfig {
                 macro_trend_filter: !base.macro_trend_filter,
@@ -870,6 +926,7 @@ pub struct LangevinPotentialStrategy {
     name: String,
     macro_ema: Option<f64>,
     macro_ema_history: VecDeque<f64>,
+    recent_velocities: VecDeque<f64>,
 }
 
 impl LangevinPotentialStrategy {
@@ -883,6 +940,7 @@ impl LangevinPotentialStrategy {
             config.lambda_ema_period,
         )?;
 
+        let k_cap = config.kinematic_exhaustion_window.max(1) + 1;
         Ok(Self {
             config,
             kde,
@@ -890,6 +948,7 @@ impl LangevinPotentialStrategy {
             name: "LangevinPotential_v1".to_string(),
             macro_ema: None,
             macro_ema_history: VecDeque::with_capacity(64),
+            recent_velocities: VecDeque::with_capacity(k_cap),
         })
     }
 
@@ -912,6 +971,7 @@ impl Strategy for LangevinPotentialStrategy {
         self.last_audit = None;
         self.macro_ema = None;
         self.macro_ema_history.clear();
+        self.recent_velocities.clear();
     }
 
     fn audit(&self) -> Option<serde_json::Value> {
@@ -973,6 +1033,44 @@ impl Strategy for LangevinPotentialStrategy {
             0.0
         };
 
+        // Kinematic velocity and acceleration tracking
+        let v_t = last_sample.delta_x;
+        self.recent_velocities.push_back(v_t);
+        let k_win = self.config.kinematic_exhaustion_window.max(1);
+        if self.recent_velocities.len() > k_win {
+            self.recent_velocities.pop_front();
+        }
+
+        let kinematic_long_ok =
+            if self.config.kinematic_exhaustion_window <= 1 || self.recent_velocities.len() < 2 {
+                last_sample.delta_x >= 0.0
+            } else {
+                let v_old = *self.recent_velocities.front().unwrap_or(&0.0);
+                (v_t >= 0.0 || (v_t - v_old) >= 0.0) && last_sample.delta_x >= -1e-5
+            };
+
+        let kinematic_short_ok =
+            if self.config.kinematic_exhaustion_window <= 1 || self.recent_velocities.len() < 2 {
+                last_sample.delta_x <= 0.0
+            } else {
+                let v_old = *self.recent_velocities.front().unwrap_or(&0.0);
+                (v_t <= 0.0 || (v_t - v_old) <= 0.0) && last_sample.delta_x <= 1e-5
+            };
+
+        // Microstructure wall absorption check
+        let total_vol = bar.dollar_volume;
+        let (absorption_long_ok, absorption_short_ok) =
+            if total_vol > Decimal::ZERO && self.config.min_wall_absorption_ratio > Decimal::ZERO {
+                let buy_ratio = bar.buy_dollar_volume / total_vol;
+                let sell_ratio = bar.sell_dollar_volume / total_vol;
+                (
+                    buy_ratio >= self.config.min_wall_absorption_ratio,
+                    sell_ratio >= self.config.min_wall_absorption_ratio,
+                )
+            } else {
+                (true, true)
+            };
+
         self.last_audit = Some(serde_json::json!({
             "x_0": topology.x_0,
             "x_0_price": x_0_price,
@@ -987,6 +1085,10 @@ impl Strategy for LangevinPotentialStrategy {
             "barrier_height_right": topology.barrier_height_right,
             "x_b_left": topology.x_b_left,
             "x_b_right": topology.x_b_right,
+            "kinematic_long_ok": kinematic_long_ok,
+            "kinematic_short_ok": kinematic_short_ok,
+            "absorption_long_ok": absorption_long_ok,
+            "absorption_short_ok": absorption_short_ok,
         }));
 
         let beta = self.config.beta_entry.to_f64().unwrap_or(0.75);
@@ -997,7 +1099,6 @@ impl Strategy for LangevinPotentialStrategy {
         // 1. Elastic Mean Reversion: LONG Condition (Price compressed in left wall)
         if log_price < topology.x_0 && log_price > topology.x_b_left {
             let traction_ok = f_curr >= beta * topology.f_max_left;
-            let exhausted = last_sample.delta_x >= 0.0;
             let delta_v_rem = self
                 .kde
                 .potential_diff(topology.x_b_left, log_price, h, sigma2, &weights)
@@ -1006,7 +1107,13 @@ impl Strategy for LangevinPotentialStrategy {
             let well_depth_ok =
                 (x_0_price - bar.close) / bar.close >= self.config.min_well_depth_pct;
 
-            if traction_ok && exhausted && energy_confined && well_depth_ok && macro_long_ok {
+            if traction_ok
+                && kinematic_long_ok
+                && absorption_long_ok
+                && energy_confined
+                && well_depth_ok
+                && macro_long_ok
+            {
                 let gamma = self
                     .config
                     .opposite_wall_fraction
@@ -1053,7 +1160,6 @@ impl Strategy for LangevinPotentialStrategy {
         // 2. Elastic Mean Reversion: SHORT Condition (Price compressed in right wall)
         if log_price > topology.x_0 && log_price < topology.x_b_right {
             let traction_ok = f_curr <= -beta * topology.f_max_right;
-            let exhausted = last_sample.delta_x <= 0.0;
             let delta_v_rem = self
                 .kde
                 .potential_diff(topology.x_b_right, log_price, h, sigma2, &weights)
@@ -1062,7 +1168,13 @@ impl Strategy for LangevinPotentialStrategy {
             let well_depth_ok =
                 (bar.close - x_0_price) / bar.close >= self.config.min_well_depth_pct;
 
-            if traction_ok && exhausted && energy_confined && well_depth_ok && macro_short_ok {
+            if traction_ok
+                && kinematic_short_ok
+                && absorption_short_ok
+                && energy_confined
+                && well_depth_ok
+                && macro_short_ok
+            {
                 let gamma = self
                     .config
                     .opposite_wall_fraction
@@ -1683,6 +1795,87 @@ mod tests {
         assert!(
             intent_no_be.breakeven_atr.is_none(),
             "Disabled dynamic breakeven must leave breakeven_atr as None"
+        );
+    }
+
+    fn sample_bar_with_volume(timestamp: i64, price: Decimal, buy_ratio: Decimal) -> DollarBar {
+        let mut bar = sample_bar(timestamp, price);
+        bar.buy_dollar_volume = bar.dollar_volume * buy_ratio;
+        bar.sell_dollar_volume = bar.dollar_volume * (Decimal::ONE - buy_ratio);
+        bar
+    }
+
+    #[test]
+    fn kinematic_deceleration_suppresses_entry_during_fast_impulse() {
+        let config = LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            macro_trend_filter: false,
+            kinematic_exhaustion_window: 4,
+            min_wall_absorption_ratio: dec!(0.0),
+            ..LangevinConfig::default()
+        };
+        let mut strategy = LangevinPotentialStrategy::new(config).unwrap();
+
+        for i in 0..20 {
+            let offset = ((i as f64 * 0.5).sin() * 200.0) as i64;
+            let price = dec!(50_000) + Decimal::from(offset);
+            strategy.on_bar(&sample_bar(1000 * i, price));
+        }
+
+        // Price accelerates strongly upwards into right wall:
+        strategy.on_bar(&sample_bar(20_000, dec!(50_100)));
+        strategy.on_bar(&sample_bar(21_000, dec!(50_250)));
+        let accelerating_bar = sample_bar(22_000, dec!(50_450));
+        let intent = strategy.on_bar(&accelerating_bar);
+
+        assert!(
+            intent.is_none(),
+            "Kinematic acceleration into wall must suppress mean-reversion fade"
+        );
+    }
+
+    #[test]
+    fn wall_absorption_ratio_filters_unabsorbed_wall_touch() {
+        let config = LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            macro_trend_filter: false,
+            kinematic_exhaustion_window: 1,
+            min_wall_absorption_ratio: dec!(0.60),
+            ..LangevinConfig::default()
+        };
+        let mut strat_unabsorbed = LangevinPotentialStrategy::new(config.clone()).unwrap();
+        let mut strat_absorbed = LangevinPotentialStrategy::new(config).unwrap();
+
+        for i in 0..20 {
+            let offset = ((i as f64 * 0.5).sin() * 200.0) as i64;
+            let price = dec!(50_000) + Decimal::from(offset);
+            let bar = sample_bar(1000 * i, price);
+            strat_unabsorbed.on_bar(&bar);
+            strat_absorbed.on_bar(&bar);
+        }
+
+        let dip_bar = sample_bar(20_000, dec!(49_650));
+        strat_unabsorbed.on_bar(&dip_bar);
+        strat_absorbed.on_bar(&dip_bar);
+
+        // Weak buyer response: only 30% buy volume at the bottom
+        let weak_bar = sample_bar_with_volume(21_000, dec!(49_660), dec!(0.30));
+        let intent_weak = strat_unabsorbed.on_bar(&weak_bar);
+        assert!(
+            intent_weak.is_none(),
+            "Unabsorbed wall touch (< 60% buy volume) must be filtered"
+        );
+
+        // Strong buyer response: 75% buy volume absorbing sellers at the bottom
+        let strong_bar = sample_bar_with_volume(21_000, dec!(49_660), dec!(0.75));
+        let intent_strong = strat_absorbed.on_bar(&strong_bar);
+        assert!(
+            intent_strong.is_some(),
+            "Absorbed wall touch (>= 60% buy volume) must trigger entry"
         );
     }
 }
