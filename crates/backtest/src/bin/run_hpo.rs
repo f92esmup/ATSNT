@@ -477,10 +477,41 @@ where
             let content = fs::read_to_string(path).with_context(|| {
                 format!("Failed to read execution context file: {}", path.display())
             })?;
-            serde_json::from_str::<BacktestConfig>(&content)
-                .with_context(|| "Failed to parse execution context JSON")?
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(ctx_val) = value.get("execution_context").filter(|v| !v.is_null()) {
+                    serde_json::from_value::<BacktestConfig>(ctx_val.clone())
+                        .with_context(|| "Failed to parse execution_context from JSON")?
+                } else {
+                    serde_json::from_value::<BacktestConfig>(value)
+                        .with_context(|| "Failed to parse execution context JSON")?
+                }
+            } else {
+                serde_json::from_str::<BacktestConfig>(&content)
+                    .with_context(|| "Failed to parse execution context JSON")?
+            }
         }
-        None => BacktestConfig::default(),
+        None => {
+            if let Some(shared_path) = &args.shared_config {
+                if let Ok(content) = fs::read_to_string(shared_path) {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(ctx_val) =
+                            value.get("execution_context").filter(|v| !v.is_null())
+                        {
+                            serde_json::from_value::<BacktestConfig>(ctx_val.clone())
+                                .unwrap_or_default()
+                        } else {
+                            BacktestConfig::default()
+                        }
+                    } else {
+                        BacktestConfig::default()
+                    }
+                } else {
+                    BacktestConfig::default()
+                }
+            } else {
+                BacktestConfig::default()
+            }
+        }
     };
     if let Some(cap) = args.capital {
         engine_config.initial_capital = cap;
