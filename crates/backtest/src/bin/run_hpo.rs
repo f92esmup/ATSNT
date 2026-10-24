@@ -377,8 +377,19 @@ where
                     path.display()
                 )
             })?;
-            serde_json::from_str::<S::SharedConfig>(&content)
-                .with_context(|| "Failed to parse shared configuration JSON")?
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(shared_val) = value.get("shared_config").filter(|v| !v.is_null()) {
+                    serde_json::from_value::<S::SharedConfig>(shared_val.clone()).with_context(
+                        || "Failed to parse shared_config from deployment artifact JSON",
+                    )?
+                } else {
+                    serde_json::from_str::<S::SharedConfig>(&content)
+                        .with_context(|| "Failed to parse shared configuration JSON")?
+                }
+            } else {
+                serde_json::from_str::<S::SharedConfig>(&content)
+                    .with_context(|| "Failed to parse shared configuration JSON")?
+            }
         }
         None => S::SharedConfig::default(),
     };
