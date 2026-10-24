@@ -137,56 +137,63 @@ $$E_k(\tau) = \frac{1}{2} \tilde{\lambda}_\tau (\Delta x_\tau)^2$$
 
 ### B. Entrada por Escape de Kramers (Breakout Explosivo)
 
-* **Long Breakout:** $x_\tau > x_b^+$ con $E_k(\tau) > \Delta V^+$ y $\tilde{\lambda}_\tau > 1.5$.
-* **Short Breakout:** $x_\tau < x_b^-$ con $E_k(\tau) > \Delta V^-$ y $\tilde{\lambda}_\tau > 1.5$.
+* **Long Breakout:** $x_\tau > x_b^+$ con $E_k(\tau) > \Delta V^+$, aceleración institucional $\tilde{\lambda}_\tau \ge \lambda_{\text{thresh}}$ y $\Delta x_\tau > 0$.
+  - Stop-Loss: $x_{\text{SL}} = x_b^+$.
+  - Take-Profit: $x_{\text{TP}} = x_\tau + \mu_{\text{breakout}} |x_b^+ - x_0|$.
+* **Short Breakout:** $x_\tau < x_b^-$ con $E_k(\tau) > \Delta V^-$, $\tilde{\lambda}_\tau \ge \lambda_{\text{thresh}}$ y $\Delta x_\tau < 0$.
+  - Stop-Loss: $x_{\text{SL}} = x_b^-$.
+  - Take-Profit: $x_{\text{TP}} = x_\tau - \mu_{\text{breakout}} |x_0 - x_b^-|$.
+
+### C. Filtro de Profundidad Mínima del Pozo (Prevención de la Trampa de Micro-Pozos)
+
+* **Diagnóstico Cuantitativo:**
+  En contratos de futuros perpetuos (ej. Binance USDT-M), las comisiones de mercado (*taker fee* 0.05% apertura + 0.05% cierre + 0.05% slippage estimado) imponen un coste friccional de ida y vuelta de $\sim 0.15\%$. En Bitcoin a $\$80,000$ USD, esto representa una fricción ineludible de $\sim \$120$ USD por trade.
+* **Condición de Profundidad Mínima:**
+  Para entradas de reversión elástica, se exige que la distancia relativa hacia el fondo de equilibrio $x_0$ supere el umbral de comisiones:
+
+$$\Delta x_{\text{depth}} = \frac{|P_{\text{close}} - \exp(x_0)|}{P_{\text{close}}} \ge \text{min\_well\_depth\_pct}$$
+
+### D. Filtro de Deriva Macro (Macro Trend Drift Filter)
+
+* **Fundamento Físico de Gravedad Macro:**
+  La ecuación de Langevin asume difusión sobre un potencial cuasi-estacionario local. En caídas o subidas macro prolongadas, se rastrea una $\text{EMA}_{\text{macro}}$ (periodo 200) y su pendiente sobre 50 barras ($\text{slope}_{\text{macro}}$):
+  - **Entradas LONG:** Permitidas únicamente si $\text{slope}_{\text{macro}} \ge 0$.
+  - **Entradas SHORT:** Permitidas únicamente si $\text{slope}_{\text{macro}} \le 0$.
 
 ---
 
-## 5. Mecanismos de Salida Físicos (Cero ATR)
+## 5. Mecanismos de Salida Físicos y Contrato Universal Triple-Barrier
 
-1. **Take-Profit Físico con Cancelación Exacta:**
-   Como $V''(x_0) = -\frac{\sigma^2}{2} \frac{K''_0(x_0)}{K_0(x_0)}$, el factor $\sigma^2/2$ se cancela exactamente en el radio térmico:
-
-$$\delta_{\text{th}} = \sqrt{-\frac{K_0(x_0)}{K''_0(x_0)}}$$
-
-$$x_{\text{TP}}^{\text{long}} = x_0 - \zeta\,\delta_{\text{th}}, \qquad x_{\text{TP}}^{\text{short}} = x_0 + \zeta\,\delta_{\text{th}} \qquad (\zeta \in [0, 0.5])$$
+1. **Take-Profit Físico con Sobreoscilación Armónica (Harmonic Overshoot):**
+   Para multiplicar el recorrido monetario y evitar que el beneficio sea devorado por las comisiones de futuros, el objetivo de Take-Profit se extiende más allá de $x_0$ hacia el punto de inflexión de la pared opuesta mediante la fracción armónica $\gamma \in [0.0, 1.0]$ (`opposite_wall_fraction`, por defecto $0.60$):
+   - **Reversión LONG ($x < x_0$):** $x_{\text{TP}}^{\text{long}} = x_0 + \gamma\,(x_{\text{inf}}^+ - x_0) - \zeta\,\delta_{\text{th}}$
+   - **Reversión SHORT ($x > x_0$):** $x_{\text{TP}}^{\text{short}} = x_0 - \gamma\,(x_0 - x_{\text{inf}}^-) + \zeta\,\delta_{\text{th}}$
 
 2. **Stop-Loss Físico (Cima de Barrera $x_b$):**
-   - En $x_b$, la fuerza restauradora se anula o invierte su signo hacia un pozo vecino o el vacío. Se fija en $x_b^\pm$.
+   - En $x_b$, la fuerza restauradora se anula o invierte su signo hacia un pozo vecino o el vacío. Se fija exactamente en $x_b^\pm$.
 
-3. **Salida por Deformación del Paisaje:**
-   - Si $\Delta V(\tau) < \frac{1}{2}\sigma^2$ (desaparición de barrera térmica) o $x_0(\tau)$ migra cruzando el precio de entrada, se aborta a mercado.
+3. **Protección Horizontal y Deformación del Paisaje:**
+   - La barrera horizontal `time_barrier_bars` previene quedar atrapado si el pozo experimenta relajación térmica sin alcanzar TP ni SL (calibración empírica: 300 barras).
 
-4. **Trailing Stop de Escape:**
-   - En breakouts, sigue la cima de la barrera atravesada $x_b(\tau)$.
+4. **Telemetría y Auditoría en Tiempo Real:**
+   - Implementa `Strategy::audit()`, registrando en cada barra la topología diagnosticada para monitoreo determinista.
+
+5. **Breakeven Stop Dinámico y Trailing Ratchet:**
+   - En cuanto la excursión favorable alcanza el fondo de equilibrio $x_0$, el Stop-Loss se desplaza inmediatamente a precio de entrada (`breakeven_atr: Some(dist_to_x0)`), protegiendo las operaciones ganadoras contra giros bruscos.
 
 ---
 
 ## 6. Estructuras de Datos en Rust
 
 ```rust
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PhysicalSample {
     pub x: f64,
     pub delta_x: f64,
     pub delta_t_ms: u64,
 }
 
-#[derive(Debug, Clone)]
-pub struct KdePotential {
-    window: VecDeque<PhysicalSample>,
-    capacity: usize,
-    bandwidth_factor: f64,
-    bandwidth_h: f64,
-    decay_eta: f64,
-    vacuum_epsilon: f64,
-    weights: Vec<f64>,
-    n_eff: f64,
-    diffusivity_sigma2: f64,
-    lambda_ema: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WellTopology {
     pub x_0: f64,
     pub curvature_0: f64,
@@ -199,5 +206,28 @@ pub struct WellTopology {
     pub x_b_right: f64,
     pub barrier_height_left: f64,
     pub barrier_height_right: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LangevinConfig {
+    pub window_size: usize,
+    pub bandwidth_factor: Decimal,
+    pub decay_eta: Decimal,
+    pub vacuum_epsilon: Decimal,
+    pub beta_entry: Decimal,
+    pub alpha_dissociation: Decimal,
+    pub zeta_thermal_tp: Decimal,
+    pub lambda_ema_period: usize,
+    pub time_barrier_bars: usize,
+    pub min_take_profit_pct: Decimal,
+    pub min_well_depth_pct: Decimal,
+    pub enable_kramers_breakout: bool,
+    pub kramers_lambda_threshold: Decimal,
+    pub kramers_tp_multiple: Decimal,
+    pub opposite_wall_fraction: Decimal,
+    pub enable_dynamic_breakeven: bool,
+    pub macro_trend_filter: bool,
+    pub macro_ema_period: usize,
+    pub macro_slope_window: usize,
 }
 ```

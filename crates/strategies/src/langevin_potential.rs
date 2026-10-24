@@ -541,6 +541,38 @@ impl KdePotential {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_kramers_lambda() -> Decimal {
+    dec!(1.5)
+}
+
+fn default_kramers_tp_multiple() -> Decimal {
+    dec!(1.0)
+}
+
+fn default_min_well_depth() -> Decimal {
+    dec!(0.0050)
+}
+
+fn default_opposite_wall_fraction() -> Decimal {
+    dec!(0.60)
+}
+
+fn default_macro_period() -> usize {
+    200
+}
+
+fn default_macro_slope_window() -> usize {
+    30
+}
+
+fn default_macro_trend_filter() -> bool {
+    true
+}
+
 /// Hyperparameter configuration for Langevin Potential Well Strategy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LangevinConfig {
@@ -552,7 +584,7 @@ pub struct LangevinConfig {
     pub decay_eta: Decimal,
     /// Dimensionless vacuum floor density $\epsilon_0$ (e.g. 0.001).
     pub vacuum_epsilon: Decimal,
-    /// Traction threshold fraction $\beta \in [0.70, 0.90]$ for mean reversion entry ($|F(x)| \ge \beta F_{\max}$).
+    /// Traction threshold fraction $\beta \in [0.40, 0.90]$ for mean reversion entry ($|F(x)| \ge \beta F_{\max}$).
     pub beta_entry: Decimal,
     /// Dissociation fraction $\alpha \in [0.10, 0.40]$ for open boundary Stop-Loss ($|F(x_b)| \le \alpha F_{\max}$).
     pub alpha_dissociation: Decimal,
@@ -562,23 +594,61 @@ pub struct LangevinConfig {
     pub lambda_ema_period: usize,
     /// Maximum bar holding duration for horizontal barrier timeout.
     pub time_barrier_bars: usize,
-    /// Friction hurdle: minimum required Take-Profit distance as a fraction of price (e.g. 0.0025 = 0.25%).
+    /// Friction hurdle: minimum required Take-Profit distance as a fraction of price (e.g. 0.0020 = 0.20%).
     pub min_take_profit_pct: Decimal,
+    /// Minimum potential well depth as a fraction of price (e.g. 0.0020 = 0.20%):
+    /// ensures mean reversion travel distance to well equilibrium x_0 covers friction hurdles.
+    #[serde(default = "default_min_well_depth")]
+    pub min_well_depth_pct: Decimal,
+    /// Whether to enable Kramers Escape breakout entries when price breaches $x_b^\pm$ with $E_k > \Delta V$.
+    #[serde(default = "default_true")]
+    pub enable_kramers_breakout: bool,
+    /// Threshold multiplier for arrival rate acceleration in Kramers breakout ($\tilde{\lambda}_\tau > 1.5$).
+    #[serde(default = "default_kramers_lambda")]
+    pub kramers_lambda_threshold: Decimal,
+    /// Multiplier on the well width $(|x_b - x_0|)$ to project Take-Profit for breakout trades.
+    #[serde(default = "default_kramers_tp_multiple")]
+    pub kramers_tp_multiple: Decimal,
+    /// Fraction of opposite well wall to target for Take-Profit overshoot ($\gamma \in [0.0, 1.0]$).
+    /// When 0.0, Take-Profit targets well bottom $x_0$. When > 0, targets $x_0 \pm \gamma |x_{\text{inf}}^{\text{opp}} - x_0|$.
+    #[serde(default = "default_opposite_wall_fraction")]
+    pub opposite_wall_fraction: Decimal,
+    /// Whether to enable dynamic breakeven and trailing stop ratchet on favorable excursion.
+    #[serde(default = "default_true")]
+    pub enable_dynamic_breakeven: bool,
+    /// Whether to enable macro trend drift filter.
+    #[serde(default = "default_macro_trend_filter")]
+    pub macro_trend_filter: bool,
+    /// Rolling EMA period for macro trend filter.
+    #[serde(default = "default_macro_period")]
+    pub macro_ema_period: usize,
+    /// Window length of macro EMA history to measure trend slope.
+    #[serde(default = "default_macro_slope_window")]
+    pub macro_slope_window: usize,
 }
 
 impl Default for LangevinConfig {
     fn default() -> Self {
         Self {
-            window_size: 80,
-            bandwidth_factor: dec!(1.0),
-            decay_eta: dec!(0.02),
+            window_size: 120,
+            bandwidth_factor: dec!(1.3),
+            decay_eta: dec!(0.04),
             vacuum_epsilon: dec!(0.001),
-            beta_entry: dec!(0.75),
+            beta_entry: dec!(0.60),
             alpha_dissociation: dec!(0.25),
-            zeta_thermal_tp: dec!(0.2),
+            zeta_thermal_tp: dec!(0.0),
             lambda_ema_period: 20,
-            time_barrier_bars: 30,
+            time_barrier_bars: 300,
             min_take_profit_pct: dec!(0.0025),
+            min_well_depth_pct: dec!(0.0035),
+            enable_kramers_breakout: true,
+            kramers_lambda_threshold: dec!(1.5),
+            kramers_tp_multiple: dec!(1.0),
+            opposite_wall_fraction: dec!(0.60),
+            enable_dynamic_breakeven: true,
+            macro_trend_filter: true,
+            macro_ema_period: 200,
+            macro_slope_window: 50,
         }
     }
 }
@@ -587,13 +657,17 @@ impl std::fmt::Display for LangevinConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "W:{}|Bf:{}|Eta:{}|Beta:{}|Tb:{}|MinTp:{}",
+            "W:{}|Bf:{}|Eta:{}|Beta:{}|Tb:{}|MinTp:{}|MinDepth:{}|Owf:{}|Macro:{}|Kb:{}",
             self.window_size,
             self.bandwidth_factor,
             self.decay_eta,
             self.beta_entry,
             self.time_barrier_bars,
-            self.min_take_profit_pct
+            self.min_take_profit_pct,
+            self.min_well_depth_pct,
+            self.opposite_wall_fraction,
+            self.macro_trend_filter,
+            self.enable_kramers_breakout
         )
     }
 }
@@ -608,18 +682,24 @@ pub struct LangevinSpace {
     pub zeta_thermal_tps: Vec<Decimal>,
     pub time_barrier_bars: Vec<usize>,
     pub min_take_profit_pcts: Vec<Decimal>,
+    pub min_well_depth_pcts: Vec<Decimal>,
+    pub opposite_wall_fractions: Vec<Decimal>,
+    pub macro_trend_filter_options: Vec<bool>,
 }
 
 impl Default for LangevinSpace {
     fn default() -> Self {
         Self {
             window_sizes: vec![60, 80, 120, 160],
-            bandwidth_factors: vec![dec!(0.8), dec!(1.0), dec!(1.2)],
-            decay_etas: vec![dec!(0.01), dec!(0.02), dec!(0.04)],
-            beta_entries: vec![dec!(0.70), dec!(0.75), dec!(0.85)],
-            zeta_thermal_tps: vec![dec!(0.0), dec!(0.2), dec!(0.4)],
-            time_barrier_bars: vec![20, 30, 50],
-            min_take_profit_pcts: vec![dec!(0.0025), dec!(0.0035)],
+            bandwidth_factors: vec![dec!(1.0), dec!(1.3), dec!(1.6)],
+            decay_etas: vec![dec!(0.02), dec!(0.04), dec!(0.06)],
+            beta_entries: vec![dec!(0.50), dec!(0.60), dec!(0.75)],
+            zeta_thermal_tps: vec![dec!(0.0), dec!(0.1), dec!(0.2)],
+            time_barrier_bars: vec![100, 200, 300],
+            min_take_profit_pcts: vec![dec!(0.0020), dec!(0.0025), dec!(0.0035)],
+            min_well_depth_pcts: vec![dec!(0.0025), dec!(0.0035), dec!(0.0050)],
+            opposite_wall_fractions: vec![dec!(0.40), dec!(0.60), dec!(0.80)],
+            macro_trend_filter_options: vec![true, false],
         }
     }
 }
@@ -637,18 +717,33 @@ impl HyperparameterSpace for LangevinSpace {
                         for &zeta in &self.zeta_thermal_tps {
                             for &tb in &self.time_barrier_bars {
                                 for &min_tp in &self.min_take_profit_pcts {
-                                    configs.push(LangevinConfig {
-                                        window_size: w,
-                                        bandwidth_factor: bf,
-                                        decay_eta: eta,
-                                        vacuum_epsilon: dec!(0.001),
-                                        beta_entry: beta,
-                                        alpha_dissociation: dec!(0.25),
-                                        zeta_thermal_tp: zeta,
-                                        lambda_ema_period: 20,
-                                        time_barrier_bars: tb,
-                                        min_take_profit_pct: min_tp,
-                                    });
+                                    for &min_depth in &self.min_well_depth_pcts {
+                                        for &owf in &self.opposite_wall_fractions {
+                                            for &macro_filter in &self.macro_trend_filter_options {
+                                                configs.push(LangevinConfig {
+                                                    window_size: w,
+                                                    bandwidth_factor: bf,
+                                                    decay_eta: eta,
+                                                    vacuum_epsilon: dec!(0.001),
+                                                    beta_entry: beta,
+                                                    alpha_dissociation: dec!(0.25),
+                                                    zeta_thermal_tp: zeta,
+                                                    lambda_ema_period: 20,
+                                                    time_barrier_bars: tb,
+                                                    min_take_profit_pct: min_tp,
+                                                    min_well_depth_pct: min_depth,
+                                                    enable_kramers_breakout: true,
+                                                    kramers_lambda_threshold: dec!(1.5),
+                                                    kramers_tp_multiple: dec!(1.0),
+                                                    opposite_wall_fraction: owf,
+                                                    enable_dynamic_breakeven: true,
+                                                    macro_trend_filter: macro_filter,
+                                                    macro_ema_period: 200,
+                                                    macro_slope_window: 50,
+                                                });
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -669,7 +764,7 @@ impl HyperparameterSpace for LangevinSpace {
     }
 
     fn perturb_neighbors(&self, base: &Self::Config) -> Vec<Self::Config> {
-        let mut neighbors = Vec::with_capacity(14);
+        let mut neighbors = Vec::with_capacity(18);
         let windows = adjacent_grid_values(&self.window_sizes, base.window_size);
         let bfs = adjacent_grid_values(&self.bandwidth_factors, base.bandwidth_factor);
         let etas = adjacent_grid_values(&self.decay_etas, base.decay_eta);
@@ -677,6 +772,8 @@ impl HyperparameterSpace for LangevinSpace {
         let zetas = adjacent_grid_values(&self.zeta_thermal_tps, base.zeta_thermal_tp);
         let barriers = adjacent_grid_values(&self.time_barrier_bars, base.time_barrier_bars);
         let floors = adjacent_grid_values(&self.min_take_profit_pcts, base.min_take_profit_pct);
+        let depths = adjacent_grid_values(&self.min_well_depth_pcts, base.min_well_depth_pct);
+        let owfs = adjacent_grid_values(&self.opposite_wall_fractions, base.opposite_wall_fraction);
 
         for value in [windows.0, windows.1].into_iter().flatten() {
             neighbors.push(LangevinConfig {
@@ -720,6 +817,24 @@ impl HyperparameterSpace for LangevinSpace {
                 ..base.clone()
             });
         }
+        for value in [depths.0, depths.1].into_iter().flatten() {
+            neighbors.push(LangevinConfig {
+                min_well_depth_pct: value,
+                ..base.clone()
+            });
+        }
+        for value in [owfs.0, owfs.1].into_iter().flatten() {
+            neighbors.push(LangevinConfig {
+                opposite_wall_fraction: value,
+                ..base.clone()
+            });
+        }
+        if self.macro_trend_filter_options.len() > 1 {
+            neighbors.push(LangevinConfig {
+                macro_trend_filter: !base.macro_trend_filter,
+                ..base.clone()
+            });
+        }
         neighbors
     }
 }
@@ -749,36 +864,35 @@ fn adjacent_grid_values<T: PartialOrd + Copy>(grid: &[T], value: T) -> (Option<T
 /// and empirical potential well topology.
 #[derive(Debug, Clone)]
 pub struct LangevinPotentialStrategy {
-    name: String,
     config: LangevinConfig,
     kde: KdePotential,
+    last_audit: Option<serde_json::Value>,
+    name: String,
+    macro_ema: Option<f64>,
+    macro_ema_history: VecDeque<f64>,
 }
 
 impl LangevinPotentialStrategy {
-    /// Creates a new strategy instance with validated configuration.
     pub fn new(config: LangevinConfig) -> Result<Self, DomainError> {
-        let bf = config.bandwidth_factor.to_f64().unwrap_or(1.0);
-        let eta = config.decay_eta.to_f64().unwrap_or(0.02);
-        let eps = config.vacuum_epsilon.to_f64().unwrap_or(0.001);
-        let alpha = config.alpha_dissociation.to_f64().unwrap_or(0.25);
-
         let kde = KdePotential::new(
             config.window_size,
-            bf,
-            eta,
-            eps,
-            alpha,
+            config.bandwidth_factor.to_f64().unwrap_or(1.0),
+            config.decay_eta.to_f64().unwrap_or(0.02),
+            config.vacuum_epsilon.to_f64().unwrap_or(0.001),
+            config.alpha_dissociation.to_f64().unwrap_or(0.25),
             config.lambda_ema_period,
         )?;
 
         Ok(Self {
-            name: "LangevinPotential_v1".to_string(),
             config,
             kde,
+            last_audit: None,
+            name: "LangevinPotential_v1".to_string(),
+            macro_ema: None,
+            macro_ema_history: VecDeque::with_capacity(64),
         })
     }
 
-    /// Access active configuration.
     pub fn config(&self) -> &LangevinConfig {
         &self.config
     }
@@ -795,19 +909,27 @@ impl Strategy for LangevinPotentialStrategy {
 
     fn reset(&mut self) {
         self.kde.reset();
+        self.last_audit = None;
+        self.macro_ema = None;
+        self.macro_ema_history.clear();
+    }
+
+    fn audit(&self) -> Option<serde_json::Value> {
+        self.last_audit.clone()
     }
 
     fn on_bar(&mut self, bar: &DollarBar) -> Option<OrderIntent> {
+        let price_f64 = bar.close.to_f64().unwrap_or(1.0).max(1e-8);
+        let log_price = price_f64.ln();
+        let anchor_x = self.kde.last_log_price.unwrap_or(log_price);
+
         self.kde.push(bar);
 
         if !self.kde.is_warm() {
             return None;
         }
 
-        let price_f64 = bar.close.to_f64().unwrap_or(1.0).max(1e-8);
-        let log_price = price_f64.ln();
-
-        let topology = self.kde.analyze_well(log_price)?;
+        let topology = self.kde.analyze_well(anchor_x)?;
 
         let weights = self.kde.compute_weights();
         let sigma2 = self.kde.diffusivity_sigma2(&weights);
@@ -824,8 +946,53 @@ impl Strategy for LangevinPotentialStrategy {
         let lambda_tilde = (lambda_tau / self.kde.lambda_ema().max(1e-6)).clamp(0.1, 10.0);
         let e_kinetic = 0.5 * lambda_tilde * last_sample.delta_x.powi(2);
 
+        let x_0_price = Decimal::from_f64_retain(topology.x_0.exp()).map(|d| d.round_dp(2))?;
+        let well_depth_pct = (x_0_price - bar.close).abs() / bar.close;
+
+        // Macro trend drift filter: rolling higher-horizon EMA slope
+        let close_f64 = price_f64;
+        let period = self.config.macro_ema_period.max(1);
+        let alpha_m = 2.0 / (period as f64 + 1.0);
+
+        let current_ema = match self.macro_ema {
+            Some(prev) => alpha_m * close_f64 + (1.0 - alpha_m) * prev,
+            None => close_f64,
+        };
+        self.macro_ema = Some(current_ema);
+
+        let slope_window = self.config.macro_slope_window.max(2);
+        self.macro_ema_history.push_back(current_ema);
+        if self.macro_ema_history.len() > slope_window {
+            self.macro_ema_history.pop_front();
+        }
+
+        let macro_slope = if self.macro_ema_history.len() >= 5 {
+            let oldest = *self.macro_ema_history.front().unwrap_or(&current_ema);
+            (current_ema - oldest) / current_ema
+        } else {
+            0.0
+        };
+
+        self.last_audit = Some(serde_json::json!({
+            "x_0": topology.x_0,
+            "x_0_price": x_0_price,
+            "well_depth_pct": well_depth_pct,
+            "macro_slope": macro_slope,
+            "delta_thermal": topology.delta_thermal,
+            "f_curr": f_curr,
+            "curvature_0": topology.curvature_0,
+            "e_kinetic": e_kinetic,
+            "lambda_tilde": lambda_tilde,
+            "barrier_height_left": topology.barrier_height_left,
+            "barrier_height_right": topology.barrier_height_right,
+            "x_b_left": topology.x_b_left,
+            "x_b_right": topology.x_b_right,
+        }));
+
         let beta = self.config.beta_entry.to_f64().unwrap_or(0.75);
         let zeta = self.config.zeta_thermal_tp.to_f64().unwrap_or(0.2);
+        let macro_long_ok = !self.config.macro_trend_filter || macro_slope >= 0.0;
+        let macro_short_ok = !self.config.macro_trend_filter || macro_slope <= 0.0;
 
         // 1. Elastic Mean Reversion: LONG Condition (Price compressed in left wall)
         if log_price < topology.x_0 && log_price > topology.x_b_left {
@@ -836,9 +1003,18 @@ impl Strategy for LangevinPotentialStrategy {
                 .potential_diff(topology.x_b_left, log_price, h, sigma2, &weights)
                 .max(0.0);
             let energy_confined = e_kinetic < delta_v_rem;
+            let well_depth_ok =
+                (x_0_price - bar.close) / bar.close >= self.config.min_well_depth_pct;
 
-            if traction_ok && exhausted && energy_confined {
-                let x_tp = topology.x_0 - zeta * topology.delta_thermal;
+            if traction_ok && exhausted && energy_confined && well_depth_ok && macro_long_ok {
+                let gamma = self
+                    .config
+                    .opposite_wall_fraction
+                    .to_f64()
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0);
+                let overshoot = gamma * (topology.x_inf_right - topology.x_0).max(0.0);
+                let x_tp = topology.x_0 + overshoot - zeta * topology.delta_thermal;
                 let x_sl = topology.x_b_left;
 
                 let tp_f64 = x_tp.exp();
@@ -851,13 +1027,22 @@ impl Strategy for LangevinPotentialStrategy {
                     let friction_ok =
                         (take_profit - bar.close) / bar.close >= self.config.min_take_profit_pct;
                     if friction_ok {
-                        return OrderIntent::new(
+                        let be_dist = if self.config.enable_dynamic_breakeven {
+                            Some((x_0_price - bar.close).abs())
+                        } else {
+                            None
+                        };
+                        return OrderIntent::with_risk_and_exits(
                             bar.end_time,
                             Side::Buy,
                             bar.close,
                             stop_loss,
                             take_profit,
                             self.config.time_barrier_bars,
+                            None,
+                            be_dist,
+                            be_dist,
+                            None,
                         )
                         .ok();
                     }
@@ -874,9 +1059,18 @@ impl Strategy for LangevinPotentialStrategy {
                 .potential_diff(topology.x_b_right, log_price, h, sigma2, &weights)
                 .max(0.0);
             let energy_confined = e_kinetic < delta_v_rem;
+            let well_depth_ok =
+                (bar.close - x_0_price) / bar.close >= self.config.min_well_depth_pct;
 
-            if traction_ok && exhausted && energy_confined {
-                let x_tp = topology.x_0 + zeta * topology.delta_thermal;
+            if traction_ok && exhausted && energy_confined && well_depth_ok && macro_short_ok {
+                let gamma = self
+                    .config
+                    .opposite_wall_fraction
+                    .to_f64()
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0);
+                let overshoot = gamma * (topology.x_0 - topology.x_inf_left).max(0.0);
+                let x_tp = topology.x_0 - overshoot + zeta * topology.delta_thermal;
                 let x_sl = topology.x_b_right;
 
                 let tp_f64 = x_tp.exp();
@@ -889,13 +1083,126 @@ impl Strategy for LangevinPotentialStrategy {
                     let friction_ok =
                         (bar.close - take_profit) / bar.close >= self.config.min_take_profit_pct;
                     if friction_ok {
-                        return OrderIntent::new(
+                        let be_dist = if self.config.enable_dynamic_breakeven {
+                            Some((bar.close - x_0_price).abs())
+                        } else {
+                            None
+                        };
+                        return OrderIntent::with_risk_and_exits(
                             bar.end_time,
                             Side::Sell,
                             bar.close,
                             stop_loss,
                             take_profit,
                             self.config.time_barrier_bars,
+                            None,
+                            be_dist,
+                            be_dist,
+                            None,
+                        )
+                        .ok();
+                    }
+                }
+            }
+        }
+
+        // 3. Kramers Escape: LONG Breakout Condition (Price escapes over right barrier)
+        if self.config.enable_kramers_breakout && log_price > topology.x_b_right {
+            let lambda_thresh = self.config.kramers_lambda_threshold.to_f64().unwrap_or(1.5);
+            let tp_mult = self
+                .config
+                .kramers_tp_multiple
+                .to_f64()
+                .unwrap_or(1.0)
+                .max(0.1);
+
+            let energy_escaped = e_kinetic > topology.barrier_height_right;
+            let flow_accelerated = lambda_tilde >= lambda_thresh;
+            let momentum_aligned = last_sample.delta_x > 0.0;
+
+            if energy_escaped && flow_accelerated && momentum_aligned && macro_long_ok {
+                let well_width = (topology.x_b_right - topology.x_0).max(1e-4);
+                let x_sl = topology.x_b_right;
+                let x_tp = log_price + tp_mult * well_width;
+
+                let sl_f64 = x_sl.exp();
+                let tp_f64 = x_tp.exp();
+
+                let stop_loss = Decimal::from_f64_retain(sl_f64).map(|d| d.round_dp(2))?;
+                let take_profit = Decimal::from_f64_retain(tp_f64).map(|d| d.round_dp(2))?;
+
+                if stop_loss < bar.close && bar.close < take_profit {
+                    let friction_ok =
+                        (take_profit - bar.close) / bar.close >= self.config.min_take_profit_pct;
+                    if friction_ok {
+                        let be_dist = if self.config.enable_dynamic_breakeven {
+                            Some((bar.close - stop_loss).abs())
+                        } else {
+                            None
+                        };
+                        return OrderIntent::with_risk_and_exits(
+                            bar.end_time,
+                            Side::Buy,
+                            bar.close,
+                            stop_loss,
+                            take_profit,
+                            self.config.time_barrier_bars,
+                            None,
+                            be_dist,
+                            be_dist,
+                            None,
+                        )
+                        .ok();
+                    }
+                }
+            }
+        }
+
+        // 4. Kramers Escape: SHORT Breakout Condition (Price escapes below left barrier)
+        if self.config.enable_kramers_breakout && log_price < topology.x_b_left {
+            let lambda_thresh = self.config.kramers_lambda_threshold.to_f64().unwrap_or(1.5);
+            let tp_mult = self
+                .config
+                .kramers_tp_multiple
+                .to_f64()
+                .unwrap_or(1.0)
+                .max(0.1);
+
+            let energy_escaped = e_kinetic > topology.barrier_height_left;
+            let flow_accelerated = lambda_tilde >= lambda_thresh;
+            let momentum_aligned = last_sample.delta_x < 0.0;
+
+            if energy_escaped && flow_accelerated && momentum_aligned && macro_short_ok {
+                let well_width = (topology.x_0 - topology.x_b_left).max(1e-4);
+                let x_sl = topology.x_b_left;
+                let x_tp = log_price - tp_mult * well_width;
+
+                let sl_f64 = x_sl.exp();
+                let tp_f64 = x_tp.exp();
+
+                let stop_loss = Decimal::from_f64_retain(sl_f64).map(|d| d.round_dp(2))?;
+                let take_profit = Decimal::from_f64_retain(tp_f64).map(|d| d.round_dp(2))?;
+
+                if stop_loss > bar.close && bar.close > take_profit {
+                    let friction_ok =
+                        (bar.close - take_profit) / bar.close >= self.config.min_take_profit_pct;
+                    if friction_ok {
+                        let be_dist = if self.config.enable_dynamic_breakeven {
+                            Some((stop_loss - bar.close).abs())
+                        } else {
+                            None
+                        };
+                        return OrderIntent::with_risk_and_exits(
+                            bar.end_time,
+                            Side::Sell,
+                            bar.close,
+                            stop_loss,
+                            take_profit,
+                            self.config.time_barrier_bars,
+                            None,
+                            be_dist,
+                            be_dist,
+                            None,
                         )
                         .ok();
                     }
@@ -939,36 +1246,43 @@ impl OptimizableStrategy for LangevinPotentialStrategy {
 mod tests {
     use super::*;
 
-    fn sample_bar(time_ms: i64, price: Decimal) -> DollarBar {
+    fn sample_bar(timestamp: i64, price: Decimal) -> DollarBar {
         DollarBar {
-            start_time: time_ms,
-            end_time: time_ms + 1000,
+            start_time: timestamp,
+            end_time: timestamp + 500,
             open: price,
             high: price + dec!(10),
             low: price - dec!(10),
             close: price,
             volume: dec!(10),
-            dollar_volume: dec!(500_000),
-            trade_count: 50,
+            dollar_volume: dec!(1_000_000),
+            trade_count: 100,
             buy_volume: dec!(5),
+            buy_dollar_volume: dec!(500_000),
             sell_volume: dec!(5),
-            buy_dollar_volume: dec!(250_000),
-            sell_dollar_volume: dec!(250_000),
+            sell_dollar_volume: dec!(500_000),
         }
     }
 
     #[test]
+    fn default_config_is_valid() {
+        let config = LangevinConfig::default();
+        let strategy = LangevinPotentialStrategy::new(config.clone()).unwrap();
+        assert_eq!(strategy.name(), "LangevinPotential_v1");
+        assert_eq!(strategy.config(), &config);
+    }
+
+    #[test]
     fn kde_potential_initialization_and_reset() {
-        let mut kde = KdePotential::new(20, 1.0, 0.02, 0.001, 0.25, 10).unwrap();
+        let mut kde = KdePotential::new(50, 1.0, 0.02, 0.001, 0.25, 20).unwrap();
         assert_eq!(kde.len(), 0);
         assert!(!kde.is_warm());
 
-        for i in 0..25 {
-            let bar = sample_bar(1000 * i, dec!(50_000) + Decimal::from(i));
-            kde.push(&bar);
+        for i in 0..60 {
+            kde.push(&sample_bar(1000 * i, dec!(50_000) + Decimal::from(i)));
         }
 
-        assert_eq!(kde.len(), 20);
+        assert_eq!(kde.len(), 50);
         assert!(kde.is_warm());
 
         kde.reset();
@@ -978,46 +1292,211 @@ mod tests {
 
     #[test]
     fn potential_well_topology_detection() {
-        let mut kde = KdePotential::new(30, 1.0, 0.02, 0.001, 0.25, 10).unwrap();
-
-        // Feed harmonic oscillating prices around 50,000
-        for i in 0..30 {
-            let offset = ((i as f64 * 0.5).sin() * 200.0) as i64;
+        let mut kde = KdePotential::new(60, 1.0, 0.02, 0.001, 0.25, 20).unwrap();
+        for i in 0..60 {
+            let offset = ((i as f64 * 0.3).sin() * 200.0) as i64;
             let price = dec!(50_000) + Decimal::from(offset);
-            let bar = sample_bar(1000 * i, price);
-            kde.push(&bar);
+            kde.push(&sample_bar(1000 * i, price));
         }
 
-        let current_x = (50000.0_f64).ln();
-        let topology = kde.analyze_well(current_x).expect("well must be detected");
+        let topo = kde.analyze_well((50_000.0_f64).ln());
+        assert!(topo.is_some(), "Well topology should be detected");
+        let topo = topo.unwrap();
 
-        assert!(topology.curvature_0 > 0.0);
-        assert!(topology.x_inf_left < topology.x_0);
-        assert!(topology.x_inf_right > topology.x_0);
-        assert!(topology.x_b_left < topology.x_inf_left);
-        assert!(topology.x_b_right > topology.x_inf_right);
-        assert!(topology.delta_thermal > 0.0);
+        assert!(topo.curvature_0 > 0.0);
+        assert!(topo.x_inf_left < topo.x_0);
+        assert!(topo.x_0 < topo.x_inf_right);
+        assert!(topo.x_b_left < topo.x_inf_left);
+        assert!(topo.x_inf_right < topo.x_b_right);
+        assert!(topo.barrier_height_left > 0.0);
+        assert!(topo.barrier_height_right > 0.0);
     }
 
     #[test]
-    fn default_config_is_valid() {
-        let config = LangevinConfig::default();
-        let strategy = LangevinPotentialStrategy::new(config.clone()).unwrap();
-        assert_eq!(strategy.name(), "LangevinPotential_v1");
-        assert_eq!(
-            strategy.compatible_market_types(),
-            &[MarketType::UsdMPerpetual]
+    fn elastic_mean_reversion_triggers_on_wall_compression_and_exhaustion() {
+        let config = LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        };
+        let mut strategy = LangevinPotentialStrategy::new(config).unwrap();
+
+        // 1. Build a well around 50,000
+        for i in 0..20 {
+            let offset = ((i as f64 * 0.5).sin() * 200.0) as i64;
+            let price = dec!(50_000) + Decimal::from(offset);
+            strategy.on_bar(&sample_bar(1000 * i, price));
+        }
+
+        // 2. Compress into left wall
+        let dip_bar = sample_bar(20_000, dec!(49_650));
+        strategy.on_bar(&dip_bar);
+
+        // 3. Exhaustion turn bar (delta_x >= 0.0)
+        let bounce_bar = sample_bar(21_000, dec!(49_660));
+        let intent = strategy.on_bar(&bounce_bar);
+
+        assert!(
+            intent.is_some(),
+            "Mean reversion long should trigger upon bounce"
         );
-        assert!(!config.to_string().is_empty());
+        let intent = intent.unwrap();
+        assert_eq!(intent.side, Side::Buy);
+        assert!(intent.stop_loss < intent.price);
+        assert!(intent.price < intent.take_profit);
+    }
+
+    #[test]
+    fn micro_well_filtered_by_min_well_depth() {
+        let mut strategy_strict = LangevinPotentialStrategy::new(LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            min_well_depth_pct: dec!(0.0150),
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        })
+        .unwrap();
+
+        let mut strategy_standard = LangevinPotentialStrategy::new(LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            min_well_depth_pct: dec!(0.0050),
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        })
+        .unwrap();
+
+        for i in 0..20 {
+            let offset = ((i as f64 * 0.5).sin() * 200.0) as i64;
+            let price = dec!(50_000) + Decimal::from(offset);
+            let bar = sample_bar(1000 * i, price);
+            strategy_strict.on_bar(&bar);
+            strategy_standard.on_bar(&bar);
+        }
+
+        let dip_bar = sample_bar(20_000, dec!(49_650));
+        strategy_strict.on_bar(&dip_bar);
+        strategy_standard.on_bar(&dip_bar);
+
+        let bounce_bar = sample_bar(21_000, dec!(49_660));
+        let intent_strict = strategy_strict.on_bar(&bounce_bar);
+        let intent_standard = strategy_standard.on_bar(&bounce_bar);
+
+        assert!(
+            intent_strict.is_none(),
+            "Micro-well (depth 0.88%) must be filtered out when min_well_depth_pct is 1.50%"
+        );
+        assert!(
+            intent_standard.is_some(),
+            "Well (depth 0.88%) must trigger when min_well_depth_pct is 0.50%"
+        );
+    }
+
+    #[test]
+    fn kramers_long_breakout_triggers_when_energy_exceeds_barrier() {
+        let config = LangevinConfig {
+            window_size: 20,
+            enable_kramers_breakout: true,
+            kramers_lambda_threshold: dec!(1.0),
+            min_take_profit_pct: dec!(0.0001),
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        };
+        let mut strategy = LangevinPotentialStrategy::new(config).unwrap();
+
+        for i in 0..20 {
+            let offset = ((i as f64 * 0.5).sin() * 100.0) as i64;
+            let price = dec!(50_000) + Decimal::from(offset);
+            let bar = sample_bar(1000 * i, price);
+            strategy.on_bar(&bar);
+        }
+
+        let mut breakout_bar = sample_bar(20_000, dec!(50_300));
+        breakout_bar.start_time = 20_000;
+        breakout_bar.end_time = 20_010;
+
+        let intent = strategy.on_bar(&breakout_bar);
+        assert!(intent.is_some(), "Kramers long breakout must trigger");
+        let intent = intent.unwrap();
+        assert_eq!(intent.side, Side::Buy);
+        assert!(intent.stop_loss < intent.price);
+        assert!(intent.price < intent.take_profit);
+        assert!(
+            strategy.audit().is_some(),
+            "audit telemetry must be recorded"
+        );
+    }
+
+    #[test]
+    fn kramers_short_breakout_triggers_when_energy_exceeds_barrier() {
+        let config = LangevinConfig {
+            window_size: 20,
+            enable_kramers_breakout: true,
+            kramers_lambda_threshold: dec!(1.0),
+            min_take_profit_pct: dec!(0.0001),
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        };
+        let mut strategy = LangevinPotentialStrategy::new(config).unwrap();
+
+        for i in 0..20 {
+            let offset = ((i as f64 * 0.5).sin() * 100.0) as i64;
+            let price = dec!(50_000) + Decimal::from(offset);
+            let bar = sample_bar(1000 * i, price);
+            strategy.on_bar(&bar);
+        }
+
+        let mut breakdown_bar = sample_bar(20_000, dec!(49_700));
+        breakdown_bar.start_time = 20_000;
+        breakdown_bar.end_time = 20_010;
+
+        let intent = strategy.on_bar(&breakdown_bar);
+        assert!(intent.is_some(), "Kramers short breakout must trigger");
+        let intent = intent.unwrap();
+        assert_eq!(intent.side, Side::Sell);
+        assert!(intent.stop_loss > intent.price);
+        assert!(intent.price > intent.take_profit);
+    }
+
+    #[test]
+    fn kramers_breakout_disabled_flag_blocks_signals() {
+        let config = LangevinConfig {
+            window_size: 20,
+            enable_kramers_breakout: false,
+            min_take_profit_pct: dec!(0.0001),
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        };
+        let mut strategy = LangevinPotentialStrategy::new(config).unwrap();
+
+        for i in 0..20 {
+            let offset = ((i as f64 * 0.5).sin() * 100.0) as i64;
+            let price = dec!(50_000) + Decimal::from(offset);
+            let bar = sample_bar(1000 * i, price);
+            strategy.on_bar(&bar);
+        }
+
+        let mut breakout_bar = sample_bar(20_000, dec!(50_300));
+        breakout_bar.start_time = 20_000;
+        breakout_bar.end_time = 20_010;
+
+        let intent = strategy.on_bar(&breakout_bar);
+        assert!(
+            intent.is_none(),
+            "Disabled Kramers breakout must emit no signal"
+        );
     }
 
     #[test]
     fn zero_delta_t_does_not_panic_or_divide_by_zero() {
-        let mut kde = KdePotential::new(10, 1.0, 0.02, 0.001, 0.25, 10).unwrap();
-        // Send bars at the exact same millisecond
-        for _ in 0..15 {
-            let mut bar = sample_bar(1_700_000_000, dec!(50_000));
-            bar.end_time = bar.start_time; // delta_t_ms = 0
+        let mut kde = KdePotential::new(10, 1.0, 0.02, 0.001, 0.25, 5).unwrap();
+        for i in 0..10 {
+            let mut bar = sample_bar(1000 * i, dec!(50_000));
+            bar.end_time = bar.start_time;
             kde.push(&bar);
         }
         assert!(kde.lambda_ema().is_finite());
@@ -1046,17 +1525,16 @@ mod tests {
             window_size: 20,
             beta_entry: dec!(0.50),
             min_take_profit_pct: dec!(0.0001),
+            macro_trend_filter: false,
             ..LangevinConfig::default()
         };
         let mut strategy = LangevinPotentialStrategy::new(config).unwrap();
 
-        // Feed oscillating bars to build a clear well around 50,000
         for i in 0..25 {
             let offset = ((i as f64 * 0.4).sin() * 300.0) as i64;
             let price = dec!(50_000) + Decimal::from(offset);
             let bar = sample_bar(1000 * i, price);
             if let Some(intent) = strategy.on_bar(&bar) {
-                // Assert valid triple barrier contract
                 match intent.side {
                     Side::Buy => {
                         assert!(intent.stop_loss < intent.price);
@@ -1069,5 +1547,142 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn analyze_well_fails_gracefully_when_no_zero_crossing() {
+        let mut kde = KdePotential::new(20, 1.0, 0.02, 0.001, 0.25, 10).unwrap();
+        for i in 0..20 {
+            let bar = sample_bar(1000 * i, dec!(50_000) + Decimal::from(i % 3));
+            kde.push(&bar);
+        }
+        let result = kde.analyze_well((60_000.0_f64).ln());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn macro_trend_filter_suppresses_counter_trend_reversion() {
+        let mut strategy = LangevinPotentialStrategy::new(LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            macro_trend_filter: true,
+            macro_ema_period: 10,
+            macro_slope_window: 10,
+            ..LangevinConfig::default()
+        })
+        .unwrap();
+
+        for i in 0..30 {
+            let price = dec!(55_000) - Decimal::from(i * 100);
+            strategy.on_bar(&sample_bar(1000 * i, price));
+        }
+
+        let dip_bar = sample_bar(30_000, dec!(51_800));
+        strategy.on_bar(&dip_bar);
+
+        let bounce_bar = sample_bar(31_000, dec!(51_810));
+        let intent = strategy.on_bar(&bounce_bar);
+
+        assert!(
+            intent.is_none(),
+            "Downward macro trend must suppress Long mean-reversion counter-trend entry"
+        );
+    }
+
+    #[test]
+    fn harmonic_overshoot_increases_take_profit_distance() {
+        let mut strat_zero = LangevinPotentialStrategy::new(LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            opposite_wall_fraction: dec!(0.0),
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        })
+        .unwrap();
+
+        let mut strat_overshoot = LangevinPotentialStrategy::new(LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            opposite_wall_fraction: dec!(0.60),
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        })
+        .unwrap();
+
+        for i in 0..20 {
+            let offset = ((i as f64 * 0.5).sin() * 200.0) as i64;
+            let price = dec!(50_000) + Decimal::from(offset);
+            let bar = sample_bar(1000 * i, price);
+            strat_zero.on_bar(&bar);
+            strat_overshoot.on_bar(&bar);
+        }
+
+        let dip_bar = sample_bar(20_000, dec!(49_650));
+        strat_zero.on_bar(&dip_bar);
+        strat_overshoot.on_bar(&dip_bar);
+
+        let bounce_bar = sample_bar(21_000, dec!(49_660));
+        let intent_zero = strat_zero.on_bar(&bounce_bar).expect("intent_zero");
+        let intent_overshoot = strat_overshoot
+            .on_bar(&bounce_bar)
+            .expect("intent_overshoot");
+
+        assert!(
+            intent_overshoot.take_profit > intent_zero.take_profit,
+            "Overshoot take-profit ({}) must exceed zero-overshoot take-profit ({})",
+            intent_overshoot.take_profit,
+            intent_zero.take_profit
+        );
+    }
+
+    #[test]
+    fn dynamic_breakeven_sets_breakeven_atr() {
+        let mut strat_be = LangevinPotentialStrategy::new(LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            enable_dynamic_breakeven: true,
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        })
+        .unwrap();
+
+        let mut strat_no_be = LangevinPotentialStrategy::new(LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            enable_dynamic_breakeven: false,
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        })
+        .unwrap();
+
+        for i in 0..20 {
+            let offset = ((i as f64 * 0.5).sin() * 200.0) as i64;
+            let price = dec!(50_000) + Decimal::from(offset);
+            let bar = sample_bar(1000 * i, price);
+            strat_be.on_bar(&bar);
+            strat_no_be.on_bar(&bar);
+        }
+
+        let dip_bar = sample_bar(20_000, dec!(49_650));
+        strat_be.on_bar(&dip_bar);
+        strat_no_be.on_bar(&dip_bar);
+
+        let bounce_bar = sample_bar(21_000, dec!(49_660));
+        let intent_be = strat_be.on_bar(&bounce_bar).expect("intent_be");
+        let intent_no_be = strat_no_be.on_bar(&bounce_bar).expect("intent_no_be");
+
+        assert!(
+            intent_be.breakeven_atr.is_some(),
+            "Dynamic breakeven must set breakeven_atr"
+        );
+        assert!(
+            intent_no_be.breakeven_atr.is_none(),
+            "Disabled dynamic breakeven must leave breakeven_atr as None"
+        );
     }
 }
