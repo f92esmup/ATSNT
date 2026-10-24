@@ -437,6 +437,9 @@ cargo run -p adapters --bin live_gateway -- \
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): Milestone progress and upcoming deliverables.
 - [`docs/strategy/01-dollar-bars-cusum.md`](docs/strategy/01-dollar-bars-cusum.md): Mathematics of Dollar Bars, symmetric CUSUM filter, rolling Z-Scores, and Triple Barrier exits.
 - [`docs/strategy/02-order-flow-imbalance.md`](docs/strategy/02-order-flow-imbalance.md): Order Flow Imbalance, toxic momentum breakouts, liquidity absorption reversals, and friction filters.
+- [`docs/strategy/03-swarm-consensus.md`](docs/strategy/03-swarm-consensus.md): Multi-agent Bayesian prior consensus and heterogeneous feed weighting.
+- [`docs/strategy/04-langevin-potential-well.md`](docs/strategy/04-langevin-potential-well.md): *(En desarrollo)* Non-equilibrium statistical mechanics, Langevin dynamics, empirical potential wells, and Kramers escape.
+- [`docs/strategy/05-ising-phase-transition.md`](docs/strategy/05-ising-phase-transition.md): *(En espera)* Curie-Weiss mean-field Ising spin model, order flow susceptibility, and entropy phase transitions.
 - [`docs/architecture/02-domain-models-and-lifecycle.md`](docs/architecture/02-domain-models-and-lifecycle.md): Domain models and 3-stage execution lifecycle (`OrderIntent` -> `Order` FSM -> `Position`).
 - [`docs/architecture/03-adapters-and-market-data.md`](docs/architecture/03-adapters-and-market-data.md): Ports and Adapters, Binance `aggTrades` mapping, and WebSocket streaming.
 - [`docs/architecture/04-hpo-and-walk-forward.md`](docs/architecture/04-hpo-and-walk-forward.md): Walk-Forward Optimization, parameter stability scoring, DSR, and Rayon parallelism.
