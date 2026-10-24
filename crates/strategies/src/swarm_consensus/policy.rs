@@ -834,7 +834,7 @@ impl SwarmPolicySpace {
     /// Search space for Classifier Mode with Triple Barrier protection.
     pub fn classifier_space() -> Self {
         Self {
-            threshold_bases: vec![dec!(0.50), dec!(0.525), dec!(0.55)],
+            threshold_bases: vec![dec!(0.525), dec!(0.55), dec!(0.575)],
             threshold_steps: vec![dec!(0.075)],
             hysteresis_values: vec![dec!(0.55)],
             base_risks: vec![dec!(0.010)],
@@ -846,14 +846,14 @@ impl SwarmPolicySpace {
                 Some(dec!(3.5)),
                 Some(dec!(4.0)),
             ],
-            breakeven_atr_multipliers: vec![Some(dec!(1.0)), Some(dec!(1.25)), Some(dec!(1.50))],
+            breakeven_atr_multipliers: vec![Some(dec!(0.60)), Some(dec!(0.75)), Some(dec!(0.90))],
             trailing_atr_multipliers: vec![Some(dec!(0.75)), Some(dec!(1.0)), Some(dec!(1.25))],
             decay_horizon_options: vec![Some(43200), Some(86400)],
             feed_weights_options: standard_feed_weights_options(),
             bracket_priority_options: default_bracket_priority_options(),
             macro_trend_filter_options: vec![true],
-            macro_slope_min_options: vec![dec!(0.0), dec!(0.02), dec!(0.04)],
-            short_threshold_delta_options: vec![dec!(0.0), dec!(0.025), dec!(0.05)],
+            macro_slope_min_options: vec![dec!(0.03), dec!(0.05), dec!(0.07), dec!(0.09)],
+            short_threshold_delta_options: vec![dec!(0.025), dec!(0.05), dec!(0.075)],
             max_level_risk: default_max_level_risk(),
             classifier_mode: true,
         }
