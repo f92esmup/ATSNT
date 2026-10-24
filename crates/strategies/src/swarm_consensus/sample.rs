@@ -235,6 +235,9 @@ pub struct ConsensusSample {
     /// ALMA slope of feed 2 (time 1h, `STOP_REFERENCE_FEED`), in ATR units per bar.
     #[serde(default)]
     pub macro_trend_slope: Decimal,
+    /// ALMA slope of feed 3 (time 2h), in ATR units per bar.
+    #[serde(default)]
+    pub macro_trend_slope_2h: Decimal,
     /// Price of the trade that produced the sample (audit only).
     pub price: Decimal,
 }
@@ -345,6 +348,7 @@ mod tests {
             feed_short,
             atr_stop_reference: dec!(500),
             macro_trend_slope: Decimal::ZERO,
+            macro_trend_slope_2h: Decimal::ZERO,
             price: dec!(40000),
         }
     }

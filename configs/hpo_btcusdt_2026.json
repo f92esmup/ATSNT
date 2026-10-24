@@ -22,7 +22,7 @@
     "classifier_mode": true,
     "macro_trend_filter": true,
     "macro_slope_min": "0.02",
-    "short_threshold_delta": "0.05"
+    "short_threshold_delta": "0.0"
   },
   "execution_context": {
     "initial_capital": "200",
@@ -37,7 +37,8 @@
     "quantity_step_size": "0.001",
     "min_order_notional": "5",
     "funding_rate_pct": "0.0001",
-    "maintenance_margin_rate": "0.004"
+    "maintenance_margin_rate": "0.004",
+    "resting_maker_exits": true
   },
   "hpo_scorecard": {
     "mean_is_sortino": "-0.2388711435389275016514279116",

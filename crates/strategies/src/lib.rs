@@ -3,12 +3,16 @@
 #[cfg(test)]
 mod contract;
 pub mod dollar_bars_cusum;
+pub mod langevin_potential;
 pub mod order_flow_imbalance;
 pub mod registry;
 pub mod strategy;
 pub mod swarm_consensus;
 
 pub use dollar_bars_cusum::{DollarBarsCusumConfig, DollarBarsCusumSpace, DollarBarsCusumStrategy};
+pub use langevin_potential::{
+    LangevinConfig, LangevinPotentialStrategy, LangevinSpace, WellTopology,
+};
 pub use order_flow_imbalance::{
     OrderFlowImbalanceConfig, OrderFlowImbalanceSpace, OrderFlowImbalanceStrategy,
 };

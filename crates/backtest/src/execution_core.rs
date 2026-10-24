@@ -995,11 +995,17 @@ impl ExecutionCore {
             self.bars_held,
             config.slippage_pct,
         ) {
+            let is_taker = !(config.resting_maker_exits && exit.reason == "TakeProfit");
+            let slippage = if !is_taker {
+                Decimal::ZERO
+            } else {
+                exit.slippage_per_unit
+            };
             self.execute_close(
                 bar.end_ms,
                 exit.price,
-                exit.slippage_per_unit,
-                true,
+                slippage,
+                is_taker,
                 exit.reason,
                 config,
                 equity,

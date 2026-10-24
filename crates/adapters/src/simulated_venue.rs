@@ -36,6 +36,9 @@ pub struct SimulatedVenueConfig {
     pub initial_equity: Decimal,
     /// Taker fee as a fraction of notional (e.g. 0.0005 = 0.05%).
     pub taker_fee_pct: Decimal,
+    /// Maker fee as a fraction of notional (e.g. 0.0002 = 0.02%).
+    /// When None, falls back to `taker_fee_pct` for backward compatibility.
+    pub maker_fee_pct: Option<Decimal>,
     /// Milliseconds between sending an order and it reaching the market.
     pub latency_ms: i64,
     /// Fraction of equity risked per entry.
@@ -47,6 +50,13 @@ pub struct SimulatedVenueConfig {
     /// Maintenance margin as a fraction of notional (a flat stand-in for the exchange's
     /// notional brackets; 0.004 is the first Binance BTC bracket).
     pub maintenance_margin_rate: Decimal,
+}
+
+impl SimulatedVenueConfig {
+    /// Effective maker fee percentage (or taker fee when maker fee is not configured).
+    pub fn maker_fee_rate(&self) -> Decimal {
+        self.maker_fee_pct.unwrap_or(self.taker_fee_pct)
+    }
 }
 
 /// A funding payment settled by the venue.
@@ -94,6 +104,10 @@ struct WorkingOrder {
     reduce_only: bool,
     /// Leverage the account runs at when this entry fills (1 for closing orders).
     leverage: u32,
+    /// Whether the order executes as a passive maker (e.g. resting Take Profit limit order).
+    is_maker: bool,
+    /// Specific execution price for resting limit orders, bypassing tape slippage.
+    limit_price: Option<Decimal>,
 }
 
 /// One execution to book against the account.
@@ -219,6 +233,8 @@ impl SimulatedVenue {
             due_ms: at_ms + self.config.latency_ms,
             reduce_only,
             leverage,
+            is_maker: false,
+            limit_price: None,
         });
         order_id
     }
@@ -358,12 +374,20 @@ impl SimulatedVenue {
         if stop_hit || take_hit {
             state.exits = None;
             let due_ms = state.clock_ms + self.config.latency_ms;
+            let (is_maker, limit_price) =
+                if take_hit && !stop_hit && self.config.maker_fee_pct.is_some() {
+                    (true, legs.take_profit)
+                } else {
+                    (false, None)
+                };
             state.orders.push(WorkingOrder {
                 side: opposite(position.side),
                 remaining: position.quantity,
                 due_ms,
                 reduce_only: true,
                 leverage: 1,
+                is_maker,
+                limit_price,
             });
         }
     }
@@ -398,9 +422,20 @@ impl SimulatedVenue {
             let side = order.side;
             let reduce_only = order.reduce_only;
             let leverage = order.leverage;
+            let is_maker = order.is_maker;
+            let fill_price = if let Some(limit) = order.limit_price {
+                limit
+            } else {
+                trade.price
+            };
             state.orders[index].remaining -= take;
             let filled = state.orders[index].remaining <= Decimal::ZERO;
-            let commission = trade.price * take * self.config.taker_fee_pct;
+            let fee_rate = if is_maker {
+                self.config.maker_fee_rate()
+            } else {
+                self.config.taker_fee_pct
+            };
+            let commission = fill_price * take * fee_rate;
             let trade_id = state.next_trade_id;
             state.next_trade_id += 1;
             self.apply_fill(
@@ -408,7 +443,7 @@ impl SimulatedVenue {
                 Fill {
                     side,
                     quantity: take,
-                    price: trade.price,
+                    price: fill_price,
                     commission,
                     reduce_only,
                     leverage,
@@ -418,7 +453,7 @@ impl SimulatedVenue {
                 time_ms: trade.timestamp,
                 side,
                 last_quantity: take,
-                last_price: trade.price,
+                last_price: fill_price,
                 order_filled: filled,
                 order_closed: filled,
                 commission,
@@ -552,6 +587,8 @@ impl ExitGateway for SimulatedVenue {
             due_ms,
             reduce_only: true,
             leverage: 1,
+            is_maker: false,
+            limit_price: None,
         });
         Ok(true)
     }
@@ -654,6 +691,7 @@ mod tests {
         SimulatedVenue::new(SimulatedVenueConfig {
             initial_equity: dec!(1000),
             taker_fee_pct: dec!(0.001),
+            maker_fee_pct: None,
             latency_ms,
             risk_per_trade_pct: dec!(0.01),
             risk_policy: RiskPolicy::default(),
@@ -786,6 +824,40 @@ mod tests {
         assert_eq!(reports[0].commission, dec!(0.5));
         assert_eq!(reports[0].commission_asset.as_deref(), Some("USDT"));
         assert_eq!(venue.wallet_balance(), dec!(999.5));
+    }
+
+    #[tokio::test]
+    async fn take_profit_pays_maker_commission_when_configured() {
+        let venue = SimulatedVenue::new(SimulatedVenueConfig {
+            initial_equity: dec!(1000),
+            taker_fee_pct: dec!(0.001),
+            maker_fee_pct: Some(dec!(0.0002)),
+            latency_ms: 0,
+            risk_per_trade_pct: dec!(0.01),
+            risk_policy: RiskPolicy::default(),
+            funding: FundingSchedule::constant(dec!(0.0001)),
+            maintenance_margin_rate: dec!(0.004),
+        });
+        venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
+        venue
+            .submit_entry("BTCUSDT", &long_intent(), dec!(1000), dec!(1000))
+            .await
+            .unwrap();
+        venue.on_trade(&print(1_001, dec!(100), dec!(10), Side::Buy));
+        venue
+            .place_exits("BTCUSDT", Side::Buy, dec!(98), Some(dec!(104)))
+            .await
+            .unwrap();
+
+        // Print at 105 arms take_profit (104). The next print fills it as Maker at the limit price (104).
+        let armed = venue.on_trade(&print(1_002, dec!(105), dec!(1), Side::Buy));
+        assert!(armed.is_empty());
+        let filled = venue.on_trade(&print(1_003, dec!(104.8), dec!(10), Side::Sell));
+        assert_eq!(filled.len(), 1);
+        assert_eq!(filled[0].last_price, dec!(104));
+        assert_eq!(filled[0].last_quantity, dec!(5));
+        // 5 units * 104 * 0.0002 maker fee = 0.104 commission.
+        assert_eq!(filled[0].commission, dec!(0.104));
     }
 
     #[tokio::test]

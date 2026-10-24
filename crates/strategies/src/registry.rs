@@ -14,6 +14,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::dollar_bars_cusum::DollarBarsCusumStrategy;
+use crate::langevin_potential::LangevinPotentialStrategy;
 use crate::order_flow_imbalance::OrderFlowImbalanceStrategy;
 use crate::strategy::OptimizableStrategy;
 use crate::swarm_consensus::SwarmConsensusStrategy;
@@ -74,6 +75,7 @@ register_strategies! {
     DollarBarsCusumStrategy => ["cusum"],
     OrderFlowImbalanceStrategy => ["ofi"],
     SwarmConsensusStrategy => ["swarm"],
+    LangevinPotentialStrategy => ["langevin"],
 }
 
 /// Error text for an unknown strategy name, listing what is registered.

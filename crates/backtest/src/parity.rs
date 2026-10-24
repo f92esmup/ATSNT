@@ -165,6 +165,7 @@ pub fn simulate_market_order(
     let venue = SimulatedVenue::new(SimulatedVenueConfig {
         initial_equity: dec!(1_000_000_000),
         taker_fee_pct: Decimal::ZERO,
+        maker_fee_pct: None,
         latency_ms,
         risk_per_trade_pct: dec!(0.01),
         risk_policy: RiskPolicy::default(),

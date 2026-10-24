@@ -478,7 +478,8 @@ impl ConsensusPolicy {
             let (candidate_side, conviction, theta) =
                 if long_net >= theta_long && short_net < theta_long {
                     if self.config.macro_trend_filter
-                        && sample.macro_trend_slope < self.config.macro_slope_min
+                        && (sample.macro_trend_slope < self.config.macro_slope_min
+                            || sample.macro_trend_slope_2h < Decimal::ZERO)
                     {
                         (None, Decimal::ZERO, theta_long)
                     } else {
@@ -486,7 +487,8 @@ impl ConsensusPolicy {
                     }
                 } else if allow_short && short_net >= theta_short && long_net < theta_short {
                     if self.config.macro_trend_filter
-                        && sample.macro_trend_slope > -self.config.macro_slope_min
+                        && (sample.macro_trend_slope > -self.config.macro_slope_min
+                            || sample.macro_trend_slope_2h > Decimal::ZERO)
                     {
                         (None, Decimal::ZERO, theta_short)
                     } else {
@@ -590,10 +592,14 @@ impl ConsensusPolicy {
             0
         };
         if self.config.macro_trend_filter {
-            if sample.macro_trend_slope < self.config.macro_slope_min {
+            if sample.macro_trend_slope < self.config.macro_slope_min
+                || sample.macro_trend_slope_2h < Decimal::ZERO
+            {
                 self.long_level = 0;
             }
-            if sample.macro_trend_slope > -self.config.macro_slope_min {
+            if sample.macro_trend_slope > -self.config.macro_slope_min
+                || sample.macro_trend_slope_2h > Decimal::ZERO
+            {
                 self.short_level = 0;
             }
         }
@@ -834,21 +840,21 @@ impl SwarmPolicySpace {
     /// Search space for Classifier Mode with Triple Barrier protection.
     pub fn classifier_space() -> Self {
         Self {
-            threshold_bases: vec![dec!(0.50), dec!(0.525), dec!(0.55)],
+            threshold_bases: vec![dec!(0.475), dec!(0.50), dec!(0.525), dec!(0.55)],
             threshold_steps: vec![dec!(0.075)],
             hysteresis_values: vec![dec!(0.55)],
             base_risks: vec![dec!(0.010)],
             risk_increments: vec![dec!(0.0)],
             stop_atr_multipliers: vec![dec!(1.0), dec!(1.25), dec!(1.50)],
-            take_profit_atr_multipliers: vec![Some(dec!(3.5)), Some(dec!(4.0))],
-            breakeven_atr_multipliers: vec![Some(dec!(1.0)), Some(dec!(1.25))],
-            trailing_atr_multipliers: vec![Some(dec!(1.0)), Some(dec!(1.25))],
+            take_profit_atr_multipliers: vec![Some(dec!(3.5)), Some(dec!(4.0)), Some(dec!(4.5))],
+            breakeven_atr_multipliers: vec![Some(dec!(1.0)), Some(dec!(1.25)), Some(dec!(1.50))],
+            trailing_atr_multipliers: vec![Some(dec!(1.0)), Some(dec!(1.25)), Some(dec!(1.50))],
             decay_horizon_options: vec![Some(86400)],
             feed_weights_options: standard_feed_weights_options(),
             bracket_priority_options: default_bracket_priority_options(),
             macro_trend_filter_options: vec![true],
-            macro_slope_min_options: vec![dec!(0.02), dec!(0.04)],
-            short_threshold_delta_options: vec![dec!(0.025), dec!(0.05)],
+            macro_slope_min_options: vec![dec!(0.02), dec!(0.04), dec!(0.06)],
+            short_threshold_delta_options: vec![dec!(0.0)],
             max_level_risk: default_max_level_risk(),
             classifier_mode: true,
         }
@@ -1224,6 +1230,7 @@ mod tests {
             feed_short: [FeedVote::default(); FEED_COUNT],
             atr_stop_reference: atr,
             macro_trend_slope: Decimal::ZERO,
+            macro_trend_slope_2h: Decimal::ZERO,
             price: dec!(40000),
         }
     }
@@ -1802,6 +1809,7 @@ mod tests {
             feed_short: [FeedVote::default(); FEED_COUNT],
             atr_stop_reference: dec!(500),
             macro_trend_slope: Decimal::ZERO,
+            macro_trend_slope_2h: Decimal::ZERO,
             price: dec!(40000),
         };
         s.feed_long[0] = FeedVote { up: 0, down: 6 };
@@ -2092,6 +2100,36 @@ mod tests {
         let d4 = policy.on_sample(&s4, true);
         assert!(
             matches!(d4, Some(Decision::Entry(ref intent)) if intent.side == domain::Side::Sell)
+        );
+    }
+
+    #[test]
+    fn macro_trend_filter_dual_timeframe_blocks_when_2h_slope_disagrees() {
+        let config = PolicyConfig {
+            classifier_mode: true,
+            macro_trend_filter: true,
+            macro_slope_min: dec!(0.02),
+            threshold_base: dec!(0.50),
+            stop_atr_multiplier: dec!(1.0),
+            take_profit_atr_multiplier: Some(dec!(2.0)),
+            decay_horizon_seconds: Some(14400),
+            ..PolicyConfig::default()
+        };
+        let mut policy = ConsensusPolicy::new(config).unwrap();
+
+        // 1. Long signal with positive 1h slope (+0.04 >= 0.02), but negative 2h slope (-0.01 < 0) -> BLOCKED!
+        let mut s1 = sample(1000, 60, 0, dec!(500));
+        s1.macro_trend_slope = dec!(0.04);
+        s1.macro_trend_slope_2h = dec!(-0.01);
+        assert_eq!(policy.on_sample(&s1, true), None);
+
+        // 2. Long signal with positive 1h slope (+0.04 >= 0.02) and non-negative 2h slope (+0.02 >= 0) -> ADMITTED!
+        let mut s2 = sample(2000, 60, 0, dec!(500));
+        s2.macro_trend_slope = dec!(0.04);
+        s2.macro_trend_slope_2h = dec!(0.02);
+        let d2 = policy.on_sample(&s2, true);
+        assert!(
+            matches!(d2, Some(Decision::Entry(ref intent)) if intent.side == domain::Side::Buy)
         );
     }
 

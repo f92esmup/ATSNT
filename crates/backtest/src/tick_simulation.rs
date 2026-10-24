@@ -73,9 +73,15 @@ impl<S: Strategy> TickSimulation<S> {
     /// Creates a flat simulation holding the configured capital.
     pub fn new(config: TickSimulationConfig, strategy: S) -> Result<Self, TickSimulationError> {
         let backtest = &config.backtest;
+        let maker_fee_pct = if backtest.resting_maker_exits {
+            Some(backtest.maker_fee_pct)
+        } else {
+            None
+        };
         let venue = SimulatedVenue::new(SimulatedVenueConfig {
             initial_equity: backtest.initial_capital,
             taker_fee_pct: backtest.taker_fee_pct,
+            maker_fee_pct,
             latency_ms: config.latency_ms,
             risk_per_trade_pct: backtest.risk_per_trade_pct,
             risk_policy: backtest.risk_policy()?,

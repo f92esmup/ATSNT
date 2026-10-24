@@ -94,6 +94,10 @@ pub struct BacktestConfig {
     /// omitted from the serialized form while it is `0`, so existing contexts serialize as before.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub latency_ms: i64,
+    /// Whether resting limit exit orders (e.g. Take Profit) execute as Maker orders (paying
+    /// `maker_fee_pct` without adverse slippage), rather than aggressive Takers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resting_maker_exits: bool,
 }
 
 fn is_zero(value: &i64) -> bool {
@@ -232,6 +236,7 @@ impl Default for BacktestConfig {
             funding_rate_pct: default_funding_rate_pct(),
             maintenance_margin_rate: default_maintenance_margin_rate(),
             latency_ms: 0,
+            resting_maker_exits: false,
         }
     }
 }

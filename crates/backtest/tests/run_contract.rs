@@ -21,7 +21,7 @@ fn sample_spec() -> RunSpec<DollarBarsCusumConfig> {
 #[test]
 fn deployed_artifact_json_still_loads_through_run_spec() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../configs/hpo_btcusdt_2026.json");
+        .join("../../configs/hpo_btcusdt_2026_1k.json");
     let loaded = load_strategy_config::<DollarBarsCusumConfig>(&path).unwrap();
     let LoadedStrategyConfig::Artifact(artifact) = loaded else {
         panic!("deployed artifact must parse as an artifact, not a bare config");
