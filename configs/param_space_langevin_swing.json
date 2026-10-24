@@ -1,0 +1,12 @@
+{
+  "window_sizes": [60, 100, 160, 250, 400],
+  "bandwidth_factors": ["1.1", "1.3", "1.6", "2.0"],
+  "decay_etas": ["0.01", "0.02", "0.04", "0.06"],
+  "beta_entries": ["0.45", "0.60", "0.75"],
+  "zeta_thermal_tps": ["0.0", "0.10"],
+  "time_barrier_bars": [150, 300, 600],
+  "min_take_profit_pcts": ["0.004", "0.008", "0.014", "0.022"],
+  "min_well_depth_pcts": ["0.003", "0.006", "0.010", "0.016"],
+  "opposite_wall_fractions": ["0.60", "0.80", "1.00", "1.25"],
+  "macro_trend_filter_options": [true, false]
+}
