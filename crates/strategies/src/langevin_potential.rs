@@ -723,6 +723,17 @@ fn default_min_wall_absorption_ratios_space() -> Vec<Decimal> {
     vec![dec!(0.48), dec!(0.52)]
 }
 
+fn default_stop_loss_atr_buffers_space() -> Vec<Decimal> {
+    vec![
+        dec!(0.0),
+        dec!(0.25),
+        dec!(0.50),
+        dec!(0.75),
+        dec!(1.00),
+        dec!(1.50),
+    ]
+}
+
 /// Hyperparameter search space for automated optimization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LangevinSpace {
@@ -735,6 +746,8 @@ pub struct LangevinSpace {
     pub min_take_profit_pcts: Vec<Decimal>,
     pub min_well_depth_pcts: Vec<Decimal>,
     pub opposite_wall_fractions: Vec<Decimal>,
+    #[serde(default = "default_stop_loss_atr_buffers_space")]
+    pub stop_loss_atr_buffers: Vec<Decimal>,
     pub macro_trend_filter_options: Vec<bool>,
     #[serde(default = "default_kinematic_windows_space")]
     pub kinematic_windows: Vec<usize>,
@@ -754,6 +767,7 @@ impl Default for LangevinSpace {
             min_take_profit_pcts: vec![dec!(0.0020), dec!(0.0025), dec!(0.0035)],
             min_well_depth_pcts: vec![dec!(0.0025), dec!(0.0035), dec!(0.0050)],
             opposite_wall_fractions: vec![dec!(0.40), dec!(0.60), dec!(0.80)],
+            stop_loss_atr_buffers: default_stop_loss_atr_buffers_space(),
             macro_trend_filter_options: vec![true, false],
             kinematic_windows: vec![2, 4, 6],
             min_wall_absorption_ratios: vec![dec!(0.48), dec!(0.52)],
@@ -765,6 +779,86 @@ impl HyperparameterSpace for LangevinSpace {
     type Config = LangevinConfig;
 
     fn generate_candidates(&self, max_candidates: usize) -> Vec<Self::Config> {
+        let total_combinations: usize = self
+            .window_sizes
+            .len()
+            .saturating_mul(self.bandwidth_factors.len())
+            .saturating_mul(self.decay_etas.len())
+            .saturating_mul(self.beta_entries.len())
+            .saturating_mul(self.zeta_thermal_tps.len())
+            .saturating_mul(self.time_barrier_bars.len())
+            .saturating_mul(self.min_take_profit_pcts.len())
+            .saturating_mul(self.min_well_depth_pcts.len())
+            .saturating_mul(self.opposite_wall_fractions.len())
+            .saturating_mul(self.stop_loss_atr_buffers.len())
+            .saturating_mul(self.macro_trend_filter_options.len())
+            .saturating_mul(self.kinematic_windows.len())
+            .saturating_mul(self.min_wall_absorption_ratios.len());
+
+        if total_combinations > max_candidates.saturating_mul(10) {
+            use rand::seq::SliceRandom;
+            use rand::SeedableRng;
+            let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+            let mut configs = Vec::with_capacity(max_candidates);
+            for _ in 0..max_candidates {
+                configs.push(LangevinConfig {
+                    window_size: *self.window_sizes.choose(&mut rng).unwrap_or(&100),
+                    bandwidth_factor: *self
+                        .bandwidth_factors
+                        .choose(&mut rng)
+                        .unwrap_or(&dec!(1.6)),
+                    decay_eta: *self.decay_etas.choose(&mut rng).unwrap_or(&dec!(0.02)),
+                    vacuum_epsilon: dec!(0.001),
+                    beta_entry: *self.beta_entries.choose(&mut rng).unwrap_or(&dec!(0.60)),
+                    alpha_dissociation: dec!(0.25),
+                    zeta_thermal_tp: *self
+                        .zeta_thermal_tps
+                        .choose(&mut rng)
+                        .unwrap_or(&dec!(0.10)),
+                    lambda_ema_period: 20,
+                    time_barrier_bars: *self.time_barrier_bars.choose(&mut rng).unwrap_or(&150),
+                    min_take_profit_pct: *self
+                        .min_take_profit_pcts
+                        .choose(&mut rng)
+                        .unwrap_or(&dec!(0.010)),
+                    min_well_depth_pct: *self
+                        .min_well_depth_pcts
+                        .choose(&mut rng)
+                        .unwrap_or(&dec!(0.012)),
+                    enable_kramers_breakout: true,
+                    kramers_lambda_threshold: dec!(1.5),
+                    kramers_tp_multiple: dec!(1.0),
+                    opposite_wall_fraction: *self
+                        .opposite_wall_fractions
+                        .choose(&mut rng)
+                        .unwrap_or(&dec!(0.50)),
+                    enable_dynamic_breakeven: true,
+                    breakeven_distance_fraction: dec!(0.50),
+                    stop_loss_atr_buffer: *self
+                        .stop_loss_atr_buffers
+                        .choose(&mut rng)
+                        .unwrap_or(&dec!(0.75)),
+                    macro_trend_filter: *self
+                        .macro_trend_filter_options
+                        .choose(&mut rng)
+                        .unwrap_or(&true),
+                    macro_ema_period: 200,
+                    macro_slope_window: 50,
+                    kinematic_exhaustion_window: *self
+                        .kinematic_windows
+                        .choose(&mut rng)
+                        .unwrap_or(&4),
+                    min_wall_absorption_ratio: *self
+                        .min_wall_absorption_ratios
+                        .choose(&mut rng)
+                        .unwrap_or(&dec!(0.50)),
+                    use_limit_entries: false,
+                    limit_time_in_force_bars: None,
+                });
+            }
+            return configs;
+        }
+
         let mut configs = Vec::new();
 
         for &w in &self.window_sizes {
@@ -776,36 +870,43 @@ impl HyperparameterSpace for LangevinSpace {
                                 for &min_tp in &self.min_take_profit_pcts {
                                     for &min_depth in &self.min_well_depth_pcts {
                                         for &owf in &self.opposite_wall_fractions {
-                                            for &macro_filter in &self.macro_trend_filter_options {
-                                                for &kw in &self.kinematic_windows {
-                                                    for &war in &self.min_wall_absorption_ratios {
-                                                        configs.push(LangevinConfig {
-                                                            window_size: w,
-                                                            bandwidth_factor: bf,
-                                                            decay_eta: eta,
-                                                            vacuum_epsilon: dec!(0.001),
-                                                            beta_entry: beta,
-                                                            alpha_dissociation: dec!(0.25),
-                                                            zeta_thermal_tp: zeta,
-                                                            lambda_ema_period: 20,
-                                                            time_barrier_bars: tb,
-                                                            min_take_profit_pct: min_tp,
-                                                            min_well_depth_pct: min_depth,
-                                                            enable_kramers_breakout: true,
-                                                            kramers_lambda_threshold: dec!(1.5),
-                                                            kramers_tp_multiple: dec!(1.0),
-                                                            opposite_wall_fraction: owf,
-                                                            enable_dynamic_breakeven: true,
-                                                            breakeven_distance_fraction: dec!(0.50),
-                                                            stop_loss_atr_buffer: dec!(0.75),
-                                                            macro_trend_filter: macro_filter,
-                                                            macro_ema_period: 200,
-                                                            macro_slope_window: 50,
-                                                            kinematic_exhaustion_window: kw,
-                                                            min_wall_absorption_ratio: war,
-                                                            use_limit_entries: false,
-                                                            limit_time_in_force_bars: None,
-                                                        });
+                                            for &atr_buf in &self.stop_loss_atr_buffers {
+                                                for &macro_filter in
+                                                    &self.macro_trend_filter_options
+                                                {
+                                                    for &kw in &self.kinematic_windows {
+                                                        for &war in &self.min_wall_absorption_ratios
+                                                        {
+                                                            configs.push(LangevinConfig {
+                                                                window_size: w,
+                                                                bandwidth_factor: bf,
+                                                                decay_eta: eta,
+                                                                vacuum_epsilon: dec!(0.001),
+                                                                beta_entry: beta,
+                                                                alpha_dissociation: dec!(0.25),
+                                                                zeta_thermal_tp: zeta,
+                                                                lambda_ema_period: 20,
+                                                                time_barrier_bars: tb,
+                                                                min_take_profit_pct: min_tp,
+                                                                min_well_depth_pct: min_depth,
+                                                                enable_kramers_breakout: true,
+                                                                kramers_lambda_threshold: dec!(1.5),
+                                                                kramers_tp_multiple: dec!(1.0),
+                                                                opposite_wall_fraction: owf,
+                                                                enable_dynamic_breakeven: true,
+                                                                breakeven_distance_fraction: dec!(
+                                                                    0.50
+                                                                ),
+                                                                stop_loss_atr_buffer: atr_buf,
+                                                                macro_trend_filter: macro_filter,
+                                                                macro_ema_period: 200,
+                                                                macro_slope_window: 50,
+                                                                kinematic_exhaustion_window: kw,
+                                                                min_wall_absorption_ratio: war,
+                                                                use_limit_entries: false,
+                                                                limit_time_in_force_bars: None,
+                                                            });
+                                                        }
                                                     }
                                                 }
                                             }
@@ -841,6 +942,8 @@ impl HyperparameterSpace for LangevinSpace {
         let floors = adjacent_grid_values(&self.min_take_profit_pcts, base.min_take_profit_pct);
         let depths = adjacent_grid_values(&self.min_well_depth_pcts, base.min_well_depth_pct);
         let owfs = adjacent_grid_values(&self.opposite_wall_fractions, base.opposite_wall_fraction);
+        let atr_buffers =
+            adjacent_grid_values(&self.stop_loss_atr_buffers, base.stop_loss_atr_buffer);
         let kws = adjacent_grid_values(&self.kinematic_windows, base.kinematic_exhaustion_window);
         let wars = adjacent_grid_values(
             &self.min_wall_absorption_ratios,
@@ -898,6 +1001,12 @@ impl HyperparameterSpace for LangevinSpace {
         for value in [owfs.0, owfs.1].into_iter().flatten() {
             neighbors.push(LangevinConfig {
                 opposite_wall_fraction: value,
+                ..base.clone()
+            });
+        }
+        for value in [atr_buffers.0, atr_buffers.1].into_iter().flatten() {
+            neighbors.push(LangevinConfig {
+                stop_loss_atr_buffer: value,
                 ..base.clone()
             });
         }

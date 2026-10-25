@@ -36,6 +36,10 @@ struct Args {
     #[arg(long)]
     eth_config: Option<PathBuf>,
 
+    /// Optional path to SOL strategy config JSON
+    #[arg(long)]
+    sol_config: Option<PathBuf>,
+
     /// Dollar bar accumulation threshold for BTC (default: $8M for day trading, $25M for swing)
     #[arg(long, default_value = "25000000")]
     btc_dollar_bar: Decimal,
@@ -190,11 +194,6 @@ fn main() -> Result<()> {
         )
     };
 
-    btc_cfg.opposite_wall_fraction = dec!(0.25);
-    btc_cfg.min_take_profit_pct = dec!(0.006);
-    btc_cfg.breakeven_distance_fraction = dec!(0.50);
-    btc_cfg.enable_dynamic_breakeven = true;
-    btc_cfg.stop_loss_atr_buffer = dec!(0.75);
     btc_cfg.use_limit_entries = args.use_limit_orders;
     btc_cfg.limit_time_in_force_bars = if args.use_limit_orders {
         Some(args.limit_timeout_bars)
@@ -210,17 +209,15 @@ fn main() -> Result<()> {
         )
     } else {
         let mut cfg = btc_cfg.clone();
+        cfg.opposite_wall_fraction = dec!(0.25);
         cfg.min_take_profit_pct = dec!(0.008);
         cfg.min_well_depth_pct = dec!(0.015);
+        cfg.breakeven_distance_fraction = dec!(0.50);
+        cfg.enable_dynamic_breakeven = true;
+        cfg.stop_loss_atr_buffer = dec!(0.75);
         (cfg, args.eth_dollar_bar)
     };
 
-    eth_cfg.opposite_wall_fraction = dec!(0.25);
-    eth_cfg.min_well_depth_pct = dec!(0.015);
-    eth_cfg.min_take_profit_pct = dec!(0.008);
-    eth_cfg.breakeven_distance_fraction = dec!(0.50);
-    eth_cfg.enable_dynamic_breakeven = true;
-    eth_cfg.stop_loss_atr_buffer = dec!(0.75);
     eth_cfg.use_limit_entries = args.use_limit_orders;
     eth_cfg.limit_time_in_force_bars = if args.use_limit_orders {
         Some(args.limit_timeout_bars)
@@ -228,13 +225,23 @@ fn main() -> Result<()> {
         None
     };
 
-    let mut sol_cfg = btc_cfg.clone();
-    sol_cfg.opposite_wall_fraction = dec!(0.25);
-    sol_cfg.min_take_profit_pct = dec!(0.014);
-    sol_cfg.min_well_depth_pct = dec!(0.020);
-    sol_cfg.breakeven_distance_fraction = dec!(0.50);
-    sol_cfg.enable_dynamic_breakeven = true;
-    sol_cfg.stop_loss_atr_buffer = dec!(0.75);
+    let (mut sol_cfg, sol_threshold) = if let Some(path) = args.sol_config.as_ref() {
+        let loaded = backtest::load_strategy_config::<LangevinConfig>(path)?;
+        (
+            loaded.strategy_config().clone(),
+            loaded.dollar_bar_threshold().unwrap_or(args.sol_dollar_bar),
+        )
+    } else {
+        let mut cfg = btc_cfg.clone();
+        cfg.opposite_wall_fraction = dec!(0.25);
+        cfg.min_take_profit_pct = dec!(0.014);
+        cfg.min_well_depth_pct = dec!(0.020);
+        cfg.breakeven_distance_fraction = dec!(0.50);
+        cfg.enable_dynamic_breakeven = true;
+        cfg.stop_loss_atr_buffer = dec!(0.75);
+        (cfg, args.sol_dollar_bar)
+    };
+
     sol_cfg.use_limit_entries = args.use_limit_orders;
     sol_cfg.limit_time_in_force_bars = if args.use_limit_orders {
         Some(args.limit_timeout_bars)
@@ -247,11 +254,7 @@ fn main() -> Result<()> {
     let eth_bars = load_asset_bars("ETHUSDT", &args.eth_data, eth_threshold)?;
 
     let sol_bars = if args.sol_data.exists() {
-        Some(load_asset_bars(
-            "SOLUSDT",
-            &args.sol_data,
-            args.sol_dollar_bar,
-        )?)
+        Some(load_asset_bars("SOLUSDT", &args.sol_data, sol_threshold)?)
     } else {
         None
     };
