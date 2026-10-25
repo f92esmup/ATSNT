@@ -474,7 +474,10 @@ fn main() -> Result<()> {
             .filter(|t| t.exit_reason == "StopLoss")
             .collect();
         if !sl_trades.is_empty() {
-            let be_sls = sl_trades.iter().filter(|t| t.pnl_gross >= Decimal::ZERO).count();
+            let be_sls = sl_trades
+                .iter()
+                .filter(|t| t.pnl_gross >= Decimal::ZERO)
+                .count();
             let true_sls = sl_trades.len() - be_sls;
             let avg_sl_pct: Decimal = sl_trades
                 .iter()
@@ -500,7 +503,10 @@ fn main() -> Result<()> {
                 sl_trades
                     .iter()
                     .filter(|t| t.excursion.peak_equity > t.excursion.entry_equity)
-                    .map(|t| (t.excursion.peak_equity - t.excursion.entry_equity) / t.excursion.entry_equity)
+                    .map(|t| {
+                        (t.excursion.peak_equity - t.excursion.entry_equity)
+                            / t.excursion.entry_equity
+                    })
                     .sum::<Decimal>()
                     / Decimal::from(had_positive_mfe)
             } else {

@@ -1165,8 +1165,11 @@ impl Strategy for LangevinPotentialStrategy {
 
         let beta = self.config.beta_entry.to_f64().unwrap_or(0.75);
         let zeta = self.config.zeta_thermal_tp.to_f64().unwrap_or(0.2);
-        let macro_long_ok = !self.config.macro_trend_filter || macro_slope >= 0.0;
-        let macro_short_ok = !self.config.macro_trend_filter || macro_slope <= 0.0;
+        let x_0_val = topology.x_0.exp();
+        let macro_long_ok = !self.config.macro_trend_filter
+            || (macro_slope >= 0.0 && (close_f64 >= current_ema || x_0_val >= current_ema));
+        let macro_short_ok = !self.config.macro_trend_filter
+            || (macro_slope <= 0.0 && (close_f64 <= current_ema || x_0_val <= current_ema));
 
         // 1. Elastic Mean Reversion: LONG Condition (Price compressed in left wall)
         if log_price < topology.x_0 && log_price > topology.x_b_left {
@@ -1787,6 +1790,38 @@ mod tests {
         assert!(
             intent.is_none(),
             "Downward macro trend must suppress Long mean-reversion counter-trend entry"
+        );
+    }
+
+    #[test]
+    fn macro_trend_filter_suppresses_counter_trend_short_in_bull_market() {
+        let mut strategy = LangevinPotentialStrategy::new(LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            macro_trend_filter: true,
+            macro_ema_period: 10,
+            macro_slope_window: 10,
+            ..LangevinConfig::default()
+        })
+        .unwrap();
+
+        // Strong upward trend:
+        for i in 0..30 {
+            let price = dec!(50_000) + Decimal::from(i * 100);
+            strategy.on_bar(&sample_bar(1000 * i, price));
+        }
+
+        // Rally into the upper wall:
+        let peak_bar = sample_bar(30_000, dec!(53_500));
+        strategy.on_bar(&peak_bar);
+
+        let pullback_bar = sample_bar(31_000, dec!(53_490));
+        let intent = strategy.on_bar(&pullback_bar);
+
+        assert!(
+            intent.is_none(),
+            "Upward macro trend must suppress Short mean-reversion counter-trend entry"
         );
     }
 
