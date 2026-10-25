@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use domain::{DollarBar, DomainError, OrderIntent, Side};
+use domain::{BarInput, DollarBar, DomainError, OrderIntent, Side, WilderAtr};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -585,6 +585,10 @@ fn default_breakeven_distance_fraction() -> Decimal {
     dec!(0.50)
 }
 
+fn default_stop_loss_atr_buffer() -> Decimal {
+    dec!(0.75)
+}
+
 /// Hyperparameter configuration for Langevin Potential Well Strategy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LangevinConfig {
@@ -631,6 +635,9 @@ pub struct LangevinConfig {
     /// Fraction of distance to potential well center (x_0) required to trigger dynamic breakeven (default: 0.50).
     #[serde(default = "default_breakeven_distance_fraction")]
     pub breakeven_distance_fraction: Decimal,
+    /// Volatility buffer multiplier in ATR units to pad Stop-Loss beyond the potential barrier (default: 0.75).
+    #[serde(default = "default_stop_loss_atr_buffer")]
+    pub stop_loss_atr_buffer: Decimal,
     /// Whether to enable macro trend drift filter.
     #[serde(default = "default_macro_trend_filter")]
     pub macro_trend_filter: bool,
@@ -676,6 +683,7 @@ impl Default for LangevinConfig {
             opposite_wall_fraction: dec!(0.60),
             enable_dynamic_breakeven: true,
             breakeven_distance_fraction: dec!(0.50),
+            stop_loss_atr_buffer: dec!(0.75),
             macro_trend_filter: true,
             macro_ema_period: 200,
             macro_slope_window: 50,
@@ -789,6 +797,7 @@ impl HyperparameterSpace for LangevinSpace {
                                                             opposite_wall_fraction: owf,
                                                             enable_dynamic_breakeven: true,
                                                             breakeven_distance_fraction: dec!(0.50),
+                                                            stop_loss_atr_buffer: dec!(0.75),
                                                             macro_trend_filter: macro_filter,
                                                             macro_ema_period: 200,
                                                             macro_slope_window: 50,
@@ -946,6 +955,7 @@ pub struct LangevinPotentialStrategy {
     macro_ema: Option<f64>,
     macro_ema_history: VecDeque<f64>,
     recent_velocities: VecDeque<f64>,
+    atr: WilderAtr,
 }
 
 impl LangevinPotentialStrategy {
@@ -960,6 +970,7 @@ impl LangevinPotentialStrategy {
         )?;
 
         let k_cap = config.kinematic_exhaustion_window.max(1) + 1;
+        let atr = WilderAtr::new(14)?;
         Ok(Self {
             config,
             kde,
@@ -968,6 +979,7 @@ impl LangevinPotentialStrategy {
             macro_ema: None,
             macro_ema_history: VecDeque::with_capacity(64),
             recent_velocities: VecDeque::with_capacity(k_cap),
+            atr,
         })
     }
 
@@ -1021,6 +1033,9 @@ impl Strategy for LangevinPotentialStrategy {
         self.macro_ema = None;
         self.macro_ema_history.clear();
         self.recent_velocities.clear();
+        if let Ok(fresh_atr) = WilderAtr::new(14) {
+            self.atr = fresh_atr;
+        }
     }
 
     fn audit(&self) -> Option<serde_json::Value> {
@@ -1028,6 +1043,14 @@ impl Strategy for LangevinPotentialStrategy {
     }
 
     fn on_bar(&mut self, bar: &DollarBar) -> Option<OrderIntent> {
+        let bar_input = BarInput {
+            high: bar.high,
+            low: bar.low,
+            close: bar.close,
+            volume: bar.volume,
+        };
+        self.atr.update(&bar_input);
+
         let price_f64 = bar.close.to_f64().unwrap_or(1.0).max(1e-8);
         let log_price = price_f64.ln();
         let anchor_x = self.kde.last_log_price.unwrap_or(log_price);
@@ -1177,7 +1200,12 @@ impl Strategy for LangevinPotentialStrategy {
                 let sl_f64 = x_sl.exp();
 
                 let take_profit = Decimal::from_f64_retain(tp_f64).map(|d| d.round_dp(2))?;
-                let stop_loss = Decimal::from_f64_retain(sl_f64).map(|d| d.round_dp(2))?;
+                let raw_sl = Decimal::from_f64_retain(sl_f64).map(|d| d.round_dp(2))?;
+                let atr_pad_long = self.atr.value().unwrap_or(bar.high - bar.low)
+                    * self.config.stop_loss_atr_buffer;
+                let stop_loss = (raw_sl - atr_pad_long)
+                    .min(bar.close - dec!(0.01))
+                    .round_dp(2);
 
                 if stop_loss < bar.close && bar.close < take_profit {
                     let friction_ok =
@@ -1237,7 +1265,12 @@ impl Strategy for LangevinPotentialStrategy {
                 let sl_f64 = x_sl.exp();
 
                 let take_profit = Decimal::from_f64_retain(tp_f64).map(|d| d.round_dp(2))?;
-                let stop_loss = Decimal::from_f64_retain(sl_f64).map(|d| d.round_dp(2))?;
+                let raw_sl = Decimal::from_f64_retain(sl_f64).map(|d| d.round_dp(2))?;
+                let atr_pad_short = self.atr.value().unwrap_or(bar.high - bar.low)
+                    * self.config.stop_loss_atr_buffer;
+                let stop_loss = (raw_sl + atr_pad_short)
+                    .max(bar.close + dec!(0.01))
+                    .round_dp(2);
 
                 if stop_loss > bar.close && bar.close > take_profit {
                     let friction_ok =
@@ -1287,7 +1320,12 @@ impl Strategy for LangevinPotentialStrategy {
                 let sl_f64 = x_sl.exp();
                 let tp_f64 = x_tp.exp();
 
-                let stop_loss = Decimal::from_f64_retain(sl_f64).map(|d| d.round_dp(2))?;
+                let raw_sl = Decimal::from_f64_retain(sl_f64).map(|d| d.round_dp(2))?;
+                let atr_pad_kramers_long = self.atr.value().unwrap_or(bar.high - bar.low)
+                    * self.config.stop_loss_atr_buffer;
+                let stop_loss = (raw_sl - atr_pad_kramers_long)
+                    .min(bar.close - dec!(0.01))
+                    .round_dp(2);
                 let take_profit = Decimal::from_f64_retain(tp_f64).map(|d| d.round_dp(2))?;
 
                 if stop_loss < bar.close && bar.close < take_profit {
@@ -1338,7 +1376,12 @@ impl Strategy for LangevinPotentialStrategy {
                 let sl_f64 = x_sl.exp();
                 let tp_f64 = x_tp.exp();
 
-                let stop_loss = Decimal::from_f64_retain(sl_f64).map(|d| d.round_dp(2))?;
+                let raw_sl = Decimal::from_f64_retain(sl_f64).map(|d| d.round_dp(2))?;
+                let atr_pad_kramers = self.atr.value().unwrap_or(bar.high - bar.low)
+                    * self.config.stop_loss_atr_buffer;
+                let stop_loss = (raw_sl + atr_pad_kramers)
+                    .max(bar.close + dec!(0.01))
+                    .round_dp(2);
                 let take_profit = Decimal::from_f64_retain(tp_f64).map(|d| d.round_dp(2))?;
 
                 if stop_loss > bar.close && bar.close > take_profit {
@@ -1803,6 +1846,7 @@ mod tests {
             min_take_profit_pct: dec!(0.0010),
             enable_dynamic_breakeven: true,
             breakeven_distance_fraction: dec!(0.50),
+            stop_loss_atr_buffer: dec!(0.75),
             macro_trend_filter: false,
             ..LangevinConfig::default()
         })
@@ -1863,6 +1907,7 @@ mod tests {
             min_take_profit_pct: dec!(0.0010),
             enable_dynamic_breakeven: true,
             breakeven_distance_fraction: dec!(0.50),
+            stop_loss_atr_buffer: dec!(0.75),
             macro_trend_filter: false,
             ..LangevinConfig::default()
         })
@@ -1895,6 +1940,52 @@ mod tests {
             be_half,
             (be_full * dec!(0.50)).round_dp(2),
             "Half breakeven distance must be exactly 50% of full"
+        );
+    }
+
+    #[test]
+    fn stop_loss_atr_buffer_expands_stop_distance_beyond_wall() {
+        let mut strat_zero_buffer = LangevinPotentialStrategy::new(LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            stop_loss_atr_buffer: dec!(0.00),
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        })
+        .unwrap();
+
+        let mut strat_padded = LangevinPotentialStrategy::new(LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            stop_loss_atr_buffer: dec!(1.00),
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        })
+        .unwrap();
+
+        for i in 0..20 {
+            let offset = ((i as f64 * 0.5).sin() * 200.0) as i64;
+            let price = dec!(50_000) + Decimal::from(offset);
+            let bar = sample_bar(1000 * i, price);
+            strat_zero_buffer.on_bar(&bar);
+            strat_padded.on_bar(&bar);
+        }
+
+        let dip_bar = sample_bar(20_000, dec!(49_650));
+        strat_zero_buffer.on_bar(&dip_bar);
+        strat_padded.on_bar(&dip_bar);
+
+        let bounce_bar = sample_bar(21_000, dec!(49_660));
+        let intent_zero = strat_zero_buffer.on_bar(&bounce_bar).expect("intent_zero");
+        let intent_padded = strat_padded.on_bar(&bounce_bar).expect("intent_padded");
+
+        assert!(
+            intent_padded.stop_loss < intent_zero.stop_loss,
+            "Padded stop_loss ({}) must be further below entry than zero-buffer ({})",
+            intent_padded.stop_loss,
+            intent_zero.stop_loss
         );
     }
 

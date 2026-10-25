@@ -37,15 +37,15 @@ struct Args {
     eth_config: Option<PathBuf>,
 
     /// Dollar bar accumulation threshold for BTC (default: $8M for day trading, $25M for swing)
-    #[arg(long, default_value = "8000000")]
+    #[arg(long, default_value = "25000000")]
     btc_dollar_bar: Decimal,
 
-    /// Dollar bar accumulation threshold for ETH (default: $3M for day trading, $10M for swing)
-    #[arg(long, default_value = "3000000")]
+    /// Dollar bar accumulation threshold for ETH (default: $3M for day trading, $8M for swing)
+    #[arg(long, default_value = "8000000")]
     eth_dollar_bar: Decimal,
 
-    /// Dollar bar accumulation threshold for SOL (default: $1.5M for day trading, $5M for swing)
-    #[arg(long, default_value = "1500000")]
+    /// Dollar bar accumulation threshold for SOL (default: $1.5M for day trading, $4M for swing)
+    #[arg(long, default_value = "4000000")]
     sol_dollar_bar: Decimal,
 
     /// Initial shared capital in quote currency (USDT)
@@ -173,6 +173,7 @@ fn main() -> Result<()> {
                 opposite_wall_fraction: dec!(1.00),
                 enable_dynamic_breakeven: true,
                 breakeven_distance_fraction: dec!(0.50),
+                stop_loss_atr_buffer: dec!(0.75),
                 macro_trend_filter: true,
                 macro_ema_period: 200,
                 macro_slope_window: 50,
@@ -191,6 +192,7 @@ fn main() -> Result<()> {
 
     btc_cfg.breakeven_distance_fraction = dec!(0.50);
     btc_cfg.enable_dynamic_breakeven = true;
+    btc_cfg.stop_loss_atr_buffer = dec!(0.75);
     btc_cfg.use_limit_entries = args.use_limit_orders;
     btc_cfg.limit_time_in_force_bars = if args.use_limit_orders {
         Some(args.limit_timeout_bars)
@@ -213,6 +215,7 @@ fn main() -> Result<()> {
 
     eth_cfg.breakeven_distance_fraction = dec!(0.50);
     eth_cfg.enable_dynamic_breakeven = true;
+    eth_cfg.stop_loss_atr_buffer = dec!(0.75);
     eth_cfg.use_limit_entries = args.use_limit_orders;
     eth_cfg.limit_time_in_force_bars = if args.use_limit_orders {
         Some(args.limit_timeout_bars)
@@ -221,10 +224,11 @@ fn main() -> Result<()> {
     };
 
     let mut sol_cfg = btc_cfg.clone();
-    sol_cfg.min_take_profit_pct = dec!(0.009);
-    sol_cfg.min_well_depth_pct = dec!(0.012);
+    sol_cfg.min_take_profit_pct = dec!(0.018);
+    sol_cfg.min_well_depth_pct = dec!(0.020);
     sol_cfg.breakeven_distance_fraction = dec!(0.50);
     sol_cfg.enable_dynamic_breakeven = true;
+    sol_cfg.stop_loss_atr_buffer = dec!(0.75);
     sol_cfg.use_limit_entries = args.use_limit_orders;
     sol_cfg.limit_time_in_force_bars = if args.use_limit_orders {
         Some(args.limit_timeout_bars)
@@ -422,6 +426,55 @@ fn main() -> Result<()> {
             print!("{r}: {c} | ");
         }
         println!();
+
+        let sl_trades: Vec<_> = refs
+            .iter()
+            .filter(|t| t.exit_reason == "StopLoss")
+            .collect();
+        if !sl_trades.is_empty() {
+            let avg_sl_pct: Decimal = sl_trades
+                .iter()
+                .map(|t| t.return_pct.abs())
+                .sum::<Decimal>()
+                / Decimal::from(sl_trades.len());
+            let avg_sl_sec: i64 = sl_trades
+                .iter()
+                .map(|t| t.holding_duration_seconds)
+                .sum::<i64>()
+                / sl_trades.len() as i64;
+            let died_under_5m = sl_trades
+                .iter()
+                .filter(|t| t.holding_duration_seconds < 300)
+                .count();
+            println!(
+                "     SL Profile: Avg Loss: {:.2}% | Avg Hold: {}s ({:.1}m) | <5m Kills: {}/{} ({:.0}%)",
+                avg_sl_pct * dec!(100),
+                avg_sl_sec,
+                avg_sl_sec as f64 / 60.0,
+                died_under_5m,
+                sl_trades.len(),
+                (died_under_5m as f64 / sl_trades.len() as f64) * 100.0
+            );
+        }
+        let tp_trades: Vec<_> = refs
+            .iter()
+            .filter(|t| t.exit_reason == "TakeProfit")
+            .collect();
+        if !tp_trades.is_empty() {
+            let avg_tp_pct: Decimal = tp_trades.iter().map(|t| t.return_pct).sum::<Decimal>()
+                / Decimal::from(tp_trades.len());
+            let avg_tp_sec: i64 = tp_trades
+                .iter()
+                .map(|t| t.holding_duration_seconds)
+                .sum::<i64>()
+                / tp_trades.len() as i64;
+            println!(
+                "     TP Profile: Avg Gain: {:.2}% | Avg Hold: {}s ({:.1}m)",
+                avg_tp_pct * dec!(100),
+                avg_tp_sec,
+                avg_tp_sec as f64 / 60.0
+            );
+        }
     }
     println!("------------------------------------------------------------");
     println!(" MONTHLY PERFORMANCE BREAKDOWN:");
