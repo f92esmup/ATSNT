@@ -69,7 +69,7 @@ struct Args {
     max_slot_margin: Decimal,
 
     /// Whether to enter using passive limit orders with TIF timeout
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     use_limit_orders: bool,
 
     /// Limit order Time-In-Force timeout in bars (default: 2)
@@ -326,22 +326,64 @@ fn main() -> Result<()> {
     let net_pnl = engine.total_realized_pnl();
     let max_dd_pct = engine.max_drawdown_pct() * dec!(100);
 
-    // Breakdown per symbol
-    let mut btc_trades = 0;
-    let mut btc_pnl = Decimal::ZERO;
-    let mut eth_trades = 0;
-    let mut eth_pnl = Decimal::ZERO;
+    // Breakdown per symbol and monthly PnL
+    let mut btc_closed = Vec::new();
+    let mut eth_closed = Vec::new();
+    let mut monthly_pnl: std::collections::BTreeMap<String, (Decimal, usize)> =
+        std::collections::BTreeMap::new();
 
     for trade in closed {
-        // Approximate symbol attribution from notional / price
+        let month_str = chrono::DateTime::from_timestamp_millis(trade.exit_time)
+            .map(|dt| dt.format("%Y-%m").to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+        let entry = monthly_pnl.entry(month_str).or_insert((Decimal::ZERO, 0));
+        entry.0 += trade.pnl_net;
+        entry.1 += 1;
+
         if trade.entry_price > dec!(10000) {
-            btc_trades += 1;
-            btc_pnl += trade.pnl_net;
+            btc_closed.push(trade);
         } else {
-            eth_trades += 1;
-            eth_pnl += trade.pnl_net;
+            eth_closed.push(trade);
         }
     }
+
+    let calc_stats = |trades: &[&backtest::ClosedTrade]| {
+        let count = trades.len();
+        let wins = trades.iter().filter(|t| t.pnl_net > Decimal::ZERO).count();
+        let losses = trades.iter().filter(|t| t.pnl_net < Decimal::ZERO).count();
+        let win_rate = if count > 0 {
+            (wins as f64 / count as f64) * 100.0
+        } else {
+            0.0
+        };
+        let gross_p: Decimal = trades
+            .iter()
+            .filter(|t| t.pnl_net > Decimal::ZERO)
+            .map(|t| t.pnl_net)
+            .sum();
+        let gross_l: Decimal = trades
+            .iter()
+            .filter(|t| t.pnl_net < Decimal::ZERO)
+            .map(|t| t.pnl_net.abs())
+            .sum();
+        let pf = if gross_l > Decimal::ZERO {
+            gross_p / gross_l
+        } else if gross_p > Decimal::ZERO {
+            dec!(99.99)
+        } else {
+            dec!(0)
+        };
+        let net: Decimal = trades.iter().map(|t| t.pnl_net).sum();
+        let mut exit_reasons: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for t in trades {
+            *exit_reasons.entry(t.exit_reason.clone()).or_default() += 1;
+        }
+        (count, wins, losses, win_rate, pf, net, exit_reasons)
+    };
+
+    let btc_stats = calc_stats(&btc_closed);
+    let eth_stats = calc_stats(&eth_closed);
 
     println!("============================================================");
     println!(" PORTFOLIO BACKTEST PERFORMANCE REPORT");
@@ -361,13 +403,28 @@ fn main() -> Result<()> {
     println!("------------------------------------------------------------");
     println!(" SYMBOL ATTRIBUTION:");
     println!(
-        "   BTCUSDT Trades:     {} (PnL: {:+.2} USDT)",
-        btc_trades, btc_pnl
+        "   BTCUSDT: {} trades | Win: {:.1}% ({}/{}W) | PF: {:.2} | PnL: {:+.2} USDT",
+        btc_stats.0, btc_stats.3, btc_stats.1, btc_stats.0, btc_stats.4, btc_stats.5
     );
+    print!("     Exits: ");
+    for (r, c) in &btc_stats.6 {
+        print!("{r}: {c} | ");
+    }
+    println!();
     println!(
-        "   ETHUSDT Trades:     {} (PnL: {:+.2} USDT)",
-        eth_trades, eth_pnl
+        "   ETHUSDT: {} trades | Win: {:.1}% ({}/{}W) | PF: {:.2} | PnL: {:+.2} USDT",
+        eth_stats.0, eth_stats.3, eth_stats.1, eth_stats.0, eth_stats.4, eth_stats.5
     );
+    print!("     Exits: ");
+    for (r, c) in &eth_stats.6 {
+        print!("{r}: {c} | ");
+    }
+    println!();
+    println!("------------------------------------------------------------");
+    println!(" MONTHLY PERFORMANCE BREAKDOWN:");
+    for (month, (pnl, cnt)) in &monthly_pnl {
+        println!("   {month}: {cnt:>2} trades | PnL: {:+8.2} USDT", pnl);
+    }
     println!("------------------------------------------------------------");
     println!(" REJECTIONS & CONCURRENCY STATS:");
     for (reason, count) in engine.rejected_orders() {
