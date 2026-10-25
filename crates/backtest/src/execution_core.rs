@@ -26,6 +26,21 @@ use crate::metrics::{
 };
 use crate::price_event::PriceEvent;
 
+/// Result of evaluating a due pending entry against a price event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingEntryOutcome {
+    /// No pending entry was due on this event.
+    NoDueEntry,
+    /// A market order filled at the event open.
+    FilledMarket,
+    /// A limit order filled at the limit price.
+    FilledLimit,
+    /// A limit order was not reached by the event and remains resting.
+    RestingLimit { bars_pending: usize },
+    /// A limit order exceeded its Time-In-Force timeout and was canceled.
+    ExpiredLimit,
+}
+
 /// A submitted entry: the strategy intent and the quantity sized when it was signalled.
 #[derive(Debug, Clone)]
 pub struct PendingEntry {
@@ -33,6 +48,19 @@ pub struct PendingEntry {
     pub intent: OrderIntent,
     /// Quantity sized at the signal price.
     pub quantity: Decimal,
+    /// Number of bars this entry has waited without filling (for Limit orders).
+    pub bars_pending: usize,
+}
+
+impl PendingEntry {
+    /// Constructs a pending entry initialized with zero bars pending.
+    pub fn new(intent: OrderIntent, quantity: Decimal) -> Self {
+        Self {
+            intent,
+            quantity,
+            bars_pending: 0,
+        }
+    }
 }
 
 /// A submitted target: the strategy's target, the signed quantity sized when it was decided, and
@@ -528,6 +556,64 @@ impl ExecutionCore {
         }
     }
 
+    /// Checks and executes any due pending entry (market or limit) on this event.
+    /// Returns the outcome of the evaluation.
+    pub fn step_pending_entry(
+        &mut self,
+        event: impl Into<PriceEvent>,
+        config: &BacktestConfig,
+        equity: &mut Decimal,
+    ) -> PendingEntryOutcome {
+        let bar = event.into();
+        let Some(pending) = self.pending.as_ref() else {
+            return PendingEntryOutcome::NoDueEntry;
+        };
+        if self.pending_due_ms > bar.start_ms {
+            return PendingEntryOutcome::NoDueEntry;
+        }
+
+        match pending.intent.order_type {
+            domain::OrderType::Market => {
+                if let Some(pending) = self.pending.take() {
+                    self.fill_entry(pending, bar, config, equity);
+                    PendingEntryOutcome::FilledMarket
+                } else {
+                    PendingEntryOutcome::NoDueEntry
+                }
+            }
+            domain::OrderType::Limit => {
+                let limit_price = pending.intent.price;
+                let touched = match pending.intent.side {
+                    Side::Buy => bar.low <= limit_price,
+                    Side::Sell => bar.high >= limit_price,
+                };
+
+                if touched {
+                    if let Some(pending) = self.pending.take() {
+                        self.fill_entry(pending, bar, config, equity);
+                        PendingEntryOutcome::FilledLimit
+                    } else {
+                        PendingEntryOutcome::NoDueEntry
+                    }
+                } else {
+                    let timeout = pending.intent.time_in_force_bars.unwrap_or(3);
+                    if let Some(entry) = self.pending.as_mut() {
+                        entry.bars_pending += 1;
+                        if entry.bars_pending >= timeout {
+                            self.pending = None;
+                            return PendingEntryOutcome::ExpiredLimit;
+                        }
+                        PendingEntryOutcome::RestingLimit {
+                            bars_pending: entry.bars_pending,
+                        }
+                    } else {
+                        PendingEntryOutcome::NoDueEntry
+                    }
+                }
+            }
+        }
+    }
+
     /// The target waiting to fill, if any.
     pub fn pending_target(&self) -> Option<&PendingTarget> {
         self.pending_target.as_ref()
@@ -649,11 +735,22 @@ impl ExecutionCore {
         equity: &mut Decimal,
     ) {
         let bar = event.into();
-        let PendingEntry { intent, quantity } = pending;
-        let (fill_price, slip) = market_fill_price(intent.side, bar.open, config.slippage_pct);
+        let PendingEntry {
+            intent, quantity, ..
+        } = pending;
+        let is_limit = intent.order_type == domain::OrderType::Limit;
 
-        // Entry Fee (Taker)
-        let entry_fee = fill_fee(fill_price, quantity, config.taker_fee_pct);
+        let (fill_price, entry_fee, adverse_per_unit) = if is_limit {
+            let price = intent.price;
+            let fee = fill_fee(price, quantity, config.maker_fee_pct);
+            (price, fee, Decimal::ZERO)
+        } else {
+            let (market_price, slip) =
+                market_fill_price(intent.side, bar.open, config.slippage_pct);
+            let fee = fill_fee(market_price, quantity, config.taker_fee_pct);
+            let adverse = opening_slippage_per_unit(intent.side, slip, bar.open, intent.price);
+            (market_price, fee, adverse)
+        };
 
         let notional = fill_price * quantity;
         let Some(leverage) = margin_leverage(notional, entry_fee, *equity, config) else {
@@ -661,9 +758,6 @@ impl ExecutionCore {
         };
         // Slippage is already embedded in fill_price; do not deduct from cash equity here
         *equity -= entry_fee;
-        // Reported slippage is what the order paid: the slippage on the open plus the adverse
-        // part of the gap from the signal price.
-        let adverse_per_unit = opening_slippage_per_unit(intent.side, slip, bar.open, intent.price);
 
         if let Ok(pos) = Position::new(position_side(intent.side), quantity, fill_price) {
             let mut campaign = Campaign::starting(bar.start_ms);
@@ -1468,10 +1562,7 @@ mod tests {
         let mut core = ExecutionCore::new();
         let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(95), dec!(110), 5)
             .expect("valid intent");
-        core.submit(PendingEntry {
-            intent,
-            quantity: dec!(2),
-        });
+        core.submit(PendingEntry::new(intent, dec!(2)));
         let pending = core.take_pending().expect("queued");
         core.fill_entry(
             pending,
@@ -1521,10 +1612,7 @@ mod tests {
             None,
         )
         .expect("valid intent");
-        core.submit(PendingEntry {
-            intent,
-            quantity: dec!(1),
-        });
+        core.submit(PendingEntry::new(intent, dec!(1)));
         let pending = core.take_pending().expect("queued");
         core.fill_entry(
             pending,
@@ -1569,10 +1657,7 @@ mod tests {
             None,
         )
         .expect("valid intent");
-        core.submit(PendingEntry {
-            intent,
-            quantity: dec!(1),
-        });
+        core.submit(PendingEntry::new(intent, dec!(1)));
         let pending = core.take_pending().expect("queued");
         core.fill_entry(
             pending,
@@ -1627,10 +1712,7 @@ mod tests {
             None,
         )
         .expect("valid intent");
-        core.submit(PendingEntry {
-            intent,
-            quantity: dec!(1),
-        });
+        core.submit(PendingEntry::new(intent, dec!(1)));
         let pending = core.take_pending().expect("queued");
         core.fill_entry(
             pending,
@@ -1669,5 +1751,84 @@ mod tests {
         assert_eq!(trade.exit_reason, "StopLoss");
         assert_eq!(trade.exit_price, dec!(107.5));
         assert_eq!(trade.pnl_gross, dec!(7.5)); // Locked in profit!
+    }
+
+    #[test]
+    fn limit_entry_fills_as_maker_with_zero_slippage() {
+        let config = BacktestConfig {
+            maker_fee_pct: dec!(0.0002),
+            taker_fee_pct: dec!(0.0005),
+            slippage_pct: dec!(0.001),
+            ..BacktestConfig::default()
+        };
+        let mut equity = dec!(10_000);
+        let mut core = ExecutionCore::new();
+        let intent = OrderIntent::limit(
+            1,
+            Side::Buy,
+            dec!(100),
+            dec!(90),
+            dec!(110),
+            5,
+            Some(2),
+            true,
+        )
+        .expect("valid limit intent");
+
+        core.submit(PendingEntry::new(intent, dec!(2)));
+        assert!(core.pending().is_some());
+
+        // Bar touches limit price (low 99 <= 100)
+        let bar_touched = bar(dec!(102), dec!(105), dec!(99), dec!(101));
+        let outcome = core.step_pending_entry(&bar_touched, &config, &mut equity);
+
+        assert_eq!(outcome, PendingEntryOutcome::FilledLimit);
+        assert!(core.pending().is_none());
+        assert!(core.position().is_some());
+
+        let pos = core.position().unwrap();
+        assert_eq!(pos.entry_price, dec!(100));
+        assert_eq!(pos.quantity, dec!(2));
+
+        // Maker fee = 200 notional * 0.0002 = 0.04 (vs 0.10 taker)
+        assert_eq!(equity, dec!(9_999.96));
+        assert_eq!(core.campaign.unwrap().slippage, dec!(0));
+    }
+
+    #[test]
+    fn limit_entry_rests_and_expires_after_tif_timeout() {
+        let config = BacktestConfig::default();
+        let mut equity = dec!(10_000);
+        let mut core = ExecutionCore::new();
+        let intent = OrderIntent::limit(
+            1,
+            Side::Buy,
+            dec!(100),
+            dec!(90),
+            dec!(110),
+            5,
+            Some(2),
+            true,
+        )
+        .expect("valid limit intent");
+
+        core.submit(PendingEntry::new(intent, dec!(1)));
+
+        // Bar 1: Price stays above limit (low 102 > 100)
+        let bar_1 = bar(dec!(105), dec!(106), dec!(102), dec!(103));
+        let outcome_1 = core.step_pending_entry(&bar_1, &config, &mut equity);
+        assert_eq!(
+            outcome_1,
+            PendingEntryOutcome::RestingLimit { bars_pending: 1 }
+        );
+        assert!(core.position().is_none());
+        assert!(core.pending().is_some());
+
+        // Bar 2: Price still stays above limit (low 101 > 100) -> reaches TIF timeout of 2
+        let bar_2 = bar(dec!(103), dec!(104), dec!(101), dec!(102));
+        let outcome_2 = core.step_pending_entry(&bar_2, &config, &mut equity);
+        assert_eq!(outcome_2, PendingEntryOutcome::ExpiredLimit);
+        assert!(core.position().is_none());
+        assert!(core.pending().is_none()); // Slot freed!
     }
 }

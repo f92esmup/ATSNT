@@ -16,6 +16,7 @@ pub mod operator_alerts;
 pub mod optimization;
 pub mod paper;
 pub mod parity;
+pub mod portfolio_engine;
 pub mod price_event;
 pub mod recording;
 pub mod registry;
@@ -37,8 +38,8 @@ pub use engine::BacktestEngine;
 pub use error::BacktestError;
 pub use excursion::ExcursionTracker;
 pub use execution_core::{
-    barrier_exit, market_fill_price, BarrierExit, ExecutionCore, PendingEntry, PendingTarget,
-    TradeLedger,
+    barrier_exit, market_fill_price, BarrierExit, ExecutionCore, PendingEntry, PendingEntryOutcome,
+    PendingTarget, TradeLedger,
 };
 pub use live_exits::{ExitEvent, ExitGateway, ExitManager, HaltState};
 pub use metrics::{
@@ -62,6 +63,7 @@ pub use paper::{
     PaperSessionOwner, PaperSessionRuntime, PaperTradingConfig, PaperTradingEvent,
     PaperTradingSession, TelemetryConfig, TelemetryEnvelope,
 };
+pub use portfolio_engine::{EventMerger, PortfolioEngine, PortfolioEngineConfig, TaggedPriceEvent};
 pub use price_event::{bucket_trades, PriceEvent};
 pub use recording::{
     now_unix_ms, record_backtest, record_backtest_with_audit, record_closed_trade, record_hpo,

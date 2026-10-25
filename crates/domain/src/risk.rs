@@ -43,6 +43,12 @@ pub enum RiskError {
         notional: String,
         min_notional: String,
     },
+    /// Maximum number of concurrent positions breached.
+    #[error("Concurrent positions limit exceeded: current {current} >= limit {limit}")]
+    MaxPositionsExceeded { current: usize, limit: usize },
+    /// Maximum number of positions in the same direction breached (directional correlation cap).
+    #[error("Directional position limit exceeded: current {current} >= limit {limit}")]
+    DirectionalLimitExceeded { current: usize, limit: usize },
 }
 
 impl RiskError {
@@ -55,6 +61,8 @@ impl RiskError {
             Self::InvalidParameters(_) => "InvalidParameters",
             Self::OrderBelowMinLotSize { .. } => "OrderBelowMinLotSize",
             Self::OrderBelowMinNotional { .. } => "OrderBelowMinNotional",
+            Self::MaxPositionsExceeded { .. } => "MaxPositionsExceeded",
+            Self::DirectionalLimitExceeded { .. } => "DirectionalLimitExceeded",
         }
     }
 }
@@ -447,6 +455,171 @@ impl RiskPolicy {
         }
 
         Ok(())
+    }
+}
+
+/// Pre-trade multi-asset portfolio risk policy governing concurrent positions, directional exposure,
+/// risk-budget sizing, and isolated margin caps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortfolioRiskPolicy {
+    /// Maximum number of concurrent open positions across all assets.
+    pub max_open_positions: usize,
+    /// Maximum number of open positions in the same direction (e.g. max longs or max shorts).
+    pub max_directional_positions: usize,
+    /// Fraction of account equity risked to the Stop Loss distance per trade (e.g. 0.01 = 1.0%).
+    pub risk_per_trade_pct: Decimal,
+    /// Maximum margin allocation per position as a fraction of account equity (e.g. 0.20 = 20%).
+    pub max_slot_margin_pct: Decimal,
+    /// Maximum allowed leverage per position.
+    pub max_leverage: Decimal,
+    /// Minimum order quantity (exchange LOT_SIZE minQty).
+    pub min_order_quantity: Decimal,
+    /// Quantity increment step (exchange LOT_SIZE stepSize).
+    pub quantity_step_size: Decimal,
+    /// Minimum order notional in quote currency (exchange MIN_NOTIONAL).
+    pub min_order_notional: Decimal,
+}
+
+impl Default for PortfolioRiskPolicy {
+    fn default() -> Self {
+        Self {
+            max_open_positions: 5,
+            max_directional_positions: 3,
+            risk_per_trade_pct: Decimal::new(10, 3), // 0.010 = 1.0%
+            max_slot_margin_pct: Decimal::new(20, 2), // 0.20 = 20.0%
+            max_leverage: default_max_leverage(),
+            min_order_quantity: default_min_order_quantity(),
+            quantity_step_size: default_quantity_step_size(),
+            min_order_notional: default_min_order_notional(),
+        }
+    }
+}
+
+impl PortfolioRiskPolicy {
+    /// Creates a new validated `PortfolioRiskPolicy`.
+    pub fn new(
+        max_open_positions: usize,
+        max_directional_positions: usize,
+        risk_per_trade_pct: Decimal,
+        max_slot_margin_pct: Decimal,
+    ) -> Result<Self, RiskError> {
+        if max_open_positions == 0 {
+            return Err(RiskError::InvalidParameters(
+                "max_open_positions must be greater than zero".to_string(),
+            ));
+        }
+        if max_directional_positions == 0 {
+            return Err(RiskError::InvalidParameters(
+                "max_directional_positions must be greater than zero".to_string(),
+            ));
+        }
+        if max_directional_positions > max_open_positions {
+            return Err(RiskError::InvalidParameters(
+                "max_directional_positions cannot exceed max_open_positions".to_string(),
+            ));
+        }
+        if risk_per_trade_pct <= Decimal::ZERO || risk_per_trade_pct > Decimal::ONE {
+            return Err(RiskError::InvalidParameters(
+                "risk_per_trade_pct must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+        if max_slot_margin_pct <= Decimal::ZERO || max_slot_margin_pct > Decimal::ONE {
+            return Err(RiskError::InvalidParameters(
+                "max_slot_margin_pct must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+
+        Ok(Self {
+            max_open_positions,
+            max_directional_positions,
+            risk_per_trade_pct,
+            max_slot_margin_pct,
+            max_leverage: default_max_leverage(),
+            min_order_quantity: default_min_order_quantity(),
+            quantity_step_size: default_quantity_step_size(),
+            min_order_notional: default_min_order_notional(),
+        })
+    }
+
+    /// Evaluates and sizes an order intent against portfolio risk constraints:
+    /// - Caps concurrent positions to `max_open_positions`.
+    /// - Caps directional exposure to `max_directional_positions`.
+    /// - Calculates quantity from Stop Loss risk budget: `(equity * risk_pct) / |entry - stop|`.
+    /// - Clamps maximum notional to `equity * max_slot_margin_pct * leverage`.
+    /// - Validates exchange lot size and minimum notional.
+    pub fn size_order(
+        &self,
+        intent: &OrderIntent,
+        current_open_positions: usize,
+        current_same_direction: usize,
+        equity: Decimal,
+    ) -> Result<Decimal, RiskError> {
+        if current_open_positions >= self.max_open_positions {
+            return Err(RiskError::MaxPositionsExceeded {
+                current: current_open_positions,
+                limit: self.max_open_positions,
+            });
+        }
+
+        if current_same_direction >= self.max_directional_positions {
+            return Err(RiskError::DirectionalLimitExceeded {
+                current: current_same_direction,
+                limit: self.max_directional_positions,
+            });
+        }
+
+        if equity <= Decimal::ZERO {
+            return Err(RiskError::InvalidParameters(
+                "equity must be positive".to_string(),
+            ));
+        }
+
+        let price = intent.price;
+        if price <= Decimal::ZERO {
+            return Err(RiskError::InvalidParameters(
+                "price must be positive".to_string(),
+            ));
+        }
+
+        let stop_distance = (price - intent.stop_loss).abs();
+        if stop_distance <= Decimal::ZERO {
+            return Err(RiskError::InvalidParameters(
+                "stop distance must be non-zero".to_string(),
+            ));
+        }
+
+        // 1. Risk budget sizing: Equity * RiskPct / StopDist
+        let risk_dollars = equity * self.risk_per_trade_pct;
+        let mut quantity = risk_dollars / stop_distance;
+
+        // 2. Max slot notional limit: Equity * max_slot_margin_pct * leverage
+        let max_slot_notional = equity * self.max_slot_margin_pct * self.max_leverage;
+        let notional = quantity * price;
+        if notional > max_slot_notional {
+            quantity = max_slot_notional / price;
+        }
+
+        // 3. Floor to lot step size
+        quantity = (quantity / self.quantity_step_size).floor() * self.quantity_step_size;
+
+        // 4. Validate min lot size
+        if quantity < self.min_order_quantity {
+            return Err(RiskError::OrderBelowMinLotSize {
+                quantity: quantity.to_string(),
+                min_quantity: self.min_order_quantity.to_string(),
+            });
+        }
+
+        // 5. Validate min notional
+        let final_notional = quantity * price;
+        if final_notional < self.min_order_notional {
+            return Err(RiskError::OrderBelowMinNotional {
+                notional: final_notional.to_string(),
+                min_notional: self.min_order_notional.to_string(),
+            });
+        }
+
+        Ok(quantity)
     }
 }
 
@@ -1008,5 +1181,76 @@ mod tests {
             policy.size_target(&t, dec!(100), dec!(10_000), Decimal::ZERO, dec!(-0.1)),
             Err(RiskError::InvalidParameters(_))
         ));
+    }
+
+    #[test]
+    fn portfolio_risk_policy_enforces_max_positions_cap() {
+        let policy = PortfolioRiskPolicy::default();
+        let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(95), dec!(110), 5).unwrap();
+
+        // 4 open positions -> allowed (within cap of 5)
+        let res = policy.size_order(&intent, 4, 2, dec!(10_000));
+        assert!(res.is_ok());
+
+        // 5 open positions -> rejected with MaxPositionsExceeded
+        let res_exceeded = policy.size_order(&intent, 5, 2, dec!(10_000));
+        assert_eq!(
+            res_exceeded,
+            Err(RiskError::MaxPositionsExceeded {
+                current: 5,
+                limit: 5,
+            })
+        );
+        assert_eq!(res_exceeded.unwrap_err().kind(), "MaxPositionsExceeded");
+    }
+
+    #[test]
+    fn portfolio_risk_policy_enforces_directional_limit() {
+        let policy = PortfolioRiskPolicy::default();
+        let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(95), dec!(110), 5).unwrap();
+
+        // 3 open long positions -> rejected with DirectionalLimitExceeded (limit is 3)
+        let res = policy.size_order(&intent, 3, 3, dec!(10_000));
+        assert_eq!(
+            res,
+            Err(RiskError::DirectionalLimitExceeded {
+                current: 3,
+                limit: 3,
+            })
+        );
+        assert_eq!(res.unwrap_err().kind(), "DirectionalLimitExceeded");
+    }
+
+    #[test]
+    fn portfolio_risk_policy_sizes_by_stop_loss_risk_budget() {
+        let policy = PortfolioRiskPolicy::default(); // 1% risk per trade, max slot 20%
+        let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(98), dec!(105), 5).unwrap();
+
+        // Equity 10,000, 1% risk = 100 USDT.
+        // Stop distance = |100 - 98| = 2.
+        // Expected quantity = 100 / 2 = 50.
+        let qty = policy.size_order(&intent, 0, 0, dec!(10_000)).unwrap();
+        assert_eq!(qty, dec!(50));
+    }
+
+    #[test]
+    fn portfolio_risk_policy_clips_to_max_slot_notional() {
+        // max slot margin 20%, max leverage 2x -> max slot notional = 40% of equity
+        let policy = PortfolioRiskPolicy {
+            max_open_positions: 5,
+            max_directional_positions: 3,
+            risk_per_trade_pct: dec!(0.05), // 5% risk
+            max_slot_margin_pct: dec!(0.20),
+            max_leverage: dec!(2), // notional cap = 10,000 * 0.20 * 2 = 4,000 USDT
+            min_order_quantity: dec!(0.001),
+            quantity_step_size: dec!(0.001),
+            min_order_notional: dec!(5),
+        };
+        // Very tight stop (dist = 0.10) would demand 500 / 0.10 = 5,000 units = 500,000 notional
+        let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.90), dec!(105), 5).unwrap();
+
+        // Should clip to max notional 4,000 / 100 = 40 units
+        let qty = policy.size_order(&intent, 0, 0, dec!(10_000)).unwrap();
+        assert_eq!(qty, dec!(40));
     }
 }

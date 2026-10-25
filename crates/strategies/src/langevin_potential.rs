@@ -641,6 +641,12 @@ pub struct LangevinConfig {
     /// (e.g. 0.50 = 50% buy volume on low wall, 50% sell volume on high wall).
     #[serde(default = "default_min_wall_absorption_ratio")]
     pub min_wall_absorption_ratio: Decimal,
+    /// Whether to enter via passive Limit orders instead of aggressive Market orders.
+    #[serde(default)]
+    pub use_limit_entries: bool,
+    /// Time-In-Force timeout in number of bars for Limit entry orders before cancellation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_time_in_force_bars: Option<usize>,
 }
 
 impl Default for LangevinConfig {
@@ -667,6 +673,8 @@ impl Default for LangevinConfig {
             macro_slope_window: 50,
             kinematic_exhaustion_window: 4,
             min_wall_absorption_ratio: dec!(0.50),
+            use_limit_entries: false,
+            limit_time_in_force_bars: None,
         }
     }
 }
@@ -777,6 +785,8 @@ impl HyperparameterSpace for LangevinSpace {
                                                             macro_slope_window: 50,
                                                             kinematic_exhaustion_window: kw,
                                                             min_wall_absorption_ratio: war,
+                                                            use_limit_entries: false,
+                                                            limit_time_in_force_bars: None,
                                                         });
                                                     }
                                                 }
@@ -954,6 +964,36 @@ impl LangevinPotentialStrategy {
 
     pub fn config(&self) -> &LangevinConfig {
         &self.config
+    }
+
+    fn build_intent(
+        &self,
+        timestamp: i64,
+        side: Side,
+        price: Decimal,
+        stop_loss: Decimal,
+        take_profit: Decimal,
+        be_dist: Option<Decimal>,
+    ) -> Option<OrderIntent> {
+        let mut intent = OrderIntent::with_risk_and_exits(
+            timestamp,
+            side,
+            price,
+            stop_loss,
+            take_profit,
+            self.config.time_barrier_bars,
+            None,
+            be_dist,
+            be_dist,
+            None,
+        )
+        .ok()?;
+
+        if self.config.use_limit_entries {
+            intent = intent.into_limit(self.config.limit_time_in_force_bars, true);
+        }
+
+        Some(intent)
     }
 }
 
@@ -1139,19 +1179,14 @@ impl Strategy for LangevinPotentialStrategy {
                         } else {
                             None
                         };
-                        return OrderIntent::with_risk_and_exits(
+                        return self.build_intent(
                             bar.end_time,
                             Side::Buy,
                             bar.close,
                             stop_loss,
                             take_profit,
-                            self.config.time_barrier_bars,
-                            None,
                             be_dist,
-                            be_dist,
-                            None,
-                        )
-                        .ok();
+                        );
                     }
                 }
             }
@@ -1200,19 +1235,14 @@ impl Strategy for LangevinPotentialStrategy {
                         } else {
                             None
                         };
-                        return OrderIntent::with_risk_and_exits(
+                        return self.build_intent(
                             bar.end_time,
                             Side::Sell,
                             bar.close,
                             stop_loss,
                             take_profit,
-                            self.config.time_barrier_bars,
-                            None,
                             be_dist,
-                            be_dist,
-                            None,
-                        )
-                        .ok();
+                        );
                     }
                 }
             }
@@ -1252,19 +1282,14 @@ impl Strategy for LangevinPotentialStrategy {
                         } else {
                             None
                         };
-                        return OrderIntent::with_risk_and_exits(
+                        return self.build_intent(
                             bar.end_time,
                             Side::Buy,
                             bar.close,
                             stop_loss,
                             take_profit,
-                            self.config.time_barrier_bars,
-                            None,
                             be_dist,
-                            be_dist,
-                            None,
-                        )
-                        .ok();
+                        );
                     }
                 }
             }
@@ -1304,19 +1329,14 @@ impl Strategy for LangevinPotentialStrategy {
                         } else {
                             None
                         };
-                        return OrderIntent::with_risk_and_exits(
+                        return self.build_intent(
                             bar.end_time,
                             Side::Sell,
                             bar.close,
                             stop_loss,
                             take_profit,
-                            self.config.time_barrier_bars,
-                            None,
                             be_dist,
-                            be_dist,
-                            None,
-                        )
-                        .ok();
+                        );
                     }
                 }
             }
@@ -1877,5 +1897,39 @@ mod tests {
             intent_strong.is_some(),
             "Absorbed wall touch (>= 60% buy volume) must trigger entry"
         );
+    }
+
+    #[test]
+    fn langevin_emits_limit_order_when_configured() {
+        let config = LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            macro_trend_filter: false,
+            kinematic_exhaustion_window: 1,
+            min_wall_absorption_ratio: dec!(0.50),
+            use_limit_entries: true,
+            limit_time_in_force_bars: Some(2),
+            ..LangevinConfig::default()
+        };
+        let mut strat = LangevinPotentialStrategy::new(config).unwrap();
+
+        for i in 0..20 {
+            let offset = ((i as f64 * 0.5).sin() * 200.0) as i64;
+            let price = dec!(50_000) + Decimal::from(offset);
+            strat.on_bar(&sample_bar(1000 * i, price));
+        }
+
+        let dip_bar = sample_bar(20_000, dec!(49_650));
+        strat.on_bar(&dip_bar);
+
+        let strong_bar = sample_bar_with_volume(21_000, dec!(49_660), dec!(0.75));
+        let intent = strat.on_bar(&strong_bar);
+        assert!(intent.is_some());
+
+        let order = intent.unwrap();
+        assert_eq!(order.order_type, domain::OrderType::Limit);
+        assert_eq!(order.time_in_force_bars, Some(2));
+        assert!(order.post_only);
     }
 }

@@ -30,6 +30,9 @@ impl Strategy for ScriptedLong {
             trailing_atr: None,
             breakeven_atr: None,
             deadline_ms: None,
+            order_type: domain::OrderType::Market,
+            time_in_force_bars: None,
+            post_only: false,
         })
     }
 

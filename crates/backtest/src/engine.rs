@@ -6,7 +6,9 @@ use strategies::{Decision, MarketEvent, Strategy};
 
 use crate::config::BacktestConfig;
 use crate::daily_watermark::DailyWatermark;
-use crate::execution_core::{market_fill_price, ExecutionCore, PendingEntry, PendingTarget};
+use crate::execution_core::{
+    market_fill_price, ExecutionCore, PendingEntry, PendingEntryOutcome, PendingTarget,
+};
 use crate::metrics::{
     BacktestMetrics, ClosedTrade, TradeExcursion, DAILY_HALT_REJECTION, POSITION_CAP_CLIP,
     REARM_IGNORED_REJECTION, UNSUPPORTED_DECISION_REJECTION,
@@ -290,11 +292,13 @@ impl BacktestEngine {
         // trade count is taken before the fills. Entry fills never close a trade.
         let trades_before = self.closed_trades().len();
 
-        // 0. A market order submitted on an earlier event fills at this event's open once due.
-        if let Some(pending) = self.core.take_due_pending(bar.start_ms) {
-            if !self.halted {
+        // 0. A pending order (market or limit) submitted on an earlier event evaluates once due.
+        if !self.halted {
+            if let PendingEntryOutcome::ExpiredLimit =
                 self.core
-                    .fill_entry(pending, *bar, &self.config, &mut self.equity);
+                    .step_pending_entry(*bar, &self.config, &mut self.equity)
+            {
+                self.count_rejection("LimitTimeoutExpired");
             }
         }
         if let Some(pending) = self.core.take_due_target(bar.start_ms) {
@@ -435,7 +439,7 @@ impl BacktestEngine {
         match sized {
             Ok(quantity) => self
                 .core
-                .submit_due(PendingEntry { intent, quantity }, due_ms),
+                .submit_due(PendingEntry::new(intent, quantity), due_ms),
             Err(error) => self.count_rejection(error.kind()),
         }
     }

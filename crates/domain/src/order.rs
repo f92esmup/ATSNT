@@ -5,8 +5,9 @@ use crate::error::DomainError;
 use crate::trade::Side;
 
 /// Order execution type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum OrderType {
+    #[default]
     Market,
     Limit,
 }
@@ -56,6 +57,15 @@ pub struct OrderIntent {
     /// Optional timestamp deadline in Unix ms for real-time / intraday time barriers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<i64>,
+    /// Order execution type: Market (aggressive Taker) or Limit (passive Maker).
+    #[serde(default)]
+    pub order_type: OrderType,
+    /// Optional Time-In-Force timeout in number of bars for Limit orders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_in_force_bars: Option<usize>,
+    /// Whether the order must execute strictly as a Maker order (Post-Only).
+    #[serde(default)]
+    pub post_only: bool,
 }
 
 impl OrderIntent {
@@ -188,7 +198,44 @@ impl OrderIntent {
             trailing_atr,
             breakeven_atr,
             deadline_ms,
+            order_type: OrderType::Market,
+            time_in_force_bars: None,
+            post_only: false,
         })
+    }
+
+    /// Converts this intent into a passive Limit order with an optional Time-In-Force (bars) and post-only flag.
+    pub fn into_limit(mut self, time_in_force_bars: Option<usize>, post_only: bool) -> Self {
+        self.order_type = OrderType::Limit;
+        self.time_in_force_bars = time_in_force_bars;
+        self.post_only = post_only;
+        self
+    }
+
+    /// Constructs a Limit order intent with a specific limit price, time-in-force, and post-only flag.
+    #[allow(clippy::too_many_arguments)]
+    pub fn limit(
+        timestamp: i64,
+        side: Side,
+        limit_price: Decimal,
+        stop_loss: Decimal,
+        take_profit: Decimal,
+        max_bars_hold: usize,
+        time_in_force_bars: Option<usize>,
+        post_only: bool,
+    ) -> Result<Self, DomainError> {
+        let mut intent = Self::new(
+            timestamp,
+            side,
+            limit_price,
+            stop_loss,
+            take_profit,
+            max_bars_hold,
+        )?;
+        intent.order_type = OrderType::Limit;
+        intent.time_in_force_bars = time_in_force_bars;
+        intent.post_only = post_only;
+        Ok(intent)
     }
 }
 
@@ -406,5 +453,34 @@ mod tests {
         let res = order.transition_to_fill(dec!(1.5));
         assert_eq!(res, Err(DomainError::OverfillError));
         assert_eq!(order.status, OrderStatus::New);
+    }
+
+    #[test]
+    fn order_intent_limit_properties() {
+        let default_intent =
+            OrderIntent::new(1000, Side::Buy, dec!(50000), dec!(49000), dec!(52000), 5).unwrap();
+        assert_eq!(default_intent.order_type, OrderType::Market);
+        assert_eq!(default_intent.time_in_force_bars, None);
+        assert!(!default_intent.post_only);
+
+        let limit_converted = default_intent.into_limit(Some(3), true);
+        assert_eq!(limit_converted.order_type, OrderType::Limit);
+        assert_eq!(limit_converted.time_in_force_bars, Some(3));
+        assert!(limit_converted.post_only);
+
+        let direct_limit = OrderIntent::limit(
+            2000,
+            Side::Sell,
+            dec!(51000),
+            dec!(52000),
+            dec!(48000),
+            10,
+            Some(2),
+            true,
+        )
+        .unwrap();
+        assert_eq!(direct_limit.order_type, OrderType::Limit);
+        assert_eq!(direct_limit.time_in_force_bars, Some(2));
+        assert!(direct_limit.post_only);
     }
 }
