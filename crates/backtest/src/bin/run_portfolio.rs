@@ -40,8 +40,8 @@ struct Args {
     #[arg(long, default_value = "25000000")]
     btc_dollar_bar: Decimal,
 
-    /// Dollar bar accumulation threshold for ETH (default: $3M for day trading, $8M for swing)
-    #[arg(long, default_value = "8000000")]
+    /// Dollar bar accumulation threshold for ETH (default: $8M for day trading, $20M for swing)
+    #[arg(long, default_value = "20000000")]
     eth_dollar_bar: Decimal,
 
     /// Dollar bar accumulation threshold for SOL (default: $1.5M for day trading, $4M for swing)
@@ -170,7 +170,7 @@ fn main() -> Result<()> {
                 enable_kramers_breakout: true,
                 kramers_lambda_threshold: dec!(1.5),
                 kramers_tp_multiple: dec!(1.0),
-                opposite_wall_fraction: dec!(1.00),
+                opposite_wall_fraction: dec!(0.25),
                 enable_dynamic_breakeven: true,
                 breakeven_distance_fraction: dec!(0.50),
                 stop_loss_atr_buffer: dec!(0.75),
@@ -190,6 +190,8 @@ fn main() -> Result<()> {
         )
     };
 
+    btc_cfg.opposite_wall_fraction = dec!(0.25);
+    btc_cfg.min_take_profit_pct = dec!(0.006);
     btc_cfg.breakeven_distance_fraction = dec!(0.50);
     btc_cfg.enable_dynamic_breakeven = true;
     btc_cfg.stop_loss_atr_buffer = dec!(0.75);
@@ -208,11 +210,14 @@ fn main() -> Result<()> {
         )
     } else {
         let mut cfg = btc_cfg.clone();
-        cfg.min_take_profit_pct = dec!(0.009);
-        cfg.min_well_depth_pct = dec!(0.012);
+        cfg.min_take_profit_pct = dec!(0.008);
+        cfg.min_well_depth_pct = dec!(0.015);
         (cfg, args.eth_dollar_bar)
     };
 
+    eth_cfg.opposite_wall_fraction = dec!(0.25);
+    eth_cfg.min_well_depth_pct = dec!(0.015);
+    eth_cfg.min_take_profit_pct = dec!(0.008);
     eth_cfg.breakeven_distance_fraction = dec!(0.50);
     eth_cfg.enable_dynamic_breakeven = true;
     eth_cfg.stop_loss_atr_buffer = dec!(0.75);
@@ -224,7 +229,8 @@ fn main() -> Result<()> {
     };
 
     let mut sol_cfg = btc_cfg.clone();
-    sol_cfg.min_take_profit_pct = dec!(0.018);
+    sol_cfg.opposite_wall_fraction = dec!(0.25);
+    sol_cfg.min_take_profit_pct = dec!(0.014);
     sol_cfg.min_well_depth_pct = dec!(0.020);
     sol_cfg.breakeven_distance_fraction = dec!(0.50);
     sol_cfg.enable_dynamic_breakeven = true;
@@ -427,11 +433,49 @@ fn main() -> Result<()> {
         }
         println!();
 
+        let long_trades: Vec<_> = refs
+            .iter()
+            .filter(|t| t.side == domain::PositionSide::Long)
+            .collect();
+        let short_trades: Vec<_> = refs
+            .iter()
+            .filter(|t| t.side == domain::PositionSide::Short)
+            .collect();
+        let long_wins = long_trades
+            .iter()
+            .filter(|t| t.pnl_net > Decimal::ZERO)
+            .count();
+        let short_wins = short_trades
+            .iter()
+            .filter(|t| t.pnl_net > Decimal::ZERO)
+            .count();
+        let long_pnl: Decimal = long_trades.iter().map(|t| t.pnl_net).sum();
+        let short_pnl: Decimal = short_trades.iter().map(|t| t.pnl_net).sum();
+        println!(
+            "     Direction: Longs: {} (Win: {:.0}%, PnL: {:+.2}) | Shorts: {} (Win: {:.0}%, PnL: {:+.2})",
+            long_trades.len(),
+            if !long_trades.is_empty() {
+                (long_wins as f64 / long_trades.len() as f64) * 100.0
+            } else {
+                0.0
+            },
+            long_pnl,
+            short_trades.len(),
+            if !short_trades.is_empty() {
+                (short_wins as f64 / short_trades.len() as f64) * 100.0
+            } else {
+                0.0
+            },
+            short_pnl
+        );
+
         let sl_trades: Vec<_> = refs
             .iter()
             .filter(|t| t.exit_reason == "StopLoss")
             .collect();
         if !sl_trades.is_empty() {
+            let be_sls = sl_trades.iter().filter(|t| t.pnl_gross >= Decimal::ZERO).count();
+            let true_sls = sl_trades.len() - be_sls;
             let avg_sl_pct: Decimal = sl_trades
                 .iter()
                 .map(|t| t.return_pct.abs())
@@ -446,14 +490,44 @@ fn main() -> Result<()> {
                 .iter()
                 .filter(|t| t.holding_duration_seconds < 300)
                 .count();
+
+            // MFE: How many SL trades had peak equity > entry equity (reached positive excursion)?
+            let had_positive_mfe = sl_trades
+                .iter()
+                .filter(|t| t.excursion.peak_equity > t.excursion.entry_equity)
+                .count();
+            let avg_peak_gain_pct: Decimal = if had_positive_mfe > 0 {
+                sl_trades
+                    .iter()
+                    .filter(|t| t.excursion.peak_equity > t.excursion.entry_equity)
+                    .map(|t| (t.excursion.peak_equity - t.excursion.entry_equity) / t.excursion.entry_equity)
+                    .sum::<Decimal>()
+                    / Decimal::from(had_positive_mfe)
+            } else {
+                Decimal::ZERO
+            };
+
             println!(
-                "     SL Profile: Avg Loss: {:.2}% | Avg Hold: {}s ({:.1}m) | <5m Kills: {}/{} ({:.0}%)",
+                "     SL Profile: Total: {} (True Losses: {} | Breakeven/Win SLs: {})",
+                sl_trades.len(),
+                true_sls,
+                be_sls
+            );
+            println!(
+                "                 Avg Loss: {:.2}% | Avg Hold: {}s ({:.1}m) | <5m Kills: {}/{} ({:.0}%)",
                 avg_sl_pct * dec!(100),
                 avg_sl_sec,
                 avg_sl_sec as f64 / 60.0,
                 died_under_5m,
                 sl_trades.len(),
                 (died_under_5m as f64 / sl_trades.len() as f64) * 100.0
+            );
+            println!(
+                "                 Had Positive Excursion (MFE): {}/{} ({:.0}%) | Avg Peak Gain: +{:.2}%",
+                had_positive_mfe,
+                sl_trades.len(),
+                (had_positive_mfe as f64 / sl_trades.len() as f64) * 100.0,
+                avg_peak_gain_pct * dec!(100)
             );
         }
         let tp_trades: Vec<_> = refs
