@@ -24,9 +24,9 @@ struct Args {
     #[arg(long, default_value = "data/historical/ETHUSDT")]
     eth_data: PathBuf,
 
-    /// Optional path to SOL historical market data
-    #[arg(long)]
-    sol_data: Option<PathBuf>,
+    /// Path to SOL historical market data (.parquet file or directory)
+    #[arg(long, default_value = "data/historical/SOLUSDT")]
+    sol_data: PathBuf,
 
     /// Optional path to BTC strategy config JSON (e.g. configs/hpo_langevin_swing_v2_winner.json)
     #[arg(long)]
@@ -69,7 +69,7 @@ struct Args {
     max_slot_margin: Decimal,
 
     /// Whether to enter using passive limit orders with TIF timeout
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     use_limit_orders: bool,
 
     /// Limit order Time-In-Force timeout in bars (default: 2)
@@ -152,10 +152,7 @@ fn main() -> Result<()> {
     // 1. Resolve strategy configs and dollar bar thresholds
     let (mut btc_cfg, btc_threshold) = if let Some(path) = args.btc_config.as_ref() {
         let loaded = backtest::load_strategy_config::<LangevinConfig>(path)?;
-        (
-            loaded.strategy_config().clone(),
-            loaded.dollar_bar_threshold().unwrap_or(args.btc_dollar_bar),
-        )
+        (loaded.strategy_config().clone(), args.btc_dollar_bar)
     } else {
         (
             LangevinConfig {
@@ -175,6 +172,7 @@ fn main() -> Result<()> {
                 kramers_tp_multiple: dec!(1.0),
                 opposite_wall_fraction: dec!(1.00),
                 enable_dynamic_breakeven: true,
+                breakeven_distance_fraction: dec!(0.50),
                 macro_trend_filter: true,
                 macro_ema_period: 200,
                 macro_slope_window: 50,
@@ -191,6 +189,15 @@ fn main() -> Result<()> {
         )
     };
 
+    btc_cfg.breakeven_distance_fraction = dec!(0.50);
+    btc_cfg.enable_dynamic_breakeven = true;
+    btc_cfg.use_limit_entries = args.use_limit_orders;
+    btc_cfg.limit_time_in_force_bars = if args.use_limit_orders {
+        Some(args.limit_timeout_bars)
+    } else {
+        None
+    };
+
     let (mut eth_cfg, eth_threshold) = if let Some(path) = args.eth_config.as_ref() {
         let loaded = backtest::load_strategy_config::<LangevinConfig>(path)?;
         (
@@ -204,15 +211,22 @@ fn main() -> Result<()> {
         (cfg, args.eth_dollar_bar)
     };
 
-    btc_cfg.use_limit_entries = args.use_limit_orders;
-    btc_cfg.limit_time_in_force_bars = if args.use_limit_orders {
+    eth_cfg.breakeven_distance_fraction = dec!(0.50);
+    eth_cfg.enable_dynamic_breakeven = true;
+    eth_cfg.use_limit_entries = args.use_limit_orders;
+    eth_cfg.limit_time_in_force_bars = if args.use_limit_orders {
         Some(args.limit_timeout_bars)
     } else {
         None
     };
 
-    eth_cfg.use_limit_entries = args.use_limit_orders;
-    eth_cfg.limit_time_in_force_bars = if args.use_limit_orders {
+    let mut sol_cfg = btc_cfg.clone();
+    sol_cfg.min_take_profit_pct = dec!(0.009);
+    sol_cfg.min_well_depth_pct = dec!(0.012);
+    sol_cfg.breakeven_distance_fraction = dec!(0.50);
+    sol_cfg.enable_dynamic_breakeven = true;
+    sol_cfg.use_limit_entries = args.use_limit_orders;
+    sol_cfg.limit_time_in_force_bars = if args.use_limit_orders {
         Some(args.limit_timeout_bars)
     } else {
         None
@@ -222,12 +236,12 @@ fn main() -> Result<()> {
     let btc_bars = load_asset_bars("BTCUSDT", &args.btc_data, btc_threshold)?;
     let eth_bars = load_asset_bars("ETHUSDT", &args.eth_data, eth_threshold)?;
 
-    let sol_bars = if let Some(sol_path) = args.sol_data.as_ref() {
-        if sol_path.exists() {
-            Some(load_asset_bars("SOLUSDT", sol_path, args.sol_dollar_bar)?)
-        } else {
-            None
-        }
+    let sol_bars = if args.sol_data.exists() {
+        Some(load_asset_bars(
+            "SOLUSDT",
+            &args.sol_data,
+            args.sol_dollar_bar,
+        )?)
     } else {
         None
     };
@@ -253,7 +267,7 @@ fn main() -> Result<()> {
     // 4. Initialize Strategy Instances per symbol
     let mut btc_strat = LangevinPotentialStrategy::new(btc_cfg)?;
     let mut eth_strat = LangevinPotentialStrategy::new(eth_cfg)?;
-    let mut sol_strat = LangevinPotentialStrategy::new(LangevinConfig::default())?;
+    let mut sol_strat = LangevinPotentialStrategy::new(sol_cfg)?;
 
     // 4. Initialize Portfolio Risk Policy & Engine
     let risk_policy = PortfolioRiskPolicy {
@@ -326,9 +340,7 @@ fn main() -> Result<()> {
     let net_pnl = engine.total_realized_pnl();
     let max_dd_pct = engine.max_drawdown_pct() * dec!(100);
 
-    // Breakdown per symbol and monthly PnL
-    let mut btc_closed = Vec::new();
-    let mut eth_closed = Vec::new();
+    // Monthly PnL aggregation
     let mut monthly_pnl: std::collections::BTreeMap<String, (Decimal, usize)> =
         std::collections::BTreeMap::new();
 
@@ -339,12 +351,6 @@ fn main() -> Result<()> {
         let entry = monthly_pnl.entry(month_str).or_insert((Decimal::ZERO, 0));
         entry.0 += trade.pnl_net;
         entry.1 += 1;
-
-        if trade.entry_price > dec!(10000) {
-            btc_closed.push(trade);
-        } else {
-            eth_closed.push(trade);
-        }
     }
 
     let calc_stats = |trades: &[&backtest::ClosedTrade]| {
@@ -382,8 +388,7 @@ fn main() -> Result<()> {
         (count, wins, losses, win_rate, pf, net, exit_reasons)
     };
 
-    let btc_stats = calc_stats(&btc_closed);
-    let eth_stats = calc_stats(&eth_closed);
+    let by_symbol = engine.closed_trades_by_symbol();
 
     println!("============================================================");
     println!(" PORTFOLIO BACKTEST PERFORMANCE REPORT");
@@ -402,24 +407,22 @@ fn main() -> Result<()> {
     );
     println!("------------------------------------------------------------");
     println!(" SYMBOL ATTRIBUTION:");
-    println!(
-        "   BTCUSDT: {} trades | Win: {:.1}% ({}/{}W) | PF: {:.2} | PnL: {:+.2} USDT",
-        btc_stats.0, btc_stats.3, btc_stats.1, btc_stats.0, btc_stats.4, btc_stats.5
-    );
-    print!("     Exits: ");
-    for (r, c) in &btc_stats.6 {
-        print!("{r}: {c} | ");
+    let mut sorted_symbols: Vec<_> = by_symbol.keys().collect();
+    sorted_symbols.sort();
+    for sym in sorted_symbols {
+        let sym_trades = &by_symbol[sym];
+        let refs: Vec<&backtest::ClosedTrade> = sym_trades.iter().collect();
+        let stats = calc_stats(&refs);
+        println!(
+            "   {sym:<8}: {} trades | Win: {:.1}% ({}/{}W) | PF: {:.2} | PnL: {:+.2} USDT",
+            stats.0, stats.3, stats.1, stats.0, stats.4, stats.5
+        );
+        print!("     Exits: ");
+        for (r, c) in &stats.6 {
+            print!("{r}: {c} | ");
+        }
+        println!();
     }
-    println!();
-    println!(
-        "   ETHUSDT: {} trades | Win: {:.1}% ({}/{}W) | PF: {:.2} | PnL: {:+.2} USDT",
-        eth_stats.0, eth_stats.3, eth_stats.1, eth_stats.0, eth_stats.4, eth_stats.5
-    );
-    print!("     Exits: ");
-    for (r, c) in &eth_stats.6 {
-        print!("{r}: {c} | ");
-    }
-    println!();
     println!("------------------------------------------------------------");
     println!(" MONTHLY PERFORMANCE BREAKDOWN:");
     for (month, (pnl, cnt)) in &monthly_pnl {

@@ -6,7 +6,7 @@
 //! risk-budget sizing, and isolated margin caps).
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
 use domain::{OrderIntent, PortfolioRiskPolicy, PositionSide, Side};
 use rust_decimal::Decimal;
@@ -320,6 +320,14 @@ impl PortfolioEngine {
         &self.closed_trades
     }
 
+    /// Returns closed trades partitioned strictly by trading symbol.
+    pub fn closed_trades_by_symbol(&self) -> HashMap<String, Vec<ClosedTrade>> {
+        self.cores
+            .iter()
+            .map(|(sym, core)| (sym.clone(), core.ledger().trades().to_vec()))
+            .collect()
+    }
+
     /// Returns recorded order rejections.
     pub fn rejected_orders(&self) -> &BTreeMap<String, usize> {
         &self.rejected_orders
@@ -466,5 +474,9 @@ mod tests {
         assert_eq!(engine.open_positions_count(), 1);
         assert_eq!(engine.closed_trades().len(), 1);
         assert_eq!(engine.closed_trades()[0].exit_reason, "TakeProfit");
+
+        let by_symbol = engine.closed_trades_by_symbol();
+        assert_eq!(by_symbol.get("BTCUSDT").map(|t| t.len()), Some(1));
+        assert_eq!(by_symbol.get("ETHUSDT").map(|t| t.len()), Some(0));
     }
 }

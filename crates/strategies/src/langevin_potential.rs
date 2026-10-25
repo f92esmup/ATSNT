@@ -581,6 +581,10 @@ fn default_min_wall_absorption_ratio() -> Decimal {
     dec!(0.50)
 }
 
+fn default_breakeven_distance_fraction() -> Decimal {
+    dec!(0.50)
+}
+
 /// Hyperparameter configuration for Langevin Potential Well Strategy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LangevinConfig {
@@ -624,6 +628,9 @@ pub struct LangevinConfig {
     /// Whether to enable dynamic breakeven and trailing stop ratchet on favorable excursion.
     #[serde(default = "default_true")]
     pub enable_dynamic_breakeven: bool,
+    /// Fraction of distance to potential well center (x_0) required to trigger dynamic breakeven (default: 0.50).
+    #[serde(default = "default_breakeven_distance_fraction")]
+    pub breakeven_distance_fraction: Decimal,
     /// Whether to enable macro trend drift filter.
     #[serde(default = "default_macro_trend_filter")]
     pub macro_trend_filter: bool,
@@ -668,6 +675,7 @@ impl Default for LangevinConfig {
             kramers_tp_multiple: dec!(1.0),
             opposite_wall_fraction: dec!(0.60),
             enable_dynamic_breakeven: true,
+            breakeven_distance_fraction: dec!(0.50),
             macro_trend_filter: true,
             macro_ema_period: 200,
             macro_slope_window: 50,
@@ -780,6 +788,7 @@ impl HyperparameterSpace for LangevinSpace {
                                                             kramers_tp_multiple: dec!(1.0),
                                                             opposite_wall_fraction: owf,
                                                             enable_dynamic_breakeven: true,
+                                                            breakeven_distance_fraction: dec!(0.50),
                                                             macro_trend_filter: macro_filter,
                                                             macro_ema_period: 200,
                                                             macro_slope_window: 50,
@@ -1175,7 +1184,11 @@ impl Strategy for LangevinPotentialStrategy {
                         (take_profit - bar.close) / bar.close >= self.config.min_take_profit_pct;
                     if friction_ok {
                         let be_dist = if self.config.enable_dynamic_breakeven {
-                            Some((x_0_price - bar.close).abs())
+                            Some(
+                                ((x_0_price - bar.close).abs()
+                                    * self.config.breakeven_distance_fraction)
+                                    .round_dp(2),
+                            )
                         } else {
                             None
                         };
@@ -1231,7 +1244,11 @@ impl Strategy for LangevinPotentialStrategy {
                         (bar.close - take_profit) / bar.close >= self.config.min_take_profit_pct;
                     if friction_ok {
                         let be_dist = if self.config.enable_dynamic_breakeven {
-                            Some((bar.close - x_0_price).abs())
+                            Some(
+                                ((bar.close - x_0_price).abs()
+                                    * self.config.breakeven_distance_fraction)
+                                    .round_dp(2),
+                            )
                         } else {
                             None
                         };
@@ -1278,7 +1295,11 @@ impl Strategy for LangevinPotentialStrategy {
                         (take_profit - bar.close) / bar.close >= self.config.min_take_profit_pct;
                     if friction_ok {
                         let be_dist = if self.config.enable_dynamic_breakeven {
-                            Some((bar.close - stop_loss).abs())
+                            Some(
+                                ((bar.close - stop_loss).abs()
+                                    * self.config.breakeven_distance_fraction)
+                                    .round_dp(2),
+                            )
                         } else {
                             None
                         };
@@ -1325,7 +1346,11 @@ impl Strategy for LangevinPotentialStrategy {
                         (bar.close - take_profit) / bar.close >= self.config.min_take_profit_pct;
                     if friction_ok {
                         let be_dist = if self.config.enable_dynamic_breakeven {
-                            Some((stop_loss - bar.close).abs())
+                            Some(
+                                ((stop_loss - bar.close).abs()
+                                    * self.config.breakeven_distance_fraction)
+                                    .round_dp(2),
+                            )
                         } else {
                             None
                         };
@@ -1777,6 +1802,7 @@ mod tests {
             beta_entry: dec!(0.20),
             min_take_profit_pct: dec!(0.0010),
             enable_dynamic_breakeven: true,
+            breakeven_distance_fraction: dec!(0.50),
             macro_trend_filter: false,
             ..LangevinConfig::default()
         })
@@ -1815,6 +1841,60 @@ mod tests {
         assert!(
             intent_no_be.breakeven_atr.is_none(),
             "Disabled dynamic breakeven must leave breakeven_atr as None"
+        );
+    }
+
+    #[test]
+    fn breakeven_distance_fraction_scales_trigger_proportionately() {
+        let mut strat_full = LangevinPotentialStrategy::new(LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            enable_dynamic_breakeven: true,
+            breakeven_distance_fraction: dec!(1.00),
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        })
+        .unwrap();
+
+        let mut strat_half = LangevinPotentialStrategy::new(LangevinConfig {
+            window_size: 20,
+            beta_entry: dec!(0.20),
+            min_take_profit_pct: dec!(0.0010),
+            enable_dynamic_breakeven: true,
+            breakeven_distance_fraction: dec!(0.50),
+            macro_trend_filter: false,
+            ..LangevinConfig::default()
+        })
+        .unwrap();
+
+        for i in 0..20 {
+            let offset = ((i as f64 * 0.5).sin() * 200.0) as i64;
+            let price = dec!(50_000) + Decimal::from(offset);
+            let bar = sample_bar(1000 * i, price);
+            strat_full.on_bar(&bar);
+            strat_half.on_bar(&bar);
+        }
+
+        let dip_bar = sample_bar(20_000, dec!(49_650));
+        strat_full.on_bar(&dip_bar);
+        strat_half.on_bar(&dip_bar);
+
+        let bounce_bar = sample_bar(21_000, dec!(49_660));
+        let intent_full = strat_full.on_bar(&bounce_bar).expect("intent_full");
+        let intent_half = strat_half.on_bar(&bounce_bar).expect("intent_half");
+
+        let be_full = intent_full.breakeven_atr.expect("be_full");
+        let be_half = intent_half.breakeven_atr.expect("be_half");
+
+        assert!(
+            be_half < be_full,
+            "Half breakeven distance ({be_half}) must be less than full ({be_full})"
+        );
+        assert_eq!(
+            be_half,
+            (be_full * dec!(0.50)).round_dp(2),
+            "Half breakeven distance must be exactly 50% of full"
         );
     }
 
