@@ -24,6 +24,7 @@ pub mod run;
 pub mod session;
 pub mod sinks;
 pub mod tick_simulation;
+pub mod universe_selector;
 pub mod walk_forward;
 
 pub use alert_throttle::AlertThrottle;
@@ -81,4 +82,5 @@ pub use registry::{
 pub use run::{FillModel, InvalidRunId, RunId, RunSpec, RunType};
 pub use sinks::{artifact_object_name, artifact_run_suffix, SinkFailures, StrictSinkError};
 pub use tick_simulation::{TickSimulation, TickSimulationConfig, TickSimulationError, TickStep};
+pub use universe_selector::CrossSectionalUniverseSelector;
 pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};

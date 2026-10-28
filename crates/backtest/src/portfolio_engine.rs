@@ -8,7 +8,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
 
-use domain::{OrderIntent, PortfolioRiskPolicy, PositionSide, Side};
+use domain::{OrderIntent, PortfolioRiskPolicy, PositionSide, Side, UniverseSelectionPolicy};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -18,6 +18,7 @@ use crate::config::BacktestConfig;
 use crate::execution_core::{ExecutionCore, PendingEntry, PendingEntryOutcome};
 use crate::metrics::{BacktestMetrics, ClosedTrade, TradeExcursion, SPOT_SHORTING_DISALLOWED};
 use crate::price_event::PriceEvent;
+use crate::universe_selector::CrossSectionalUniverseSelector;
 
 /// Online rolling Pearson correlation estimator over time-synchronized horizon return pairs.
 #[derive(Debug, Clone)]
@@ -179,6 +180,8 @@ pub struct PortfolioEngineConfig {
     pub btc_correlation_threshold: Decimal,
     /// Rolling window capacity in bars for correlation estimation (default 35).
     pub btc_correlation_window: usize,
+    /// Dynamic universe selection policy for multi-asset ranking and Top-K filtering.
+    pub universe_policy: Option<UniverseSelectionPolicy>,
 }
 
 impl Default for PortfolioEngineConfig {
@@ -194,6 +197,7 @@ impl Default for PortfolioEngineConfig {
             btc_breadth_filter: false,
             btc_correlation_threshold: dec!(0.65),
             btc_correlation_window: 35,
+            universe_policy: None,
         }
     }
 }
@@ -216,6 +220,7 @@ impl PortfolioEngineConfig {
             btc_breadth_filter: false,
             btc_correlation_threshold: dec!(0.65),
             btc_correlation_window: 35,
+            universe_policy: None,
         }
     }
 
@@ -334,12 +339,17 @@ pub struct PortfolioEngine {
     closed_trades: Vec<ClosedTrade>,
     btc_macro_bullish: bool,
     correlation_trackers: BTreeMap<String, RollingCorrelationTracker>,
+    universe_selector: Option<CrossSectionalUniverseSelector>,
 }
 
 impl PortfolioEngine {
     /// Creates a new portfolio engine initialized with the given configuration.
     pub fn new(config: PortfolioEngineConfig) -> Self {
         let initial_capital = config.initial_capital;
+        let universe_selector = config
+            .universe_policy
+            .as_ref()
+            .map(|p| CrossSectionalUniverseSelector::new(p.clone(), "BTCUSDT"));
         Self {
             config,
             equity: initial_capital,
@@ -353,7 +363,24 @@ impl PortfolioEngine {
             closed_trades: Vec::new(),
             btc_macro_bullish: true,
             correlation_trackers: BTreeMap::new(),
+            universe_selector,
         }
+    }
+
+    /// Sets or replaces the cross-sectional universe selector.
+    pub fn with_universe_selector(mut self, selector: CrossSectionalUniverseSelector) -> Self {
+        self.universe_selector = Some(selector);
+        self
+    }
+
+    /// Returns a reference to the active universe selector, if present.
+    pub fn universe_selector(&self) -> Option<&CrossSectionalUniverseSelector> {
+        self.universe_selector.as_ref()
+    }
+
+    /// Returns a mutable reference to the active universe selector, if present.
+    pub fn universe_selector_mut(&mut self) -> Option<&mut CrossSectionalUniverseSelector> {
+        self.universe_selector.as_mut()
     }
 
     /// Total marked equity across the shared wallet balance and all open isolated positions.
@@ -392,7 +419,7 @@ impl PortfolioEngine {
 
     /// Ingests one price event for a specific symbol, evaluating exits, pending entries,
     /// and routing the event to the symbol's strategy instance.
-    pub fn process_event<S: Strategy>(
+    pub fn process_event<S: Strategy + ?Sized>(
         &mut self,
         symbol: &str,
         event: impl Into<PriceEvent>,
@@ -471,7 +498,20 @@ impl PortfolioEngine {
             sell_dollar_volume: bar.sell_dollar_volume,
         };
 
-        if let Some(intent) = strategy.on_bar(&dollar_bar) {
+        let strategy_intent = strategy.on_bar(&dollar_bar);
+
+        // Feed dynamic universe selector with bar and quantum metrics if active
+        if let Some(ref mut selector) = self.universe_selector {
+            let quantum_metric = strategy.audit().and_then(|a| {
+                a.get("curvature_k")
+                    .or_else(|| a.get("f_total"))
+                    .and_then(|v| v.as_f64())
+                    .and_then(Decimal::from_f64_retain)
+            });
+            selector.process_bar(symbol, &dollar_bar, quantum_metric);
+        }
+
+        if let Some(intent) = strategy_intent {
             let is_flat = {
                 let core = self.cores.entry(symbol.to_string()).or_default();
                 core.position().is_none() && core.pending().is_none()
@@ -521,6 +561,14 @@ impl PortfolioEngine {
         if self.config.market_type == MarketType::Spot && intent.side == Side::Sell {
             self.count_rejection(SPOT_SHORTING_DISALLOWED);
             return;
+        }
+
+        // Enforce Universe Selection Policy (if universe_selector is active):
+        if let Some(ref selector) = self.universe_selector {
+            if !selector.is_symbol_authorized_for_entry(symbol) {
+                self.count_rejection("ExcludedByUniverseRanking");
+                return;
+            }
         }
 
         // Enforce BTC market breadth lead filter with dynamic rolling Pearson correlation gating:

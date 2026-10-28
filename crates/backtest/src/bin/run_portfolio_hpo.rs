@@ -636,6 +636,7 @@ fn run_portfolio_slice<S: OptimizableStrategy>(
         btc_breadth_filter: false,
         btc_correlation_threshold: dec!(0.65),
         btc_correlation_window: 35,
+        universe_policy: None,
     };
 
     let mut engine = PortfolioEngine::new(engine_config);

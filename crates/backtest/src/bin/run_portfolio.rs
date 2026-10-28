@@ -471,6 +471,7 @@ where
         btc_breadth_filter: args.btc_breadth_filter || artifact_btc_breadth,
         btc_correlation_threshold,
         btc_correlation_window,
+        universe_policy: None,
     };
 
     let mut engine = PortfolioEngine::new(engine_config);

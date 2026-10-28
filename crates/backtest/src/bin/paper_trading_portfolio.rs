@@ -572,6 +572,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         btc_breadth_filter: effective_btc_breadth,
         btc_correlation_threshold: effective_btc_corr_thresh,
         btc_correlation_window: effective_btc_corr_window,
+        universe_policy: None,
     };
     let mut engine = PortfolioEngine::new(engine_config);
 
