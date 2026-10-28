@@ -28,8 +28,10 @@ pub mod walk_forward;
 
 pub use alert_throttle::AlertThrottle;
 pub use artifact::{
-    load_artifact_shared_config, load_strategy_config, HpoDeploymentArtifact, HpoScorecard,
-    LoadedStrategyConfig, SamplingConfig, StrategyDeploymentArtifact,
+    load_artifact_shared_config, load_portfolio_artifact, load_strategy_config,
+    HpoDeploymentArtifact, HpoScorecard, LoadedStrategyConfig, PortfolioAssetSpec,
+    PortfolioDeploymentArtifact, PortfolioExecutionSettings, PortfolioScorecard, SamplingConfig,
+    StrategyDeploymentArtifact,
 };
 pub use config::BacktestConfig;
 pub use daily_watermark::DailyWatermark;

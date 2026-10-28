@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use domain::{DollarBar, Position, PositionSide, RiskPolicy, Side};
 use rust_decimal::Decimal;
-use strategies::{Decision, MarketEvent, Strategy};
+use strategies::{Decision, MarketEvent, MarketType, Strategy};
 
 use crate::config::BacktestConfig;
 use crate::daily_watermark::DailyWatermark;
@@ -11,7 +11,7 @@ use crate::execution_core::{
 };
 use crate::metrics::{
     BacktestMetrics, ClosedTrade, TradeExcursion, DAILY_HALT_REJECTION, POSITION_CAP_CLIP,
-    REARM_IGNORED_REJECTION, UNSUPPORTED_DECISION_REJECTION,
+    REARM_IGNORED_REJECTION, SPOT_SHORTING_DISALLOWED, UNSUPPORTED_DECISION_REJECTION,
 };
 use crate::monthly_guard::utc_month_key;
 use crate::price_event::PriceEvent;
@@ -423,6 +423,11 @@ impl BacktestEngine {
             return;
         }
 
+        if self.config.market_type == MarketType::Spot && intent.side == Side::Sell {
+            self.count_rejection(SPOT_SHORTING_DISALLOWED);
+            return;
+        }
+
         let sized = self
             .current_daily_drawdown_pct_at(mark_price)
             .and_then(|drawdown| {
@@ -452,6 +457,10 @@ impl BacktestEngine {
     /// opposite target arrives. While the daily breaker is tripped a target may only reduce the
     /// position: an increase or a flip is counted as [`DAILY_HALT_REJECTION`], as an entry is.
     fn submit_target(&mut self, target: domain::TargetPosition, mark_price: Decimal, due_ms: i64) {
+        if self.config.market_type == MarketType::Spot && target.level() < 0 {
+            self.count_rejection(SPOT_SHORTING_DISALLOWED);
+            return;
+        }
         if self.core.intent().is_some() || self.core.pending().is_some() {
             self.count_rejection(UNSUPPORTED_DECISION_REJECTION);
             return;
@@ -1826,6 +1835,7 @@ mod tests {
             high,
             low,
             close,
+            ..Default::default()
         }
     }
 
@@ -2659,5 +2669,25 @@ mod tests {
             engine.rejected_orders,
             counters(&[("OrderSizeExceeded", 1)])
         );
+    }
+
+    #[test]
+    fn spot_engine_rejects_short_entry_and_records_rejection_counter() {
+        let mut engine = BacktestEngine::new(BacktestConfig::spot());
+        let sell_intent =
+            domain::OrderIntent::new(1, Side::Sell, dec!(100), dec!(105), dec!(95), 5).unwrap();
+
+        engine.submit_entry(sell_intent, dec!(100), 2_000);
+        assert_eq!(
+            engine.rejected_orders.get(SPOT_SHORTING_DISALLOWED),
+            Some(&1)
+        );
+        assert!(engine.pending_intent().is_none());
+
+        // Now submit a valid Buy intent in Spot
+        let buy_intent =
+            domain::OrderIntent::new(2, Side::Buy, dec!(100), dec!(95), dec!(105), 5).unwrap();
+        engine.submit_entry(buy_intent, dec!(100), 2_000);
+        assert!(engine.pending_intent().is_some());
     }
 }

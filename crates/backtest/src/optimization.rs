@@ -1341,6 +1341,7 @@ mod tests {
             high: dec!(1),
             low: dec!(1),
             close: dec!(1),
+            ..Default::default()
         }
     }
 

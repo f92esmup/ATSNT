@@ -18,6 +18,7 @@ use domain::{
 };
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use strategies::MarketType;
 
 use crate::config::BacktestConfig;
 use crate::metrics::{
@@ -520,6 +521,22 @@ impl ExecutionCore {
         self.exits.as_ref()
     }
 
+    /// Returns `(free_quote, free_base)` balance amounts for Spot accounts.
+    ///
+    /// For a flat account, `free_quote == equity` and `free_base == 0`.
+    /// When holding a position, `free_base == position.quantity`, and
+    /// `free_quote == equity - (position.quantity * position.entry_price)`.
+    pub fn spot_balances(&self, equity: Decimal) -> (Decimal, Decimal) {
+        match &self.position {
+            Some(pos) => {
+                let notional = pos.quantity * pos.entry_price;
+                let free_quote = (equity - notional).max(Decimal::ZERO);
+                (free_quote, pos.quantity)
+            }
+            None => (equity.max(Decimal::ZERO), Decimal::ZERO),
+        }
+    }
+
     /// The market order waiting to fill, if any.
     pub fn pending(&self) -> Option<&PendingEntry> {
         self.pending.as_ref()
@@ -703,6 +720,9 @@ impl ExecutionCore {
         config: &BacktestConfig,
         equity: &mut Decimal,
     ) {
+        if config.market_type == MarketType::Spot || config.funding_rate_pct == Decimal::ZERO {
+            return;
+        }
         let bar = event.into();
         let Some(position) = &self.position else {
             return;
@@ -738,6 +758,9 @@ impl ExecutionCore {
         let PendingEntry {
             intent, quantity, ..
         } = pending;
+        if config.market_type == MarketType::Spot && intent.side == Side::Sell {
+            return;
+        }
         let is_limit = intent.order_type == domain::OrderType::Limit;
 
         let (fill_price, entry_fee, adverse_per_unit) = if is_limit {
@@ -1161,6 +1184,10 @@ impl ExecutionCore {
 
     /// Liquidation price of the open position, if one is open.
     pub fn liquidation_price(&self, config: &BacktestConfig) -> Option<Decimal> {
+        if config.market_type == MarketType::Spot || config.maintenance_margin_rate == Decimal::ZERO
+        {
+            return None;
+        }
         let position = self.position.as_ref()?;
         Some(liquidation_of(position, self.margin, config))
     }
@@ -1174,6 +1201,10 @@ impl ExecutionCore {
         equity: &mut Decimal,
         excursion: &mut Option<TradeExcursion>,
     ) -> bool {
+        if config.market_type == MarketType::Spot || config.maintenance_margin_rate == Decimal::ZERO
+        {
+            return false;
+        }
         let (Some(liquidation), Some(exits), Some(position)) = (
             self.liquidation_price(config),
             self.exits,
@@ -1830,5 +1861,76 @@ mod tests {
         assert_eq!(outcome_2, PendingEntryOutcome::ExpiredLimit);
         assert!(core.position().is_none());
         assert!(core.pending().is_none()); // Slot freed!
+    }
+
+    #[test]
+    fn spot_mode_rejects_sell_entry() {
+        let config = BacktestConfig::spot();
+        let mut equity = dec!(10_000);
+        let mut core = ExecutionCore::new();
+        let intent = OrderIntent::new(1, Side::Sell, dec!(100), dec!(110), dec!(90), 5).unwrap();
+
+        core.submit(PendingEntry::new(intent, dec!(1)));
+        assert!(core.pending().is_some());
+
+        let bar_1 = bar(dec!(100), dec!(105), dec!(95), dec!(100));
+        let pending = core.take_pending().unwrap();
+        core.fill_entry(pending, &bar_1, &config, &mut equity);
+
+        // Core must remain completely flat because short entries are forbidden in Spot
+        assert!(core.position().is_none());
+        assert_eq!(equity, dec!(10_000));
+    }
+
+    #[test]
+    fn spot_mode_ignores_funding_settlements() {
+        let config = BacktestConfig::spot();
+        let mut equity = dec!(10_000);
+        let mut core = ExecutionCore::new();
+        let pos = Position::new(PositionSide::Long, dec!(2), dec!(100)).unwrap();
+        core.set_position_for_test(pos);
+
+        // Cross 8-hour funding boundary (e.g. from 0 to 8*3600*1000 + 1000)
+        let eight_hours = 8 * 3600 * 1000;
+        let mut test_bar = bar(dec!(100), dec!(105), dec!(95), dec!(100));
+        test_bar.start_time = eight_hours;
+        test_bar.end_time = eight_hours + 1000;
+
+        core.settle_funding(0, &test_bar, &config, &mut equity);
+
+        assert_eq!(equity, dec!(10_000));
+        assert_eq!(core.funding_accrued, Decimal::ZERO);
+    }
+
+    #[test]
+    fn spot_mode_disables_margin_liquidation() {
+        let config = BacktestConfig::spot();
+        let mut equity = dec!(10_000);
+        let mut core = ExecutionCore::new();
+        let pos = Position::new(PositionSide::Long, dec!(1), dec!(100)).unwrap();
+        core.set_position_for_test(pos);
+
+        // Liquidation price must be None for Spot
+        assert_eq!(core.liquidation_price(&config), None);
+
+        // Even on a massive price collapse, liquidation does not trigger
+        let crash_bar = bar(dec!(10), dec!(10), dec!(1), dec!(5));
+        let mut excursion = None;
+        assert!(!core.liquidate_if_due(&(&crash_bar).into(), &config, &mut equity, &mut excursion));
+    }
+
+    #[test]
+    fn spot_dual_balances_track_free_quote_and_base() {
+        let mut core = ExecutionCore::new();
+        let equity = dec!(10_000);
+
+        // Flat: all equity is free quote, 0 base
+        assert_eq!(core.spot_balances(equity), (dec!(10_000), dec!(0)));
+
+        // Open position: 2 units at price 100 = 200 notional
+        let pos = Position::new(PositionSide::Long, dec!(2), dec!(100)).unwrap();
+        core.set_position_for_test(pos);
+
+        assert_eq!(core.spot_balances(equity), (dec!(9_800), dec!(2)));
     }
 }

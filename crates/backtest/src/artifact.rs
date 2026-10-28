@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use domain::PortfolioRiskPolicy;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -250,6 +252,58 @@ pub fn load_strategy_config<C: DeserializeOwned>(path: &Path) -> Result<LoadedSt
         )
     })?;
     Ok(LoadedStrategyConfig::Bare(bare))
+}
+
+/// Unified Portfolio Deployment Artifact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioDeploymentArtifact {
+    pub schema_version: String,
+    pub created_at: String,
+    pub capital: Decimal,
+    pub risk_policy: PortfolioRiskPolicy,
+    pub execution: PortfolioExecutionSettings,
+    pub assets: Vec<PortfolioAssetSpec>,
+    pub scorecard: PortfolioScorecard,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioExecutionSettings {
+    pub use_limit_orders: bool,
+    pub limit_timeout_bars: usize,
+    pub maker_fee_pct: Decimal,
+    pub taker_fee_pct: Decimal,
+    pub slippage_pct: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioAssetSpec {
+    pub symbol: String,
+    pub dollar_bar_threshold: Decimal,
+    pub strategy_id: String,
+    pub strategy_config: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioScorecard {
+    pub mean_is_sortino: Decimal,
+    pub mean_oos_sortino: Decimal,
+    pub oos_sharpe: Option<Decimal>,
+    pub oos_profit_factor: Option<Decimal>,
+    pub oos_win_rate_pct: Decimal,
+    pub total_oos_trades: usize,
+    pub min_fold_trades: usize,
+    pub max_drawdown_pct: Decimal,
+    pub diversification_score: Decimal,
+    pub fitness: Decimal,
+    pub trades_per_asset: BTreeMap<String, usize>,
+}
+
+/// Loads a portfolio deployment artifact from a JSON file.
+pub fn load_portfolio_artifact(path: &Path) -> Result<PortfolioDeploymentArtifact> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read portfolio artifact from {}", path.display()))?;
+    serde_json::from_str::<PortfolioDeploymentArtifact>(&content)
+        .with_context(|| format!("Failed to parse portfolio artifact from {}", path.display()))
 }
 
 #[cfg(test)]

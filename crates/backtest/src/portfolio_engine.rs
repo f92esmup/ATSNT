@@ -10,11 +10,11 @@ use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
 use domain::{OrderIntent, PortfolioRiskPolicy, PositionSide, Side};
 use rust_decimal::Decimal;
-use strategies::Strategy;
+use strategies::{MarketType, Strategy};
 
 use crate::config::BacktestConfig;
 use crate::execution_core::{ExecutionCore, PendingEntry, PendingEntryOutcome};
-use crate::metrics::{ClosedTrade, TradeExcursion};
+use crate::metrics::{BacktestMetrics, ClosedTrade, TradeExcursion, SPOT_SHORTING_DISALLOWED};
 use crate::price_event::PriceEvent;
 
 /// Configuration for the multi-asset portfolio engine.
@@ -32,6 +32,8 @@ pub struct PortfolioEngineConfig {
     pub risk_policy: PortfolioRiskPolicy,
     /// Order latency in milliseconds.
     pub latency_ms: i64,
+    /// Market type governing exchange rules (Spot vs USD-M Perpetual).
+    pub market_type: MarketType,
 }
 
 impl Default for PortfolioEngineConfig {
@@ -43,11 +45,37 @@ impl Default for PortfolioEngineConfig {
             slippage_pct: Decimal::new(5, 4),  // 0.0005 = 0.05%
             risk_policy: PortfolioRiskPolicy::default(),
             latency_ms: 0,
+            market_type: MarketType::UsdMPerpetual,
         }
     }
 }
 
 impl PortfolioEngineConfig {
+    /// Constructs a Spot portfolio configuration with standard Binance Spot fees (0.10% maker/taker),
+    /// strict 1x leverage, and zero funding.
+    pub fn spot() -> Self {
+        Self {
+            initial_capital: Decimal::new(10_000, 0),
+            maker_fee_pct: Decimal::new(10, 4), // 0.0010 = 0.10%
+            taker_fee_pct: Decimal::new(10, 4), // 0.0010 = 0.10%
+            slippage_pct: Decimal::new(5, 4),   // 0.0005 = 0.05%
+            risk_policy: PortfolioRiskPolicy {
+                max_leverage: Decimal::ONE,
+                ..PortfolioRiskPolicy::default()
+            },
+            latency_ms: 0,
+            market_type: MarketType::Spot,
+        }
+    }
+
+    /// Constructs a Spot portfolio configuration with Binance BNB 25% fee discount (0.075% maker/taker).
+    pub fn spot_with_bnb_discount() -> Self {
+        let mut cfg = Self::spot();
+        cfg.maker_fee_pct = Decimal::new(75, 5); // 0.00075 = 0.075%
+        cfg.taker_fee_pct = Decimal::new(75, 5);
+        cfg
+    }
+
     /// Builds a per-symbol `BacktestConfig` matching this portfolio's fees and execution parameters.
     pub fn per_symbol_config(&self) -> BacktestConfig {
         BacktestConfig {
@@ -58,6 +86,7 @@ impl PortfolioEngineConfig {
             risk_per_trade_pct: self.risk_policy.risk_per_trade_pct,
             latency_ms: self.latency_ms,
             resting_maker_exits: true,
+            market_type: self.market_type,
             ..BacktestConfig::default()
         }
     }
@@ -68,6 +97,15 @@ impl PortfolioEngineConfig {
 pub struct TaggedPriceEvent {
     pub symbol: String,
     pub event: PriceEvent,
+}
+
+/// Detailed outcome of stepping one price event through the portfolio engine.
+#[derive(Debug, Clone, Default)]
+pub struct PortfolioStepReport {
+    /// Newly opened position on this event (if any), with its protective barriers.
+    pub opened_position: Option<(domain::Position, Option<domain::ProtectiveExits>)>,
+    /// Newly closed trades on this event (if any).
+    pub closed_trades: Vec<ClosedTrade>,
 }
 
 impl PartialEq for TaggedPriceEvent {
@@ -204,19 +242,26 @@ impl PortfolioEngine {
         symbol: &str,
         event: impl Into<PriceEvent>,
         strategy: &mut S,
-    ) {
+    ) -> PortfolioStepReport {
         let bar = event.into();
         self.last_prices.insert(symbol.to_string(), bar.close);
 
         let per_symbol_cfg = self.config.per_symbol_config();
 
         // 1. Evaluate pending entry (Market or Limit with TIF timeout)
-        let expired = {
+        let (expired, newly_opened) = {
             let core = self.cores.entry(symbol.to_string()).or_default();
-            matches!(
-                core.step_pending_entry(bar, &per_symbol_cfg, &mut self.equity),
-                PendingEntryOutcome::ExpiredLimit
-            )
+            let pos_before = core.position().is_some();
+            let outcome = core.step_pending_entry(bar, &per_symbol_cfg, &mut self.equity);
+            let expired = matches!(outcome, PendingEntryOutcome::ExpiredLimit);
+            let opened = if !pos_before && core.position().is_some() {
+                core.position()
+                    .cloned()
+                    .map(|pos| (pos, core.exits().copied()))
+            } else {
+                None
+            };
+            (expired, opened)
         };
         if expired {
             self.count_rejection("LimitTimeoutExpired");
@@ -237,7 +282,7 @@ impl PortfolioEngine {
                 Vec::new()
             }
         };
-        self.closed_trades.extend(newly_closed);
+        self.closed_trades.extend(newly_closed.clone());
 
         // 3. Strategy decision
         let dollar_bar = domain::DollarBar {
@@ -247,13 +292,13 @@ impl PortfolioEngine {
             high: bar.high,
             low: bar.low,
             close: bar.close,
-            volume: Decimal::ZERO,
-            dollar_volume: Decimal::ZERO,
+            volume: bar.volume,
+            dollar_volume: bar.dollar_volume,
             trade_count: 1,
             buy_volume: Decimal::ZERO,
             sell_volume: Decimal::ZERO,
-            buy_dollar_volume: Decimal::ZERO,
-            sell_dollar_volume: Decimal::ZERO,
+            buy_dollar_volume: bar.buy_dollar_volume,
+            sell_dollar_volume: bar.sell_dollar_volume,
         };
 
         if let Some(intent) = strategy.on_bar(&dollar_bar) {
@@ -285,10 +330,20 @@ impl PortfolioEngine {
         if dd_pct > self.max_drawdown_pct {
             self.max_drawdown_pct = dd_pct;
         }
+
+        PortfolioStepReport {
+            opened_position: newly_opened,
+            closed_trades: newly_closed,
+        }
     }
 
     /// Evaluates pre-trade risk policy and queues an entry if authorized.
     fn try_submit_entry(&mut self, symbol: &str, intent: OrderIntent, event_end_ms: i64) {
+        if self.config.market_type == MarketType::Spot && intent.side == Side::Sell {
+            self.count_rejection(SPOT_SHORTING_DISALLOWED);
+            return;
+        }
+
         let target_side = match intent.side {
             Side::Buy => PositionSide::Long,
             Side::Sell => PositionSide::Short,
@@ -312,6 +367,15 @@ impl PortfolioEngine {
             Err(risk_err) => {
                 self.count_rejection(risk_err.kind());
             }
+        }
+    }
+
+    /// Returns the current (free quote, free base) balance for a specific symbol in Spot mode.
+    pub fn spot_balances(&self, symbol: &str) -> (Decimal, Decimal) {
+        if let Some(core) = self.cores.get(symbol) {
+            core.spot_balances(self.equity)
+        } else {
+            (self.equity, Decimal::ZERO)
         }
     }
 
@@ -341,6 +405,83 @@ impl PortfolioEngine {
     /// Returns total closed realized profit and loss across all assets.
     pub fn total_realized_pnl(&self) -> Decimal {
         self.closed_trades.iter().map(|t| t.pnl_net).sum()
+    }
+
+    /// Returns the cash balance in the shared portfolio wallet.
+    pub fn cash_equity(&self) -> Decimal {
+        self.equity
+    }
+
+    /// Returns the active position for a specific symbol, if one is currently open.
+    pub fn position(&self, symbol: &str) -> Option<&domain::Position> {
+        self.cores.get(symbol).and_then(|c| c.position())
+    }
+
+    /// Returns the active protective exits for a specific symbol, if any.
+    pub fn exits(&self, symbol: &str) -> Option<&domain::ProtectiveExits> {
+        self.cores.get(symbol).and_then(|c| c.exits())
+    }
+
+    /// Returns whether the specified symbol has no open position and no pending entry.
+    pub fn is_flat(&self, symbol: &str) -> bool {
+        self.cores
+            .get(symbol)
+            .map_or(true, |c| c.position().is_none() && c.pending().is_none())
+    }
+
+    /// Returns the latest marked close price recorded for a symbol.
+    pub fn last_price(&self, symbol: &str) -> Option<Decimal> {
+        self.last_prices.get(symbol).copied()
+    }
+
+    /// Current peak-to-trough drawdown percentage.
+    pub fn current_drawdown_pct(&self) -> Decimal {
+        let current = self.total_marked_equity();
+        if self.peak_equity > Decimal::ZERO && current < self.peak_equity {
+            (self.peak_equity - current) / self.peak_equity
+        } else {
+            Decimal::ZERO
+        }
+    }
+
+    /// Finalizes the portfolio backtest by closing any remaining open positions at
+    /// the last recorded price as `EndOfSimulation` and computing comprehensive portfolio metrics.
+    pub fn finish(&mut self, last_timestamp: i64) -> (BacktestMetrics, Vec<ClosedTrade>) {
+        let per_symbol_cfg = self.config.per_symbol_config();
+        for (symbol, core) in &mut self.cores {
+            if core.position().is_some() {
+                let mark = self
+                    .last_prices
+                    .get(symbol)
+                    .copied()
+                    .unwrap_or(Decimal::ZERO);
+                if mark > Decimal::ZERO {
+                    let mut excursion = self.open_excursions.remove(symbol).flatten();
+                    let trades_before = core.ledger().trades().len();
+                    core.execute_close(
+                        last_timestamp,
+                        mark,
+                        Decimal::ZERO,
+                        false,
+                        "EndOfSimulation",
+                        &per_symbol_cfg,
+                        &mut self.equity,
+                        &mut excursion,
+                    );
+                    let newly_closed = &core.ledger().trades()[trades_before..];
+                    self.closed_trades.extend_from_slice(newly_closed);
+                }
+            }
+        }
+
+        let metrics = BacktestMetrics::calculate(
+            self.config.initial_capital,
+            &self.closed_trades,
+            self.max_drawdown_amount,
+            self.max_drawdown_pct,
+        );
+
+        (metrics, self.closed_trades.clone())
     }
 }
 
@@ -391,6 +532,10 @@ mod tests {
             high: price + dec!(1),
             low: price - dec!(1),
             close: price,
+            volume: Decimal::ONE,
+            dollar_volume: price,
+            buy_dollar_volume: price,
+            sell_dollar_volume: Decimal::ZERO,
         }
     }
 
@@ -467,6 +612,10 @@ mod tests {
             high: dec!(50010),
             low: dec!(49999),
             close: dec!(50005),
+            volume: Decimal::ONE,
+            dollar_volume: dec!(50000),
+            buy_dollar_volume: dec!(50000),
+            sell_dollar_volume: Decimal::ZERO,
         };
         engine.process_event("BTCUSDT", btc_bar_3, &mut btc_strat);
 
@@ -478,5 +627,83 @@ mod tests {
         let by_symbol = engine.closed_trades_by_symbol();
         assert_eq!(by_symbol.get("BTCUSDT").map(|t| t.len()), Some(1));
         assert_eq!(by_symbol.get("ETHUSDT").map(|t| t.len()), Some(0));
+
+        // Finish engine: remaining ETH position is closed as EndOfSimulation
+        let (metrics, trades) = engine.finish(300);
+        assert_eq!(trades.len(), 2);
+        assert_eq!(trades[1].exit_reason, "EndOfSimulation");
+        assert_eq!(metrics.total_trades, 2);
+    }
+
+    #[test]
+    fn test_portfolio_spot_shorting_disallowed() {
+        let mut engine = PortfolioEngine::new(PortfolioEngineConfig::spot());
+
+        let mut sell_strat = ScriptedSignalStrategy {
+            signal_on_end_ms: 100,
+            side: Side::Sell,
+            price: dec!(50000),
+        };
+
+        let bar = test_event(0, 100, dec!(50000));
+        engine.process_event("BTCUSDT", bar, &mut sell_strat);
+
+        assert_eq!(engine.open_positions_count(), 0);
+        assert_eq!(
+            engine.rejected_orders().get(SPOT_SHORTING_DISALLOWED),
+            Some(&1),
+            "Spot portfolio engine must reject short entry intents"
+        );
+    }
+
+    #[test]
+    fn test_portfolio_spot_multi_asset_execution() {
+        let mut engine = PortfolioEngine::new(PortfolioEngineConfig::spot());
+
+        let mut btc_strat = ScriptedSignalStrategy {
+            signal_on_end_ms: 100,
+            side: Side::Buy,
+            price: dec!(50000),
+        };
+        let mut eth_strat = ScriptedSignalStrategy {
+            signal_on_end_ms: 150,
+            side: Side::Buy,
+            price: dec!(3000),
+        };
+
+        // 1. Submit signals
+        engine.process_event("BTCUSDT", test_event(0, 100, dec!(50000)), &mut btc_strat);
+        engine.process_event("ETHUSDT", test_event(50, 150, dec!(3000)), &mut eth_strat);
+
+        // 2. Fill entries
+        engine.process_event("BTCUSDT", test_event(100, 200, dec!(50000)), &mut btc_strat);
+        engine.process_event("ETHUSDT", test_event(150, 250, dec!(3000)), &mut eth_strat);
+
+        assert_eq!(engine.open_positions_count(), 2);
+        assert_eq!(engine.directional_positions_count(PositionSide::Long), 2);
+
+        // Check spot dual balances
+        let (free_quote_btc, free_base_btc) = engine.spot_balances("BTCUSDT");
+        assert!(free_base_btc > Decimal::ZERO);
+        assert!(free_quote_btc < dec!(10000));
+
+        // 3. Take profit on BTC
+        let btc_tp = PriceEvent {
+            start_ms: 200,
+            end_ms: 300,
+            open: dec!(50000),
+            high: dec!(50010),
+            low: dec!(49999),
+            close: dec!(50005),
+            volume: Decimal::ONE,
+            dollar_volume: dec!(50000),
+            buy_dollar_volume: dec!(50000),
+            sell_dollar_volume: Decimal::ZERO,
+        };
+        engine.process_event("BTCUSDT", btc_tp, &mut btc_strat);
+
+        assert_eq!(engine.open_positions_count(), 1);
+        assert_eq!(engine.closed_trades().len(), 1);
+        assert_eq!(engine.closed_trades()[0].exit_reason, "TakeProfit");
     }
 }

@@ -9,10 +9,10 @@ use adapters::{
 use anyhow::{Context, Result};
 use backtest::{
     artifact_object_name, artifact_run_suffix, bar_tape, calibration_end_ms, check_calibration,
-    embargo_buckets, now_unix_ms, record_hpo, trade_tape, BacktestConfig, DataWindow, FeaturesOf,
-    HpoDeploymentArtifact, HpoScorecard, RunContext, RunSpec, RunType, SamplingConfig,
-    SinkFailures, StrategyDeploymentArtifact, Tape, WalkForwardConfig, WalkForwardOptimizer,
-    WalkForwardSplitter, TRADES_WARM_UP_MS,
+    embargo_buckets, now_unix_ms, record_hpo, trade_tape, BacktestConfig, CandidateEvaluation,
+    DataWindow, FeaturesOf, HpoDeploymentArtifact, HpoScorecard, RunContext, RunSpec, RunType,
+    SamplingConfig, SinkFailures, StrategyDeploymentArtifact, Tape, WalkForwardConfig,
+    WalkForwardFold, WalkForwardOptimizer, WalkForwardSplitter, TRADES_WARM_UP_MS,
 };
 use chrono::Utc;
 use clap::Parser;
@@ -45,9 +45,14 @@ struct Args {
     data: PathBuf,
 
     /// Dollar bar threshold (e.g. 1000000 for $1M per bar); strategies that consume dollar
-    /// bars only
-    #[arg(long, default_value = "1000000")]
-    dollar_bar: Decimal,
+    /// bars only (for backwards compatibility)
+    #[arg(long)]
+    dollar_bar: Option<Decimal>,
+
+    /// Comma-separated list of dollar bar thresholds to evaluate in a multi-resolution sweep
+    /// (e.g. "2000000,4000000,6000000")
+    #[arg(long, value_delimiter = ',')]
+    dollar_bars: Option<Vec<Decimal>>,
 
     /// Number of Walk-Forward validation folds
     #[arg(short, long, visible_alias = "windows", default_value_t = 3)]
@@ -132,6 +137,29 @@ struct Args {
     /// artifact can be uploaded); failures are reported after all local work finishes
     #[arg(long, default_value_t = false)]
     strict_sinks: bool,
+
+    /// Target Binance Spot instead of USD-M Perpetual Futures
+    #[arg(long, default_value_t = false)]
+    spot: bool,
+
+    /// Apply Binance BNB fee discount (0.075% maker/taker) when targeting Spot
+    #[arg(long, default_value_t = false)]
+    bnb_discount: bool,
+}
+
+impl Args {
+    /// Resolves the list of dollar bar thresholds to evaluate.
+    fn resolved_dollar_bars(&self) -> Vec<Decimal> {
+        if let Some(bars) = &self.dollar_bars {
+            if !bars.is_empty() {
+                return bars.clone();
+            }
+        }
+        if let Some(bar) = self.dollar_bar {
+            return vec![bar];
+        }
+        vec![Decimal::new(1_000_000, 0)]
+    }
 }
 
 #[tokio::main]
@@ -204,79 +232,125 @@ fn open_stream(
     }
 }
 
-/// The run's input once prepared for the strategy's input kind (strategy spec §15.1).
-struct PreparedInput<F> {
+/// One resolution's prepared input: threshold, tape, temporal splits, sampling config, and data window.
+struct ResolutionInput<F> {
+    threshold: Decimal,
     tape: Tape<F>,
-    raw_trades: usize,
-    embargo: usize,
+    folds: Vec<WalkForwardFold>,
     sampling: SamplingConfig,
     data_window: DataWindow,
-    /// Fold unit in the console output.
     unit: &'static str,
-    /// Settings recorded only for strategies that consume trades.
     extra_settings: Option<serde_json::Value>,
 }
 
-/// Dollar-bar input: today's path. The bars are the tape, and `--embargo-bars` counts bars.
+/// The run's input once prepared across all target resolutions (strategy spec §15.1).
+struct PreparedInput<F> {
+    resolutions: Vec<ResolutionInput<F>>,
+    raw_trades: usize,
+    embargo: usize,
+}
+
+/// Dollar-bar input: ingests trades once, aggregating into multiple resolutions in parallel.
 fn prepare_dollar_bars<S: OptimizableStrategy>(
     args: &Args,
     shared: &S::SharedConfig,
     start_total: Instant,
 ) -> Result<PreparedInput<FeaturesOf<S>>> {
-    println!("Dollar Bar:  ${}", args.dollar_bar);
+    let thresholds = args.resolved_dollar_bars();
+    let thresh_str = thresholds
+        .iter()
+        .map(|t| format!("${t}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("Dollar Bars: {}", thresh_str);
     println!(
         "Folds:       {} (Train Ratio: {:.0}%, Embargo: {} bars)",
         args.folds,
         args.train_ratio * 100.0,
         args.embargo_bars
     );
-    println!("Candidates:  Up to {}", args.candidates);
+    println!(
+        "Candidates:  Up to {} per resolution (Total: {})",
+        args.candidates,
+        args.candidates * thresholds.len()
+    );
     println!("------------------------------------------------------------");
 
-    // 1. Ingest Market Data into In-Memory Dollar Bars
-    println!("[1/4] Aggregating market trade stream into Dollar Bars...");
+    // 1. Ingest Market Data into In-Memory Dollar Bars (Single Pass)
+    println!(
+        "[1/4] Aggregating market trade stream across {} resolution(s)...",
+        thresholds.len()
+    );
     let mut stream = open_stream(&args.data)?;
 
-    let mut aggregator = DollarBarAggregator::new(args.dollar_bar)
-        .map_err(|e| anyhow::anyhow!("Failed to initialize aggregator: {e}"))?;
+    let mut aggregators = Vec::with_capacity(thresholds.len());
+    for &t in &thresholds {
+        aggregators.push(
+            DollarBarAggregator::new(t)
+                .map_err(|e| anyhow::anyhow!("Failed to initialize aggregator for ${t}: {e}"))?,
+        );
+    }
 
-    let mut bars = Vec::with_capacity(16_384);
+    let mut bars_list = vec![Vec::with_capacity(16_384); thresholds.len()];
     let mut raw_trades = 0usize;
 
     while let Some(trade) = stream.next_trade()? {
         raw_trades += 1;
-        if let Some(bar) = aggregator.process_trade(&trade) {
-            bars.push(bar);
+        for (i, agg) in aggregators.iter_mut().enumerate() {
+            if let Some(bar) = agg.process_trade(&trade) {
+                bars_list[i].push(bar);
+            }
         }
     }
 
     println!(
-        "      Ingested {} ticks -> Formed {} Dollar Bars in {:.2}s",
+        "      Ingested {} ticks across {} resolution(s) in {:.2}s",
         raw_trades,
-        bars.len(),
+        thresholds.len(),
         start_total.elapsed().as_secs_f64()
     );
     print_phase_timing("ingest", start_total);
 
-    if bars.is_empty() {
-        anyhow::bail!("No Dollar Bars were emitted; reduce --dollar-bar threshold.");
+    let wf_config = WalkForwardConfig {
+        num_folds: args.folds,
+        train_ratio: args.train_ratio,
+        embargo_bars: args.embargo_bars,
+    };
+
+    let mut resolutions = Vec::with_capacity(thresholds.len());
+    for (i, &threshold) in thresholds.iter().enumerate() {
+        let bars = &bars_list[i];
+        if bars.is_empty() {
+            anyhow::bail!(
+                "No Dollar Bars were emitted for threshold ${threshold}; reduce threshold."
+            );
+        }
+        println!(
+            "      • Resolution ${threshold}: Formed {} Dollar Bars",
+            bars.len()
+        );
+        let data_window = DataWindow {
+            source: Some(args.data.display().to_string()),
+            start_ms: bars.first().map(|b| b.start_time),
+            end_ms: bars.last().map(|b| b.end_time),
+        };
+        let tape = bar_tape::<S>(shared, bars)?;
+        let folds = WalkForwardSplitter::generate_rolling_folds(tape.len(), &wf_config)?;
+        resolutions.push(ResolutionInput {
+            threshold,
+            tape,
+            folds,
+            sampling: SamplingConfig::DollarBar { threshold },
+            data_window,
+            unit: "bars",
+            extra_settings: None,
+        });
     }
 
-    let data_window = DataWindow {
-        source: Some(args.data.display().to_string()),
-        start_ms: bars.first().map(|b| b.start_time),
-        end_ms: bars.last().map(|b| b.end_time),
-    };
     Ok(PreparedInput {
-        tape: bar_tape::<S>(shared, &bars)?,
+        resolutions,
         raw_trades,
         embargo: args.embargo_bars,
-        sampling: SamplingConfig::DollarBar {
-            threshold: args.dollar_bar,
-        },
-        data_window,
-        unit: "bars",
-        extra_settings: None,
     })
 }
 
@@ -345,19 +419,30 @@ fn prepare_trades<S: OptimizableStrategy>(
     );
     print_phase_timing("ingest", start_total);
 
+    let wf_config = WalkForwardConfig {
+        num_folds: args.folds,
+        train_ratio: args.train_ratio,
+        embargo_bars: embargo,
+    };
+    let folds = WalkForwardSplitter::generate_rolling_folds(tape.len(), &wf_config)?;
+
     Ok(PreparedInput {
-        tape,
+        resolutions: vec![ResolutionInput {
+            threshold: Decimal::ZERO,
+            tape,
+            folds,
+            sampling: SamplingConfig::Trades {
+                price_bucket_ms: Some(bucket_ms),
+            },
+            data_window,
+            unit: "buckets",
+            extra_settings: Some(json!({
+                "price_bucket_ms": bucket_ms,
+                "embargo_ms": embargo_ms,
+            })),
+        }],
         raw_trades,
         embargo,
-        sampling: SamplingConfig::Trades {
-            price_bucket_ms: Some(bucket_ms),
-        },
-        data_window,
-        unit: "buckets",
-        extra_settings: Some(json!({
-            "price_bucket_ms": bucket_ms,
-            "embargo_ms": embargo_ms,
-        })),
     })
 }
 
@@ -393,9 +478,22 @@ where
         }
         None => S::SharedConfig::default(),
     };
-    let input_kind = S::from_config(&shared, S::Config::default())
-        .map_err(|error| anyhow::anyhow!("Failed to initialize strategy: {error}"))?
-        .input_kind();
+    let strategy_instance = S::from_config(&shared, S::Config::default())
+        .map_err(|error| anyhow::anyhow!("Failed to initialize strategy: {error}"))?;
+    let target_market = if args.spot {
+        strategies::MarketType::Spot
+    } else {
+        strategies::MarketType::UsdMPerpetual
+    };
+    if !strategy_instance.supports_market_type(target_market) {
+        anyhow::bail!(
+            "Strategy '{}' does not support {} (supported: {:?})",
+            S::id(),
+            if args.spot { "Spot" } else { "USD-M Perpetual" },
+            strategy_instance.compatible_market_types()
+        );
+    }
+    let input_kind = strategy_instance.input_kind();
     match input_kind {
         InputKind::Trades if args.shared_config.is_none() => anyhow::bail!(
             "strategy '{}' consumes trades and needs the shared configuration its feeds were \
@@ -426,48 +524,47 @@ where
         symbol_upper,
     } = run;
     let (shared, input_kind) = shared_config::<S>(args)?;
-    let PreparedInput {
-        tape,
-        raw_trades,
-        embargo,
-        sampling,
-        data_window,
-        unit,
-        extra_settings,
-    } = match input_kind {
+    let prepared = match input_kind {
         InputKind::DollarBars => prepare_dollar_bars::<S>(args, &shared, start_total)?,
         InputKind::Trades => prepare_trades::<S>(args, &shared, start_total)?,
     };
 
-    // 2. Generate Walk-Forward Folds with Embargo
-    println!("[2/4] Generating Purged & Embargoed temporal splits...");
-    let wf_config = WalkForwardConfig {
-        num_folds: args.folds,
-        train_ratio: args.train_ratio,
-        embargo_bars: embargo,
-    };
-    let folds = WalkForwardSplitter::generate_rolling_folds(tape.len(), &wf_config)?;
-    let folds = folds.as_slice();
-
-    for fold in folds {
+    // 2. Generate Walk-Forward Folds with Embargo across resolutions
+    println!("[2/4] Generating Purged & Embargoed temporal splits across resolutions...");
+    for res in &prepared.resolutions {
+        let label = if res.threshold > Decimal::ZERO {
+            format!("DollarBar(${:.0})", res.threshold)
+        } else {
+            "Trades".to_string()
+        };
         println!(
-            "      Fold #{}: Train [{}..{}] ({} {unit}) | Embargo [{}..{}] ({} {unit}) | Test [{}..{}] ({} {unit})",
-            fold.fold_idx,
-            fold.train_range.start,
-            fold.train_range.end,
-            fold.train_len(),
-            fold.embargo_range.start,
-            fold.embargo_range.end,
-            fold.embargo_len(),
-            fold.test_range.start,
-            fold.test_range.end,
-            fold.test_len()
+            "      Resolution [{label}] (Total: {} {}):",
+            res.tape.len(),
+            res.unit
         );
+        for fold in &res.folds {
+            println!(
+                "        Fold #{}: Train [{}..{}] ({} {}) | Embargo [{}..{}] ({} {}) | Test [{}..{}] ({} {})",
+                fold.fold_idx,
+                fold.train_range.start,
+                fold.train_range.end,
+                fold.train_len(),
+                res.unit,
+                fold.embargo_range.start,
+                fold.embargo_range.end,
+                fold.embargo_len(),
+                res.unit,
+                fold.test_range.start,
+                fold.test_range.end,
+                fold.test_len(),
+                res.unit
+            );
+        }
     }
 
     // 3. Multi-Core Rayon Optimization
     println!(
-        "[3/4] Launching parallel Rayon search across {} candidate configurations...",
+        "\n[3/4] Launching parallel Rayon search across {} candidate(s) per resolution...",
         args.candidates
     );
     let opt_start = Instant::now();
@@ -508,11 +605,27 @@ where
                 } else {
                     BacktestConfig::default()
                 }
+            } else if args.spot {
+                if args.bnb_discount {
+                    BacktestConfig::spot_with_bnb_discount()
+                } else {
+                    BacktestConfig::spot()
+                }
             } else {
                 BacktestConfig::default()
             }
         }
     };
+    if args.spot {
+        engine_config.market_type = strategies::MarketType::Spot;
+        engine_config.max_leverage = Decimal::ONE;
+        engine_config.funding_rate_pct = Decimal::ZERO;
+        engine_config.maintenance_margin_rate = Decimal::ZERO;
+        if args.bnb_discount {
+            engine_config.maker_fee_pct = rust_decimal_macros::dec!(0.00075);
+            engine_config.taker_fee_pct = rust_decimal_macros::dec!(0.00075);
+        }
+    }
     if let Some(cap) = args.capital {
         engine_config.initial_capital = cap;
     }
@@ -538,39 +651,73 @@ where
     };
 
     let space_json = serde_json::to_value(&param_space)?;
-    // `()` (a dollar-bar strategy) serializes to `null`: nothing to store.
     let shared_json = Some(serde_json::to_value(&shared)?).filter(|value| !value.is_null());
     let optimizer = WalkForwardOptimizer::<S>::new(engine_config, param_space)
         .with_shared_config(shared)
         .with_min_trades_per_fold(args.min_trades_per_fold);
-    let evaluations = optimizer.run_optimization_on_tape(&tape, folds, args.candidates)?;
-    // Ranked eligible first: the first one is the winner only when it reached the minimum.
-    let winner = evaluations.first().filter(|e| e.eligible).cloned();
-    let eligible_count = evaluations.iter().filter(|e| e.eligible).count();
+
+    let mut all_evaluations: Vec<(
+        Decimal,
+        CandidateEvaluation<S::Config>,
+        SamplingConfig,
+        DataWindow,
+    )> = Vec::new();
+
+    for res in &prepared.resolutions {
+        let res_start = Instant::now();
+        let evals = optimizer.run_optimization_on_tape(&res.tape, &res.folds, args.candidates)?;
+        let label = if res.threshold > Decimal::ZERO {
+            format!("DollarBar(${:.0})", res.threshold)
+        } else {
+            "Trades".to_string()
+        };
+        println!(
+            "      [{label}] Evaluated {} configurations in {:.2}s",
+            evals.len(),
+            res_start.elapsed().as_secs_f64()
+        );
+        for eval in evals {
+            all_evaluations.push((res.threshold, eval, res.sampling, res.data_window.clone()));
+        }
+    }
+
+    all_evaluations.sort_by(|a, b| {
+        b.1.eligible
+            .cmp(&a.1.eligible)
+            .then_with(|| b.1.fitness.cmp(&a.1.fitness))
+            .then_with(|| b.1.mean_oos_sortino.cmp(&a.1.mean_oos_sortino))
+    });
+
+    let winner = all_evaluations.first().filter(|e| e.1.eligible).cloned();
+    let eligible_count = all_evaluations.iter().filter(|e| e.1.eligible).count();
 
     let opt_duration = opt_start.elapsed().as_secs_f64();
     println!(
-        "      Evaluated {} configurations across {} folds in {:.2}s ({:.1} backtests/sec)",
-        evaluations.len(),
-        folds.len(),
-        opt_duration,
-        (evaluations.len() * folds.len() * 2) as f64 / opt_duration
+        "\n      Evaluated {} total configurations across {} resolution(s) in {:.2}s",
+        all_evaluations.len(),
+        prepared.resolutions.len(),
+        opt_duration
     );
     print_phase_timing("search", opt_start);
 
     // 4. Output Results and Reporting
-    println!("\n============================================================");
-    println!(" TOP 5 CANDIDATES (eligible first, by OOS fitness)          ");
-    println!("============================================================");
+    println!("\n=========================================================================================");
+    println!(
+        " TOP 10 CANDIDATES (eligible first, by OOS fitness across all resolutions)               "
+    );
+    println!(
+        "========================================================================================="
+    );
     println!(
         "      {} of {} candidates reached {} closed trades in every fold",
         eligible_count,
-        evaluations.len(),
+        all_evaluations.len(),
         args.min_trades_per_fold
     );
     println!(
-        "{:<4} | {:<45} | {:>9} | {:>9} | {:>6} | {:>8} | {:>9} | {:>6} | {:>7}",
+        "{:<4} | {:<14} | {:<42} | {:>9} | {:>9} | {:>6} | {:>8} | {:>9} | {:>6} | {:>7}",
         "Rank",
+        "Resolution",
         "Parameters",
         "IS Sort",
         "OOS Sort",
@@ -580,12 +727,20 @@ where
         "MinFold",
         "DSR p"
     );
-    println!("------------------------------------------------------------");
+    println!(
+        "-----------------------------------------------------------------------------------------"
+    );
 
-    for (rank, eval) in evaluations.iter().take(5).enumerate() {
+    for (rank, (thresh, eval, _, _)) in all_evaluations.iter().take(10).enumerate() {
+        let res_label = if *thresh > Decimal::ZERO {
+            format!("${thresh}")
+        } else {
+            "Trades".to_string()
+        };
         println!(
-            "#{:<3} | {:<45} | {:>9.4} | {:>9.4} | {:>6.2} | {:>8.4} | {:>9} | {:>6} | {:>7.4}{}",
+            "#{:<3} | {:<14} | {:<42} | {:>9.4} | {:>9.4} | {:>6.2} | {:>8.4} | {:>9} | {:>6} | {:>7.4}{}",
             rank + 1,
+            res_label,
             eval.config.to_string(),
             eval.mean_is_sortino,
             eval.mean_oos_sortino,
@@ -597,48 +752,107 @@ where
             if eval.eligible { "" } else { "  (ineligible)" }
         );
     }
-    println!("============================================================");
+    println!(
+        "========================================================================================="
+    );
+
+    let mut sinks = SinkFailures::new(args.strict_sinks);
+
+    let Some((winner_thresh, winner_eval, winner_sampling, winner_window)) = winner else {
+        sinks.finish()?;
+        anyhow::bail!(
+            "no candidate reached {} closed trades in every in-sample and out-of-sample fold \
+             ({} evaluated across {} resolution(s)): there is no measurable winner; widen the space, \
+             add data or lower --min-trades-per-fold",
+            args.min_trades_per_fold,
+            all_evaluations.len(),
+            prepared.resolutions.len()
+        );
+    };
+
+    println!("\n[WINNER] Selected Robust Parameter Configuration & Resolution:");
+    println!("  • Strategy:                  {}", S::id());
+    if winner_thresh > Decimal::ZERO {
+        println!("  • Winning Dollar Bar:        ${winner_thresh}");
+    }
+    println!("  • Configuration:             {}", winner_eval.config);
+    println!(
+        "  • Mean In-Sample Sortino:    {:.2}",
+        winner_eval.mean_is_sortino
+    );
+    println!(
+        "  • Mean Out-of-Sample Sortino: {:.2}",
+        winner_eval.mean_oos_sortino
+    );
+    println!(
+        "  • Parameter Stability Score: {:.2}",
+        winner_eval.stability_score
+    );
+    println!(
+        "  • OOS trades / fewest per fold: {} / {}",
+        winner_eval.total_oos_trades, winner_eval.min_fold_trades
+    );
+    println!(
+        "  • OOS Sharpe per trade:      {}",
+        backtest::format_ratio(winner_eval.oos_sharpe)
+    );
+    println!(
+        "  • Deflated Sharpe Ratio p:   {:.4} ({})",
+        winner_eval.dsr_p_value,
+        if winner_eval.is_statistically_significant {
+            "significant at 5%"
+        } else {
+            "not significant: the edge may be selection luck"
+        }
+    );
 
     let sweep_spec = RunSpec {
         strategy_id: S::id().to_string(),
         symbol: symbol_upper.to_string(),
-        market_type: strategies::MarketType::UsdMPerpetual,
-        sampling,
+        market_type: engine_config.market_type,
+        sampling: winner_sampling,
         strategy_config: space_json,
         execution_context: engine_config,
     };
 
-    let mut sinks = SinkFailures::new(args.strict_sinks);
-
-    if args.gcp_bigquery && !evaluations.is_empty() {
+    if args.gcp_bigquery && !all_evaluations.is_empty() {
         let bq = BigQuerySink::from_env().with_strict(args.strict_sinks);
         let sweep_ctx = RunContext::new(RunType::Hpo, &sweep_spec, started_at_ms);
+        let eval_only: Vec<CandidateEvaluation<S::Config>> =
+            all_evaluations.iter().map(|e| e.1.clone()).collect();
+        let total_bars: usize = prepared.resolutions.iter().map(|r| r.tape.len()).sum();
         let mut settings = json!({
-            "folds": folds.len(),
+            "folds": args.folds,
             "train_ratio": args.train_ratio,
-            "embargo_bars": embargo,
+            "embargo_bars": prepared.embargo,
             "candidates_requested": args.candidates,
-            "total_bars": tape.len(),
-            "raw_trades": raw_trades,
+            "total_bars": total_bars,
+            "raw_trades": prepared.raw_trades,
             "optimization_seconds": opt_duration,
+            "resolutions_evaluated": prepared.resolutions.iter().map(|r| r.threshold.to_string()).collect::<Vec<_>>(),
         });
-        if let (Some(settings), Some(serde_json::Value::Object(extra))) =
-            (settings.as_object_mut(), extra_settings)
-        {
+        if let (Some(settings), Some(serde_json::Value::Object(extra))) = (
+            settings.as_object_mut(),
+            prepared
+                .resolutions
+                .first()
+                .and_then(|r| r.extra_settings.clone()),
+        ) {
             settings.extend(extra);
         }
         let record_start = Instant::now();
         println!(
-            "[*] Recording HPO run {} with {} trial runs to BigQuery...",
+            "[*] Recording HPO run {} with {} trial runs across {} resolution(s) to BigQuery...",
             sweep_ctx.run_id,
-            evaluations.len()
+            all_evaluations.len(),
+            prepared.resolutions.len()
         );
         let recorded = record_hpo(
             &bq,
             &sweep_ctx,
             &sweep_spec,
-            &data_window,
-            &evaluations,
+            &winner_window,
+            &eval_only,
             settings,
         )
         .await
@@ -647,70 +861,25 @@ where
         print_phase_timing("record_bigquery", record_start);
     }
 
-    let Some(winner) = &winner else {
-        // The trials are recorded above; without an eligible one there is nothing to deploy,
-        // and an artifact here would carry a ratio measured on a handful of trades.
-        sinks.finish()?;
-        anyhow::bail!(
-            "no candidate reached {} closed trades in every in-sample and out-of-sample fold \
-             ({} evaluated): there is no measurable winner; widen the space, add data or lower \
-             --min-trades-per-fold",
-            args.min_trades_per_fold,
-            evaluations.len()
-        );
-    };
-    println!("\n[WINNER] Selected Robust Parameter Configuration:");
-    println!("  • Strategy:                  {}", S::id());
-    println!("  • Configuration:             {}", winner.config);
-    println!(
-        "  • Mean In-Sample Sortino:    {:.2}",
-        winner.mean_is_sortino
-    );
-    println!(
-        "  • Mean Out-of-Sample Sortino: {:.2}",
-        winner.mean_oos_sortino
-    );
-    println!(
-        "  • Parameter Stability Score: {:.2}",
-        winner.stability_score
-    );
-    println!(
-        "  • OOS trades / fewest per fold: {} / {}",
-        winner.total_oos_trades, winner.min_fold_trades
-    );
-    println!(
-        "  • OOS Sharpe per trade:      {}",
-        backtest::format_ratio(winner.oos_sharpe)
-    );
-    println!(
-        "  • Deflated Sharpe Ratio p:   {:.4} ({})",
-        winner.dsr_p_value,
-        if winner.is_statistically_significant {
-            "significant at 5%"
-        } else {
-            "not significant: the edge may be selection luck"
-        }
-    );
-
     // Serialize Winner to output_config as authoritative StrategyDeploymentArtifact
     let scorecard = HpoScorecard {
-        mean_is_sortino: winner.mean_is_sortino,
-        mean_oos_sortino: winner.mean_oos_sortino,
-        oos_profit_factor: winner.oos_profit_factor,
-        oos_sharpe: winner.oos_sharpe,
-        total_oos_trades: winner.total_oos_trades,
-        min_fold_trades: winner.min_fold_trades,
-        stability_score: winner.stability_score,
-        fitness: winner.fitness,
-        dsr_p_value: winner.dsr_p_value,
-        is_statistically_significant: winner.is_statistically_significant,
-        trials_evaluated: evaluations.len(),
+        mean_is_sortino: winner_eval.mean_is_sortino,
+        mean_oos_sortino: winner_eval.mean_oos_sortino,
+        oos_profit_factor: winner_eval.oos_profit_factor,
+        oos_sharpe: winner_eval.oos_sharpe,
+        total_oos_trades: winner_eval.total_oos_trades,
+        min_fold_trades: winner_eval.min_fold_trades,
+        stability_score: winner_eval.stability_score,
+        fitness: winner_eval.fitness,
+        dsr_p_value: winner_eval.dsr_p_value,
+        is_statistically_significant: winner_eval.is_statistically_significant,
+        trials_evaluated: all_evaluations.len(),
     };
 
     let deployment_artifact = HpoDeploymentArtifact {
         artifact: StrategyDeploymentArtifact {
             schema_version: "1.0".to_string(),
-            spec: sweep_spec.with_config(winner.config.clone()),
+            spec: sweep_spec.with_config(winner_eval.config.clone()),
             hpo_scorecard: Some(scorecard),
         },
         shared_config: shared_json,
@@ -733,7 +902,7 @@ where
         "        • Symbol:       {}",
         deployment_artifact.artifact.spec.symbol
     );
-    match sampling {
+    match winner_sampling {
         SamplingConfig::DollarBar { threshold } => {
             println!("        • Sampling:     DollarBar(${})", threshold)
         }
@@ -745,8 +914,6 @@ where
 
     if args.gcs_upload {
         let upload_start = Instant::now();
-        // Create-only: a retried Batch task re-uploading the same name keeps the
-        // first attempt's artifact instead of failing on overwrite.
         let gcs = GcsArtifactSink::from_env()
             .with_strict(args.strict_sinks)
             .with_create_only(true);

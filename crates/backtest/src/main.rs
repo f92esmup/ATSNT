@@ -108,6 +108,14 @@ struct Args {
     /// the backtest and Monte Carlo finish
     #[arg(long, default_value_t = false)]
     strict_sinks: bool,
+
+    /// Target Binance Spot instead of USD-M Perpetual Futures
+    #[arg(long, default_value_t = false)]
+    spot: bool,
+
+    /// Apply Binance BNB fee discount (0.075% maker/taker) when targeting Spot
+    #[arg(long, default_value_t = false)]
+    bnb_discount: bool,
 }
 
 #[tokio::main]
@@ -208,10 +216,34 @@ async fn main() -> Result<()> {
 
     println!("[*] Strategy loaded: {}", strategy.name());
 
+    let target_market = if args.spot {
+        MarketType::Spot
+    } else {
+        art_market.unwrap_or(MarketType::UsdMPerpetual)
+    };
+    if !strategy.supports_market_type(target_market) {
+        anyhow::bail!(
+            "Strategy '{}' does not support {} (supported: {:?})",
+            strategy.name(),
+            if target_market == MarketType::Spot {
+                "Spot"
+            } else {
+                "USD-M Perpetual"
+            },
+            strategy.compatible_market_types()
+        );
+    }
+
     // 3. Initialize Backtest Engine with 1:1 realistic friction
     let mut engine_config = if let Some(artifact_ctx) = art_context {
         println!("[*] Adopting 1:1 realistic friction schedule from deployment artifact");
         artifact_ctx
+    } else if args.spot {
+        if args.bnb_discount {
+            BacktestConfig::spot_with_bnb_discount()
+        } else {
+            BacktestConfig::spot()
+        }
     } else {
         BacktestConfig {
             initial_capital: dec!(10_000),
@@ -223,6 +255,17 @@ async fn main() -> Result<()> {
             ..BacktestConfig::default()
         }
     };
+
+    if args.spot {
+        engine_config.market_type = MarketType::Spot;
+        engine_config.max_leverage = Decimal::ONE;
+        engine_config.funding_rate_pct = Decimal::ZERO;
+        engine_config.maintenance_margin_rate = Decimal::ZERO;
+        if args.bnb_discount {
+            engine_config.maker_fee_pct = dec!(0.00075);
+            engine_config.taker_fee_pct = dec!(0.00075);
+        }
+    }
 
     if let Some(cap) = args.capital {
         if cap <= Decimal::ZERO {
@@ -475,7 +518,7 @@ async fn main() -> Result<()> {
     let run_spec = RunSpec {
         strategy_id: strat_id,
         symbol,
-        market_type: art_market.unwrap_or(MarketType::UsdMPerpetual),
+        market_type: target_market,
         sampling: match input_kind {
             InputKind::DollarBars => SamplingConfig::DollarBar {
                 threshold: effective_dollar_bar,

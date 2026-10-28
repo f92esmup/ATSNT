@@ -65,6 +65,14 @@ path = "src/bin/generate_pipeline_test_data.rs"
 name = "run_portfolio"
 path = "src/bin/run_portfolio.rs"
 
+[[bin]]
+name = "paper_trading_portfolio"
+path = "src/bin/paper_trading_portfolio.rs"
+
+[[bin]]
+name = "run_portfolio_hpo"
+path = "src/bin/run_portfolio_hpo.rs"
+
 
 [dev-dependencies]
 tempfile = "3"

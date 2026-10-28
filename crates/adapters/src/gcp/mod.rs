@@ -19,7 +19,7 @@ pub use bigquery::{BigQueryRecord, BigQuerySink};
 pub use gcs::GcsArtifactSink;
 pub use retry::{RetryPolicy, RETRY_BASE_MS_ENV};
 pub use secret_manager::GcpSecretManager;
-pub use telegram::{datetime_in_madrid, now_in_madrid, TelegramNotifier};
+pub use telegram::{datetime_in_madrid, now_in_madrid, SymbolPerformanceSummary, TelegramNotifier};
 
 /// Formats a Unix timestamp in milliseconds as an RFC3339 UTC string.
 pub fn format_unix_ms_rfc3339(ms: i64) -> String {

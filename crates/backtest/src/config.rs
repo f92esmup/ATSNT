@@ -1,6 +1,15 @@
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
+use strategies::MarketType;
+
+fn default_market_type() -> MarketType {
+    MarketType::UsdMPerpetual
+}
+
+fn is_default_market_type(market_type: &MarketType) -> bool {
+    *market_type == MarketType::UsdMPerpetual
+}
 
 fn default_max_monthly_drawdown_pct() -> Decimal {
     dec!(0.15)
@@ -37,6 +46,12 @@ fn default_maintenance_margin_rate() -> Decimal {
 /// (`latency_ms`); bid/ask spread is not yet modeled (see `odd/tasks/sim-live-fidelity.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BacktestConfig {
+    /// Market venue model (Spot or UsdMPerpetual). Default: UsdMPerpetual.
+    #[serde(
+        default = "default_market_type",
+        skip_serializing_if = "is_default_market_type"
+    )]
+    pub market_type: MarketType,
     /// Starting capital in quote currency (USDT).
     pub initial_capital: Decimal,
     /// Exchange fee for limit maker orders (e.g. 0.0002 = 0.02%). The bar-level engine only
@@ -213,13 +228,67 @@ impl BacktestConfig {
                 self.latency_ms
             )));
         }
+        if self.market_type == MarketType::Spot {
+            if self.max_leverage > Decimal::ONE {
+                return Err(crate::error::BacktestError::General(format!(
+                    "Spot trading does not permit leverage > 1, got {}",
+                    self.max_leverage
+                )));
+            }
+            if self.funding_rate_pct != Decimal::ZERO {
+                return Err(crate::error::BacktestError::General(format!(
+                    "Spot trading does not have funding rates, got {}",
+                    self.funding_rate_pct
+                )));
+            }
+            if self.maintenance_margin_rate != Decimal::ZERO {
+                return Err(crate::error::BacktestError::General(format!(
+                    "Spot trading does not have maintenance margin liquidation, got {}",
+                    self.maintenance_margin_rate
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// Realistic Binance Spot configuration (0.10% maker/taker, 1x leverage, 0% funding, 0% maintenance margin).
+    pub fn spot() -> Self {
+        Self {
+            market_type: MarketType::Spot,
+            initial_capital: dec!(10_000),
+            maker_fee_pct: dec!(0.0010),
+            taker_fee_pct: dec!(0.0010),
+            slippage_pct: dec!(0.0005),
+            risk_per_trade_pct: dec!(0.01),
+            max_daily_drawdown_pct: dec!(0.05),
+            max_monthly_drawdown_pct: default_max_monthly_drawdown_pct(),
+            max_leverage: Decimal::ONE,
+            min_order_quantity: default_min_order_quantity(),
+            quantity_step_size: default_quantity_step_size(),
+            min_order_notional: default_min_order_notional(),
+            max_order_notional: None,
+            max_position_notional: None,
+            funding_rate_pct: Decimal::ZERO,
+            maintenance_margin_rate: Decimal::ZERO,
+            latency_ms: 0,
+            resting_maker_exits: false,
+        }
+    }
+
+    /// Realistic Binance Spot configuration with BNB fee discount (0.075% maker/taker).
+    pub fn spot_with_bnb_discount() -> Self {
+        Self {
+            maker_fee_pct: dec!(0.00075),
+            taker_fee_pct: dec!(0.00075),
+            ..Self::spot()
+        }
     }
 }
 
 impl Default for BacktestConfig {
     fn default() -> Self {
         Self {
+            market_type: default_market_type(),
             initial_capital: dec!(10_000),
             maker_fee_pct: dec!(0.0002),
             taker_fee_pct: dec!(0.0005),
@@ -244,6 +313,38 @@ impl Default for BacktestConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spot_config_validates_and_carries_spot_parameters() {
+        let spot = BacktestConfig::spot();
+        assert_eq!(spot.market_type, MarketType::Spot);
+        assert_eq!(spot.max_leverage, Decimal::ONE);
+        assert_eq!(spot.funding_rate_pct, Decimal::ZERO);
+        assert_eq!(spot.maintenance_margin_rate, Decimal::ZERO);
+        assert_eq!(spot.maker_fee_pct, dec!(0.0010));
+        assert_eq!(spot.taker_fee_pct, dec!(0.0010));
+        assert!(spot.validate().is_ok());
+
+        let mut invalid_leverage = spot;
+        invalid_leverage.max_leverage = dec!(2);
+        assert!(invalid_leverage.validate().is_err());
+
+        let mut invalid_funding = spot;
+        invalid_funding.funding_rate_pct = dec!(0.0001);
+        assert!(invalid_funding.validate().is_err());
+
+        let mut invalid_margin = spot;
+        invalid_margin.maintenance_margin_rate = dec!(0.004);
+        assert!(invalid_margin.validate().is_err());
+    }
+
+    #[test]
+    fn spot_bnb_discount_config_carries_discounted_fees() {
+        let spot_bnb = BacktestConfig::spot_with_bnb_discount();
+        assert_eq!(spot_bnb.maker_fee_pct, dec!(0.00075));
+        assert_eq!(spot_bnb.taker_fee_pct, dec!(0.00075));
+        assert!(spot_bnb.validate().is_ok());
+    }
 
     #[test]
     fn legacy_artifact_context_without_new_fields_loads_with_defaults() {

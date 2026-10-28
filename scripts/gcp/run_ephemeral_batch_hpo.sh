@@ -435,7 +435,10 @@ done
 [ -n "${ZONES}" ] || die "Machine type ${MACHINE_TYPE} is not offered in ${REGION}. Pick another with --machine-type or --region."
 echo "      [OK] Available in: ${ZONES}(${GUEST_CPUS} vCPU)"
 
-# Free vCPUs of a quota metric: "<scope> describe" output, metric name.
+# Free and limit vCPUs of a quota metric: "<scope> describe" output, metric name.
+limit_cpus() {
+    awk -F, -v metric="$2" '$1 == metric { print int($2) }' <<< "$1"
+}
 free_cpus() {
     awk -F, -v metric="$2" '$1 == metric { print int($2 - $3) }' <<< "$1"
 }
@@ -453,11 +456,14 @@ if [ "${PROVISIONING}" = "SPOT" ] && awk -F, '$1 == "PREEMPTIBLE_CPUS" && $2 > 0
 fi
 for check in "CPUS_ALL_REGIONS:${GLOBAL_QUOTAS}" "${REGION_METRIC}:${REGION_QUOTAS}"; do
     metric="${check%%:*}"
+    limit="$(limit_cpus "${check#*:}" "${metric}")"
     free="$(free_cpus "${check#*:}" "${metric}")"
-    if [ -z "${free}" ]; then
+    if [ -z "${limit}" ]; then
         echo "      [WARN] Could not read quota ${metric}; skipping the check."
+    elif [ "${limit}" -lt "${GUEST_CPUS}" ]; then
+        die "Quota ${metric} has total limit ${limit} vCPU but ${MACHINE_TYPE} needs ${GUEST_CPUS}. Request a quota increase or pick a smaller --machine-type."
     elif [ "${free}" -lt "${GUEST_CPUS}" ]; then
-        die "Quota ${metric} has ${free} free vCPU but ${MACHINE_TYPE} needs ${GUEST_CPUS}. Request a quota increase or pick a smaller --machine-type."
+        echo "      [INFO] Quota ${metric} currently has ${free} free vCPU (active jobs running). Job will queue in Cloud Batch until capacity is released."
     fi
 done
 echo "      [OK] CPU quota allows ${GUEST_CPUS} vCPU."

@@ -1,0 +1,116 @@
+{
+  "schema_version": "1.0",
+  "created_at": "2026-10-28T12:50:18.840872371+00:00",
+  "capital": "500",
+  "risk_policy": {
+    "max_open_positions": 3,
+    "max_directional_positions": 3,
+    "risk_per_trade_pct": "0.015",
+    "max_slot_margin_pct": "0.35",
+    "max_leverage": "1",
+    "min_order_quantity": "0.001",
+    "quantity_step_size": "0.001",
+    "min_order_notional": "5"
+  },
+  "execution": {
+    "use_limit_orders": false,
+    "limit_timeout_bars": 2,
+    "maker_fee_pct": "0.00075",
+    "taker_fee_pct": "0.00075",
+    "slippage_pct": "0.0005"
+  },
+  "assets": [
+    {
+      "symbol": "BTCUSDT",
+      "dollar_bar_threshold": "300000000",
+      "strategy_id": "quantum_well_swing",
+      "strategy_config": {
+        "breakeven_trigger_ratio": "0.50",
+        "decoherence_time_bars": 90,
+        "enable_dynamic_breakeven": true,
+        "ground_state_tolerance": "0.040",
+        "hbar_eff": "2.5",
+        "limit_time_in_force_bars": null,
+        "macro_ema_period": 200,
+        "macro_slope_window": 30,
+        "macro_trend_filter": true,
+        "mass_eff": "3.0",
+        "max_wavepacket_sigma": "0.08",
+        "min_take_profit_pct": "0.090",
+        "min_upward_force": "0.010",
+        "min_well_curvature": "0.020",
+        "stop_loss_atr_buffer": "2.00",
+        "target_excitation_level": 1,
+        "use_limit_entries": false,
+        "window_size": 240
+      }
+    },
+    {
+      "symbol": "ETHUSDT",
+      "dollar_bar_threshold": "200000000",
+      "strategy_id": "quantum_well_swing",
+      "strategy_config": {
+        "breakeven_trigger_ratio": "0.50",
+        "decoherence_time_bars": 90,
+        "enable_dynamic_breakeven": true,
+        "ground_state_tolerance": "0.055",
+        "hbar_eff": "3.5",
+        "limit_time_in_force_bars": null,
+        "macro_ema_period": 200,
+        "macro_slope_window": 30,
+        "macro_trend_filter": true,
+        "mass_eff": "2.5",
+        "max_wavepacket_sigma": "0.08",
+        "min_take_profit_pct": "0.110",
+        "min_upward_force": "0.015",
+        "min_well_curvature": "0.030",
+        "stop_loss_atr_buffer": "2.00",
+        "target_excitation_level": 1,
+        "use_limit_entries": false,
+        "window_size": 220
+      }
+    },
+    {
+      "symbol": "SOLUSDT",
+      "dollar_bar_threshold": "120000000",
+      "strategy_id": "quantum_well_swing",
+      "strategy_config": {
+        "breakeven_trigger_ratio": "0.50",
+        "decoherence_time_bars": 40,
+        "enable_dynamic_breakeven": true,
+        "ground_state_tolerance": "0.050",
+        "hbar_eff": "4.5",
+        "limit_time_in_force_bars": null,
+        "macro_ema_period": 200,
+        "macro_slope_window": 30,
+        "macro_trend_filter": true,
+        "mass_eff": "2.0",
+        "max_wavepacket_sigma": "0.08",
+        "min_take_profit_pct": "0.050",
+        "min_upward_force": "0.050",
+        "min_well_curvature": "0.050",
+        "stop_loss_atr_buffer": "2.50",
+        "target_excitation_level": 1,
+        "use_limit_entries": false,
+        "window_size": 120
+      }
+    }
+  ],
+  "scorecard": {
+    "mean_is_sortino": "0.240010679837813971879479683",
+    "mean_oos_sortino": "1.4488888577990568977277792561",
+    "oos_sharpe": "0.404363161866827969248561203",
+    "oos_profit_factor": "3.1990254643113487194408530764",
+    "oos_win_rate_pct": "56.666666666666666666666666670",
+    "total_oos_trades": 30,
+    "min_fold_trades": 6,
+    "max_drawdown_pct": "0.0257725067404279293421384812",
+    "diversification_score": "0.9566666666666665541640668376",
+    "fitness": "1.2074868425606260780327292240",
+    "trades_per_asset": {
+      "BTCUSDT": 9,
+      "ETHUSDT": 14,
+      "SOLUSDT": 7
+    }
+  }
+}

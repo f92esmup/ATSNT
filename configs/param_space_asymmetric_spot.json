@@ -1,0 +1,41 @@
+{
+  "btc_dollar_bars": ["150000000", "300000000", "600000000", "1200000000", "2500000000", "5000000000"],
+  "eth_dollar_bars": ["100000000", "200000000", "400000000", "800000000", "1500000000", "3000000000"],
+  "sol_dollar_bars": ["30000000", "60000000", "120000000", "250000000", "500000000", "1000000000"],
+  "btc": {
+    "window_sizes": [45, 90, 150, 240],
+    "hbar_effs": ["1.0", "1.5", "2.0", "2.5"],
+    "mass_effs": ["2.0", "3.0", "4.0", "5.0"],
+    "min_well_curvatures": ["0.010", "0.020", "0.040"],
+    "ground_state_tolerances": ["0.015", "0.025", "0.040"],
+    "min_upward_forces": ["0.005", "0.010", "0.020"],
+    "decoherence_time_bars": [30, 60, 90],
+    "min_take_profit_pcts": ["0.030", "0.045", "0.065", "0.090"],
+    "stop_loss_atr_buffers": ["1.00", "1.50", "2.00"],
+    "macro_trend_filters": [true]
+  },
+  "eth": {
+    "window_sizes": [45, 90, 150, 220],
+    "hbar_effs": ["1.5", "2.0", "2.5", "3.5"],
+    "mass_effs": ["1.5", "2.5", "3.5", "4.5"],
+    "min_well_curvatures": ["0.015", "0.030", "0.060"],
+    "ground_state_tolerances": ["0.020", "0.035", "0.055"],
+    "min_upward_forces": ["0.008", "0.015", "0.030"],
+    "decoherence_time_bars": [30, 60, 90],
+    "min_take_profit_pcts": ["0.035", "0.050", "0.075", "0.110"],
+    "stop_loss_atr_buffers": ["1.00", "1.50", "2.00"],
+    "macro_trend_filters": [true]
+  },
+  "sol": {
+    "window_sizes": [30, 60, 90, 120],
+    "hbar_effs": ["2.5", "3.5", "4.5", "6.0"],
+    "mass_effs": ["1.0", "2.0", "3.0", "4.0"],
+    "min_well_curvatures": ["0.020", "0.050", "0.100"],
+    "ground_state_tolerances": ["0.030", "0.050", "0.080"],
+    "min_upward_forces": ["0.010", "0.025", "0.050"],
+    "decoherence_time_bars": [20, 40, 60],
+    "min_take_profit_pcts": ["0.050", "0.075", "0.100", "0.150"],
+    "stop_loss_atr_buffers": ["1.25", "1.75", "2.50"],
+    "macro_trend_filters": [true]
+  }
+}

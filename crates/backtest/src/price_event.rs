@@ -16,7 +16,7 @@ use crate::error::BacktestError;
 /// Pending orders become due against `start_ms` (an order fills at the first event whose start
 /// is at or after its due time), while day and month rollovers, funding windows, exit times and
 /// the decision timestamp use `end_ms`, exactly as the bar engine used `DollarBar::end_time`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PriceEvent {
     /// Timestamp of the first trade in the event, in Unix milliseconds.
     pub start_ms: i64,
@@ -30,10 +30,18 @@ pub struct PriceEvent {
     pub low: Decimal,
     /// Last traded price.
     pub close: Decimal,
+    /// Traded asset quantity/volume in this event.
+    pub volume: Decimal,
+    /// Traded quote dollar volume in this event.
+    pub dollar_volume: Decimal,
+    /// Buy-initiated quote dollar volume.
+    pub buy_dollar_volume: Decimal,
+    /// Sell-initiated quote dollar volume.
+    pub sell_dollar_volume: Decimal,
 }
 
 impl From<&DollarBar> for PriceEvent {
-    /// The bar's OHLC, with `start_ms = start_time` and `end_ms = end_time`.
+    /// The bar's OHLC and volume metrics, with `start_ms = start_time` and `end_ms = end_time`.
     fn from(bar: &DollarBar) -> Self {
         Self {
             start_ms: bar.start_time,
@@ -42,6 +50,10 @@ impl From<&DollarBar> for PriceEvent {
             high: bar.high,
             low: bar.low,
             close: bar.close,
+            volume: bar.volume,
+            dollar_volume: bar.dollar_volume,
+            buy_dollar_volume: bar.buy_dollar_volume,
+            sell_dollar_volume: bar.sell_dollar_volume,
         }
     }
 }
@@ -49,6 +61,7 @@ impl From<&DollarBar> for PriceEvent {
 impl From<&Trade> for PriceEvent {
     /// A flat event at the trade's price and timestamp.
     fn from(trade: &Trade) -> Self {
+        let dv = trade.price * trade.quantity;
         Self {
             start_ms: trade.timestamp,
             end_ms: trade.timestamp,
@@ -56,6 +69,16 @@ impl From<&Trade> for PriceEvent {
             high: trade.price,
             low: trade.price,
             close: trade.price,
+            volume: trade.quantity,
+            dollar_volume: dv,
+            buy_dollar_volume: match trade.side {
+                domain::Side::Buy => dv,
+                domain::Side::Sell => Decimal::ZERO,
+            },
+            sell_dollar_volume: match trade.side {
+                domain::Side::Buy => Decimal::ZERO,
+                domain::Side::Sell => dv,
+            },
         }
     }
 }
@@ -83,6 +106,13 @@ pub fn bucket_trades(
                 event.high = event.high.max(trade.price);
                 event.low = event.low.min(trade.price);
                 event.close = trade.price;
+                event.volume += trade.quantity;
+                let dv = trade.price * trade.quantity;
+                event.dollar_volume += dv;
+                match trade.side {
+                    domain::Side::Buy => event.buy_dollar_volume += dv,
+                    domain::Side::Sell => event.sell_dollar_volume += dv,
+                }
             }
             _ => {
                 if let Some((_, event)) = current.take() {
@@ -140,6 +170,10 @@ mod tests {
                 high: dec!(12),
                 low: dec!(9),
                 close: dec!(11),
+                volume: dec!(1),
+                dollar_volume: dec!(11),
+                buy_dollar_volume: dec!(5.5),
+                sell_dollar_volume: dec!(5.5),
             }
         );
     }
@@ -155,6 +189,10 @@ mod tests {
                 high: dec!(50.5),
                 low: dec!(50.5),
                 close: dec!(50.5),
+                volume: dec!(1),
+                dollar_volume: dec!(50.5),
+                buy_dollar_volume: dec!(50.5),
+                sell_dollar_volume: Decimal::ZERO,
             }
         );
     }
@@ -204,6 +242,10 @@ mod tests {
                 high: dec!(9),
                 low: dec!(2),
                 close: dec!(4),
+                volume: dec!(4),
+                dollar_volume: dec!(20),
+                buy_dollar_volume: dec!(20),
+                sell_dollar_volume: Decimal::ZERO,
             }]
         );
     }

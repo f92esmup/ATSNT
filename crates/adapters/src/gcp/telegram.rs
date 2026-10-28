@@ -296,6 +296,168 @@ impl TelegramNotifier {
             limit_pct
         )
     }
+
+    /// Formats the daily 8:00 PM Madrid executive portfolio performance summary across all assets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn format_portfolio_daily_summary(
+        date_str: &str,
+        mode: &str,
+        initial_capital: Decimal,
+        cash_equity: Decimal,
+        total_equity: Decimal,
+        drawdown_pct: Decimal,
+        daily_trades_count: usize,
+        daily_wins: usize,
+        daily_losses: usize,
+        daily_gross_pnl: Decimal,
+        daily_fees: Decimal,
+        daily_net_pnl: Decimal,
+        symbols_summary: &[SymbolPerformanceSummary],
+    ) -> String {
+        let win_rate = if daily_trades_count > 0 {
+            (Decimal::from(daily_wins) / Decimal::from(daily_trades_count)) * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        };
+        let pnl_sign = if daily_net_pnl >= Decimal::ZERO {
+            "+"
+        } else {
+            ""
+        };
+        let gross_sign = if daily_gross_pnl >= Decimal::ZERO {
+            "+"
+        } else {
+            ""
+        };
+        let ret_pct = if initial_capital > Decimal::ZERO {
+            ((total_equity - initial_capital) / initial_capital) * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        };
+        let ret_sign = if ret_pct >= Decimal::ZERO { "+" } else { "" };
+        let emoji = if daily_net_pnl >= Decimal::ZERO {
+            "📈"
+        } else {
+            "📉"
+        };
+
+        let mut breakdown = String::new();
+        for s in symbols_summary {
+            let s_pnl_sign = if s.net_pnl >= Decimal::ZERO { "+" } else { "" };
+            breakdown.push_str(&format!(
+                "• *{}*: `{}` trd ({}W/{}L) | Net: `{}{:.2} USD` | `{}`\n",
+                s.symbol.to_uppercase(),
+                s.trades_count,
+                s.wins,
+                s.losses,
+                s_pnl_sign,
+                s.net_pnl,
+                s.active_position_desc
+            ));
+        }
+
+        format!(
+            "{} *ATSNT: Multi-Asset Portfolio Summary (20:00 Madrid)*\n\
+             ━━━━━━━━━━━━━━━━━━━━━━\n\
+             📅 *Date*: `{}`\n\
+             🚀 *Execution Mode*: `{}`\n\
+             💰 *Initial Capital*: `${:.2}`\n\
+             💵 *Cash Balance*: `${:.2}`\n\
+             📈 *Total Equity*: `${:.2}` ({}{:.2}%)\n\
+             📉 *Session Drawdown*: `{:.2}%`\n\
+             ━━━━━━━━━━━━━━━━━━━━━━\n\
+             📊 *Portfolio Trades Today*: `{}`\n\
+             • *Wins*: `{}` ({:.1}%)\n\
+             • *Losses*: `{}`\n\
+             • *Gross PnL*: `{}{:.2} USD`\n\
+             • *Fees & Friction*: `-${:.2}`\n\
+             • *Net Realized PnL*: `{}{:.2} USD`\n\
+             ──────────────────────\n\
+             📋 *Asset Breakdown*:\n\
+             {}\
+             ━━━━━━━━━━━━━━━━━━━━━━",
+            emoji,
+            date_str,
+            mode,
+            initial_capital,
+            cash_equity,
+            total_equity,
+            ret_sign,
+            ret_pct,
+            drawdown_pct * Decimal::from(100),
+            daily_trades_count,
+            daily_wins,
+            win_rate,
+            daily_losses,
+            gross_sign,
+            daily_gross_pnl,
+            daily_fees,
+            pnl_sign,
+            daily_net_pnl,
+            breakdown
+        )
+    }
+
+    /// Formats a periodic heartbeat notification for the multi-asset portfolio.
+    pub fn format_portfolio_heartbeat(
+        initial_capital: Decimal,
+        total_equity: Decimal,
+        drawdown_pct: Decimal,
+        active_positions_count: usize,
+        positions_desc: &str,
+        uptime_seconds: u64,
+    ) -> String {
+        let uptime_str = if uptime_seconds >= 86400 {
+            format!(
+                "{}d {}h",
+                uptime_seconds / 86400,
+                (uptime_seconds % 86400) / 3600
+            )
+        } else if uptime_seconds >= 3600 {
+            format!(
+                "{}h {}m",
+                uptime_seconds / 3600,
+                (uptime_seconds % 3600) / 60
+            )
+        } else {
+            format!("{}m", uptime_seconds / 60)
+        };
+        let ret_pct = if initial_capital > Decimal::ZERO {
+            ((total_equity - initial_capital) / initial_capital) * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        };
+        let ret_sign = if ret_pct >= Decimal::ZERO { "+" } else { "" };
+
+        format!(
+            "💓 *ATSNT Portfolio Heartbeat*\n\
+             • *Equity*: `${:.2}` ({}{:.2}%)\n\
+             • *Drawdown*: `{:.2}%`\n\
+             • *Open Positions*: `{}` ({})\n\
+             • *Uptime*: `{}`\n\
+             • *Status*: Normal operational state.",
+            total_equity,
+            ret_sign,
+            ret_pct,
+            drawdown_pct * Decimal::from(100),
+            active_positions_count,
+            positions_desc,
+            uptime_str
+        )
+    }
+}
+
+/// Performance attribution for an individual asset in a portfolio daily summary.
+#[derive(Debug, Clone)]
+pub struct SymbolPerformanceSummary {
+    pub symbol: String,
+    pub trades_count: usize,
+    pub wins: usize,
+    pub losses: usize,
+    pub net_pnl: Decimal,
+    pub active_position_desc: String,
+    pub ticks_count: u64,
+    pub bars_count: u64,
 }
 
 /// Converts a UTC `DateTime` into `Europe/Madrid` timezone (CET UTC+1 or CEST UTC+2).
@@ -516,5 +678,83 @@ mod tests {
         // Current Madrid time can be queried without panic
         let now = now_in_madrid();
         assert!(now.year() >= 2026);
+    }
+
+    #[test]
+    fn format_portfolio_daily_summary_contains_all_symbols_and_metrics() {
+        let summaries = vec![
+            SymbolPerformanceSummary {
+                symbol: "BTCUSDT".to_string(),
+                trades_count: 1,
+                wins: 1,
+                losses: 0,
+                net_pnl: dec!(8.50),
+                active_position_desc: "Flat".to_string(),
+                ticks_count: 5000,
+                bars_count: 12,
+            },
+            SymbolPerformanceSummary {
+                symbol: "ETHUSDT".to_string(),
+                trades_count: 2,
+                wins: 1,
+                losses: 1,
+                net_pnl: dec!(-1.20),
+                active_position_desc: "Long 0.045 @ $2540".to_string(),
+                ticks_count: 7000,
+                bars_count: 24,
+            },
+            SymbolPerformanceSummary {
+                symbol: "SOLUSDT".to_string(),
+                trades_count: 1,
+                wins: 1,
+                losses: 0,
+                net_pnl: dec!(9.90),
+                active_position_desc: "Flat".to_string(),
+                ticks_count: 4000,
+                bars_count: 15,
+            },
+        ];
+
+        let msg = TelegramNotifier::format_portfolio_daily_summary(
+            "2026-10-27",
+            "Paper Trading Portfolio",
+            dec!(500),
+            dec!(495.20),
+            dec!(517.20),
+            dec!(0.012),
+            4,
+            3,
+            1,
+            dec!(18.20),
+            dec!(1.00),
+            dec!(17.20),
+            &summaries,
+        );
+
+        assert!(msg.contains("Multi-Asset Portfolio Summary (20:00 Madrid)"));
+        assert!(msg.contains("Initial Capital*: `$500.00`"));
+        assert!(msg.contains("Total Equity*: `$517.20` (+3.44%)"));
+        assert!(msg.contains("Net Realized PnL*: `+17.20 USD`"));
+        assert!(msg.contains("BTCUSDT"));
+        assert!(msg.contains("ETHUSDT"));
+        assert!(msg.contains("SOLUSDT"));
+        assert!(msg.contains("Long 0.045 @ $2540"));
+    }
+
+    #[test]
+    fn format_portfolio_heartbeat_contains_equity_and_positions() {
+        let msg = TelegramNotifier::format_portfolio_heartbeat(
+            dec!(500),
+            dec!(512.40),
+            dec!(0.008),
+            1,
+            "ETHUSDT: Long 0.045",
+            3720,
+        );
+
+        assert!(msg.contains("ATSNT Portfolio Heartbeat"));
+        assert!(msg.contains("Equity*: `$512.40` (+2.48%)"));
+        assert!(msg.contains("Open Positions*: `1` (ETHUSDT: Long 0.045)"));
+        assert!(msg.contains("Uptime*: `1h 2m`"));
     }
 }

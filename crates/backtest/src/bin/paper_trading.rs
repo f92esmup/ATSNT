@@ -238,6 +238,12 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
             },
             ..*artifact_ctx
         }
+    } else if args.spot {
+        BacktestConfig {
+            initial_capital: args.capital,
+            risk_per_trade_pct: args.risk_pct,
+            ..BacktestConfig::spot()
+        }
     } else {
         BacktestConfig {
             initial_capital: args.capital,
@@ -247,7 +253,12 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     };
 
     let mut backtest_config = backtest_config;
-    if let Some(rate) = args.funding_rate {
+    if args.spot {
+        backtest_config.market_type = MarketType::Spot;
+        backtest_config.funding_rate_pct = Decimal::ZERO;
+        backtest_config.max_leverage = Decimal::ONE;
+        backtest_config.maintenance_margin_rate = Decimal::ZERO;
+    } else if let Some(rate) = args.funding_rate {
         backtest_config.funding_rate_pct = rate;
     }
     println!(

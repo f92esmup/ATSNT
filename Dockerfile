@@ -13,7 +13,7 @@
 ARG RUST_VERSION=1.99
 ARG DEBIAN_SUITE=bookworm
 
-FROM rust:${RUST_VERSION}-slim-${DEBIAN_SUITE} AS builder
+FROM rust:slim-bookworm AS builder
 WORKDIR /src
 
 # .git is not in the build context; build.rs falls back to this value for run metadata.
@@ -31,8 +31,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         -p backtest --bin backtest \
         -p backtest --bin calibrate_feeds \
         -p backtest --bin prune_swarm \
+        -p backtest --bin run_portfolio \
+        -p backtest --bin run_portfolio_hpo \
     && mkdir -p /out \
-    && cp target/release/fetch_data target/release/run_hpo target/release/backtest target/release/calibrate_feeds target/release/prune_swarm /out/
+    && cp target/release/fetch_data target/release/run_hpo target/release/backtest target/release/calibrate_feeds target/release/prune_swarm target/release/run_portfolio target/release/run_portfolio_hpo /out/
 
 FROM debian:${DEBIAN_SUITE}-slim AS runtime
 
@@ -45,7 +47,10 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin atsnt
 WORKDIR /app
 COPY --from=builder /out/ /app/bin/
 COPY scripts/run_production_pipeline.sh /app/scripts/run_production_pipeline.sh
+COPY scripts/run_joint_portfolio_pipeline.sh /app/scripts/run_joint_portfolio_pipeline.sh
 COPY configs/ /app/configs/
+
+RUN chmod +x /app/scripts/*.sh
 
 # Writable work area for downloaded market data, logs and the winning artifact.
 RUN mkdir -p /app/work && chown -R atsnt:atsnt /app/work /app/configs

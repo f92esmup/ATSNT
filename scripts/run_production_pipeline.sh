@@ -52,6 +52,8 @@ CANDIDATES_PER_FEED="12"
 KEEP_PER_FEED="6"
 PRICE_BUCKET_MS="1000"
 EMBARGO_MS="86400000"
+SPOT=false
+BNB_DISCOUNT=false
 
 show_help() {
     cat << EOF
@@ -95,6 +97,8 @@ Options:
                              Optional JSON execution context for the HPO (capital, fees, slippage,
                              risk, drawdown, leverage, notional caps); the backtest adopts it from
                              the winning artifact. --capital still overrides the capital
+      --spot                 Target Binance Spot instead of USD-M Perpetual Futures
+      --bnb-discount         Apply Binance BNB fee discount (0.075% in Spot)
       --min-trades-per-fold <N>
                              Closed trades a candidate needs in every HPO fold to be ranked
                              (default: run_hpo's, 30); the HPO fails without an eligible one
@@ -217,6 +221,14 @@ while [[ $# -gt 0 ]]; do
         --execution-context)
             EXECUTION_CONTEXT="$2"
             shift 2
+            ;;
+        --spot)
+            SPOT=true
+            shift
+            ;;
+        --bnb-discount)
+            BNB_DISCOUNT=true
+            shift
             ;;
         --min-trades-per-fold)
             MIN_TRADES_PER_FOLD="$2"
@@ -374,6 +386,8 @@ FORWARD_ARGS=(
 [ -n "${HOLDOUT_FROM}" ] && FORWARD_ARGS+=(--holdout-from-month "${HOLDOUT_FROM}")
 [ -n "${PARAM_SPACE}" ] && FORWARD_ARGS+=(--param-space "${PARAM_SPACE}")
 [ -n "${EXECUTION_CONTEXT}" ] && FORWARD_ARGS+=(--execution-context "${EXECUTION_CONTEXT}")
+[ "${SPOT}" = "true" ] && FORWARD_ARGS+=(--spot)
+[ "${BNB_DISCOUNT}" = "true" ] && FORWARD_ARGS+=(--bnb-discount)
 [ -n "${MIN_TRADES_PER_FOLD}" ] && FORWARD_ARGS+=(--min-trades-per-fold "${MIN_TRADES_PER_FOLD}")
 [ -n "${CAPITAL}" ] && FORWARD_ARGS+=(--capital "${CAPITAL}")
 [ -n "${BIN_DIR}" ] && FORWARD_ARGS+=(--bin-dir "${BIN_DIR}")
@@ -745,6 +759,12 @@ else
     if [ "${STRICT_SINKS}" = "true" ]; then
         HPO_ARGS+=("--strict-sinks")
     fi
+    if [ "${SPOT}" = "true" ]; then
+        HPO_ARGS+=("--spot")
+    fi
+    if [ "${BNB_DISCOUNT}" = "true" ]; then
+        HPO_ARGS+=("--bnb-discount")
+    fi
     run_stage hpo "${BIN_PATH}/run_hpo" "${HPO_ARGS[@]}"
 fi
 
@@ -768,6 +788,12 @@ if [ "${GCP_BIGQUERY}" = "true" ]; then
 fi
 if [ "${STRICT_SINKS}" = "true" ]; then
     BACKTEST_ARGS+=("--strict-sinks")
+fi
+if [ "${SPOT}" = "true" ]; then
+    BACKTEST_ARGS+=("--spot")
+fi
+if [ "${BNB_DISCOUNT}" = "true" ]; then
+    BACKTEST_ARGS+=("--bnb-discount")
 fi
 run_stage backtest "${BIN_PATH}/backtest" "${BACKTEST_ARGS[@]}"
 

@@ -285,6 +285,10 @@ impl BacktestMetrics {
 /// namespace as [`domain::RiskError::kind`], so it must not match any of its names.
 pub const DAILY_HALT_REJECTION: &str = "DailyHalt";
 
+/// Rejection reason counted when opening a short position is attempted in Spot mode.
+/// Same namespace as [`DAILY_HALT_REJECTION`].
+pub const SPOT_SHORTING_DISALLOWED: &str = "SpotShortingDisallowed";
+
 /// Rejection reason counted when a runner receives a decision kind it cannot execute yet
 /// (`Decision::Target` before the target-position execution exists). Same namespace as
 /// [`DAILY_HALT_REJECTION`].

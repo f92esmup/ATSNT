@@ -40,7 +40,7 @@ pub use error::AdapterError;
 pub use fetch_plan::{is_not_archived, plan_fetch_tasks, run_bounded, FetchTask};
 pub use gcp::{
     datetime_in_madrid, format_unix_ms_rfc3339, now_in_madrid, BigQueryRecord, BigQuerySink,
-    GcpSecretManager, GcsArtifactSink, TelegramNotifier,
+    GcpSecretManager, GcsArtifactSink, SymbolPerformanceSummary, TelegramNotifier,
 };
 pub use simulated_venue::{SimulatedVenue, SimulatedVenueConfig, SimulatedVenueError};
 pub use traits::{AlertNotifier, AsyncMarketDataStream, MarketDataStream};

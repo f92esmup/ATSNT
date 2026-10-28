@@ -24,6 +24,7 @@
     "kramers_tp_multiple": "1.0",
     "opposite_wall_fraction": "1.00",
     "enable_dynamic_breakeven": true,
+    "stop_loss_atr_buffer": "0.75",
     "macro_trend_filter": true,
     "macro_ema_period": 200,
     "macro_slope_window": 50,
