@@ -622,6 +622,7 @@ fn run_portfolio_slice<S: OptimizableStrategy>(
         min_order_quantity: dec!(0.001),
         quantity_step_size: dec!(0.001),
         min_order_notional: dec!(5),
+        ..PortfolioRiskPolicy::default()
     };
 
     let engine_config = PortfolioEngineConfig {
@@ -632,6 +633,7 @@ fn run_portfolio_slice<S: OptimizableStrategy>(
         risk_policy,
         latency_ms: 100,
         market_type: ctx.market_type,
+        btc_breadth_filter: false,
     };
 
     let mut engine = PortfolioEngine::new(engine_config);
@@ -1360,6 +1362,7 @@ where
             min_order_quantity: dec!(0.001),
             quantity_step_size: dec!(0.001),
             min_order_notional: dec!(5),
+            ..PortfolioRiskPolicy::default()
         },
         execution: PortfolioExecutionSettings {
             use_limit_orders: winner.candidate.use_limit_orders,
@@ -1367,6 +1370,7 @@ where
             maker_fee_pct,
             taker_fee_pct,
             slippage_pct: dec!(0.0005),
+            btc_breadth_filter: true,
         },
         assets: vec![
             PortfolioAssetSpec {

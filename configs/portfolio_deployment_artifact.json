@@ -10,14 +10,17 @@
     "max_leverage": "1",
     "min_order_quantity": "0.001",
     "quantity_step_size": "0.001",
-    "min_order_notional": "5"
+    "min_order_notional": "5",
+    "elastic_slot_sizing": true,
+    "max_elastic_slot_margin_pct": "0.55"
   },
   "execution": {
     "use_limit_orders": false,
     "limit_timeout_bars": 2,
     "maker_fee_pct": "0.00075",
     "taker_fee_pct": "0.00075",
-    "slippage_pct": "0.0005"
+    "slippage_pct": "0.0005",
+    "btc_breadth_filter": true
   },
   "assets": [
     {

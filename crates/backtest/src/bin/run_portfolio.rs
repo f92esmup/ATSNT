@@ -96,6 +96,30 @@ struct Args {
     #[arg(long, default_value_t = 2)]
     limit_timeout_bars: usize,
 
+    /// Whether to override artifact dollar bars with CLI threshold arguments
+    #[arg(long, default_value_t = false)]
+    override_dollar_bars: bool,
+
+    /// Whether to enable trailing ATR stop ratchet
+    #[arg(long, default_value_t = false)]
+    enable_trailing_stop: bool,
+
+    /// Trailing ATR multiplier (default: 1.50)
+    #[arg(long, default_value = "1.50")]
+    trailing_atr_mult: Decimal,
+
+    /// Whether to enforce BTC market breadth lead filter
+    #[arg(long, default_value_t = false)]
+    btc_breadth_filter: bool,
+
+    /// Whether to enable elastic slot sizing based on occupancy
+    #[arg(long, default_value_t = false)]
+    elastic_slots: bool,
+
+    /// Elastic slot margin fraction when <= 1 position open (default: 0.55 = 55%)
+    #[arg(long, default_value = "0.55")]
+    elastic_slot_margin: Decimal,
+
     /// Maximum bar holding duration before horizontal barrier timeout (default: 45 for day trading)
     #[arg(long, default_value_t = 45)]
     time_barrier_bars: usize,
@@ -106,6 +130,24 @@ fn load_asset_bars(
     path: &PathBuf,
     dollar_bar_threshold: Decimal,
 ) -> Result<Vec<domain::DollarBar>> {
+    let cache_dir = std::path::Path::new("target/dollar_bars_cache");
+    let cache_path = cache_dir.join(format!("{symbol}_{dollar_bar_threshold}.json"));
+
+    if cache_path.exists() {
+        println!(
+            "[*] Loading cached {symbol} bars from {}",
+            cache_path.display()
+        );
+        let file = std::fs::File::open(&cache_path)?;
+        let reader = std::io::BufReader::new(file);
+        let bars: Vec<domain::DollarBar> = serde_json::from_reader(reader)?;
+        println!(
+            "    [OK] {symbol}: Loaded {} cached dollar bars in milliseconds",
+            bars.len()
+        );
+        return Ok(bars);
+    }
+
     println!(
         "[*] Loading and aggregating {symbol} from {}",
         path.display()
@@ -137,6 +179,13 @@ fn load_asset_bars(
         elapsed,
         trade_count as f64 / elapsed.max(0.001)
     );
+
+    if let Err(e) = std::fs::create_dir_all(cache_dir) {
+        eprintln!("[WARN] Failed to create cache directory: {e}");
+    } else if let Ok(file) = std::fs::File::create(&cache_path) {
+        let writer = std::io::BufWriter::new(file);
+        let _ = serde_json::to_writer(writer, &bars);
+    }
 
     Ok(bars)
 }
@@ -184,21 +233,54 @@ where
             let mut sol_t = args.sol_dollar_bar;
 
             for asset in &artifact.assets {
+                let mut strat_val = asset.strategy_config.clone();
+                if args.use_limit_orders {
+                    if let Some(obj) = strat_val.as_object_mut() {
+                        obj.insert("use_limit_entries".to_string(), serde_json::json!(true));
+                        obj.insert(
+                            "limit_time_in_force_bars".to_string(),
+                            serde_json::json!(args.limit_timeout_bars),
+                        );
+                    }
+                }
+                if args.enable_trailing_stop {
+                    if let Some(obj) = strat_val.as_object_mut() {
+                        obj.insert("enable_trailing_stop".to_string(), serde_json::json!(true));
+                        obj.insert(
+                            "trailing_atr_multiplier".to_string(),
+                            serde_json::to_value(args.trailing_atr_mult)
+                                .unwrap_or(serde_json::json!("1.50")),
+                        );
+                    }
+                }
+
                 match asset.symbol.as_str() {
                     "BTCUSDT" => {
-                        btc_c = serde_json::from_value(asset.strategy_config.clone())
+                        btc_c = serde_json::from_value(strat_val)
                             .context("Failed to deserialize BTC strategy config from artifact")?;
-                        btc_t = asset.dollar_bar_threshold;
+                        btc_t = if args.override_dollar_bars {
+                            args.btc_dollar_bar
+                        } else {
+                            asset.dollar_bar_threshold
+                        };
                     }
                     "ETHUSDT" => {
-                        eth_c = serde_json::from_value(asset.strategy_config.clone())
+                        eth_c = serde_json::from_value(strat_val)
                             .context("Failed to deserialize ETH strategy config from artifact")?;
-                        eth_t = asset.dollar_bar_threshold;
+                        eth_t = if args.override_dollar_bars {
+                            args.eth_dollar_bar
+                        } else {
+                            asset.dollar_bar_threshold
+                        };
                     }
                     "SOLUSDT" => {
-                        sol_c = serde_json::from_value(asset.strategy_config.clone())
+                        sol_c = serde_json::from_value(strat_val)
                             .context("Failed to deserialize SOL strategy config from artifact")?;
-                        sol_t = asset.dollar_bar_threshold;
+                        sol_t = if args.override_dollar_bars {
+                            args.sol_dollar_bar
+                        } else {
+                            asset.dollar_bar_threshold
+                        };
                     }
                     _ => {}
                 }
@@ -299,15 +381,21 @@ where
     println!("    [OK] Stream merged: {total_bars} total events ready for simulation");
 
     // 4. Initialize Portfolio Risk Policy & Engine
-    let (capital, risk_policy, maker_fee_pct, taker_fee_pct, slippage_pct) = if let Some(artifact) =
-        portfolio_artifact.as_ref()
-    {
+    let (
+        capital,
+        mut risk_policy,
+        maker_fee_pct,
+        taker_fee_pct,
+        slippage_pct,
+        artifact_btc_breadth,
+    ) = if let Some(artifact) = portfolio_artifact.as_ref() {
         (
             artifact.capital,
             artifact.risk_policy.clone(),
             artifact.execution.maker_fee_pct,
             artifact.execution.taker_fee_pct,
             artifact.execution.slippage_pct,
+            artifact.execution.btc_breadth_filter,
         )
     } else {
         let (maker_fee_pct, taker_fee_pct, max_leverage) = match (market_type, args.bnb_discount) {
@@ -330,6 +418,7 @@ where
             min_order_quantity: dec!(0.001),
             quantity_step_size: dec!(0.001),
             min_order_notional: dec!(5),
+            ..PortfolioRiskPolicy::default()
         };
         (
             args.capital,
@@ -337,8 +426,14 @@ where
             maker_fee_pct,
             taker_fee_pct,
             dec!(0.0005),
+            false,
         )
     };
+
+    if args.elastic_slots {
+        risk_policy.elastic_slot_sizing = true;
+        risk_policy.max_elastic_slot_margin_pct = args.elastic_slot_margin;
+    }
 
     let engine_config = PortfolioEngineConfig {
         initial_capital: capital,
@@ -348,6 +443,7 @@ where
         risk_policy,
         latency_ms: 100,
         market_type,
+        btc_breadth_filter: args.btc_breadth_filter || artifact_btc_breadth,
     };
 
     let mut engine = PortfolioEngine::new(engine_config);

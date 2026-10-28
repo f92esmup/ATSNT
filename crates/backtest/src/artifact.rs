@@ -273,6 +273,8 @@ pub struct PortfolioExecutionSettings {
     pub maker_fee_pct: Decimal,
     pub taker_fee_pct: Decimal,
     pub slippage_pct: Decimal,
+    #[serde(default)]
+    pub btc_breadth_filter: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -34,6 +34,8 @@ pub struct PortfolioEngineConfig {
     pub latency_ms: i64,
     /// Market type governing exchange rules (Spot vs USD-M Perpetual).
     pub market_type: MarketType,
+    /// Whether to enforce BTC market breadth filter (blocks Altcoin Longs when BTC is macro bearish).
+    pub btc_breadth_filter: bool,
 }
 
 impl Default for PortfolioEngineConfig {
@@ -46,6 +48,7 @@ impl Default for PortfolioEngineConfig {
             risk_policy: PortfolioRiskPolicy::default(),
             latency_ms: 0,
             market_type: MarketType::UsdMPerpetual,
+            btc_breadth_filter: false,
         }
     }
 }
@@ -65,6 +68,7 @@ impl PortfolioEngineConfig {
             },
             latency_ms: 0,
             market_type: MarketType::Spot,
+            btc_breadth_filter: false,
         }
     }
 
@@ -181,6 +185,7 @@ pub struct PortfolioEngine {
     open_excursions: BTreeMap<String, Option<TradeExcursion>>,
     rejected_orders: BTreeMap<String, usize>,
     closed_trades: Vec<ClosedTrade>,
+    btc_macro_bullish: bool,
 }
 
 impl PortfolioEngine {
@@ -198,6 +203,7 @@ impl PortfolioEngine {
             open_excursions: BTreeMap::new(),
             rejected_orders: BTreeMap::new(),
             closed_trades: Vec::new(),
+            btc_macro_bullish: true,
         }
     }
 
@@ -311,6 +317,15 @@ impl PortfolioEngine {
             }
         }
 
+        // Track BTC macro trend for market breadth filter
+        if symbol == "BTCUSDT" {
+            if let Some(audit) = strategy.audit() {
+                if let Some(macro_ok) = audit.get("macro_ok").and_then(|v| v.as_bool()) {
+                    self.btc_macro_bullish = macro_ok;
+                }
+            }
+        }
+
         // 4. Update portfolio peak equity and drawdown metrics
         let current_equity = self.total_marked_equity();
         if current_equity > self.peak_equity {
@@ -341,6 +356,12 @@ impl PortfolioEngine {
     fn try_submit_entry(&mut self, symbol: &str, intent: OrderIntent, event_end_ms: i64) {
         if self.config.market_type == MarketType::Spot && intent.side == Side::Sell {
             self.count_rejection(SPOT_SHORTING_DISALLOWED);
+            return;
+        }
+
+        // Enforce BTC market breadth lead filter
+        if self.config.btc_breadth_filter && symbol != "BTCUSDT" && !self.btc_macro_bullish {
+            self.count_rejection("BtcMacroBearish");
             return;
         }
 

@@ -478,6 +478,16 @@ pub struct PortfolioRiskPolicy {
     pub quantity_step_size: Decimal,
     /// Minimum order notional in quote currency (exchange MIN_NOTIONAL).
     pub min_order_notional: Decimal,
+    /// Whether to enable elastic slot sizing based on current portfolio occupancy.
+    #[serde(default)]
+    pub elastic_slot_sizing: bool,
+    /// Maximum elastic slot margin fraction when <= 1 position is currently open (e.g. 0.55 = 55%).
+    #[serde(default = "default_max_elastic_slot_margin_pct")]
+    pub max_elastic_slot_margin_pct: Decimal,
+}
+
+fn default_max_elastic_slot_margin_pct() -> Decimal {
+    Decimal::new(55, 2)
 }
 
 impl Default for PortfolioRiskPolicy {
@@ -491,6 +501,8 @@ impl Default for PortfolioRiskPolicy {
             min_order_quantity: default_min_order_quantity(),
             quantity_step_size: default_quantity_step_size(),
             min_order_notional: default_min_order_notional(),
+            elastic_slot_sizing: false,
+            max_elastic_slot_margin_pct: Decimal::new(55, 2),
         }
     }
 }
@@ -538,14 +550,34 @@ impl PortfolioRiskPolicy {
             min_order_quantity: default_min_order_quantity(),
             quantity_step_size: default_quantity_step_size(),
             min_order_notional: default_min_order_notional(),
+            elastic_slot_sizing: false,
+            max_elastic_slot_margin_pct: default_max_elastic_slot_margin_pct(),
         })
+    }
+
+    /// Configures elastic slot sizing policy based on occupancy.
+    pub fn with_elastic_slots(
+        mut self,
+        enabled: bool,
+        max_elastic_slot_margin_pct: Decimal,
+    ) -> Result<Self, RiskError> {
+        if max_elastic_slot_margin_pct <= Decimal::ZERO
+            || max_elastic_slot_margin_pct > Decimal::ONE
+        {
+            return Err(RiskError::InvalidParameters(
+                "max_elastic_slot_margin_pct must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+        self.elastic_slot_sizing = enabled;
+        self.max_elastic_slot_margin_pct = max_elastic_slot_margin_pct;
+        Ok(self)
     }
 
     /// Evaluates and sizes an order intent against portfolio risk constraints:
     /// - Caps concurrent positions to `max_open_positions`.
     /// - Caps directional exposure to `max_directional_positions`.
     /// - Calculates quantity from Stop Loss risk budget: `(equity * risk_pct) / |entry - stop|`.
-    /// - Clamps maximum notional to `equity * max_slot_margin_pct * leverage`.
+    /// - Clamps maximum notional to `equity * max_slot_margin_pct * leverage` (or elastic cap).
     /// - Validates exchange lot size and minimum notional.
     pub fn size_order(
         &self,
@@ -592,8 +624,13 @@ impl PortfolioRiskPolicy {
         let risk_dollars = equity * self.risk_per_trade_pct;
         let mut quantity = risk_dollars / stop_distance;
 
-        // 2. Max slot notional limit: Equity * max_slot_margin_pct * leverage
-        let max_slot_notional = equity * self.max_slot_margin_pct * self.max_leverage;
+        // 2. Max slot notional limit: Equity * effective_slot_margin * leverage
+        let effective_slot_margin = if self.elastic_slot_sizing && current_open_positions <= 1 {
+            self.max_elastic_slot_margin_pct
+        } else {
+            self.max_slot_margin_pct
+        };
+        let max_slot_notional = equity * effective_slot_margin * self.max_leverage;
         let notional = quantity * price;
         if notional > max_slot_notional {
             quantity = max_slot_notional / price;
@@ -1245,6 +1282,7 @@ mod tests {
             min_order_quantity: dec!(0.001),
             quantity_step_size: dec!(0.001),
             min_order_notional: dec!(5),
+            ..PortfolioRiskPolicy::default()
         };
         // Very tight stop (dist = 0.10) would demand 500 / 0.10 = 5,000 units = 500,000 notional
         let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.90), dec!(105), 5).unwrap();
@@ -1252,5 +1290,33 @@ mod tests {
         // Should clip to max notional 4,000 / 100 = 40 units
         let qty = policy.size_order(&intent, 0, 0, dec!(10_000)).unwrap();
         assert_eq!(qty, dec!(40));
+    }
+
+    #[test]
+    fn portfolio_risk_policy_elastic_slot_sizing() {
+        let policy = PortfolioRiskPolicy {
+            max_open_positions: 3,
+            max_directional_positions: 3,
+            risk_per_trade_pct: dec!(0.05), // 5% risk ($500 on $10,000)
+            max_slot_margin_pct: dec!(0.35), // 35% base
+            max_leverage: dec!(1),
+            elastic_slot_sizing: true,
+            max_elastic_slot_margin_pct: dec!(0.55), // 55% elastic cap ($5,500)
+            ..PortfolioRiskPolicy::default()
+        };
+        // Tight stop (dist = 0.50 on $100 price) -> demand 500 / 0.50 = 1,000 units = $100,000 notional
+        let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.50), dec!(105), 5).unwrap();
+
+        // When 0 open positions: should expand to elastic cap 55% -> $5,500 / 100 = 55 units
+        let qty_0 = policy.size_order(&intent, 0, 0, dec!(10_000)).unwrap();
+        assert_eq!(qty_0, dec!(55));
+
+        // When 1 open position: should still expand to elastic cap 55% -> 55 units
+        let qty_1 = policy.size_order(&intent, 1, 1, dec!(10_000)).unwrap();
+        assert_eq!(qty_1, dec!(55));
+
+        // When 2 open positions: should revert to base cap 35% -> $3,500 / 100 = 35 units
+        let qty_2 = policy.size_order(&intent, 2, 2, dec!(10_000)).unwrap();
+        assert_eq!(qty_2, dec!(35));
     }
 }

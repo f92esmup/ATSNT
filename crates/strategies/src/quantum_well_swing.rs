@@ -222,6 +222,16 @@ pub struct QuantumWellSwingConfig {
     pub enable_dynamic_breakeven: bool,
     /// Ratio of distance towards Take Profit to trigger breakeven ratchet (default 0.50 = 50%).
     pub breakeven_trigger_ratio: Decimal,
+    /// Whether to enable trailing stop ratchet.
+    #[serde(default)]
+    pub enable_trailing_stop: bool,
+    /// Trailing stop step multiplier on ATR (default 1.50).
+    #[serde(default = "default_trailing_atr_multiplier")]
+    pub trailing_atr_multiplier: Decimal,
+}
+
+fn default_trailing_atr_multiplier() -> Decimal {
+    dec!(1.50)
 }
 
 impl Default for QuantumWellSwingConfig {
@@ -245,6 +255,8 @@ impl Default for QuantumWellSwingConfig {
             limit_time_in_force_bars: None,
             enable_dynamic_breakeven: true,
             breakeven_trigger_ratio: dec!(0.50),
+            enable_trailing_stop: false,
+            trailing_atr_multiplier: dec!(1.50),
         }
     }
 }
@@ -466,6 +478,8 @@ impl HyperparameterSpace for QuantumWellSwingSpace {
                 limit_time_in_force_bars: None,
                 enable_dynamic_breakeven: true,
                 breakeven_trigger_ratio: dec!(0.50),
+                enable_trailing_stop: false,
+                trailing_atr_multiplier: dec!(1.50),
             });
         }
         configs
@@ -711,6 +725,18 @@ impl Strategy for QuantumWellSwingStrategy {
             None
         };
 
+        let trailing_atr = if self.config.enable_trailing_stop {
+            let current_atr = self.atr.value().unwrap_or(bar.close * dec!(0.02));
+            let step = current_atr * self.config.trailing_atr_multiplier;
+            if step > Decimal::ZERO {
+                Some(step)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let mut intent = OrderIntent::with_risk_and_exits(
             bar.end_time,
             Side::Buy,
@@ -719,7 +745,7 @@ impl Strategy for QuantumWellSwingStrategy {
             take_profit,
             time_barrier,
             None,
-            None,
+            trailing_atr,
             breakeven_atr,
             None,
         )
@@ -898,6 +924,38 @@ mod tests {
                 let be_dist = intent.breakeven_atr.unwrap();
                 let expected_be_dist = (intent.take_profit - intent.price) * dec!(0.50);
                 assert_eq!(be_dist, expected_be_dist);
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn test_trailing_stop_attached_to_intent() {
+        let config = QuantumWellSwingConfig {
+            window_size: 10,
+            macro_trend_filter: false,
+            enable_trailing_stop: true,
+            trailing_atr_multiplier: dec!(1.50),
+            min_well_curvature: dec!(0.001),
+            min_upward_force: dec!(0.0001),
+            ground_state_tolerance: dec!(0.05),
+            ..QuantumWellSwingConfig::default()
+        };
+
+        let mut strategy = QuantumWellSwingStrategy::new(config).expect("valid strategy");
+
+        for i in 0..15 {
+            let price = if i < 10 {
+                dec!(100) + Decimal::from(i % 3)
+            } else {
+                dec!(99.5)
+            };
+            let bar = create_test_bar(i as i64 * 60_000, price);
+            if let Some(intent) = strategy.on_bar(&bar) {
+                assert!(
+                    intent.trailing_atr.is_some(),
+                    "Trailing ATR must be populated when enable_trailing_stop is true"
+                );
                 return;
             }
         }

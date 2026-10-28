@@ -437,6 +437,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         min_order_quantity: dec!(0.001),
         quantity_step_size: dec!(0.001),
         min_order_notional: dec!(5),
+        ..PortfolioRiskPolicy::default()
     };
 
     let engine_config = PortfolioEngineConfig {
@@ -447,6 +448,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         risk_policy,
         latency_ms: args.latency_ms,
         market_type,
+        btc_breadth_filter: false,
     };
     let mut engine = PortfolioEngine::new(engine_config);
 
