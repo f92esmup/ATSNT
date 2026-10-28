@@ -16,7 +16,7 @@ Environment="GCP_DATASET_ID=atsnt_bi"
 
 # Binary Execution
 # Runs standalone compiled binary in paper trading mode with Telegram alerts and BigQuery streaming.
-ExecStart=/home/f92esmup/atsnt/paper_trading_portfolio --portfolio-config /home/f92esmup/atsnt/configs/portfolio_deployment_artifact.json --spot --bnb-discount --telegram-alerts --gcp-bigquery
+ExecStart=/home/f92esmup/atsnt/paper_trading_portfolio --portfolio-config /home/f92esmup/atsnt/configs/universe_deployment_artifact.json --capital 200 --spot --bnb-discount --telegram-alerts --gcp-bigquery
 
 # Resilience & Auto-Restart Policies
 Restart=always
