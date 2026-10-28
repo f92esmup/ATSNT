@@ -634,6 +634,8 @@ fn run_portfolio_slice<S: OptimizableStrategy>(
         latency_ms: 100,
         market_type: ctx.market_type,
         btc_breadth_filter: false,
+        btc_correlation_threshold: dec!(0.65),
+        btc_correlation_window: 35,
     };
 
     let mut engine = PortfolioEngine::new(engine_config);
@@ -1371,6 +1373,8 @@ where
             taker_fee_pct,
             slippage_pct: dec!(0.0005),
             btc_breadth_filter: true,
+            btc_correlation_threshold: dec!(0.65),
+            btc_correlation_window: 35,
         },
         assets: vec![
             PortfolioAssetSpec {

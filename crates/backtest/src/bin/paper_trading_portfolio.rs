@@ -440,6 +440,30 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         ..PortfolioRiskPolicy::default()
     };
 
+    let (effective_btc_breadth, effective_btc_corr_thresh, effective_btc_corr_window) =
+        if let Some(art) = &portfolio_artifact {
+            let breadth = art
+                .get("execution")
+                .and_then(|e| e.get("btc_breadth_filter"))
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let thresh = art
+                .get("execution")
+                .and_then(|e| e.get("btc_correlation_threshold"))
+                .and_then(|t| t.as_str())
+                .and_then(|s| s.parse::<Decimal>().ok())
+                .unwrap_or(dec!(0.65));
+            let window = art
+                .get("execution")
+                .and_then(|e| e.get("btc_correlation_window"))
+                .and_then(|w| w.as_u64())
+                .map(|w| w as usize)
+                .unwrap_or(35);
+            (breadth, thresh, window)
+        } else {
+            (false, dec!(0.65), 35)
+        };
+
     let engine_config = PortfolioEngineConfig {
         initial_capital: effective_capital,
         maker_fee_pct,
@@ -448,7 +472,9 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         risk_policy,
         latency_ms: args.latency_ms,
         market_type,
-        btc_breadth_filter: false,
+        btc_breadth_filter: effective_btc_breadth,
+        btc_correlation_threshold: effective_btc_corr_thresh,
+        btc_correlation_window: effective_btc_corr_window,
     };
     let mut engine = PortfolioEngine::new(engine_config);
 

@@ -6,16 +6,155 @@
 //! risk-budget sizing, and isolated margin caps).
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
 
 use domain::{OrderIntent, PortfolioRiskPolicy, PositionSide, Side};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use strategies::{MarketType, Strategy};
 
 use crate::config::BacktestConfig;
 use crate::execution_core::{ExecutionCore, PendingEntry, PendingEntryOutcome};
 use crate::metrics::{BacktestMetrics, ClosedTrade, TradeExcursion, SPOT_SHORTING_DISALLOWED};
 use crate::price_event::PriceEvent;
+
+/// Online rolling Pearson correlation estimator over time-synchronized horizon return pairs.
+#[derive(Debug, Clone)]
+pub struct RollingCorrelationTracker {
+    horizon_ms: i64,
+    window_capacity: usize,
+    min_observations: usize,
+    price_history: VecDeque<(i64, f64, f64)>,
+    returns_x: VecDeque<f64>,
+    returns_y: VecDeque<f64>,
+}
+
+impl RollingCorrelationTracker {
+    /// Creates a new rolling correlation tracker with default 36-hour swing horizon.
+    pub fn new(window_capacity: usize, min_observations: usize) -> Self {
+        Self::with_horizon(36, window_capacity, min_observations)
+    }
+
+    /// Creates a new rolling correlation tracker with a custom horizon in hours.
+    pub fn with_horizon(
+        horizon_hours: i64,
+        window_capacity: usize,
+        min_observations: usize,
+    ) -> Self {
+        Self {
+            horizon_ms: horizon_hours.max(1) * 3_600_000,
+            window_capacity: window_capacity.max(8),
+            min_observations: min_observations.max(4),
+            price_history: VecDeque::new(),
+            returns_x: VecDeque::with_capacity(window_capacity + 1),
+            returns_y: VecDeque::with_capacity(window_capacity + 1),
+        }
+    }
+
+    /// Pushes a new price observation pair $(P_x, P_y)$ with exact timestamp.
+    /// Calculates log-returns $r_x = \ln(P_x(t) / P_x(t - \Delta t))$ and $r_y = \ln(P_y(t) / P_y(t - \Delta t))$.
+    pub fn push_observation(&mut self, timestamp_ms: i64, price_x: f64, price_y: f64) {
+        if price_x <= 0.0 || price_y <= 0.0 {
+            return;
+        }
+
+        self.price_history
+            .push_back((timestamp_ms, price_x, price_y));
+
+        let cutoff = timestamp_ms.saturating_sub(self.horizon_ms * 3);
+        while let Some(&(t, _, _)) = self.price_history.front() {
+            if t < cutoff {
+                self.price_history.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        let target_t = timestamp_ms - self.horizon_ms;
+        let mut past_sample = None;
+        for &(t, px, py) in self.price_history.iter().rev() {
+            if t <= target_t {
+                past_sample = Some((px, py));
+                break;
+            }
+        }
+
+        if let Some((past_x, past_y)) = past_sample {
+            if past_x > 0.0 && past_y > 0.0 {
+                let ret_x = (price_x / past_x).ln();
+                let ret_y = (price_y / past_y).ln();
+
+                if self.returns_x.len() >= self.window_capacity {
+                    self.returns_x.pop_front();
+                    self.returns_y.pop_front();
+                }
+                self.returns_x.push_back(ret_x);
+                self.returns_y.push_back(ret_y);
+            }
+        }
+    }
+
+    /// Pushes a price observation using incremental horizon steps for synthetic tests.
+    pub fn push_prices(&mut self, price_x: f64, price_y: f64) {
+        let last_t = self.price_history.back().map_or(0, |&(t, _, _)| t);
+        let next_t = last_t + self.horizon_ms;
+        self.push_observation(next_t, price_x, price_y);
+    }
+
+    /// Computes the sample Pearson correlation coefficient $\rho_{x, y} \in [-1.0, 1.0]$.
+    /// Returns `None` if the number of observations is below `min_observations` or if variance is degenerate.
+    pub fn correlation(&self) -> Option<f64> {
+        let n = self.returns_x.len();
+        if n < self.min_observations {
+            return None;
+        }
+
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        for i in 0..n {
+            sum_x += self.returns_x[i];
+            sum_y += self.returns_y[i];
+        }
+        let mean_x = sum_x / n as f64;
+        let mean_y = sum_y / n as f64;
+
+        let mut var_x = 0.0;
+        let mut var_y = 0.0;
+        let mut cov_xy = 0.0;
+
+        for i in 0..n {
+            let dx = self.returns_x[i] - mean_x;
+            let dy = self.returns_y[i] - mean_y;
+            cov_xy += dx * dy;
+            var_x += dx * dx;
+            var_y += dy * dy;
+        }
+
+        let denom = (var_x * var_y).sqrt();
+        if denom <= 1e-12 {
+            return None; // Degenerate variance (constant returns)
+        }
+
+        let rho = (cov_xy / denom).clamp(-1.0, 1.0);
+        Some(rho)
+    }
+
+    /// Number of accumulated return observations.
+    pub fn len(&self) -> usize {
+        self.returns_x.len()
+    }
+
+    /// Whether any return observations have been accumulated.
+    pub fn is_empty(&self) -> bool {
+        self.returns_x.is_empty()
+    }
+
+    /// Whether minimum observations have been satisfied.
+    pub fn is_warm(&self) -> bool {
+        self.returns_x.len() >= self.min_observations
+    }
+}
 
 /// Configuration for the multi-asset portfolio engine.
 #[derive(Debug, Clone)]
@@ -36,6 +175,10 @@ pub struct PortfolioEngineConfig {
     pub market_type: MarketType,
     /// Whether to enforce BTC market breadth filter (blocks Altcoin Longs when BTC is macro bearish).
     pub btc_breadth_filter: bool,
+    /// Minimum Pearson correlation with Bitcoin to trigger macro bearish blocking (default 0.65).
+    pub btc_correlation_threshold: Decimal,
+    /// Rolling window capacity in bars for correlation estimation (default 35).
+    pub btc_correlation_window: usize,
 }
 
 impl Default for PortfolioEngineConfig {
@@ -49,6 +192,8 @@ impl Default for PortfolioEngineConfig {
             latency_ms: 0,
             market_type: MarketType::UsdMPerpetual,
             btc_breadth_filter: false,
+            btc_correlation_threshold: dec!(0.65),
+            btc_correlation_window: 35,
         }
     }
 }
@@ -69,6 +214,8 @@ impl PortfolioEngineConfig {
             latency_ms: 0,
             market_type: MarketType::Spot,
             btc_breadth_filter: false,
+            btc_correlation_threshold: dec!(0.65),
+            btc_correlation_window: 35,
         }
     }
 
@@ -186,6 +333,7 @@ pub struct PortfolioEngine {
     rejected_orders: BTreeMap<String, usize>,
     closed_trades: Vec<ClosedTrade>,
     btc_macro_bullish: bool,
+    correlation_trackers: BTreeMap<String, RollingCorrelationTracker>,
 }
 
 impl PortfolioEngine {
@@ -204,6 +352,7 @@ impl PortfolioEngine {
             rejected_orders: BTreeMap::new(),
             closed_trades: Vec::new(),
             btc_macro_bullish: true,
+            correlation_trackers: BTreeMap::new(),
         }
     }
 
@@ -251,6 +400,21 @@ impl PortfolioEngine {
     ) -> PortfolioStepReport {
         let bar = event.into();
         self.last_prices.insert(symbol.to_string(), bar.close);
+
+        // Update rolling cross-asset correlation tracker against Bitcoin
+        if symbol != "BTCUSDT" {
+            if let Some(btc_price) = self.last_prices.get("BTCUSDT").copied() {
+                let sym_f64 = bar.close.to_f64().unwrap_or(0.0);
+                let btc_f64 = btc_price.to_f64().unwrap_or(0.0);
+                let window = self.config.btc_correlation_window;
+                let min_obs = (window / 2).clamp(4, 15);
+                let tracker = self
+                    .correlation_trackers
+                    .entry(symbol.to_string())
+                    .or_insert_with(|| RollingCorrelationTracker::new(window, min_obs));
+                tracker.push_observation(bar.end_ms, sym_f64, btc_f64);
+            }
+        }
 
         let per_symbol_cfg = self.config.per_symbol_config();
 
@@ -359,10 +523,19 @@ impl PortfolioEngine {
             return;
         }
 
-        // Enforce BTC market breadth lead filter (strictly blocks ETH when BTC is macro bearish)
-        if self.config.btc_breadth_filter && symbol == "ETHUSDT" && !self.btc_macro_bullish {
-            self.count_rejection("BtcMacroBearish");
-            return;
+        // Enforce BTC market breadth lead filter with dynamic rolling Pearson correlation gating:
+        // When BTC is macro bearish, block altcoins ONLY if their rolling Pearson correlation
+        // with BTC is high (>= btc_correlation_threshold). If decoupled or during warmup, allow.
+        if self.config.btc_breadth_filter && symbol != "BTCUSDT" && !self.btc_macro_bullish {
+            if let Some(tracker) = self.correlation_trackers.get(symbol) {
+                if let Some(rho) = tracker.correlation() {
+                    let rho_dec = Decimal::from_f64_retain(rho).unwrap_or(Decimal::ZERO);
+                    if rho_dec >= self.config.btc_correlation_threshold {
+                        self.count_rejection("BtcCorrelatedBearish");
+                        return;
+                    }
+                }
+            }
         }
 
         let target_side = match intent.side {
@@ -453,6 +626,13 @@ impl PortfolioEngine {
     /// Returns the latest marked close price recorded for a symbol.
     pub fn last_price(&self, symbol: &str) -> Option<Decimal> {
         self.last_prices.get(symbol).copied()
+    }
+
+    /// Returns the rolling Pearson correlation of an asset with Bitcoin, if warmed up.
+    pub fn btc_correlation(&self, symbol: &str) -> Option<f64> {
+        self.correlation_trackers
+            .get(symbol)
+            .and_then(|t| t.correlation())
     }
 
     /// Current peak-to-trough drawdown percentage.
@@ -726,5 +906,154 @@ mod tests {
         assert_eq!(engine.open_positions_count(), 1);
         assert_eq!(engine.closed_trades().len(), 1);
         assert_eq!(engine.closed_trades()[0].exit_reason, "TakeProfit");
+    }
+
+    #[test]
+    fn test_rolling_correlation_tracker_lifecycle() {
+        let mut tracker = RollingCorrelationTracker::new(20, 5);
+        assert_eq!(tracker.len(), 0);
+        assert!(!tracker.is_warm());
+        assert_eq!(tracker.correlation(), None);
+
+        // 1. Degenerate / flat returns: constant price series
+        for _ in 0..10 {
+            tracker.push_prices(100.0, 50.0);
+        }
+        assert!(tracker.is_warm());
+        // All returns are 0.0 -> variance is 0.0 -> returns None safely
+        assert_eq!(tracker.correlation(), None);
+
+        // 2. Perfectly correlated series: Px = 2 * Py (with variance)
+        let mut corr_tracker = RollingCorrelationTracker::new(20, 5);
+        let btc_prices = [100.0, 102.0, 101.0, 105.0, 103.0, 108.0, 112.0, 110.0];
+        for &p in &btc_prices {
+            corr_tracker.push_prices(p * 2.5, p);
+        }
+        let rho = corr_tracker.correlation().expect("Must have correlation");
+        assert!((rho - 1.0).abs() < 1e-4, "Expected rho ~ 1.0, got {rho}");
+
+        // 3. Inverse series
+        let mut inv_tracker = RollingCorrelationTracker::new(20, 5);
+        let eth_prices = [200.0, 196.0, 198.0, 190.0, 194.0, 185.0, 178.0, 182.0];
+        for i in 0..btc_prices.len() {
+            inv_tracker.push_prices(eth_prices[i], btc_prices[i]);
+        }
+        let inv_rho = inv_tracker.correlation().expect("Must have correlation");
+        assert!(
+            inv_rho < -0.90,
+            "Expected negative rho < -0.90, got {inv_rho}"
+        );
+    }
+
+    #[test]
+    fn test_dynamic_correlation_breadth_filter() {
+        let mut cfg = PortfolioEngineConfig::spot();
+        cfg.btc_breadth_filter = true;
+        cfg.btc_correlation_threshold = dec!(0.65);
+        cfg.btc_correlation_window = 10;
+        let mut engine = PortfolioEngine::new(cfg);
+
+        // Set BTC macro to bearish via an audit-returning strategy
+        struct BearishAuditStrategy;
+        impl Strategy for BearishAuditStrategy {
+            fn name(&self) -> &'static str {
+                "BearishAudit"
+            }
+            fn compatible_market_types(&self) -> &'static [MarketType] {
+                &[MarketType::Spot, MarketType::UsdMPerpetual]
+            }
+            fn reset(&mut self) {}
+            fn on_bar(&mut self, _bar: &domain::DollarBar) -> Option<OrderIntent> {
+                None
+            }
+            fn audit(&self) -> Option<serde_json::Value> {
+                Some(serde_json::json!({ "macro_ok": false }))
+            }
+        }
+
+        let mut btc_strat = BearishAuditStrategy;
+        let mut signal_strat = ScriptedSignalStrategy {
+            signal_on_end_ms: 1000,
+            side: Side::Buy,
+            price: dec!(100),
+        };
+
+        // Seed BTC prices and set BTC bearish
+        let btc_prices = [
+            50000.0, 50200.0, 49800.0, 49500.0, 49200.0, 48900.0, 48500.0, 48000.0,
+        ];
+        // ETH correlated with BTC
+        let eth_prices = [
+            3000.0, 3012.0, 2988.0, 2970.0, 2952.0, 2934.0, 2910.0, 2880.0,
+        ];
+        // SOL decoupled / diverging from BTC (moving upwards while BTC drops)
+        let sol_prices = [150.0, 153.0, 156.0, 160.0, 165.0, 172.0, 180.0, 190.0];
+
+        let step_ms = 36 * 3_600_000;
+        for i in 0..btc_prices.len() {
+            let t = (i as i64 + 1) * step_ms;
+            engine.process_event(
+                "BTCUSDT",
+                test_event(t - 50, t, Decimal::from_f64_retain(btc_prices[i]).unwrap()),
+                &mut btc_strat,
+            );
+            engine.process_event(
+                "ETHUSDT",
+                test_event(t - 50, t, Decimal::from_f64_retain(eth_prices[i]).unwrap()),
+                &mut signal_strat,
+            );
+            engine.process_event(
+                "SOLUSDT",
+                test_event(t - 50, t, Decimal::from_f64_retain(sol_prices[i]).unwrap()),
+                &mut signal_strat,
+            );
+        }
+
+        // Check computed correlations
+        let eth_rho = engine.btc_correlation("ETHUSDT").expect("ETH rho");
+        let sol_rho = engine.btc_correlation("SOLUSDT").expect("SOL rho");
+        assert!(
+            eth_rho >= 0.90,
+            "ETH should be strongly correlated with BTC, got {eth_rho}"
+        );
+        assert!(
+            sol_rho < 0.0,
+            "SOL should be inversely / decoupled from BTC, got {sol_rho}"
+        );
+
+        let t_signal = (btc_prices.len() as i64 + 2) * step_ms;
+        // Attempt entry on ETH (should be blocked because BTC is bearish AND rho >= 0.65)
+        let mut eth_buy = ScriptedSignalStrategy {
+            signal_on_end_ms: t_signal,
+            side: Side::Buy,
+            price: dec!(2880),
+        };
+        engine.process_event(
+            "ETHUSDT",
+            test_event(t_signal - 50, t_signal, dec!(2880)),
+            &mut eth_buy,
+        );
+        assert_eq!(
+            engine.rejected_orders().get("BtcCorrelatedBearish"),
+            Some(&1),
+            "Correlated ETH must be blocked when BTC is bearish"
+        );
+
+        // Attempt entry on SOL (should be ALLOWED because rho < 0.65)
+        let mut sol_buy = ScriptedSignalStrategy {
+            signal_on_end_ms: t_signal,
+            side: Side::Buy,
+            price: dec!(190),
+        };
+        engine.process_event(
+            "SOLUSDT",
+            test_event(t_signal - 50, t_signal, dec!(190)),
+            &mut sol_buy,
+        );
+        assert_eq!(
+            engine.rejected_orders().get("BtcCorrelatedBearish"),
+            Some(&1),
+            "Decoupled SOL must NOT increment BtcCorrelatedBearish"
+        );
     }
 }

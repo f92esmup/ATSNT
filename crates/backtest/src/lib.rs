@@ -65,7 +65,10 @@ pub use paper::{
     PaperSessionOwner, PaperSessionRuntime, PaperTradingConfig, PaperTradingEvent,
     PaperTradingSession, TelemetryConfig, TelemetryEnvelope,
 };
-pub use portfolio_engine::{EventMerger, PortfolioEngine, PortfolioEngineConfig, TaggedPriceEvent};
+pub use portfolio_engine::{
+    EventMerger, PortfolioEngine, PortfolioEngineConfig, RollingCorrelationTracker,
+    TaggedPriceEvent,
+};
 pub use price_event::{bucket_trades, PriceEvent};
 pub use recording::{
     now_unix_ms, record_backtest, record_backtest_with_audit, record_closed_trade, record_hpo,

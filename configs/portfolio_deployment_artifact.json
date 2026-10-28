@@ -20,7 +20,9 @@
     "maker_fee_pct": "0.00075",
     "taker_fee_pct": "0.00075",
     "slippage_pct": "0.0005",
-    "btc_breadth_filter": true
+    "btc_breadth_filter": true,
+    "btc_correlation_threshold": "0.65",
+    "btc_correlation_window": 35
   },
   "assets": [
     {

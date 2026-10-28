@@ -112,6 +112,14 @@ struct Args {
     #[arg(long, default_value_t = false)]
     btc_breadth_filter: bool,
 
+    /// Minimum Pearson correlation with Bitcoin to trigger macro bearish blocking (default: 0.65)
+    #[arg(long, default_value = "0.65")]
+    btc_correlation_threshold: Decimal,
+
+    /// Rolling window capacity in bars for correlation estimation (default: 35)
+    #[arg(long, default_value_t = 35)]
+    btc_correlation_window: usize,
+
     /// Whether to enable elastic slot sizing based on occupancy
     #[arg(long, default_value_t = false)]
     elastic_slots: bool,
@@ -388,6 +396,8 @@ where
         taker_fee_pct,
         slippage_pct,
         artifact_btc_breadth,
+        artifact_btc_corr_thresh,
+        artifact_btc_corr_window,
     ) = if let Some(artifact) = portfolio_artifact.as_ref() {
         (
             artifact.capital,
@@ -396,6 +406,8 @@ where
             artifact.execution.taker_fee_pct,
             artifact.execution.slippage_pct,
             artifact.execution.btc_breadth_filter,
+            artifact.execution.btc_correlation_threshold,
+            artifact.execution.btc_correlation_window,
         )
     } else {
         let (maker_fee_pct, taker_fee_pct, max_leverage) = match (market_type, args.bnb_discount) {
@@ -427,6 +439,8 @@ where
             taker_fee_pct,
             dec!(0.0005),
             false,
+            args.btc_correlation_threshold,
+            args.btc_correlation_window,
         )
     };
 
@@ -434,6 +448,17 @@ where
         risk_policy.elastic_slot_sizing = true;
         risk_policy.max_elastic_slot_margin_pct = args.elastic_slot_margin;
     }
+
+    let btc_correlation_threshold = if args.btc_correlation_threshold != dec!(0.65) {
+        args.btc_correlation_threshold
+    } else {
+        artifact_btc_corr_thresh
+    };
+    let btc_correlation_window = if args.btc_correlation_window != 35 {
+        args.btc_correlation_window
+    } else {
+        artifact_btc_corr_window
+    };
 
     let engine_config = PortfolioEngineConfig {
         initial_capital: capital,
@@ -444,6 +469,8 @@ where
         latency_ms: 100,
         market_type,
         btc_breadth_filter: args.btc_breadth_filter || artifact_btc_breadth,
+        btc_correlation_threshold,
+        btc_correlation_window,
     };
 
     let mut engine = PortfolioEngine::new(engine_config);

@@ -275,6 +275,18 @@ pub struct PortfolioExecutionSettings {
     pub slippage_pct: Decimal,
     #[serde(default)]
     pub btc_breadth_filter: bool,
+    #[serde(default = "default_btc_correlation_threshold")]
+    pub btc_correlation_threshold: Decimal,
+    #[serde(default = "default_btc_correlation_window")]
+    pub btc_correlation_window: usize,
+}
+
+fn default_btc_correlation_threshold() -> Decimal {
+    dec!(0.65)
+}
+
+fn default_btc_correlation_window() -> usize {
+    35
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
