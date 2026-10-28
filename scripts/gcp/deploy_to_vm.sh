@@ -15,7 +15,7 @@ INSTANCE_NAME="${GCP_VM_INSTANCE:-atsnt-engine}"
 ZONE="${GCP_VM_ZONE:-europe-west1-b}"
 REMOTE_USER="${GCP_VM_USER:-f92esmup}"
 REMOTE_DIR="/home/${REMOTE_USER}/atsnt"
-CONFIG_FILE="${1:-configs/hpo_btcusdt_2026-hpo-btcusdt-2026-500eur-v3.json}"
+CONFIG_FILE="${1:-configs/portfolio_deployment_artifact.json}"
 
 echo "=============================================================================="
 echo " ATSNT - Safe Cloud Deployment Pipeline -> VM: ${INSTANCE_NAME} (${ZONE})"
@@ -48,9 +48,15 @@ case " ${EXEC_START} " in
         ;;
 esac
 
-echo "[*] Step 1: Compiling 'paper_trading' locally in release mode..."
-cargo build --release -p backtest --bin paper_trading
-LOCAL_BIN="target/release/paper_trading"
+if echo "${EXEC_START}" | grep -q "paper_trading_portfolio"; then
+    BIN_NAME="paper_trading_portfolio"
+else
+    BIN_NAME="paper_trading"
+fi
+
+echo "[*] Step 1: Compiling '${BIN_NAME}' locally in release mode..."
+cargo build --release -p backtest --bin "${BIN_NAME}"
+LOCAL_BIN="target/release/${BIN_NAME}"
 if [ ! -f "${LOCAL_BIN}" ]; then
     echo "[-] Error: Local binary '${LOCAL_BIN}' was not produced."
     exit 1
@@ -65,21 +71,21 @@ gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command="sudo systemctl
 echo "[*] Step 4: Backing up previous binary and preparing remote directories..."
 gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command="
     mkdir -p ${REMOTE_DIR}/configs
-    if [ -f ${REMOTE_DIR}/paper_trading ]; then
-        cp ${REMOTE_DIR}/paper_trading ${REMOTE_DIR}/paper_trading.bak
-        echo '[*] Backup preserved: ${REMOTE_DIR}/paper_trading.bak'
+    if [ -f ${REMOTE_DIR}/${BIN_NAME} ]; then
+        cp ${REMOTE_DIR}/${BIN_NAME} ${REMOTE_DIR}/${BIN_NAME}.bak
+        echo '[*] Backup preserved: ${REMOTE_DIR}/${BIN_NAME}.bak'
     fi
 "
 
 echo "[*] Step 5: Transferring binary, strategy artifact, and systemd unit..."
-gcloud compute scp "${LOCAL_BIN}" "${INSTANCE_NAME}:${REMOTE_DIR}/paper_trading.new" --zone="${ZONE}"
+gcloud compute scp "${LOCAL_BIN}" "${INSTANCE_NAME}:${REMOTE_DIR}/${BIN_NAME}.new" --zone="${ZONE}"
 gcloud compute scp "${CONFIG_FILE}" "${INSTANCE_NAME}:${REMOTE_DIR}/configs/${CONFIG_BASENAME}" --zone="${ZONE}"
 gcloud compute scp docs/deployment/atsnt.service "${INSTANCE_NAME}:${REMOTE_DIR}/atsnt.service" --zone="${ZONE}"
 
 echo "[*] Step 6: Atomically replacing binary and updating systemd service..."
 gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command="
-    chmod +x ${REMOTE_DIR}/paper_trading.new
-    mv ${REMOTE_DIR}/paper_trading.new ${REMOTE_DIR}/paper_trading
+    chmod +x ${REMOTE_DIR}/${BIN_NAME}.new
+    mv ${REMOTE_DIR}/${BIN_NAME}.new ${REMOTE_DIR}/${BIN_NAME}
     sudo cp ${REMOTE_DIR}/atsnt.service /etc/systemd/system/atsnt.service
     sudo systemctl daemon-reload
 "

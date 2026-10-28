@@ -16,14 +16,7 @@ Environment="GCP_DATASET_ID=atsnt_bi"
 
 # Binary Execution
 # Runs standalone compiled binary in paper trading mode with Telegram alerts and BigQuery streaming.
-#
-# INFRASTRUCTURE TEST ONLY: no artifact passes the deployment gate yet (the 500eur-v3 HPO found
-# no edge after costs), so this PAPER session runs v3 with --allow-unproven-strategy to exercise
-# the VM, the market feed, the Telegram alerts and BigQuery end to end. No money is at risk and
-# its metrics say nothing about the strategy. Never copy --allow-unproven-strategy into a
-# live_trading unit. When an HPO passes the gate, point --config at it and drop the flag.
-# scripts/gcp/deploy_to_vm.sh refuses to deploy when --config below names another artifact.
-ExecStart=/home/f92esmup/atsnt/paper_trading --symbol btcusdt --config /home/f92esmup/atsnt/configs/hpo_btcusdt_2026-hpo-btcusdt-2026-500eur-v3.json --allow-unproven-strategy --telegram-alerts --gcp-bigquery
+ExecStart=/home/f92esmup/atsnt/paper_trading_portfolio --portfolio-config /home/f92esmup/atsnt/configs/portfolio_deployment_artifact.json --spot --bnb-discount --telegram-alerts --gcp-bigquery
 
 # Resilience & Auto-Restart Policies
 Restart=always

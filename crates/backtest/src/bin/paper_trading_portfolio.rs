@@ -19,16 +19,16 @@ use adapters::{
 use anyhow::Result;
 use backtest::operator_alerts::{AlertQueue, DEFAULT_ALERT_QUEUE_CAPACITY, HEARTBEAT_INTERVAL_MS};
 use backtest::{
-    now_unix_ms, AlertThrottle, BacktestConfig, ClosedTrade, DataWindow, PortfolioEngine,
-    PortfolioEngineConfig, RunContext, RunId, RunSpec, RunStatus, RunType, SamplingConfig,
+    load_portfolio_artifact, now_unix_ms, AlertThrottle, BacktestConfig, ClosedTrade, DataWindow,
+    PortfolioDeploymentArtifact, PortfolioEngine, PortfolioEngineConfig, RunContext, RunId,
+    RunSpec, RunStatus, RunType, SamplingConfig,
 };
 use chrono::Timelike;
 use clap::Parser;
 use domain::{DollarBarAggregator, PortfolioRiskPolicy, PositionSide, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use strategies::langevin_potential::{LangevinConfig, LangevinPotentialStrategy};
-use strategies::Strategy;
+use strategies::{OptimizableStrategy, Strategy, StrategyVisitor};
 
 /// Target instrument symbols monitored in this tri-asset portfolio.
 pub const PORTFOLIO_SYMBOLS: [&str; 3] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
@@ -149,49 +149,144 @@ async fn main() -> Result<()> {
     result
 }
 
-/// Resolves strategy configuration and effective dollar bar threshold.
-fn resolve_asset_config(
+/// Specification of a single asset's execution plan within the multi-asset portfolio.
+struct AssetPlan {
+    strategy_id: String,
+    config: serde_json::Value,
+    dollar_bar_threshold: Decimal,
+}
+
+/// Dynamic strategy builder visiting the ATSNT strategy registry.
+struct StrategyInstantiator<'a> {
+    config_val: &'a serde_json::Value,
+}
+
+impl<'a> StrategyVisitor for StrategyInstantiator<'a> {
+    type Output = Result<Box<dyn Strategy>>;
+
+    fn visit<S>(self) -> Result<Box<dyn Strategy>>
+    where
+        S: OptimizableStrategy + 'static,
+        S::Config: Default,
+        S::Space: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let cfg: S::Config = serde_json::from_value(self.config_val.clone()).map_err(|e| {
+            anyhow::anyhow!("Failed to parse config for strategy '{}': {e}", S::id())
+        })?;
+        let strat = S::from_config(&S::SharedConfig::default(), cfg)
+            .map_err(|e| anyhow::anyhow!("Failed to build strategy '{}': {e}", S::id()))?;
+        Ok(Box::new(strat))
+    }
+}
+
+fn instantiate_strategy(
+    strategy_id: &str,
+    config_val: &serde_json::Value,
+) -> Result<Box<dyn Strategy>> {
+    match strategies::dispatch(strategy_id, StrategyInstantiator { config_val }) {
+        Some(res) => res,
+        None => anyhow::bail!(strategies::unknown_strategy_message(strategy_id)),
+    }
+}
+
+/// Resolves an individual asset's strategy plan from legacy bare or deployment artifact files.
+fn resolve_asset_plan(
     symbol: &str,
     config_path: Option<&PathBuf>,
     cli_threshold: Option<Decimal>,
     fallback_threshold: Decimal,
     use_limit_orders: bool,
     limit_timeout_bars: usize,
-) -> Result<(LangevinConfig, Decimal)> {
-    let (mut cfg, threshold) = if let Some(path) = config_path.filter(|p| p.exists()) {
+) -> Result<AssetPlan> {
+    if let Some(path) = config_path.filter(|p| p.exists()) {
         println!(
             "[*] Loading {} strategy configuration from: {}",
             symbol,
             path.display()
         );
-        let loaded = backtest::load_strategy_config::<LangevinConfig>(path)?;
-        let bar = cli_threshold
-            .or_else(|| loaded.dollar_bar_threshold())
-            .unwrap_or(fallback_threshold);
-        (loaded.strategy_config().clone(), bar)
+        let content = std::fs::read_to_string(path)?;
+        let val: serde_json::Value = serde_json::from_str(&content)?;
+
+        let (strategy_id, mut config, bar_threshold) = if let Some(spec) = val.get("spec") {
+            let s_id = spec
+                .get("strategy_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or("quantum_well_swing")
+                .to_string();
+            let s_cfg = spec
+                .get("strategy_config")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            let threshold = spec
+                .get("sampling")
+                .and_then(|s| s.get("DollarBar"))
+                .and_then(|db| db.get("threshold"))
+                .and_then(|t| {
+                    if let Some(s) = t.as_str() {
+                        s.parse::<Decimal>().ok()
+                    } else {
+                        t.as_i64().map(Decimal::from)
+                    }
+                })
+                .unwrap_or(fallback_threshold);
+            (s_id, s_cfg, threshold)
+        } else if let Some(s_id) = val.get("strategy_id").and_then(|s| s.as_str()) {
+            let s_cfg = val
+                .get("strategy_config")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            (s_id.to_string(), s_cfg, fallback_threshold)
+        } else {
+            ("quantum_well_swing".to_string(), val, fallback_threshold)
+        };
+
+        if use_limit_orders {
+            if let Some(obj) = config.as_object_mut() {
+                obj.insert("use_limit_entries".to_string(), serde_json::json!(true));
+                obj.insert(
+                    "limit_time_in_force_bars".to_string(),
+                    serde_json::json!(limit_timeout_bars),
+                );
+            }
+        }
+
+        let effective_threshold = cli_threshold.unwrap_or(bar_threshold);
+        Ok(AssetPlan {
+            strategy_id,
+            config,
+            dollar_bar_threshold: effective_threshold,
+        })
     } else {
         println!(
             "[!] Configuration file for {} not found; applying calibrated baseline",
             symbol
         );
-        let default_cfg = LangevinConfig {
-            opposite_wall_fraction: dec!(0.25),
-            breakeven_distance_fraction: dec!(0.50),
-            enable_dynamic_breakeven: true,
-            stop_loss_atr_buffer: dec!(0.50),
-            ..Default::default()
-        };
-        (default_cfg, cli_threshold.unwrap_or(fallback_threshold))
-    };
-
-    cfg.use_limit_entries = use_limit_orders;
-    cfg.limit_time_in_force_bars = if use_limit_orders {
-        Some(limit_timeout_bars)
-    } else {
-        None
-    };
-
-    Ok((cfg, threshold))
+        let default_cfg = serde_json::json!({
+            "window_size": 240,
+            "ground_state_tolerance": "0.040",
+            "min_well_curvature": "0.020",
+            "min_upward_force": "0.010",
+            "mass_eff": "3.0",
+            "hbar_eff": "2.5",
+            "target_excitation_level": 1,
+            "max_wavepacket_sigma": "0.08",
+            "stop_loss_atr_buffer": "2.00",
+            "min_take_profit_pct": "0.090",
+            "breakeven_trigger_ratio": "0.50",
+            "enable_dynamic_breakeven": true,
+            "decoherence_time_bars": 90,
+            "macro_trend_filter": true,
+            "macro_ema_period": 200,
+            "macro_slope_window": 30,
+            "use_limit_entries": use_limit_orders,
+            "limit_time_in_force_bars": if use_limit_orders { Some(limit_timeout_bars) } else { None }
+        });
+        Ok(AssetPlan {
+            strategy_id: "quantum_well_swing".to_string(),
+            config: default_cfg,
+            dollar_bar_threshold: cli_threshold.unwrap_or(fallback_threshold),
+        })
+    }
 }
 
 async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
@@ -203,20 +298,20 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     println!("     ATSNT - Tri-Asset Real-Time Paper Trading Portfolio    ");
     println!("============================================================");
     // 1. Resolve Strategy Configurations & Thresholds
-    let portfolio_artifact: Option<serde_json::Value> = if let Some(path) = &args.portfolio_config {
-        if path.exists() {
-            println!(
-                "[*] Loading unified portfolio deployment artifact: {}",
-                path.display()
-            );
-            let content = std::fs::read_to_string(path)?;
-            Some(serde_json::from_str(&content)?)
+    let portfolio_artifact: Option<PortfolioDeploymentArtifact> =
+        if let Some(path) = &args.portfolio_config {
+            if path.exists() {
+                println!(
+                    "[*] Loading unified portfolio deployment artifact: {}",
+                    path.display()
+                );
+                Some(load_portfolio_artifact(path)?)
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
     let mut effective_capital = args.capital;
     let mut effective_risk_per_trade = args.risk_per_trade;
@@ -225,73 +320,144 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     let mut effective_max_slot_margin = args.max_slot_margin;
     let mut effective_use_limit_orders = args.use_limit_orders;
     let mut effective_limit_timeout_bars = args.limit_timeout_bars;
+    let mut effective_elastic_slots = false;
+    let mut effective_max_elastic_slot_margin = dec!(0.55);
+    let mut effective_max_leverage = dec!(20);
+
+    let mut effective_maker_fee = None;
+    let mut effective_taker_fee = None;
+    let mut effective_slippage = dec!(0.0005);
+    let mut effective_btc_breadth = false;
+    let mut effective_btc_corr_thresh = dec!(0.65);
+    let mut effective_btc_corr_window = 35;
 
     let mut btc_from_artifact = None;
     let mut eth_from_artifact = None;
     let mut sol_from_artifact = None;
 
     if let Some(art) = &portfolio_artifact {
-        if let Some(cap_str) = art.get("capital").and_then(|c| c.as_str()) {
-            if let Ok(c) = cap_str.parse::<Decimal>() {
-                effective_capital = c;
-            }
-        }
-        if let Some(rp) = art.get("risk_policy") {
-            if let Some(mp) = rp.get("max_open_positions").and_then(|m| m.as_u64()) {
-                effective_max_positions = mp as usize;
-            }
-            if let Some(md) = rp.get("max_directional_positions").and_then(|m| m.as_u64()) {
-                effective_max_directional = md as usize;
-            }
-            if let Some(rpt) = rp
-                .get("risk_per_trade_pct")
-                .and_then(|r| r.as_str())
-                .and_then(|s| s.parse::<Decimal>().ok())
-            {
-                effective_risk_per_trade = rpt;
-            }
-            if let Some(msm) = rp
-                .get("max_slot_margin_pct")
-                .and_then(|r| r.as_str())
-                .and_then(|s| s.parse::<Decimal>().ok())
-            {
-                effective_max_slot_margin = msm;
-            }
-        }
-        if let Some(ex) = art.get("execution") {
-            if let Some(ulo) = ex.get("use_limit_orders").and_then(|u| u.as_bool()) {
-                effective_use_limit_orders = ulo;
-            }
-            if let Some(ltb) = ex.get("limit_timeout_bars").and_then(|t| t.as_u64()) {
-                effective_limit_timeout_bars = ltb as usize;
-            }
-        }
+        effective_capital = art.capital;
+        effective_max_positions = art.risk_policy.max_open_positions;
+        effective_max_directional = art.risk_policy.max_directional_positions;
+        effective_risk_per_trade = art.risk_policy.risk_per_trade_pct;
+        effective_max_slot_margin = art.risk_policy.max_slot_margin_pct;
+        effective_elastic_slots = art.risk_policy.elastic_slot_sizing;
+        effective_max_elastic_slot_margin = art.risk_policy.max_elastic_slot_margin_pct;
+        effective_max_leverage = art.risk_policy.max_leverage;
 
-        if let Some(assets) = art.get("assets").and_then(|a| a.as_array()) {
-            for a in assets {
-                let sym = a.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
-                let thresh = a.get("dollar_bar_threshold").and_then(|t| {
-                    if let Some(s) = t.as_str() {
-                        s.parse::<Decimal>().ok()
-                    } else {
-                        t.as_i64().map(Decimal::from)
-                    }
-                });
-                let cfg: Option<LangevinConfig> = a
-                    .get("strategy_config")
-                    .and_then(|c| serde_json::from_value(c.clone()).ok());
-                if let (Some(t), Some(c)) = (thresh, cfg) {
-                    match sym {
-                        "BTCUSDT" => btc_from_artifact = Some((c, t)),
-                        "ETHUSDT" => eth_from_artifact = Some((c, t)),
-                        "SOLUSDT" => sol_from_artifact = Some((c, t)),
-                        _ => {}
-                    }
-                }
+        effective_use_limit_orders = art.execution.use_limit_orders;
+        effective_limit_timeout_bars = art.execution.limit_timeout_bars;
+        effective_maker_fee = Some(art.execution.maker_fee_pct);
+        effective_taker_fee = Some(art.execution.taker_fee_pct);
+        effective_slippage = art.execution.slippage_pct;
+        effective_btc_breadth = art.execution.btc_breadth_filter;
+        effective_btc_corr_thresh = art.execution.btc_correlation_threshold;
+        effective_btc_corr_window = art.execution.btc_correlation_window;
+
+        for asset in &art.assets {
+            let plan = AssetPlan {
+                strategy_id: asset.strategy_id.clone(),
+                config: asset.strategy_config.clone(),
+                dollar_bar_threshold: asset.dollar_bar_threshold,
+            };
+            match asset.symbol.as_str() {
+                "BTCUSDT" => btc_from_artifact = Some(plan),
+                "ETHUSDT" => eth_from_artifact = Some(plan),
+                "SOLUSDT" => sol_from_artifact = Some(plan),
+                _ => {}
             }
         }
     }
 
+    let default_btc_path =
+        PathBuf::from("configs/matrix/hpo_btcusdt_2026-hpo-btcusdt-8000000-20261027-184750.json");
+    let default_eth_path =
+        PathBuf::from("configs/matrix/hpo_ethusdt_2026-hpo-ethusdt-6000000-20261027-132227.json");
+    let default_sol_path =
+        PathBuf::from("configs/matrix/hpo_solusdt_2026-hpo-solusdt-4000000-20261027-132227.json");
+
+    let btc_plan = if let Some(p) = btc_from_artifact {
+        AssetPlan {
+            dollar_bar_threshold: args.btc_dollar_bar.unwrap_or(p.dollar_bar_threshold),
+            ..p
+        }
+    } else {
+        let btc_path = args.btc_config.as_ref().or(Some(&default_btc_path));
+        resolve_asset_plan(
+            "BTCUSDT",
+            btc_path,
+            args.btc_dollar_bar,
+            dec!(300_000_000),
+            effective_use_limit_orders,
+            effective_limit_timeout_bars,
+        )?
+    };
+
+    let eth_plan = if let Some(p) = eth_from_artifact {
+        AssetPlan {
+            dollar_bar_threshold: args.eth_dollar_bar.unwrap_or(p.dollar_bar_threshold),
+            ..p
+        }
+    } else {
+        let eth_path = args.eth_config.as_ref().or(Some(&default_eth_path));
+        resolve_asset_plan(
+            "ETHUSDT",
+            eth_path,
+            args.eth_dollar_bar,
+            dec!(200_000_000),
+            effective_use_limit_orders,
+            effective_limit_timeout_bars,
+        )?
+    };
+
+    let sol_plan = if let Some(p) = sol_from_artifact {
+        AssetPlan {
+            dollar_bar_threshold: args.sol_dollar_bar.unwrap_or(p.dollar_bar_threshold),
+            ..p
+        }
+    } else {
+        let sol_path = args.sol_config.as_ref().or(Some(&default_sol_path));
+        resolve_asset_plan(
+            "SOLUSDT",
+            sol_path,
+            args.sol_dollar_bar,
+            dec!(80_000_000),
+            effective_use_limit_orders,
+            effective_limit_timeout_bars,
+        )?
+    };
+
+    let market_type = if args.spot || effective_max_leverage <= dec!(1) {
+        strategies::MarketType::Spot
+    } else {
+        strategies::MarketType::UsdMPerpetual
+    };
+
+    let (maker_fee_pct, taker_fee_pct, max_leverage) = match (market_type, args.bnb_discount) {
+        (strategies::MarketType::Spot, true) => (
+            effective_maker_fee.unwrap_or(dec!(0.00075)),
+            effective_taker_fee.unwrap_or(dec!(0.00075)),
+            dec!(1),
+        ),
+        (strategies::MarketType::Spot, false) => (
+            effective_maker_fee.unwrap_or(dec!(0.0010)),
+            effective_taker_fee.unwrap_or(dec!(0.0010)),
+            dec!(1),
+        ),
+        (strategies::MarketType::UsdMPerpetual, true) => (
+            effective_maker_fee.unwrap_or(dec!(0.00018)),
+            effective_taker_fee.unwrap_or(dec!(0.00045)),
+            effective_max_leverage,
+        ),
+        (strategies::MarketType::UsdMPerpetual, false) => (
+            effective_maker_fee.unwrap_or(dec!(0.0002)),
+            effective_taker_fee.unwrap_or(dec!(0.0005)),
+            effective_max_leverage,
+        ),
+    };
+
+    println!(" Market Type:          {:?}", market_type);
+    println!(" Strategy:             {}", btc_plan.strategy_id);
     println!(" Shared Capital:       ${:.2} USDT", effective_capital);
     println!(" Max Concurrent Pos:   {}", effective_max_positions);
     println!(" Max Directional Pos:  {}", effective_max_directional);
@@ -303,6 +469,17 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         " Max Slot Margin:      {:.1}%",
         effective_max_slot_margin * dec!(100)
     );
+    if effective_elastic_slots {
+        println!(
+            " Elastic Slot Margin:  {:.1}% (occupancy <= 1)",
+            effective_max_elastic_slot_margin * dec!(100)
+        );
+    }
+    println!(
+        " Fee Schedule:         Maker {:.4}% / Taker {:.4}%",
+        maker_fee_pct * dec!(100),
+        taker_fee_pct * dec!(100)
+    );
     println!(
         " Execution Mode:       {}",
         if effective_use_limit_orders {
@@ -311,60 +488,16 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
             "Aggressive Market (Taker)".to_string()
         }
     );
-
-    let default_btc_path =
-        PathBuf::from("configs/matrix/hpo_btcusdt_2026-hpo-btcusdt-8000000-20261027-184750.json");
-    let default_eth_path =
-        PathBuf::from("configs/matrix/hpo_ethusdt_2026-hpo-ethusdt-6000000-20261027-132227.json");
-    let default_sol_path =
-        PathBuf::from("configs/matrix/hpo_solusdt_2026-hpo-solusdt-4000000-20261027-132227.json");
-
-    let (btc_cfg, btc_threshold) = if let Some((c, t)) = btc_from_artifact {
-        (c, args.btc_dollar_bar.unwrap_or(t))
-    } else {
-        let btc_path = args.btc_config.as_ref().or(Some(&default_btc_path));
-        resolve_asset_config(
-            "BTCUSDT",
-            btc_path,
-            args.btc_dollar_bar,
-            dec!(8_000_000),
-            effective_use_limit_orders,
-            effective_limit_timeout_bars,
-        )?
-    };
-
-    let (eth_cfg, eth_threshold) = if let Some((c, t)) = eth_from_artifact {
-        (c, args.eth_dollar_bar.unwrap_or(t))
-    } else {
-        let eth_path = args.eth_config.as_ref().or(Some(&default_eth_path));
-        resolve_asset_config(
-            "ETHUSDT",
-            eth_path,
-            args.eth_dollar_bar,
-            dec!(6_000_000),
-            effective_use_limit_orders,
-            effective_limit_timeout_bars,
-        )?
-    };
-
-    let (sol_cfg, sol_threshold) = if let Some((c, t)) = sol_from_artifact {
-        (c, args.sol_dollar_bar.unwrap_or(t))
-    } else {
-        let sol_path = args.sol_config.as_ref().or(Some(&default_sol_path));
-        resolve_asset_config(
-            "SOLUSDT",
-            sol_path,
-            args.sol_dollar_bar,
-            dec!(4_000_000),
-            effective_use_limit_orders,
-            effective_limit_timeout_bars,
-        )?
-    };
-
+    if effective_btc_breadth {
+        println!(
+            " BTC Breadth Filter:   Active (Threshold: {}, Window: {} bars)",
+            effective_btc_corr_thresh, effective_btc_corr_window
+        );
+    }
     println!(" Thresholds:");
-    println!("   • BTCUSDT: ${btc_threshold}");
-    println!("   • ETHUSDT: ${eth_threshold}");
-    println!("   • SOLUSDT: ${sol_threshold}");
+    println!("   • BTCUSDT: ${}", btc_plan.dollar_bar_threshold);
+    println!("   • ETHUSDT: ${}", eth_plan.dollar_bar_threshold);
+    println!("   • SOLUSDT: ${}", sol_plan.dollar_bar_threshold);
 
     // 2. Initialize BigQuery Sink & Telegram Notifier
     let bq_sink = if args.gcp_bigquery {
@@ -398,32 +531,19 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     let telegram: &Option<AlertQueue> = alerts;
 
     // 3. Initialize Strategies
-    let mut btc_strat = LangevinPotentialStrategy::new(btc_cfg)?;
-    let mut eth_strat = LangevinPotentialStrategy::new(eth_cfg)?;
-    let mut sol_strat = LangevinPotentialStrategy::new(sol_cfg)?;
+    let mut btc_strat = instantiate_strategy(&btc_plan.strategy_id, &btc_plan.config)?;
+    let mut eth_strat = instantiate_strategy(&eth_plan.strategy_id, &eth_plan.config)?;
+    let mut sol_strat = instantiate_strategy(&sol_plan.strategy_id, &sol_plan.config)?;
 
     // 4. Initialize Dollar Bar Aggregators
-    let mut btc_agg = DollarBarAggregator::new(btc_threshold)
+    let mut btc_agg = DollarBarAggregator::new(btc_plan.dollar_bar_threshold)
         .map_err(|e| anyhow::anyhow!("Invalid BTC threshold: {e}"))?;
-    let mut eth_agg = DollarBarAggregator::new(eth_threshold)
+    let mut eth_agg = DollarBarAggregator::new(eth_plan.dollar_bar_threshold)
         .map_err(|e| anyhow::anyhow!("Invalid ETH threshold: {e}"))?;
-    let mut sol_agg = DollarBarAggregator::new(sol_threshold)
+    let mut sol_agg = DollarBarAggregator::new(sol_plan.dollar_bar_threshold)
         .map_err(|e| anyhow::anyhow!("Invalid SOL threshold: {e}"))?;
 
     // 5. Initialize Multi-Asset Portfolio Engine
-    let market_type = if args.spot {
-        strategies::MarketType::Spot
-    } else {
-        strategies::MarketType::UsdMPerpetual
-    };
-
-    let (maker_fee_pct, taker_fee_pct, max_leverage) = match (market_type, args.bnb_discount) {
-        (strategies::MarketType::Spot, true) => (dec!(0.00075), dec!(0.00075), dec!(1)),
-        (strategies::MarketType::Spot, false) => (dec!(0.0010), dec!(0.0010), dec!(1)),
-        (strategies::MarketType::UsdMPerpetual, true) => (dec!(0.00018), dec!(0.00045), dec!(20)),
-        (strategies::MarketType::UsdMPerpetual, false) => (dec!(0.0002), dec!(0.0005), dec!(20)),
-    };
-
     let risk_policy = PortfolioRiskPolicy {
         max_open_positions: effective_max_positions,
         max_directional_positions: if market_type == strategies::MarketType::Spot {
@@ -434,41 +554,18 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         risk_per_trade_pct: effective_risk_per_trade,
         max_slot_margin_pct: effective_max_slot_margin,
         max_leverage,
+        elastic_slot_sizing: effective_elastic_slots,
+        max_elastic_slot_margin_pct: effective_max_elastic_slot_margin,
         min_order_quantity: dec!(0.001),
         quantity_step_size: dec!(0.001),
         min_order_notional: dec!(5),
-        ..PortfolioRiskPolicy::default()
     };
-
-    let (effective_btc_breadth, effective_btc_corr_thresh, effective_btc_corr_window) =
-        if let Some(art) = &portfolio_artifact {
-            let breadth = art
-                .get("execution")
-                .and_then(|e| e.get("btc_breadth_filter"))
-                .and_then(|b| b.as_bool())
-                .unwrap_or(false);
-            let thresh = art
-                .get("execution")
-                .and_then(|e| e.get("btc_correlation_threshold"))
-                .and_then(|t| t.as_str())
-                .and_then(|s| s.parse::<Decimal>().ok())
-                .unwrap_or(dec!(0.65));
-            let window = art
-                .get("execution")
-                .and_then(|e| e.get("btc_correlation_window"))
-                .and_then(|w| w.as_u64())
-                .map(|w| w as usize)
-                .unwrap_or(35);
-            (breadth, thresh, window)
-        } else {
-            (false, dec!(0.65), 35)
-        };
 
     let engine_config = PortfolioEngineConfig {
         initial_capital: effective_capital,
         maker_fee_pct,
         taker_fee_pct,
-        slippage_pct: dec!(0.0005),
+        slippage_pct: effective_slippage,
         risk_policy,
         latency_ms: args.latency_ms,
         market_type,
@@ -482,11 +579,15 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     if let Some(minutes) = args.warmup_minutes {
         let now_ms = now_unix_ms();
         let from_ms = now_ms - i64::from(minutes) * 60_000;
-        println!("[*] Warming up indicators with {minutes} minutes of recent trades...");
+        println!("[*] Warming up indicators with {minutes} minutes of recent trades ({market_type:?})...");
 
-        let btc_hist = BinanceRecentTrades::futures(false)
-            .fetch("BTCUSDT", from_ms, now_ms)
-            .await?;
+        let rest_client = if market_type == strategies::MarketType::Spot {
+            BinanceRecentTrades::spot(false)
+        } else {
+            BinanceRecentTrades::futures(false)
+        };
+
+        let btc_hist = rest_client.fetch("BTCUSDT", from_ms, now_ms).await?;
         let mut btc_bars = 0;
         for t in btc_hist {
             if let Some(bar) = btc_agg.process_trade(&t) {
@@ -495,9 +596,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
             }
         }
 
-        let eth_hist = BinanceRecentTrades::futures(false)
-            .fetch("ETHUSDT", from_ms, now_ms)
-            .await?;
+        let eth_hist = rest_client.fetch("ETHUSDT", from_ms, now_ms).await?;
         let mut eth_bars = 0;
         for t in eth_hist {
             if let Some(bar) = eth_agg.process_trade(&t) {
@@ -506,9 +605,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
             }
         }
 
-        let sol_hist = BinanceRecentTrades::futures(false)
-            .fetch("SOLUSDT", from_ms, now_ms)
-            .await?;
+        let sol_hist = rest_client.fetch("SOLUSDT", from_ms, now_ms).await?;
         let mut sol_bars = 0;
         for t in sol_hist {
             if let Some(bar) = sol_agg.process_trade(&t) {
@@ -524,6 +621,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
 
     // 7. Spawn Concurrent WebSocket Ingestion Tasks
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TaggedTrade>(30_000);
+    let is_spot = market_type == strategies::MarketType::Spot;
 
     for &sym in &PORTFOLIO_SYMBOLS {
         let sym_str = sym.to_ascii_lowercase();
@@ -536,7 +634,11 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         let tx_clone = tx.clone();
 
         tokio::spawn(async move {
-            let ws_cfg = BinanceWsConfig::futures_production(&sym_str);
+            let ws_cfg = if is_spot {
+                BinanceWsConfig::spot(&sym_str)
+            } else {
+                BinanceWsConfig::futures_production(&sym_str)
+            };
             println!(
                 "[*] [{sym_static}] Connecting to WebSocket stream: {}",
                 ws_cfg.stream_url()
@@ -574,22 +676,29 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     drop(tx); // Drop original sender so channel closes when all background workers terminate
 
     // 8. Lifecycle & BigQuery Session Registration
+    let effective_strategy_id = format!("portfolio_tri_asset_{}", btc_plan.strategy_id);
     let run_spec = RunSpec {
-        strategy_id: "portfolio_tri_asset_langevin".to_string(),
+        strategy_id: effective_strategy_id,
         symbol: "PORTFOLIO".to_string(),
-        market_type: strategies::MarketType::UsdMPerpetual,
+        market_type,
         sampling: SamplingConfig::DollarBar {
-            threshold: btc_threshold,
+            threshold: btc_plan.dollar_bar_threshold,
         },
         strategy_config: serde_json::json!({
-            "btc_threshold": btc_threshold,
-            "eth_threshold": eth_threshold,
-            "sol_threshold": sol_threshold,
+            "strategy_id": btc_plan.strategy_id,
+            "btc_threshold": btc_plan.dollar_bar_threshold,
+            "eth_threshold": eth_plan.dollar_bar_threshold,
+            "sol_threshold": sol_plan.dollar_bar_threshold,
             "risk_per_trade": effective_risk_per_trade,
             "max_positions": effective_max_positions,
             "max_directional": effective_max_directional,
             "max_slot_margin": effective_max_slot_margin,
+            "elastic_slots": effective_elastic_slots,
+            "max_elastic_slot_margin": effective_max_elastic_slot_margin,
             "use_limit_orders": effective_use_limit_orders,
+            "btc_breadth_filter": effective_btc_breadth,
+            "btc_correlation_threshold": effective_btc_corr_thresh,
+            "btc_correlation_window": effective_btc_corr_window,
         }),
         execution_context: BacktestConfig {
             initial_capital: effective_capital,
@@ -602,7 +711,11 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     let run_ctx = RunContext::new(RunType::Paper, &run_spec, started_at_ms)
         .with_baseline(args.baseline_run_id.clone());
     let mut data_window = DataWindow {
-        source: Some("Binance USD-M Futures (Multi-Stream)".to_string()),
+        source: Some(if is_spot {
+            "Binance Spot (Multi-Stream)".to_string()
+        } else {
+            "Binance USD-M Futures (Multi-Stream)".to_string()
+        }),
         ..DataWindow::default()
     };
 
@@ -618,25 +731,40 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         t.send(format!(
             "🚀 *ATSNT: Multi-Asset Paper Trading Launched*\n\
              ━━━━━━━━━━━━━━━━━━━━━━\n\
+             • *Market*: `{:?}` ({})\n\
+             • *Strategy*: `{}`\n\
              • *Assets*: `BTCUSDT`, `ETHUSDT`, `SOLUSDT`\n\
              • *Shared Capital*: `${:.2} USDT`\n\
              • *Max Positions*: `{}` (Max `{}` directional)\n\
              • *Risk Per Trade*: `{:.2}%` ($`{:.2}`)\n\
              • *Thresholds*: BTC ${}, ETH ${}, SOL ${}\n\
              • *Execution*: {}\n\
+             • *Breadth Filter*: {}\n\
              ━━━━━━━━━━━━━━━━━━━━━━",
+            market_type,
+            if is_spot {
+                "1.0x, Zero Liquidation"
+            } else {
+                "20x Leverage"
+            },
+            btc_plan.strategy_id,
             effective_capital,
             effective_max_positions,
             effective_max_directional,
             effective_risk_per_trade * dec!(100),
             effective_capital * effective_risk_per_trade,
-            btc_threshold,
-            eth_threshold,
-            sol_threshold,
+            btc_plan.dollar_bar_threshold,
+            eth_plan.dollar_bar_threshold,
+            sol_plan.dollar_bar_threshold,
             if effective_use_limit_orders {
-                "Maker Limit (TIF 2)"
+                format!("Maker Limit (TIF {})", effective_limit_timeout_bars)
             } else {
-                "Market Taker"
+                "Market Taker".to_string()
+            },
+            if effective_btc_breadth {
+                format!("Active (BTC Corr >= {})", effective_btc_corr_thresh)
+            } else {
+                "Disabled".to_string()
             }
         ));
     }

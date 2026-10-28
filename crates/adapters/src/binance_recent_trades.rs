@@ -17,6 +17,11 @@ const MAX_ATTEMPTS: u32 = 4;
 const WINDOW_MS: i64 = 60 * 60 * 1_000;
 const TESTNET_BASE_URL: &str = "https://testnet.binancefuture.com";
 const PRODUCTION_BASE_URL: &str = "https://fapi.binance.com";
+const SPOT_TESTNET_BASE_URL: &str = "https://testnet.binance.vision";
+const SPOT_PRODUCTION_BASE_URL: &str = "https://api.binance.com";
+
+const FUTURES_AGG_TRADES_PATH: &str = "/fapi/v1/aggTrades";
+const SPOT_AGG_TRADES_PATH: &str = "/api/v3/aggTrades";
 
 #[derive(Debug, Deserialize)]
 struct AggTradeRecord {
@@ -54,26 +59,48 @@ impl AggTradeRecord {
     }
 }
 
-/// Public REST client for historical aggregated trades of one futures market.
+/// Public REST client for historical aggregated trades of one futures or spot market.
 pub struct BinanceRecentTrades {
     base_url: String,
+    path: &'static str,
     client: reqwest::Client,
 }
 
 impl BinanceRecentTrades {
     /// The futures market the live stream of the same environment trades.
     pub fn futures(testnet: bool) -> Self {
-        Self::with_base_url(if testnet {
-            TESTNET_BASE_URL
-        } else {
-            PRODUCTION_BASE_URL
-        })
+        Self::with_base_url_and_path(
+            if testnet {
+                TESTNET_BASE_URL
+            } else {
+                PRODUCTION_BASE_URL
+            },
+            FUTURES_AGG_TRADES_PATH,
+        )
+    }
+
+    /// The spot market for live stream trade history.
+    pub fn spot(testnet: bool) -> Self {
+        Self::with_base_url_and_path(
+            if testnet {
+                SPOT_TESTNET_BASE_URL
+            } else {
+                SPOT_PRODUCTION_BASE_URL
+            },
+            SPOT_AGG_TRADES_PATH,
+        )
     }
 
     /// A client against an explicit endpoint (a mock server in tests).
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
+        Self::with_base_url_and_path(base_url, FUTURES_AGG_TRADES_PATH)
+    }
+
+    /// A client against an explicit endpoint with an explicit path.
+    pub fn with_base_url_and_path(base_url: impl Into<String>, path: &'static str) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
+            path,
             client: reqwest::Client::builder()
                 .timeout(REQUEST_TIMEOUT)
                 .build()
@@ -145,7 +172,8 @@ impl BinanceRecentTrades {
                         "symbol={symbol}&startTime={window_start}&endTime={window_end}&limit={PAGE_LIMIT}"
                     ),
                 };
-                let url = format!("{}/fapi/v1/aggTrades?{query}", self.base_url);
+                let path = self.path;
+                let url = format!("{}{path}?{query}", self.base_url);
                 let page = self.get_page(&url).await?;
                 let full = page.len() >= PAGE_LIMIT;
                 let last_id = page.last().map(|record| record.id);
@@ -254,6 +282,14 @@ mod tests {
         assert_eq!(
             BinanceRecentTrades::futures(false).base_url(),
             "https://fapi.binance.com"
+        );
+        assert_eq!(
+            BinanceRecentTrades::spot(true).base_url(),
+            "https://testnet.binance.vision"
+        );
+        assert_eq!(
+            BinanceRecentTrades::spot(false).base_url(),
+            "https://api.binance.com"
         );
     }
 
