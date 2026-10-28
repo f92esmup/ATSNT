@@ -359,8 +359,8 @@ impl PortfolioEngine {
             return;
         }
 
-        // Enforce BTC market breadth lead filter
-        if self.config.btc_breadth_filter && symbol != "BTCUSDT" && !self.btc_macro_bullish {
+        // Enforce BTC market breadth lead filter (strictly blocks ETH when BTC is macro bearish)
+        if self.config.btc_breadth_filter && symbol == "ETHUSDT" && !self.btc_macro_bullish {
             self.count_rejection("BtcMacroBearish");
             return;
         }
