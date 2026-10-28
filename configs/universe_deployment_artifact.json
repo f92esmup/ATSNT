@@ -182,56 +182,6 @@
         "use_limit_entries": false,
         "window_size": 120
       }
-    },
-    {
-      "symbol": "SUIUSDT",
-      "dollar_bar_threshold": "50000000",
-      "strategy_id": "quantum_well_swing",
-      "strategy_config": {
-        "breakeven_trigger_ratio": "0.50",
-        "decoherence_time_bars": 40,
-        "enable_dynamic_breakeven": true,
-        "ground_state_tolerance": "0.050",
-        "hbar_eff": "4.5",
-        "limit_time_in_force_bars": null,
-        "macro_ema_period": 200,
-        "macro_slope_window": 30,
-        "macro_trend_filter": true,
-        "mass_eff": "2.0",
-        "max_wavepacket_sigma": "0.08",
-        "min_take_profit_pct": "0.060",
-        "min_upward_force": "0.040",
-        "min_well_curvature": "0.040",
-        "stop_loss_atr_buffer": "2.50",
-        "target_excitation_level": 1,
-        "use_limit_entries": false,
-        "window_size": 120
-      }
-    },
-    {
-      "symbol": "LINKUSDT",
-      "dollar_bar_threshold": "40000000",
-      "strategy_id": "quantum_well_swing",
-      "strategy_config": {
-        "breakeven_trigger_ratio": "0.50",
-        "decoherence_time_bars": 60,
-        "enable_dynamic_breakeven": true,
-        "ground_state_tolerance": "0.050",
-        "hbar_eff": "3.5",
-        "limit_time_in_force_bars": null,
-        "macro_ema_period": 200,
-        "macro_slope_window": 30,
-        "macro_trend_filter": true,
-        "mass_eff": "2.5",
-        "max_wavepacket_sigma": "0.08",
-        "min_take_profit_pct": "0.060",
-        "min_upward_force": "0.030",
-        "min_well_curvature": "0.030",
-        "stop_loss_atr_buffer": "2.00",
-        "target_excitation_level": 1,
-        "use_limit_entries": false,
-        "window_size": 140
-      }
     }
   ],
   "scorecard": {

@@ -264,6 +264,8 @@ pub struct PortfolioDeploymentArtifact {
     pub execution: PortfolioExecutionSettings,
     pub assets: Vec<PortfolioAssetSpec>,
     pub scorecard: PortfolioScorecard,
+    #[serde(default)]
+    pub universe_policy: Option<domain::UniverseSelectionPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

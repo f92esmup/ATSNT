@@ -1410,6 +1410,7 @@ where
             fitness: winner.fitness,
             trades_per_asset: winner.trades_per_asset.clone(),
         },
+        universe_policy: None,
     };
 
     if let Some(parent) = args.output_config.parent() {

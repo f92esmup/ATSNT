@@ -86,7 +86,12 @@ Todas las pruebas se realizaron con:
 1. **NEAR como Generador de Alpha**: NEAR aportó 7 victorias en 8 operaciones, validando que el motor de ranking detecta expansiones de momentum temprano.
 2. **Filtrado de Ruido Eficaz**: Se rechazaron 185 órdenes de baja calidad mediante `ExcludedByUniverseRanking`, evitando degradación de capital.
 3. **Control de Drawdown**: El drawdown máximo de 5.60% (11.20 € de caída máxima en todo el año) ofrece una preservación de capital institucional para cuentas pequeñas.
-4. **Siguientes Pasos**:
-   - Adaptar `paper_trading_portfolio.rs` para soportar el ranking dinámico sobre streams WebSockets múltiples en vivo.
-   - Formatear notificaciones periódicas de Telegram con la foto del ranking diario Top-3 / Top-5.
-   - Despliegue en la VM de producción una vez validado el arnés de paper trading.
+4. **Implementación en Paper Trading en Tiempo Real (Fase 8)**:
+   - `crates/backtest/src/bin/paper_trading_portfolio.rs` adaptado para ingesta concurrente vía WebSockets de los 6 activos candidatos (`BTCUSDT`, `ETHUSDT`, `SOLUSDT`, `BNBUSDT`, `AVAXUSDT`, `NEARUSDT`).
+   - Conexión con `CrossSectionalUniverseSelector` dentro de `PortfolioEngine`: rebalanceo transversal cada 24 horas y filtrado automático `ExcludedByUniverseRanking` para entradas no autorizadas.
+   - Notificaciones de Telegram enriquecidas:
+     - Lanzamiento con resumen del universo y política Top-K / histéresis.
+     - Apertura de posiciones indicando el rango actual (`[NEARUSDT (Rank #1)]`).
+     - Heartbeat periódico incluyendo el Top-3 actual del universo.
+     - Resumen diario consolidado de las 20:00 Madrid acompañado de la foto del ranking completo (`format_universe_ranking_update`).
+   - Validación en vivo (dry-run): 6 streams de Spot conectados simultáneamente y agregación reactiva de Dollar Bars verificada sin cuellos de botella ni bloqueos asíncronos.

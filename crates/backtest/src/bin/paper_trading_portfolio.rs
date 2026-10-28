@@ -1,11 +1,12 @@
-//! Real-Time Tri-Asset Paper Trading Engine for ATSNT.
+//! Real-Time Multi-Asset Dynamic Universe Paper Trading Engine for ATSNT.
 //!
-//! Subscribes concurrently to live Binance aggregate trade WebSocket streams for BTCUSDT,
-//! ETHUSDT, and SOLUSDT, aggregates trades into information-driven Dollar Bars independently,
-//! executes strategy signals through the unified [`PortfolioEngine`] managing a shared $500 wallet,
-//! enforces strict pre-trade risk policy (max positions, max directional exposure, isolated margin caps),
-//! streams execution telemetry to Google Cloud BigQuery, and sends real-time execution alerts and a
-//! consolidated 20:00 Madrid daily performance summary to Telegram.
+//! Subscribes concurrently to live Binance aggregate trade WebSocket streams for candidate
+//! universe assets (BTC, ETH, SOL, BNB, AVAX, NEAR), aggregates trades into information-driven
+//! Dollar Bars independently, executes strategy signals through the unified [`PortfolioEngine`]
+//! managing a shared wallet, dynamically filters and ranks assets cross-sectionally every 24 hours
+//! (authorizing Top-K entries with hysteresis retention), enforces strict pre-trade risk policy,
+//! streams execution telemetry to Google Cloud BigQuery, and sends real-time execution alerts,
+//! periodic heartbeats, and consolidated daily performance & universe ranking snapshots to Telegram.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,23 +26,44 @@ use backtest::{
 };
 use chrono::Timelike;
 use clap::Parser;
-use domain::{DollarBarAggregator, PortfolioRiskPolicy, PositionSide, Trade};
+use domain::{
+    DollarBarAggregator, PortfolioRiskPolicy, PositionSide, Trade, UniverseSelectionPolicy,
+};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategies::{OptimizableStrategy, Strategy, StrategyVisitor};
 
-/// Target instrument symbols monitored in this tri-asset portfolio.
-pub const PORTFOLIO_SYMBOLS: [&str; 3] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+/// Default candidate instrument symbols monitored in the multi-asset dynamic universe.
+pub const DEFAULT_PORTFOLIO_SYMBOLS: [&str; 6] = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "NEARUSDT",
+];
+pub const PORTFOLIO_SYMBOLS: [&str; 6] = DEFAULT_PORTFOLIO_SYMBOLS;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "paper_trading_portfolio",
-    about = "ATSNT - Tri-Asset Real-Time Paper Trading Portfolio Engine"
+    about = "ATSNT - Multi-Asset Dynamic Universe Real-Time Paper Trading Portfolio Engine"
 )]
 struct Args {
-    /// Optional path to unified Portfolio Deployment Artifact JSON (from run_portfolio_hpo)
+    /// Optional path to unified Portfolio Deployment Artifact JSON (defaults to universe_deployment_artifact.json)
     #[arg(long)]
     portfolio_config: Option<PathBuf>,
+
+    /// Candidate asset symbols comma-separated (defaults to artifact assets or 6-asset pool)
+    #[arg(long)]
+    candidates: Option<String>,
+
+    /// Number of top-ranked assets authorized to receive new capital allocations
+    #[arg(long, default_value_t = 3)]
+    top_k: usize,
+
+    /// Hysteresis rank tolerance buffer (holds positions up to top_k + tolerance)
+    #[arg(long, default_value_t = 2)]
+    hysteresis: usize,
+
+    /// Disable dynamic universe ranking and allow trades across all candidate assets
+    #[arg(long, default_value_t = false)]
+    disable_universe_filter: bool,
 
     /// Optional path to BTC strategy configuration JSON / deployment artifact
     #[arg(long)]
@@ -68,27 +90,27 @@ struct Args {
     sol_dollar_bar: Option<Decimal>,
 
     /// Initial shared capital across the portfolio in quote currency (USDT)
-    #[arg(long, default_value = "500")]
+    #[arg(long, default_value = "200")]
     capital: Decimal,
 
-    /// Fixed fractional risk percentage per trade relative to total equity (default: 0.01 = 1.0%)
-    #[arg(long, default_value = "0.010")]
+    /// Fixed fractional risk percentage per trade relative to total equity (default: 0.015 = 1.5%)
+    #[arg(long, default_value = "0.015")]
     risk_per_trade: Decimal,
 
     /// Maximum concurrent open positions across the portfolio (default: 3, max 1 per asset)
     #[arg(long, default_value_t = 3)]
     max_positions: usize,
 
-    /// Maximum positions in the same direction (default: 2)
-    #[arg(long, default_value_t = 2)]
+    /// Maximum positions in the same direction (default: 3)
+    #[arg(long, default_value_t = 3)]
     max_directional: usize,
 
-    /// Maximum margin allocation per position as fraction of equity (default: 0.25 = 25%)
-    #[arg(long, default_value = "0.25")]
+    /// Maximum margin allocation per position as fraction of equity (default: 0.35 = 35%)
+    #[arg(long, default_value = "0.35")]
     max_slot_margin: Decimal,
 
     /// Whether to enter using passive limit orders with TIF timeout
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     use_limit_orders: bool,
 
     /// Limit order Time-In-Force timeout in bars (default: 2)
@@ -124,18 +146,18 @@ struct Args {
     show_ticks: bool,
 
     /// Whether to run paper trading in Spot market mode
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     spot: bool,
 
     /// Whether to apply Binance 25% BNB fee discount (0.075% in Spot)
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     bnb_discount: bool,
 }
 
 /// A trade tagged with its instrument symbol for MPSC multiplexing.
 #[derive(Debug, Clone)]
 struct TaggedTrade {
-    symbol: &'static str,
+    symbol: String,
     trade: Trade,
 }
 
@@ -186,6 +208,21 @@ fn instantiate_strategy(
     match strategies::dispatch(strategy_id, StrategyInstantiator { config_val }) {
         Some(res) => res,
         None => anyhow::bail!(strategies::unknown_strategy_message(strategy_id)),
+    }
+}
+
+/// Default dollar bar accumulation threshold for standard symbols.
+fn default_threshold_for_symbol(symbol: &str) -> Decimal {
+    match symbol {
+        "BTCUSDT" => dec!(300_000_000),
+        "ETHUSDT" => dec!(200_000_000),
+        "SOLUSDT" => dec!(80_000_000),
+        "BNBUSDT" => dec!(60_000_000),
+        "AVAXUSDT" => dec!(30_000_000),
+        "NEARUSDT" => dec!(25_000_000),
+        "SUIUSDT" => dec!(25_000_000),
+        "LINKUSDT" => dec!(25_000_000),
+        _ => dec!(50_000_000),
     }
 }
 
@@ -289,23 +326,69 @@ fn resolve_asset_plan(
     }
 }
 
+fn resolve_fallback_plan(
+    symbol: &str,
+    args: &Args,
+    use_limit_orders: bool,
+    limit_timeout_bars: usize,
+) -> Result<AssetPlan> {
+    let (config_path, cli_threshold) = match symbol {
+        "BTCUSDT" => (args.btc_config.as_ref(), args.btc_dollar_bar),
+        "ETHUSDT" => (args.eth_config.as_ref(), args.eth_dollar_bar),
+        "SOLUSDT" => (args.sol_config.as_ref(), args.sol_dollar_bar),
+        _ => (None, None),
+    };
+    let fallback_threshold = default_threshold_for_symbol(symbol);
+    resolve_asset_plan(
+        symbol,
+        config_path,
+        cli_threshold,
+        fallback_threshold,
+        use_limit_orders,
+        limit_timeout_bars,
+    )
+}
+
 async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let args = Args::parse();
     let started_at_ms = now_unix_ms();
 
     println!("============================================================");
-    println!("     ATSNT - Tri-Asset Real-Time Paper Trading Portfolio    ");
+    println!("     ATSNT - Multi-Asset Dynamic Universe Paper Engine      ");
     println!("============================================================");
-    // 1. Resolve Strategy Configurations & Thresholds
+
+    // 1. Resolve Strategy Configurations, Artifacts, & Symbols
+    let default_artifact_path = PathBuf::from("configs/universe_deployment_artifact.json");
+    let fallback_artifact_path = PathBuf::from("configs/portfolio_deployment_artifact.json");
+
+    let resolved_artifact_path = args.portfolio_config.as_ref().or_else(|| {
+        if default_artifact_path.exists() {
+            Some(&default_artifact_path)
+        } else if fallback_artifact_path.exists() {
+            Some(&fallback_artifact_path)
+        } else {
+            None
+        }
+    });
+
     let portfolio_artifact: Option<PortfolioDeploymentArtifact> =
-        if let Some(path) = &args.portfolio_config {
+        if let Some(path) = resolved_artifact_path {
             if path.exists() {
                 println!(
                     "[*] Loading unified portfolio deployment artifact: {}",
                     path.display()
                 );
-                Some(load_portfolio_artifact(path)?)
+                match load_portfolio_artifact(path) {
+                    Ok(art) => Some(art),
+                    Err(e) => {
+                        eprintln!(
+                            "[WARN] Failed to load artifact from {}: {e}",
+                            path.display()
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             }
@@ -320,23 +403,21 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     let mut effective_max_slot_margin = args.max_slot_margin;
     let mut effective_use_limit_orders = args.use_limit_orders;
     let mut effective_limit_timeout_bars = args.limit_timeout_bars;
-    let mut effective_elastic_slots = false;
+    let mut effective_elastic_slots = true;
     let mut effective_max_elastic_slot_margin = dec!(0.55);
-    let mut effective_max_leverage = dec!(20);
+    let mut effective_max_leverage = dec!(1);
 
     let mut effective_maker_fee = None;
     let mut effective_taker_fee = None;
     let mut effective_slippage = dec!(0.0005);
-    let mut effective_btc_breadth = false;
-    let mut effective_btc_corr_thresh = dec!(0.65);
+    let mut effective_btc_breadth = true;
+    let mut effective_btc_corr_thresh = dec!(0.75);
     let mut effective_btc_corr_window = 35;
 
-    let mut btc_from_artifact = None;
-    let mut eth_from_artifact = None;
-    let mut sol_from_artifact = None;
-
     if let Some(art) = &portfolio_artifact {
-        effective_capital = art.capital;
+        if args.capital == dec!(200) {
+            effective_capital = art.capital;
+        }
         effective_max_positions = art.risk_policy.max_open_positions;
         effective_max_directional = art.risk_policy.max_directional_positions;
         effective_risk_per_trade = art.risk_policy.risk_per_trade_pct;
@@ -353,79 +434,58 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         effective_btc_breadth = art.execution.btc_breadth_filter;
         effective_btc_corr_thresh = art.execution.btc_correlation_threshold;
         effective_btc_corr_window = art.execution.btc_correlation_window;
-
-        for asset in &art.assets {
-            let plan = AssetPlan {
-                strategy_id: asset.strategy_id.clone(),
-                config: asset.strategy_config.clone(),
-                dollar_bar_threshold: asset.dollar_bar_threshold,
-            };
-            match asset.symbol.as_str() {
-                "BTCUSDT" => btc_from_artifact = Some(plan),
-                "ETHUSDT" => eth_from_artifact = Some(plan),
-                "SOLUSDT" => sol_from_artifact = Some(plan),
-                _ => {}
-            }
-        }
     }
 
-    let default_btc_path =
-        PathBuf::from("configs/matrix/hpo_btcusdt_2026-hpo-btcusdt-8000000-20261027-184750.json");
-    let default_eth_path =
-        PathBuf::from("configs/matrix/hpo_ethusdt_2026-hpo-ethusdt-6000000-20261027-132227.json");
-    let default_sol_path =
-        PathBuf::from("configs/matrix/hpo_solusdt_2026-hpo-solusdt-4000000-20261027-132227.json");
+    let default_candidates: Vec<String> = DEFAULT_PORTFOLIO_SYMBOLS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
-    let btc_plan = if let Some(p) = btc_from_artifact {
-        AssetPlan {
-            dollar_bar_threshold: args.btc_dollar_bar.unwrap_or(p.dollar_bar_threshold),
-            ..p
-        }
+    let candidate_symbols: Vec<String> = if let Some(c_str) = &args.candidates {
+        c_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else if let Some(art) = &portfolio_artifact {
+        art.assets.iter().map(|a| a.symbol.clone()).collect()
     } else {
-        let btc_path = args.btc_config.as_ref().or(Some(&default_btc_path));
-        resolve_asset_plan(
-            "BTCUSDT",
-            btc_path,
-            args.btc_dollar_bar,
-            dec!(300_000_000),
-            effective_use_limit_orders,
-            effective_limit_timeout_bars,
-        )?
+        default_candidates
     };
 
-    let eth_plan = if let Some(p) = eth_from_artifact {
-        AssetPlan {
-            dollar_bar_threshold: args.eth_dollar_bar.unwrap_or(p.dollar_bar_threshold),
-            ..p
-        }
-    } else {
-        let eth_path = args.eth_config.as_ref().or(Some(&default_eth_path));
-        resolve_asset_plan(
-            "ETHUSDT",
-            eth_path,
-            args.eth_dollar_bar,
-            dec!(200_000_000),
-            effective_use_limit_orders,
-            effective_limit_timeout_bars,
-        )?
-    };
-
-    let sol_plan = if let Some(p) = sol_from_artifact {
-        AssetPlan {
-            dollar_bar_threshold: args.sol_dollar_bar.unwrap_or(p.dollar_bar_threshold),
-            ..p
-        }
-    } else {
-        let sol_path = args.sol_config.as_ref().or(Some(&default_sol_path));
-        resolve_asset_plan(
-            "SOLUSDT",
-            sol_path,
-            args.sol_dollar_bar,
-            dec!(80_000_000),
-            effective_use_limit_orders,
-            effective_limit_timeout_bars,
-        )?
-    };
+    let mut asset_plans: HashMap<String, AssetPlan> = HashMap::new();
+    for sym in &candidate_symbols {
+        let plan = if let Some(art) = &portfolio_artifact {
+            if let Some(spec) = art.assets.iter().find(|a| a.symbol == *sym) {
+                let threshold = match sym.as_str() {
+                    "BTCUSDT" => args.btc_dollar_bar.unwrap_or(spec.dollar_bar_threshold),
+                    "ETHUSDT" => args.eth_dollar_bar.unwrap_or(spec.dollar_bar_threshold),
+                    "SOLUSDT" => args.sol_dollar_bar.unwrap_or(spec.dollar_bar_threshold),
+                    _ => spec.dollar_bar_threshold,
+                };
+                AssetPlan {
+                    strategy_id: spec.strategy_id.clone(),
+                    config: spec.strategy_config.clone(),
+                    dollar_bar_threshold: threshold,
+                }
+            } else {
+                resolve_fallback_plan(
+                    sym,
+                    &args,
+                    effective_use_limit_orders,
+                    effective_limit_timeout_bars,
+                )?
+            }
+        } else {
+            resolve_fallback_plan(
+                sym,
+                &args,
+                effective_use_limit_orders,
+                effective_limit_timeout_bars,
+            )?
+        };
+        asset_plans.insert(sym.clone(), plan);
+    }
 
     let market_type = if args.spot || effective_max_leverage <= dec!(1) {
         strategies::MarketType::Spot
@@ -456,8 +516,44 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         ),
     };
 
+    let universe_policy = if args.disable_universe_filter {
+        None
+    } else if let Some(art) = &portfolio_artifact {
+        if let Some(mut pol) = art.universe_policy.clone() {
+            if args.top_k != 3 {
+                pol.top_k = args.top_k;
+            }
+            if args.hysteresis != 2 {
+                pol.hysteresis_tolerance = args.hysteresis;
+            }
+            Some(pol)
+        } else {
+            Some(UniverseSelectionPolicy {
+                top_k: args.top_k,
+                hysteresis_tolerance: args.hysteresis,
+                ..Default::default()
+            })
+        }
+    } else {
+        Some(UniverseSelectionPolicy {
+            top_k: args.top_k,
+            hysteresis_tolerance: args.hysteresis,
+            ..Default::default()
+        })
+    };
+
     println!(" Market Type:          {:?}", market_type);
-    println!(" Strategy:             {}", btc_plan.strategy_id);
+    println!(" Candidate Universe:   {:?}", candidate_symbols);
+    if let Some(ref pol) = universe_policy {
+        println!(
+            " Dynamic Selection:    Top-{} Entry / Top-{} Retention (Hysteresis: {})",
+            pol.top_k,
+            pol.top_k + pol.hysteresis_tolerance,
+            pol.hysteresis_tolerance
+        );
+    } else {
+        println!(" Dynamic Selection:    Disabled (All candidates active)");
+    }
     println!(" Shared Capital:       ${:.2} USDT", effective_capital);
     println!(" Max Concurrent Pos:   {}", effective_max_positions);
     println!(" Max Directional Pos:  {}", effective_max_directional);
@@ -494,10 +590,12 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
             effective_btc_corr_thresh, effective_btc_corr_window
         );
     }
-    println!(" Thresholds:");
-    println!("   • BTCUSDT: ${}", btc_plan.dollar_bar_threshold);
-    println!("   • ETHUSDT: ${}", eth_plan.dollar_bar_threshold);
-    println!("   • SOLUSDT: ${}", sol_plan.dollar_bar_threshold);
+    println!(" Instrument Thresholds:");
+    for sym in &candidate_symbols {
+        if let Some(p) = asset_plans.get(sym) {
+            println!("   • {}: ${}", sym, p.dollar_bar_threshold);
+        }
+    }
 
     // 2. Initialize BigQuery Sink & Telegram Notifier
     let bq_sink = if args.gcp_bigquery {
@@ -530,20 +628,32 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     }
     let telegram: &Option<AlertQueue> = alerts;
 
-    // 3. Initialize Strategies
-    let mut btc_strat = instantiate_strategy(&btc_plan.strategy_id, &btc_plan.config)?;
-    let mut eth_strat = instantiate_strategy(&eth_plan.strategy_id, &eth_plan.config)?;
-    let mut sol_strat = instantiate_strategy(&sol_plan.strategy_id, &sol_plan.config)?;
+    // 3. Initialize Strategies and Dollar Bar Aggregators
+    let mut strategies: HashMap<String, Box<dyn Strategy>> = HashMap::new();
+    let mut aggregators: HashMap<String, DollarBarAggregator> = HashMap::new();
 
-    // 4. Initialize Dollar Bar Aggregators
-    let mut btc_agg = DollarBarAggregator::new(btc_plan.dollar_bar_threshold)
-        .map_err(|e| anyhow::anyhow!("Invalid BTC threshold: {e}"))?;
-    let mut eth_agg = DollarBarAggregator::new(eth_plan.dollar_bar_threshold)
-        .map_err(|e| anyhow::anyhow!("Invalid ETH threshold: {e}"))?;
-    let mut sol_agg = DollarBarAggregator::new(sol_plan.dollar_bar_threshold)
-        .map_err(|e| anyhow::anyhow!("Invalid SOL threshold: {e}"))?;
+    for sym in &candidate_symbols {
+        let plan = asset_plans
+            .get(sym)
+            .ok_or_else(|| anyhow::anyhow!("Plan not found for {sym}"))?;
+        let strat = instantiate_strategy(&plan.strategy_id, &plan.config)?;
+        let agg = DollarBarAggregator::new(plan.dollar_bar_threshold)
+            .map_err(|e| anyhow::anyhow!("Invalid threshold for {sym}: {e}"))?;
+        strategies.insert(sym.clone(), strat);
+        aggregators.insert(sym.clone(), agg);
+    }
 
-    // 5. Initialize Multi-Asset Portfolio Engine
+    // 4. Initialize Multi-Asset Portfolio Engine with Dynamic Universe Selector
+    let (min_order_qty, step_size, min_notional) = if let Some(art) = &portfolio_artifact {
+        (
+            art.risk_policy.min_order_quantity,
+            art.risk_policy.quantity_step_size,
+            art.risk_policy.min_order_notional,
+        )
+    } else {
+        (dec!(0.00001), dec!(0.00001), dec!(5))
+    };
+
     let risk_policy = PortfolioRiskPolicy {
         max_open_positions: effective_max_positions,
         max_directional_positions: if market_type == strategies::MarketType::Spot {
@@ -556,9 +666,9 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         max_leverage,
         elastic_slot_sizing: effective_elastic_slots,
         max_elastic_slot_margin_pct: effective_max_elastic_slot_margin,
-        min_order_quantity: dec!(0.001),
-        quantity_step_size: dec!(0.001),
-        min_order_notional: dec!(5),
+        min_order_quantity: min_order_qty,
+        quantity_step_size: step_size,
+        min_order_notional: min_notional,
     };
 
     let engine_config = PortfolioEngineConfig {
@@ -572,15 +682,23 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         btc_breadth_filter: effective_btc_breadth,
         btc_correlation_threshold: effective_btc_corr_thresh,
         btc_correlation_window: effective_btc_corr_window,
-        universe_policy: None,
+        universe_policy: universe_policy.clone(),
     };
     let mut engine = PortfolioEngine::new(engine_config);
 
-    // 6. Optional Warm-up via Public REST AggTrades
+    if let Some(selector) = engine.universe_selector_mut() {
+        for sym in &candidate_symbols {
+            selector.register_asset(sym);
+        }
+    }
+
+    // 5. Optional Warm-up via Public REST AggTrades
     if let Some(minutes) = args.warmup_minutes {
         let now_ms = now_unix_ms();
         let from_ms = now_ms - i64::from(minutes) * 60_000;
-        println!("[*] Warming up indicators with {minutes} minutes of recent trades ({market_type:?})...");
+        println!(
+            "[*] Warming up indicators with {minutes} minutes of recent trades ({market_type:?})..."
+        );
 
         let rest_client = if market_type == strategies::MarketType::Spot {
             BinanceRecentTrades::spot(false)
@@ -588,50 +706,34 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
             BinanceRecentTrades::futures(false)
         };
 
-        let btc_hist = rest_client.fetch("BTCUSDT", from_ms, now_ms).await?;
-        let mut btc_bars = 0;
-        for t in btc_hist {
-            if let Some(bar) = btc_agg.process_trade(&t) {
-                btc_bars += 1;
-                btc_strat.on_bar(&bar);
+        for sym in &candidate_symbols {
+            if let (Some(agg), Some(strat)) = (aggregators.get_mut(sym), strategies.get_mut(sym)) {
+                match rest_client.fetch(sym, from_ms, now_ms).await {
+                    Ok(hist) => {
+                        let mut bars = 0;
+                        for t in hist {
+                            if let Some(bar) = agg.process_trade(&t) {
+                                bars += 1;
+                                strat.on_bar(&bar);
+                            }
+                        }
+                        println!("    [OK] {sym}: Warm-up complete ({bars} bars)");
+                    }
+                    Err(e) => {
+                        eprintln!("[WARN] {sym}: Failed to fetch warm-up trades: {e}");
+                    }
+                }
             }
         }
-
-        let eth_hist = rest_client.fetch("ETHUSDT", from_ms, now_ms).await?;
-        let mut eth_bars = 0;
-        for t in eth_hist {
-            if let Some(bar) = eth_agg.process_trade(&t) {
-                eth_bars += 1;
-                eth_strat.on_bar(&bar);
-            }
-        }
-
-        let sol_hist = rest_client.fetch("SOLUSDT", from_ms, now_ms).await?;
-        let mut sol_bars = 0;
-        for t in sol_hist {
-            if let Some(bar) = sol_agg.process_trade(&t) {
-                sol_bars += 1;
-                sol_strat.on_bar(&bar);
-            }
-        }
-
-        println!(
-            "    [OK] Warm-up complete: BTC {btc_bars} bars, ETH {eth_bars} bars, SOL {sol_bars} bars"
-        );
     }
 
-    // 7. Spawn Concurrent WebSocket Ingestion Tasks
+    // 6. Spawn Concurrent WebSocket Ingestion Tasks across Candidate Symbols
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TaggedTrade>(30_000);
     let is_spot = market_type == strategies::MarketType::Spot;
 
-    for &sym in &PORTFOLIO_SYMBOLS {
+    for sym in &candidate_symbols {
+        let sym_name = sym.clone();
         let sym_str = sym.to_ascii_lowercase();
-        let sym_static: &'static str = match sym {
-            "BTCUSDT" => "BTCUSDT",
-            "ETHUSDT" => "ETHUSDT",
-            "SOLUSDT" => "SOLUSDT",
-            _ => unreachable!(),
-        };
         let tx_clone = tx.clone();
 
         tokio::spawn(async move {
@@ -641,18 +743,18 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                 BinanceWsConfig::futures_production(&sym_str)
             };
             println!(
-                "[*] [{sym_static}] Connecting to WebSocket stream: {}",
+                "[*] [{sym_name}] Connecting to WebSocket stream: {}",
                 ws_cfg.stream_url()
             );
 
             loop {
                 match BinanceWebSocketStream::connect(ws_cfg.clone()) {
                     Ok(mut stream) => {
-                        println!("[OK] [{sym_static}] WebSocket connected and streaming trades");
+                        println!("[OK] [{sym_name}] WebSocket connected and streaming trades");
                         while let Ok(Some(trade)) = stream.next_trade().await {
                             if tx_clone
                                 .send(TaggedTrade {
-                                    symbol: sym_static,
+                                    symbol: sym_name.clone(),
                                     trade,
                                 })
                                 .await
@@ -662,11 +764,11 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                             }
                         }
                         eprintln!(
-                            "[WARN] [{sym_static}] WebSocket stream disconnected. Reconnecting..."
+                            "[WARN] [{sym_name}] WebSocket stream disconnected. Reconnecting..."
                         );
                     }
                     Err(e) => {
-                        eprintln!("[ERROR] [{sym_static}] Failed to connect WebSocket: {e}. Retrying in 2s...");
+                        eprintln!("[ERROR] [{sym_name}] Failed to connect WebSocket: {e}. Retrying in 2s...");
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 }
@@ -676,20 +778,21 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
 
     drop(tx); // Drop original sender so channel closes when all background workers terminate
 
-    // 8. Lifecycle & BigQuery Session Registration
-    let effective_strategy_id = format!("portfolio_tri_asset_{}", btc_plan.strategy_id);
+    // 7. Lifecycle & BigQuery Session Registration
     let run_spec = RunSpec {
-        strategy_id: effective_strategy_id,
+        strategy_id: "portfolio_dynamic_universe".to_string(),
         symbol: "PORTFOLIO".to_string(),
         market_type,
         sampling: SamplingConfig::DollarBar {
-            threshold: btc_plan.dollar_bar_threshold,
+            threshold: asset_plans
+                .get("BTCUSDT")
+                .map(|p| p.dollar_bar_threshold)
+                .unwrap_or(dec!(300_000_000)),
         },
         strategy_config: serde_json::json!({
-            "strategy_id": btc_plan.strategy_id,
-            "btc_threshold": btc_plan.dollar_bar_threshold,
-            "eth_threshold": eth_plan.dollar_bar_threshold,
-            "sol_threshold": sol_plan.dollar_bar_threshold,
+            "candidates": candidate_symbols,
+            "top_k": args.top_k,
+            "hysteresis": args.hysteresis,
             "risk_per_trade": effective_risk_per_trade,
             "max_positions": effective_max_positions,
             "max_directional": effective_max_directional,
@@ -713,9 +816,15 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         .with_baseline(args.baseline_run_id.clone());
     let mut data_window = DataWindow {
         source: Some(if is_spot {
-            "Binance Spot (Multi-Stream)".to_string()
+            format!(
+                "Binance Spot (Multi-Stream {} Assets)",
+                candidate_symbols.len()
+            )
         } else {
-            "Binance USD-M Futures (Multi-Stream)".to_string()
+            format!(
+                "Binance USD-M Futures (Multi-Stream {} Assets)",
+                candidate_symbols.len()
+            )
         }),
         ..DataWindow::default()
     };
@@ -729,16 +838,27 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     }
 
     if let Some(t) = &telegram {
+        let universe_desc = if let Some(ref pol) = universe_policy {
+            format!(
+                "Top-{} Entry / Top-{} Retention (tol={})",
+                pol.top_k,
+                pol.top_k + pol.hysteresis_tolerance,
+                pol.hysteresis_tolerance
+            )
+        } else {
+            "Disabled (All Candidates Active)".to_string()
+        };
+
         t.send(format!(
             "🚀 *ATSNT: Multi-Asset Paper Trading Launched*\n\
              ━━━━━━━━━━━━━━━━━━━━━━\n\
              • *Market*: `{:?}` ({})\n\
-             • *Strategy*: `{}`\n\
-             • *Assets*: `BTCUSDT`, `ETHUSDT`, `SOLUSDT`\n\
+             • *Universe*: `{}`\n\
+             • *Dynamic Selection*: `{}`\n\
              • *Shared Capital*: `${:.2} USDT`\n\
              • *Max Positions*: `{}` (Max `{}` directional)\n\
-             • *Risk Per Trade*: `{:.2}%` ($`{:.2}`)\n\
-             • *Thresholds*: BTC ${}, ETH ${}, SOL ${}\n\
+             • *Risk Per Trade*: `{:.2}%` (${:.2})\n\
+             • *Fee Tier*: Maker `{:.4}%` / Taker `{:.4}%`\n\
              • *Execution*: {}\n\
              • *Breadth Filter*: {}\n\
              ━━━━━━━━━━━━━━━━━━━━━━",
@@ -746,17 +866,17 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
             if is_spot {
                 "1.0x, Zero Liquidation"
             } else {
-                "20x Leverage"
+                "Leveraged Futures"
             },
-            btc_plan.strategy_id,
+            candidate_symbols.join(", "),
+            universe_desc,
             effective_capital,
             effective_max_positions,
             effective_max_directional,
             effective_risk_per_trade * dec!(100),
             effective_capital * effective_risk_per_trade,
-            btc_plan.dollar_bar_threshold,
-            eth_plan.dollar_bar_threshold,
-            sol_plan.dollar_bar_threshold,
+            maker_fee_pct * dec!(100),
+            taker_fee_pct * dec!(100),
             if effective_use_limit_orders {
                 format!("Maker Limit (TIF {})", effective_limit_timeout_bars)
             } else {
@@ -772,10 +892,10 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
 
     println!("[*] Engine initialized. Awaiting market trades (Press Ctrl+C to terminate)...\n");
 
-    // 9. Telemetry & Accounting State
-    let mut last_mark_prices: HashMap<&'static str, Decimal> = HashMap::new();
-    let mut total_ticks: HashMap<&'static str, u64> = HashMap::new();
-    let mut total_bars: HashMap<&'static str, u64> = HashMap::new();
+    // 8. Telemetry & Accounting State
+    let mut last_mark_prices: HashMap<String, Decimal> = HashMap::new();
+    let mut total_ticks: HashMap<String, u64> = HashMap::new();
+    let mut total_bars: HashMap<String, u64> = HashMap::new();
     let mut trade_counter: usize = 0;
 
     let mut current_day = now_in_madrid().date_naive();
@@ -791,7 +911,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     let heartbeat = AlertThrottle::new(HEARTBEAT_INTERVAL_MS);
     let session_start_time = Instant::now();
 
-    // 10. Main Asynchronous Event Loop
+    // 9. Main Asynchronous Event Loop
     loop {
         tokio::select! {
             biased;
@@ -800,7 +920,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                 println!("\n[SHUTDOWN] Interruption signal received (Ctrl+C). Terminating portfolio session...");
                 let total_eq = engine.total_marked_equity();
                 let dd = engine.current_drawdown_pct();
-                let pos_desc = format_portfolio_positions(&engine);
+                let pos_desc = format_portfolio_positions(&engine, &candidate_symbols);
 
                 if let Some(t) = &telegram {
                     t.send(format!(
@@ -829,16 +949,31 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                     if heartbeat.allow(now_ms) {
                         let total_eq = engine.total_marked_equity();
                         let dd = engine.current_drawdown_pct();
-                        let pos_desc = format_portfolio_positions(&engine);
+                        let pos_desc = format_portfolio_positions(&engine, &candidate_symbols);
                         let open_count = engine.open_positions_count();
                         let uptime = session_start_time.elapsed().as_secs();
 
+                        let top_3_desc = engine.universe_selector().map(|s| {
+                            let r = s.current_ranking();
+                            let top: Vec<&str> = r.iter().take(3).map(|i| i.symbol.as_str()).collect();
+                            top.join(", ")
+                        });
+                        let full_pos_desc = if let Some(top) = top_3_desc {
+                            if !top.is_empty() {
+                                format!("{pos_desc} | Top-3: [{top}]")
+                            } else {
+                                pos_desc
+                            }
+                        } else {
+                            pos_desc
+                        };
+
                         t.send(TelegramNotifier::format_portfolio_heartbeat(
-                            args.capital,
+                            effective_capital,
                             total_eq,
                             dd,
                             open_count,
-                            &pos_desc,
+                            &full_pos_desc,
                             uptime,
                         ));
                     }
@@ -855,7 +990,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                     daily_net_pnl = Decimal::ZERO;
                 }
 
-                // 20:00 Madrid Daily Performance Report
+                // 20:00 Madrid Daily Performance Report & Universe Ranking Snapshot
                 if now_madrid.hour() == 20 && last_daily_report_date != Some(now_madrid.date_naive()) {
                     last_daily_report_date = Some(now_madrid.date_naive());
                     if let Some(t) = &telegram {
@@ -867,8 +1002,8 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                         let closed_by_sym = engine.closed_trades_by_symbol();
                         let mut summaries = Vec::new();
 
-                        for &sym in &PORTFOLIO_SYMBOLS {
-                            let sym_trades = closed_by_sym.get(sym).map(|v| v.as_slice()).unwrap_or(&[]);
+                        for sym in &candidate_symbols {
+                            let sym_trades = closed_by_sym.get(sym.as_str()).map(|v| v.as_slice()).unwrap_or(&[]);
                             let sym_wins = sym_trades.iter().filter(|t| t.pnl_net > Decimal::ZERO).count();
                             let sym_losses = sym_trades.iter().filter(|t| t.pnl_net < Decimal::ZERO).count();
                             let sym_net: Decimal = sym_trades.iter().map(|t| t.pnl_net).sum();
@@ -884,14 +1019,14 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                                 losses: sym_losses,
                                 net_pnl: sym_net,
                                 active_position_desc: active_desc,
-                                ticks_count: *total_ticks.get(sym).unwrap_or(&0),
-                                bars_count: *total_bars.get(sym).unwrap_or(&0),
+                                ticks_count: *total_ticks.get(sym.as_str()).unwrap_or(&0),
+                                bars_count: *total_bars.get(sym.as_str()).unwrap_or(&0),
                             });
                         }
 
                         let msg = TelegramNotifier::format_portfolio_daily_summary(
                             &date_str,
-                            "Paper Trading Portfolio",
+                            "Dynamic Universe Paper Trading",
                             effective_capital,
                             cash_eq,
                             total_eq,
@@ -905,7 +1040,20 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                             &summaries,
                         );
                         t.send(msg);
-                        tracing::info!(target: "telegram", "Queued consolidated 20:00 Madrid daily portfolio summary");
+
+                        if let Some(selector) = engine.universe_selector() {
+                            let ranking = selector.current_ranking();
+                            if !ranking.is_empty() {
+                                let rank_msg = TelegramNotifier::format_universe_ranking_update(
+                                    &date_str,
+                                    ranking,
+                                    selector.policy().top_k,
+                                    selector.policy().hysteresis_tolerance,
+                                );
+                                t.send(rank_msg);
+                            }
+                        }
+                        tracing::info!(target: "telegram", "Queued consolidated 20:00 Madrid daily portfolio summary and universe ranking");
                     }
                 }
             }
@@ -913,8 +1061,8 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
             Some(tagged) = rx.recv() => {
                 let sym = tagged.symbol;
                 let trade = tagged.trade;
-                last_mark_prices.insert(sym, trade.price);
-                *total_ticks.entry(sym).or_insert(0) += 1;
+                last_mark_prices.insert(sym.clone(), trade.price);
+                *total_ticks.entry(sym.clone()).or_insert(0) += 1;
 
                 data_window.start_ms.get_or_insert(trade.timestamp);
                 data_window.end_ms = Some(trade.timestamp);
@@ -924,29 +1072,32 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                 }
 
                 // Route trade to the instrument's Dollar Bar Aggregator
-                let formed_bar = match sym {
-                    "BTCUSDT" => btc_agg.process_trade(&trade),
-                    "ETHUSDT" => eth_agg.process_trade(&trade),
-                    "SOLUSDT" => sol_agg.process_trade(&trade),
-                    _ => None,
+                let formed_bar = if let Some(agg) = aggregators.get_mut(&sym) {
+                    agg.process_trade(&trade)
+                } else {
+                    None
                 };
 
                 if let Some(bar) = formed_bar {
-                    *total_bars.entry(sym).or_insert(0) += 1;
+                    *total_bars.entry(sym.clone()).or_insert(0) += 1;
                     let price_event = backtest::PriceEvent::from(&bar);
 
                     // Step through unified portfolio engine
-                    let report = match sym {
-                        "BTCUSDT" => engine.process_event("BTCUSDT", price_event, &mut btc_strat),
-                        "ETHUSDT" => engine.process_event("ETHUSDT", price_event, &mut eth_strat),
-                        "SOLUSDT" => engine.process_event("SOLUSDT", price_event, &mut sol_strat),
-                        _ => Default::default(),
+                    let report = if let Some(strat) = strategies.get_mut(&sym) {
+                        engine.process_event(&sym, price_event, strat.as_mut())
+                    } else {
+                        Default::default()
                     };
 
                     // Handle Newly Opened Positions
                     if let Some((pos, exits)) = report.opened_position {
+                        let rank_desc = engine.universe_selector()
+                            .and_then(|s| s.current_rank(&sym))
+                            .map(|r| format!(" (Rank #{r})"))
+                            .unwrap_or_default();
+
                         println!(
-                            "[+] [{sym}] Position Opened: {:?} {} @ ${} | Total Equity: ${:.2}",
+                            "[+] [{sym}{rank_desc}] Position Opened: {:?} {} @ ${} | Total Equity: ${:.2}",
                             pos.side,
                             pos.quantity,
                             pos.entry_price,
@@ -961,8 +1112,9 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                                 PositionSide::Short => "Short",
                             };
 
+                            let sym_label = format!("{sym}{rank_desc}");
                             t.send(TelegramNotifier::format_position_opened(
-                                sym,
+                                &sym_label,
                                 side_str,
                                 pos.entry_price,
                                 pos.quantity,
@@ -1004,7 +1156,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                             let fees = closed.fees_paid;
 
                             t.send(TelegramNotifier::format_trade_summary(
-                                sym,
+                                &sym,
                                 side_str,
                                 &closed.exit_reason,
                                 closed.entry_price,
@@ -1032,9 +1184,9 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
 }
 
 /// Formats active open positions across the portfolio into a single concise string.
-fn format_portfolio_positions(engine: &PortfolioEngine) -> String {
+fn format_portfolio_positions(engine: &PortfolioEngine, candidate_symbols: &[String]) -> String {
     let mut parts = Vec::new();
-    for &sym in &PORTFOLIO_SYMBOLS {
+    for sym in candidate_symbols {
         if let Some(pos) = engine.position(sym) {
             parts.push(format!("{sym}: {:?} {}", pos.side, pos.quantity));
         }
