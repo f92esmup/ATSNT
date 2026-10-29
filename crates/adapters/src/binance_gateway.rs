@@ -993,6 +993,45 @@ impl BinanceGateway {
         })
     }
 
+    /// Validates an order against Binance Spot without placing it (`POST /api/v3/order/test`).
+    pub async fn test_spot_order(
+        &self,
+        symbol: &str,
+        side: Side,
+        order_type: &str,
+        quantity: Decimal,
+        price: Option<Decimal>,
+    ) -> Result<(), GatewayError> {
+        let side_str = match side {
+            Side::Buy => "BUY",
+            Side::Sell => "SELL",
+        };
+        let mut raw_query =
+            format!("symbol={symbol}&side={side_str}&type={order_type}&quantity={quantity}");
+        if let Some(p) = price {
+            raw_query.push_str(&format!("&price={p}&timeInForce=GTC"));
+        }
+        let signed_query = self
+            .auth
+            .sign_query(&raw_query, Some(self.config.recv_window_ms));
+        let url = format!("{}/api/v3/order/test?{signed_query}", self.base_url);
+
+        let resp = self.client.post(&url).send().await?;
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await?;
+
+        if !status.is_success() {
+            let code = body.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+            let msg = body
+                .get("msg")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Order test failed")
+                .to_string();
+            return Err(GatewayError::BinanceApi { code, message: msg });
+        }
+        Ok(())
+    }
+
     /// Base URL configured for this gateway instance.
     #[inline]
     pub fn base_url(&self) -> &str {

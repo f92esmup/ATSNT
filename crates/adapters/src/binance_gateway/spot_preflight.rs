@@ -48,9 +48,7 @@ impl SpotCommissionInfo {
 }
 
 impl BinanceGateway {
-    pub(super) async fn fetch_spot_balances(
-        &self,
-    ) -> Result<HashMap<String, Decimal>, GatewayError> {
+    pub async fn fetch_spot_balances(&self) -> Result<HashMap<String, Decimal>, GatewayError> {
         let query = self
             .auth
             .sign_query("omitZeroBalances=false", Some(self.config.recv_window_ms));

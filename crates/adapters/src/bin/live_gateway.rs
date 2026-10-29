@@ -1,7 +1,8 @@
 //! Binance Live Execution Gateway CLI runner.
 //!
 //! Provides command-line utilities to test account balances, verify HMAC signatures,
-//! and stream normalized private account events on Binance Testnet or Production.
+//! simulate order placement via POST /api/v3/order/test, and stream normalized private
+//! account events on Binance Testnet or Production.
 
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use adapters::{
     GcpSecretManager,
 };
 use clap::Parser;
+use rust_decimal::Decimal;
 use tracing::{error, info};
 
 #[derive(Parser, Debug)]
@@ -20,16 +22,16 @@ use tracing::{error, info};
     about = "ATSNT Live Exchange Execution Gateway (Binance Testnet & Production)"
 )]
 struct Cli {
-    /// Binance API Key (can also be read from BINANCE_API_KEY env var).
+    /// Binance API Key (can also be read from BINANCE_API_KEY env var or GCP Secret Manager).
     #[arg(long)]
     api_key: Option<String>,
 
-    /// Binance Secret Key (can also be read from BINANCE_SECRET_KEY env var).
+    /// Binance Secret Key (can also be read from BINANCE_SECRET_KEY env var or GCP Secret Manager).
     #[arg(long)]
     secret_key: Option<String>,
 
-    /// Use official Binance Testnet (defaults to true for capital safety).
-    #[arg(long, default_value_t = true)]
+    /// Use official Binance Testnet (defaults to false for production execution).
+    #[arg(long, default_value_t = false)]
     testnet: bool,
 
     /// Target USD-M Perpetual Futures instead of Spot.
@@ -40,9 +42,17 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     check_balance: bool,
 
-    /// Currency asset to query balance for.
+    /// Specific currency asset to query balance for.
     #[arg(long, default_value = "USDT")]
     asset: String,
+
+    /// Test a simulated order against Binance Spot test endpoint (POST /api/v3/order/test).
+    #[arg(long)]
+    test_order: Option<String>,
+
+    /// Quantity for test simulated order (e.g. 0.0001 for BTCUSDT or 2.0 for NEARUSDT).
+    #[arg(long)]
+    test_quantity: Option<Decimal>,
 
     /// Connect to the private User Data Stream for normalized account and order events.
     #[arg(long, default_value_t = false)]
@@ -81,6 +91,27 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_default(),
     };
 
+    let api_key = api_key
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string();
+    let secret_key = secret_key
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string();
+
+    if api_key.len() != 64 {
+        error!(
+            current_len = api_key.len(),
+            expected_len = 64,
+            "BINANCE_API_KEY has an invalid length: standard Binance HMAC API keys are exactly 64 characters long. Check if an extra character was accidentally copied at the beginning or end."
+        );
+    }
+
     if api_key.is_empty() || secret_key.is_empty() {
         error!("API key or Secret key not provided. Store BINANCE_API_KEY and BINANCE_SECRET_KEY in GCP Secret Manager, .env, or pass --api-key and --secret-key");
         std::process::exit(1);
@@ -108,6 +139,58 @@ async fn main() -> anyhow::Result<()> {
                 info!(asset = %cli.asset, available_balance = %bal, "Balance query succeeded")
             }
             Err(e) => error!(error = %e, "Failed to query balance"),
+        }
+
+        if is_spot {
+            match gateway.fetch_spot_balances().await {
+                Ok(balances) => {
+                    info!("All Spot Balances with non-zero funds:");
+                    let mut any = false;
+                    for (asset, free) in &balances {
+                        if *free > Decimal::ZERO {
+                            info!("  • {asset}: {free}");
+                            any = true;
+                        }
+                    }
+                    if !any {
+                        info!("  (All Spot asset balances are zero / not yet funded)");
+                    }
+                }
+                Err(e) => error!(error = %e, "Failed to fetch all spot balances"),
+            }
+        }
+    }
+
+    if let Some(symbol) = &cli.test_order {
+        let sym_upper = symbol.to_ascii_uppercase();
+        let qty = cli.test_quantity.unwrap_or(match sym_upper.as_str() {
+            "BTCUSDT" => rust_decimal_macros::dec!(0.0001),
+            "ETHUSDT" => rust_decimal_macros::dec!(0.005),
+            "SOLUSDT" => rust_decimal_macros::dec!(0.05),
+            "BNBUSDT" => rust_decimal_macros::dec!(0.01),
+            "AVAXUSDT" => rust_decimal_macros::dec!(0.5),
+            "NEARUSDT" => rust_decimal_macros::dec!(2.0),
+            _ => rust_decimal_macros::dec!(1.0),
+        });
+
+        info!(
+            symbol = %sym_upper,
+            quantity = %qty,
+            "Validating simulated order against Binance Spot (POST /api/v3/order/test)..."
+        );
+        match gateway
+            .test_spot_order(&sym_upper, domain::Side::Buy, "MARKET", qty, None)
+            .await
+        {
+            Ok(()) => info!(
+                symbol = %sym_upper,
+                "✅ Test order accepted by Binance Spot API! Valid HMAC signature, lot size, and trading permissions."
+            ),
+            Err(e) => error!(
+                symbol = %sym_upper,
+                error = %e,
+                "❌ Test order rejected by Binance Spot API"
+            ),
         }
     }
 
