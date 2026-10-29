@@ -1,0 +1,14 @@
+{
+  "market_type": "spot",
+  "initial_capital": "200",
+  "maker_fee_pct": "0.0025",
+  "taker_fee_pct": "0.0040",
+  "slippage_pct": "0.0005",
+  "risk_per_trade_pct": "0.015",
+  "max_daily_drawdown_pct": "0.05",
+  "max_monthly_drawdown_pct": "0.15",
+  "max_leverage": "1.0",
+  "min_order_quantity": "0.00001",
+  "quantity_step_size": "0.00001",
+  "min_order_notional": "5"
+}

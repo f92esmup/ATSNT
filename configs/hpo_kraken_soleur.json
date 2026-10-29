@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0",
+  "strategy_id": "quantum_well_swing",
+  "symbol": "SOLEUR",
+  "market_type": "spot",
+  "sampling": {
+    "type": "dollar_bar",
+    "threshold": "300000"
+  },
+  "strategy_config": {
+    "window_size": 35,
+    "hbar_eff": "0.35",
+    "mass_eff": "0.35",
+    "min_well_curvature": "0.050",
+    "max_wavepacket_sigma": "0.08",
+    "ground_state_tolerance": "0.007",
+    "min_upward_force": "0.0550",
+    "target_excitation_level": 1,
+    "min_take_profit_pct": "0.025",
+    "stop_loss_atr_buffer": "2.50",
+    "decoherence_time_bars": 45,
+    "macro_trend_filter": false,
+    "macro_ema_period": 200,
+    "macro_slope_window": 30,
+    "use_limit_entries": false,
+    "limit_time_in_force_bars": null,
+    "enable_dynamic_breakeven": true,
+    "breakeven_trigger_ratio": "0.50",
+    "enable_trailing_stop": false,
+    "trailing_atr_multiplier": "1.50"
+  },
+  "execution_context": {
+    "market_type": "spot",
+    "initial_capital": "200",
+    "maker_fee_pct": "0.0025",
+    "taker_fee_pct": "0.0040",
+    "slippage_pct": "0.0005",
+    "risk_per_trade_pct": "0.015",
+    "max_daily_drawdown_pct": "0.05",
+    "max_monthly_drawdown_pct": "0.15",
+    "max_leverage": "1",
+    "min_order_quantity": "0.00001",
+    "quantity_step_size": "0.00001",
+    "min_order_notional": "5",
+    "funding_rate_pct": "0",
+    "maintenance_margin_rate": "0"
+  },
+  "hpo_scorecard": {
+    "mean_is_sortino": "-0.4035446214277168160686806642",
+    "mean_oos_sortino": "-0.2372660587105368461581989746",
+    "mean_oos_profit_factor": "0.5088815853587732186855637392",
+    "oos_sharpe": "-0.252543",
+    "total_oos_trades": 66,
+    "min_fold_trades": 20,
+    "stability_score": "0",
+    "fitness": "0",
+    "dsr_p_value": "1.0000",
+    "is_statistically_significant": false,
+    "trials_evaluated": 330
+  }
+}
