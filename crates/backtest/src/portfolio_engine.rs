@@ -182,6 +182,8 @@ pub struct PortfolioEngineConfig {
     pub btc_correlation_window: usize,
     /// Dynamic universe selection policy for multi-asset ranking and Top-K filtering.
     pub universe_policy: Option<UniverseSelectionPolicy>,
+    /// Benchmark symbol representing the market lead (default "BTCUSDT", or "BTCEUR" in EUR universe).
+    pub benchmark_symbol: String,
 }
 
 impl Default for PortfolioEngineConfig {
@@ -198,6 +200,7 @@ impl Default for PortfolioEngineConfig {
             btc_correlation_threshold: dec!(0.65),
             btc_correlation_window: 35,
             universe_policy: None,
+            benchmark_symbol: "BTCUSDT".to_string(),
         }
     }
 }
@@ -221,6 +224,7 @@ impl PortfolioEngineConfig {
             btc_correlation_threshold: dec!(0.65),
             btc_correlation_window: 35,
             universe_policy: None,
+            benchmark_symbol: "BTCUSDT".to_string(),
         }
     }
 
@@ -346,10 +350,11 @@ impl PortfolioEngine {
     /// Creates a new portfolio engine initialized with the given configuration.
     pub fn new(config: PortfolioEngineConfig) -> Self {
         let initial_capital = config.initial_capital;
+        let benchmark = config.benchmark_symbol.clone();
         let universe_selector = config
             .universe_policy
             .as_ref()
-            .map(|p| CrossSectionalUniverseSelector::new(p.clone(), "BTCUSDT"));
+            .map(|p| CrossSectionalUniverseSelector::new(p.clone(), &benchmark));
         Self {
             config,
             equity: initial_capital,
@@ -428,9 +433,9 @@ impl PortfolioEngine {
         let bar = event.into();
         self.last_prices.insert(symbol.to_string(), bar.close);
 
-        // Update rolling cross-asset correlation tracker against Bitcoin
-        if symbol != "BTCUSDT" {
-            if let Some(btc_price) = self.last_prices.get("BTCUSDT").copied() {
+        // Update rolling cross-asset correlation tracker against Bitcoin / benchmark lead
+        if symbol != self.config.benchmark_symbol.as_str() {
+            if let Some(btc_price) = self.last_prices.get(&self.config.benchmark_symbol).copied() {
                 let sym_f64 = bar.close.to_f64().unwrap_or(0.0);
                 let btc_f64 = btc_price.to_f64().unwrap_or(0.0);
                 let window = self.config.btc_correlation_window;
@@ -522,7 +527,7 @@ impl PortfolioEngine {
         }
 
         // Track BTC macro trend for market breadth filter
-        if symbol == "BTCUSDT" {
+        if symbol == self.config.benchmark_symbol.as_str() {
             if let Some(audit) = strategy.audit() {
                 if let Some(macro_ok) = audit.get("macro_ok").and_then(|v| v.as_bool()) {
                     self.btc_macro_bullish = macro_ok;
@@ -574,7 +579,10 @@ impl PortfolioEngine {
         // Enforce BTC market breadth lead filter with dynamic rolling Pearson correlation gating:
         // When BTC is macro bearish, block altcoins ONLY if their rolling Pearson correlation
         // with BTC is high (>= btc_correlation_threshold). If decoupled or during warmup, allow.
-        if self.config.btc_breadth_filter && symbol != "BTCUSDT" && !self.btc_macro_bullish {
+        if self.config.btc_breadth_filter
+            && symbol != self.config.benchmark_symbol.as_str()
+            && !self.btc_macro_bullish
+        {
             if let Some(tracker) = self.correlation_trackers.get(symbol) {
                 if let Some(rho) = tracker.correlation() {
                     let rho_dec = Decimal::from_f64_retain(rho).unwrap_or(Decimal::ZERO);

@@ -637,6 +637,7 @@ fn run_portfolio_slice<S: OptimizableStrategy>(
         btc_correlation_threshold: dec!(0.65),
         btc_correlation_window: 35,
         universe_policy: None,
+        benchmark_symbol: "BTCUSDT".to_string(),
     };
 
     let mut engine = PortfolioEngine::new(engine_config);

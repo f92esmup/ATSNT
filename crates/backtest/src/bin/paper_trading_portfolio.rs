@@ -705,6 +705,12 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         min_order_notional: min_notional,
     };
 
+    let btc_lead = candidate_symbols
+        .iter()
+        .find(|s| s.starts_with("BTC"))
+        .cloned()
+        .unwrap_or_else(|| "BTCUSDT".to_string());
+
     let engine_config = PortfolioEngineConfig {
         initial_capital: effective_capital,
         maker_fee_pct,
@@ -717,6 +723,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         btc_correlation_threshold: effective_btc_corr_thresh,
         btc_correlation_window: effective_btc_corr_window,
         universe_policy: universe_policy.clone(),
+        benchmark_symbol: btc_lead,
     };
     let mut engine = PortfolioEngine::new(engine_config);
 

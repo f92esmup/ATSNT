@@ -259,6 +259,12 @@ fn main() -> Result<()> {
         Some(policy)
     };
 
+    let benchmark = candidate_list
+        .iter()
+        .find(|&&s| s.starts_with("BTC"))
+        .copied()
+        .unwrap_or("BTCUSDT");
+
     let engine_config = PortfolioEngineConfig {
         initial_capital: capital,
         maker_fee_pct: artifact.execution.maker_fee_pct,
@@ -271,13 +277,14 @@ fn main() -> Result<()> {
         btc_correlation_threshold: artifact.execution.btc_correlation_threshold,
         btc_correlation_window: artifact.execution.btc_correlation_window,
         universe_policy: universe_policy.clone(),
+        benchmark_symbol: benchmark.to_string(),
     };
 
     let mut engine = PortfolioEngine::new(engine_config);
 
     // Explicitly register all candidate assets into the selector
     if let Some(policy) = universe_policy {
-        let mut selector = CrossSectionalUniverseSelector::new(policy, "BTCUSDT");
+        let mut selector = CrossSectionalUniverseSelector::new(policy, benchmark);
         for sym in &candidate_list {
             selector.register_asset(*sym);
         }

@@ -472,6 +472,7 @@ where
         btc_correlation_threshold,
         btc_correlation_window,
         universe_policy: None,
+        benchmark_symbol: "BTCUSDT".to_string(),
     };
 
     let mut engine = PortfolioEngine::new(engine_config);
