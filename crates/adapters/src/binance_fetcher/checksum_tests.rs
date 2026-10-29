@@ -119,6 +119,7 @@ fn monthly_params(output: &std::path::Path) -> FetchParams {
         month: 1,
         day: None,
         output_dir: output.to_path_buf(),
+        is_spot: false,
     }
 }
 
@@ -180,6 +181,7 @@ fn a_corrupt_archive_fails_before_any_parquet_is_written() {
         month: 1,
         day: None,
         output_dir: output.path().to_path_buf(),
+        is_spot: false,
     };
 
     let error = fetcher

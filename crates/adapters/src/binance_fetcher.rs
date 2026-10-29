@@ -24,20 +24,26 @@ pub struct FetchParams {
     pub month: u32,
     pub day: Option<u32>,
     pub output_dir: PathBuf,
+    pub is_spot: bool,
 }
 
 impl FetchParams {
     /// Path of the archive on the Binance Vision host, without the origin.
     pub fn archive_path(&self) -> String {
         let sym = self.symbol.to_uppercase();
+        let market = if self.is_spot || sym.ends_with("EUR") {
+            "spot"
+        } else {
+            "futures/um"
+        };
         if let Some(day) = self.day {
             format!(
-                "/data/futures/um/daily/aggTrades/{sym}/{sym}-aggTrades-{:04}-{:02}-{:02}.zip",
+                "/data/{market}/daily/aggTrades/{sym}/{sym}-aggTrades-{:04}-{:02}-{:02}.zip",
                 self.year, self.month, day
             )
         } else {
             format!(
-                "/data/futures/um/monthly/aggTrades/{sym}/{sym}-aggTrades-{:04}-{:02}.zip",
+                "/data/{market}/monthly/aggTrades/{sym}/{sym}-aggTrades-{:04}-{:02}.zip",
                 self.year, self.month
             )
         }
@@ -289,7 +295,7 @@ impl BinanceDataFetcher {
             // Price: parts[1], Quantity: parts[2], Timestamp: parts[5], is_buyer_maker: parts[6]
             let price = parts[1].trim();
             let quantity = parts[2].trim();
-            let timestamp: i64 =
+            let raw_ts: i64 =
                 parts[5]
                     .trim()
                     .parse()
@@ -297,6 +303,13 @@ impl BinanceDataFetcher {
                         line: line_number,
                         raw: parts[5].to_string(),
                     })?;
+
+            // Normalize microsecond timestamps (16 digits in Spot) to milliseconds (13 digits)
+            let timestamp = if raw_ts > 10_000_000_000_000 {
+                raw_ts / 1_000
+            } else {
+                raw_ts
+            };
 
             let is_buyer_maker =
                 matches!(parts[6].trim().to_lowercase().as_str(), "true" | "t" | "1");
@@ -337,6 +350,7 @@ mod tests {
             month: 1,
             day: None,
             output_dir: PathBuf::from("data/historical"),
+            is_spot: false,
         };
         assert_eq!(
             params.download_url(),
@@ -356,6 +370,7 @@ mod tests {
             month: 3,
             day: Some(15),
             output_dir: PathBuf::from("data/historical"),
+            is_spot: false,
         };
         assert_eq!(
             params.download_url(),
@@ -364,6 +379,22 @@ mod tests {
         assert_eq!(
             params.target_parquet_path(),
             PathBuf::from("data/historical/ETHUSDT/ETHUSDT-aggTrades-2024-03-15.parquet")
+        );
+    }
+
+    #[test]
+    fn build_spot_eur_url() {
+        let params = FetchParams {
+            symbol: "BTCEUR".to_string(),
+            year: 2026,
+            month: 1,
+            day: Some(15),
+            output_dir: PathBuf::from("data/historical"),
+            is_spot: true,
+        };
+        assert_eq!(
+            params.download_url(),
+            "https://data.binance.vision/data/spot/daily/aggTrades/BTCEUR/BTCEUR-aggTrades-2026-01-15.zip"
         );
     }
 }

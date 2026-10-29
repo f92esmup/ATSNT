@@ -18,6 +18,14 @@ struct Args {
     #[arg(short, long, default_value = "BTCUSDT")]
     symbol: String,
 
+    /// Multiple trading pair symbols (comma-separated, e.g. BTCEUR,ETHEUR,SOLEUR)
+    #[arg(long, value_delimiter = ',')]
+    symbols: Option<Vec<String>>,
+
+    /// Target Spot market instead of USD-M Perpetual Futures (automatically enabled if symbol ends with EUR)
+    #[arg(long, default_value_t = false)]
+    spot: bool,
+
     /// Year to fetch (e.g. 2024, 2026)
     #[arg(short, long, default_value_t = 2024)]
     year: u32,
@@ -92,15 +100,19 @@ fn print_outcome(year: u32, task: &FetchTask, outcome: &Result<TaskOutcome, Adap
 
 fn fetch_one(
     fetcher: &BinanceDataFetcher,
+    symbol: &str,
     args: &Args,
     task: &FetchTask,
 ) -> Result<TaskOutcome, AdapterError> {
+    let sym_upper = symbol.to_uppercase();
+    let is_spot = args.spot || sym_upper.ends_with("EUR");
     let params = FetchParams {
-        symbol: args.symbol.to_uppercase(),
+        symbol: sym_upper,
         year: args.year,
         month: task.month,
         day: task.day,
         output_dir: args.output_dir.clone(),
+        is_spot,
     };
     let target_path = params.target_parquet_path();
     if target_path.exists() && !args.force {
@@ -110,7 +122,10 @@ fn fetch_one(
             bytes,
         });
     }
-    println!("\n[*] Processing {}...", task_label(args.year, task));
+    println!(
+        "\n[*] Processing {} ({symbol})...",
+        task_label(args.year, task)
+    );
     fetcher
         .fetch_and_convert(&params)
         .map(TaskOutcome::Converted)
@@ -154,10 +169,15 @@ fn main() -> Result<()> {
         }
     }
 
+    let symbols = match &args.symbols {
+        Some(list) if !list.is_empty() => list.clone(),
+        _ => vec![args.symbol.clone()],
+    };
+
     println!("============================================================");
     println!(" ATSNT - Binance Historical ETL & Parquet Converter");
     println!("============================================================");
-    println!("Symbol:     {}", args.symbol.to_uppercase());
+    println!("Symbols:    {}", symbols.join(", "));
     println!("Year:       {}", args.year);
     if let Some(day) = args.day {
         println!(
@@ -185,75 +205,64 @@ fn main() -> Result<()> {
     } else {
         println!("Period:     Full Year {:04} (12 Months)", args.year);
     }
-    println!(
-        "Target Dir: {}",
-        args.output_dir.join(&args.symbol).display()
-    );
+    println!("Target Dir: {}", args.output_dir.display());
     println!("------------------------------------------------------------");
 
     let fetcher = BinanceDataFetcher::new().with_progress(args.jobs == 1);
-    let mut total_trades_all = 0usize;
-    let mut total_bytes_all = 0u64;
+    let mut grand_total_trades = 0usize;
+    let mut grand_total_bytes = 0u64;
     let start_all = std::time::Instant::now();
 
     let today = now.date_naive();
     let tasks = plan_fetch_tasks(args.year, args.month, args.day, today);
-    println!(
-        "Jobs:       {} archive(s), up to {} concurrent download(s)",
-        tasks.len(),
-        args.jobs
-    );
 
-    // Sequential runs print each result right after its "Processing" line; concurrent
-    // runs print all results afterwards in task (month) order.
-    let sequential = args.jobs == 1;
-    let outcomes = run_bounded(&tasks, args.jobs, |task| {
-        let outcome = fetch_one(&fetcher, &args, task);
-        if sequential {
-            print_outcome(args.year, task, &outcome);
-        }
-        outcome
-    })?;
-
-    let mut failures = Vec::new();
-    for (task, outcome) in tasks.iter().zip(&outcomes) {
-        if !sequential {
-            print_outcome(args.year, task, outcome);
-        }
-        match outcome {
-            Ok(TaskOutcome::Skipped { bytes, .. }) => total_bytes_all += bytes,
-            Ok(TaskOutcome::Converted(summary)) => {
-                total_trades_all += summary.total_trades;
-                total_bytes_all += summary.parquet_size_bytes;
+    for symbol in &symbols {
+        println!("\n>>> Starting fetch for symbol: {symbol}");
+        let sequential = args.jobs == 1;
+        let outcomes = run_bounded(&tasks, args.jobs, |task| {
+            let outcome = fetch_one(&fetcher, symbol, &args, task);
+            if sequential {
+                print_outcome(args.year, task, &outcome);
             }
-            Err(e) if task.day.is_some() && is_not_archived(e) => {}
-            Err(_) => failures.push(task_label(args.year, task)),
-        }
-    }
+            outcome
+        })?;
 
-    if !failures.is_empty() {
-        bail!(
-            "{} archive(s) failed to download or convert: {}",
-            failures.len(),
-            failures.join(", ")
-        );
+        let mut failures = Vec::new();
+        for (task, outcome) in tasks.iter().zip(&outcomes) {
+            if !sequential {
+                print_outcome(args.year, task, outcome);
+            }
+            match outcome {
+                Ok(TaskOutcome::Skipped { bytes, .. }) => grand_total_bytes += bytes,
+                Ok(TaskOutcome::Converted(summary)) => {
+                    grand_total_trades += summary.total_trades;
+                    grand_total_bytes += summary.parquet_size_bytes;
+                }
+                Err(e) if task.day.is_some() && is_not_archived(e) => {}
+                Err(_) => failures.push(task_label(args.year, task)),
+            }
+        }
+
+        if !failures.is_empty() {
+            bail!(
+                "{} archive(s) failed for {symbol}: {}",
+                failures.len(),
+                failures.join(", ")
+            );
+        }
     }
 
     let elapsed = start_all.elapsed().as_secs_f64();
-    let total_mb = total_bytes_all as f64 / (1024.0 * 1024.0);
+    let total_mb = grand_total_bytes as f64 / (1024.0 * 1024.0);
 
     println!("\n============================================================");
     println!(" [SUCCESS] All datasets processed!");
-    if total_trades_all > 0 {
-        println!(" New Trades Converted:  {}", total_trades_all);
+    if grand_total_trades > 0 {
+        println!(" New Trades Converted:  {}", grand_total_trades);
     }
     println!(" Total Elapsed Time:    {:.2}s", elapsed);
     println!("[TIMING] phase=fetch seconds={:.2}", elapsed);
     println!(" Total Dataset Size:    {:.2} MB", total_mb);
-    println!(
-        " Parquet Directory:     {}",
-        args.output_dir.join(&args.symbol).display()
-    );
     println!("============================================================");
 
     Ok(())

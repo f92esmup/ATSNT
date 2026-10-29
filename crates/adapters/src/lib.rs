@@ -12,6 +12,7 @@ pub mod binance_ws;
 pub mod error;
 pub mod fetch_plan;
 pub mod gcp;
+pub mod kraken_ws;
 pub mod simulated_venue;
 pub mod traits;
 
@@ -41,6 +42,10 @@ pub use fetch_plan::{is_not_archived, plan_fetch_tasks, run_bounded, FetchTask};
 pub use gcp::{
     datetime_in_madrid, format_unix_ms_rfc3339, now_in_madrid, BigQueryRecord, BigQuerySink,
     GcpSecretManager, GcsArtifactSink, SymbolPerformanceSummary, TelegramNotifier,
+};
+pub use kraken_ws::{
+    normalize_from_kraken_symbol, normalize_to_kraken_symbol, KrakenTradeItem,
+    KrakenWebSocketStream, KrakenWsConfig, KrakenWsMessage,
 };
 pub use simulated_venue::{SimulatedVenue, SimulatedVenueConfig, SimulatedVenueError};
 pub use traits::{AlertNotifier, AsyncMarketDataStream, MarketDataStream};

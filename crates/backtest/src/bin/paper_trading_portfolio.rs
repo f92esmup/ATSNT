@@ -149,6 +149,10 @@ struct Args {
     #[arg(long, default_value_t = true)]
     spot: bool,
 
+    /// Execution venue / data feed provider (binance or kraken)
+    #[arg(long, default_value = "binance")]
+    venue: String,
+
     /// Whether to apply Binance 25% BNB fee discount (0.075% in Spot)
     #[arg(long, default_value_t = true)]
     bnb_discount: bool,
@@ -215,11 +219,17 @@ fn instantiate_strategy(
 fn default_threshold_for_symbol(symbol: &str) -> Decimal {
     match symbol {
         "BTCUSDT" => dec!(300_000_000),
+        "BTCEUR" => dec!(270_000_000),
         "ETHUSDT" => dec!(200_000_000),
+        "ETHEUR" => dec!(180_000_000),
         "SOLUSDT" => dec!(80_000_000),
+        "SOLEUR" => dec!(75_000_000),
         "BNBUSDT" => dec!(60_000_000),
+        "BNBEUR" => dec!(55_000_000),
         "AVAXUSDT" => dec!(30_000_000),
+        "AVAXEUR" => dec!(28_000_000),
         "NEARUSDT" => dec!(25_000_000),
+        "NEAREUR" => dec!(23_000_000),
         "SUIUSDT" => dec!(25_000_000),
         "LINKUSDT" => dec!(25_000_000),
         _ => dec!(50_000_000),
@@ -493,27 +503,40 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         strategies::MarketType::UsdMPerpetual
     };
 
-    let (maker_fee_pct, taker_fee_pct, max_leverage) = match (market_type, args.bnb_discount) {
-        (strategies::MarketType::Spot, true) => (
-            effective_maker_fee.unwrap_or(dec!(0.00075)),
-            effective_taker_fee.unwrap_or(dec!(0.00075)),
+    let is_kraken = args.venue.eq_ignore_ascii_case("kraken")
+        || candidate_symbols.iter().any(|s| s.ends_with("EUR"));
+    let currency = if is_kraken { "EUR" } else { "USDT" };
+    let currency_symbol = if is_kraken { "€" } else { "$" };
+
+    let (maker_fee_pct, taker_fee_pct, max_leverage) = if is_kraken {
+        (
+            effective_maker_fee.unwrap_or(dec!(0.0025)),
+            effective_taker_fee.unwrap_or(dec!(0.0040)),
             dec!(1),
-        ),
-        (strategies::MarketType::Spot, false) => (
-            effective_maker_fee.unwrap_or(dec!(0.0010)),
-            effective_taker_fee.unwrap_or(dec!(0.0010)),
-            dec!(1),
-        ),
-        (strategies::MarketType::UsdMPerpetual, true) => (
-            effective_maker_fee.unwrap_or(dec!(0.00018)),
-            effective_taker_fee.unwrap_or(dec!(0.00045)),
-            effective_max_leverage,
-        ),
-        (strategies::MarketType::UsdMPerpetual, false) => (
-            effective_maker_fee.unwrap_or(dec!(0.0002)),
-            effective_taker_fee.unwrap_or(dec!(0.0005)),
-            effective_max_leverage,
-        ),
+        )
+    } else {
+        match (market_type, args.bnb_discount) {
+            (strategies::MarketType::Spot, true) => (
+                effective_maker_fee.unwrap_or(dec!(0.00075)),
+                effective_taker_fee.unwrap_or(dec!(0.00075)),
+                dec!(1),
+            ),
+            (strategies::MarketType::Spot, false) => (
+                effective_maker_fee.unwrap_or(dec!(0.0010)),
+                effective_taker_fee.unwrap_or(dec!(0.0010)),
+                dec!(1),
+            ),
+            (strategies::MarketType::UsdMPerpetual, true) => (
+                effective_maker_fee.unwrap_or(dec!(0.00018)),
+                effective_taker_fee.unwrap_or(dec!(0.00045)),
+                effective_max_leverage,
+            ),
+            (strategies::MarketType::UsdMPerpetual, false) => (
+                effective_maker_fee.unwrap_or(dec!(0.0002)),
+                effective_taker_fee.unwrap_or(dec!(0.0005)),
+                effective_max_leverage,
+            ),
+        }
     };
 
     let universe_policy = if args.disable_universe_filter {
@@ -542,6 +565,14 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         })
     };
 
+    println!(
+        " Venue:                {}",
+        if is_kraken {
+            "Kraken Spot (EUR)"
+        } else {
+            "Binance"
+        }
+    );
     println!(" Market Type:          {:?}", market_type);
     println!(" Candidate Universe:   {:?}", candidate_symbols);
     if let Some(ref pol) = universe_policy {
@@ -554,7 +585,10 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     } else {
         println!(" Dynamic Selection:    Disabled (All candidates active)");
     }
-    println!(" Shared Capital:       ${:.2} USDT", effective_capital);
+    println!(
+        " Shared Capital:       {}{:.2} {}",
+        currency_symbol, effective_capital, currency
+    );
     println!(" Max Concurrent Pos:   {}", effective_max_positions);
     println!(" Max Directional Pos:  {}", effective_max_directional);
     println!(
@@ -735,41 +769,81 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         let sym_name = sym.clone();
         let sym_str = sym.to_ascii_lowercase();
         let tx_clone = tx.clone();
+        let is_kraken_venue = is_kraken;
 
         tokio::spawn(async move {
-            let ws_cfg = if is_spot {
-                BinanceWsConfig::spot(&sym_str)
-            } else {
-                BinanceWsConfig::futures_production(&sym_str)
-            };
-            println!(
-                "[*] [{sym_name}] Connecting to WebSocket stream: {}",
-                ws_cfg.stream_url()
-            );
+            if is_kraken_venue {
+                let kraken_cfg = adapters::KrakenWsConfig::for_symbol(&sym_name);
+                println!(
+                    "[*] [{sym_name}] Connecting to Kraken v2 WebSocket stream for {}",
+                    kraken_cfg.symbol
+                );
 
-            loop {
-                match BinanceWebSocketStream::connect(ws_cfg.clone()) {
-                    Ok(mut stream) => {
-                        println!("[OK] [{sym_name}] WebSocket connected and streaming trades");
-                        while let Ok(Some(trade)) = stream.next_trade().await {
-                            if tx_clone
-                                .send(TaggedTrade {
-                                    symbol: sym_name.clone(),
-                                    trade,
-                                })
-                                .await
-                                .is_err()
-                            {
-                                return; // Parent receiver dropped; shutdown task
+                loop {
+                    match adapters::KrakenWebSocketStream::connect(kraken_cfg.clone()) {
+                        Ok(mut stream) => {
+                            println!(
+                                "[OK] [{sym_name}] Kraken WebSocket connected and streaming trades"
+                            );
+                            while let Ok(Some(trade)) = stream.next_trade().await {
+                                if tx_clone
+                                    .send(TaggedTrade {
+                                        symbol: sym_name.clone(),
+                                        trade,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    return; // Parent receiver dropped; shutdown task
+                                }
                             }
+                            eprintln!(
+                                "[WARN] [{sym_name}] Kraken WebSocket stream disconnected. Reconnecting..."
+                            );
                         }
-                        eprintln!(
-                            "[WARN] [{sym_name}] WebSocket stream disconnected. Reconnecting..."
-                        );
+                        Err(e) => {
+                            eprintln!(
+                                "[ERROR] [{sym_name}] Failed to connect Kraken WebSocket: {e}. Retrying in 2s..."
+                            );
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("[ERROR] [{sym_name}] Failed to connect WebSocket: {e}. Retrying in 2s...");
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            } else {
+                let ws_cfg = if is_spot {
+                    BinanceWsConfig::spot(&sym_str)
+                } else {
+                    BinanceWsConfig::futures_production(&sym_str)
+                };
+                println!(
+                    "[*] [{sym_name}] Connecting to WebSocket stream: {}",
+                    ws_cfg.stream_url()
+                );
+
+                loop {
+                    match BinanceWebSocketStream::connect(ws_cfg.clone()) {
+                        Ok(mut stream) => {
+                            println!("[OK] [{sym_name}] WebSocket connected and streaming trades");
+                            while let Ok(Some(trade)) = stream.next_trade().await {
+                                if tx_clone
+                                    .send(TaggedTrade {
+                                        symbol: sym_name.clone(),
+                                        trade,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    return; // Parent receiver dropped; shutdown task
+                                }
+                            }
+                            eprintln!(
+                                "[WARN] [{sym_name}] WebSocket stream disconnected. Reconnecting..."
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("[ERROR] [{sym_name}] Failed to connect WebSocket: {e}. Retrying in 2s...");
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
                     }
                 }
             }
@@ -815,7 +889,12 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     let run_ctx = RunContext::new(RunType::Paper, &run_spec, started_at_ms)
         .with_baseline(args.baseline_run_id.clone());
     let mut data_window = DataWindow {
-        source: Some(if is_spot {
+        source: Some(if is_kraken {
+            format!(
+                "Kraken Spot EUR (Multi-Stream {} Assets)",
+                candidate_symbols.len()
+            )
+        } else if is_spot {
             format!(
                 "Binance Spot (Multi-Stream {} Assets)",
                 candidate_symbols.len()
@@ -852,16 +931,22 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         t.send(format!(
             "🚀 *ATSNT: Multi-Asset Paper Trading Launched*\n\
              ━━━━━━━━━━━━━━━━━━━━━━\n\
+             • *Venue*: `{}`\n\
              • *Market*: `{:?}` ({})\n\
              • *Universe*: `{}`\n\
              • *Dynamic Selection*: `{}`\n\
-             • *Shared Capital*: `${:.2} USDT`\n\
+             • *Shared Capital*: `{currency_symbol}{:.2} {currency}`\n\
              • *Max Positions*: `{}` (Max `{}` directional)\n\
-             • *Risk Per Trade*: `{:.2}%` (${:.2})\n\
+             • *Risk Per Trade*: `{:.2}%` ({currency_symbol}{:.2})\n\
              • *Fee Tier*: Maker `{:.4}%` / Taker `{:.4}%`\n\
              • *Execution*: {}\n\
              • *Breadth Filter*: {}\n\
              ━━━━━━━━━━━━━━━━━━━━━━",
+            if is_kraken {
+                "Kraken Spot (EUR)"
+            } else {
+                "Binance"
+            },
             market_type,
             if is_spot {
                 "1.0x, Zero Liquidation"
