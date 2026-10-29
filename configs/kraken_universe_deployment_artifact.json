@@ -36,34 +36,34 @@
   "assets": [
     {
       "symbol": "BTCEUR",
-      "dollar_bar_threshold": "8000000",
+      "dollar_bar_threshold": "1200000",
       "strategy_id": "quantum_well_swing",
       "strategy_config": {
         "breakeven_trigger_ratio": "0.50",
-        "decoherence_time_bars": 30,
+        "decoherence_time_bars": 90,
         "enable_dynamic_breakeven": true,
         "enable_trailing_stop": false,
-        "ground_state_tolerance": "0.007",
-        "hbar_eff": "2.50",
+        "ground_state_tolerance": "0.040",
+        "hbar_eff": "2.5",
         "limit_time_in_force_bars": null,
         "macro_ema_period": 200,
         "macro_slope_window": 30,
         "macro_trend_filter": true,
-        "mass_eff": "5.00",
+        "mass_eff": "3.0",
         "max_wavepacket_sigma": "0.08",
-        "min_take_profit_pct": "0.050",
-        "min_upward_force": "0.0550",
+        "min_take_profit_pct": "0.090",
+        "min_upward_force": "0.010",
         "min_well_curvature": "0.020",
-        "stop_loss_atr_buffer": "1.50",
+        "stop_loss_atr_buffer": "2.00",
         "target_excitation_level": 1,
         "trailing_atr_multiplier": "1.50",
         "use_limit_entries": false,
-        "window_size": 20
+        "window_size": 240
       }
     },
     {
       "symbol": "ETHEUR",
-      "dollar_bar_threshold": "1400000",
+      "dollar_bar_threshold": "740000",
       "strategy_id": "quantum_well_swing",
       "strategy_config": {
         "breakeven_trigger_ratio": "0.50",
@@ -90,7 +90,7 @@
     },
     {
       "symbol": "SOLEUR",
-      "dollar_bar_threshold": "300000",
+      "dollar_bar_threshold": "400000",
       "strategy_id": "quantum_well_swing",
       "strategy_config": {
         "breakeven_trigger_ratio": "0.50",
@@ -105,10 +105,10 @@
         "macro_trend_filter": true,
         "mass_eff": "2.0",
         "max_wavepacket_sigma": "0.08",
-        "min_take_profit_pct": "0.050",
+        "min_take_profit_pct": "0.085",
         "min_upward_force": "0.050",
         "min_well_curvature": "0.050",
-        "stop_loss_atr_buffer": "2.50",
+        "stop_loss_atr_buffer": "2.00",
         "target_excitation_level": 1,
         "trailing_atr_multiplier": "1.50",
         "use_limit_entries": false,
@@ -117,7 +117,7 @@
     },
     {
       "symbol": "BNBEUR",
-      "dollar_bar_threshold": "250000",
+      "dollar_bar_threshold": "170000",
       "strategy_id": "quantum_well_swing",
       "strategy_config": {
         "breakeven_trigger_ratio": "0.50",
@@ -144,7 +144,7 @@
     },
     {
       "symbol": "AVAXEUR",
-      "dollar_bar_threshold": "23000",
+      "dollar_bar_threshold": "11000",
       "strategy_id": "quantum_well_swing",
       "strategy_config": {
         "breakeven_trigger_ratio": "0.50",
@@ -171,7 +171,7 @@
     },
     {
       "symbol": "NEAREUR",
-      "dollar_bar_threshold": "5000",
+      "dollar_bar_threshold": "13000",
       "strategy_id": "quantum_well_swing",
       "strategy_config": {
         "breakeven_trigger_ratio": "0.50",
