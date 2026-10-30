@@ -2,7 +2,7 @@
 //!
 //! They pin, byte for byte, what `dollar_bars_cusum` and `order_flow_imbalance` produce today on
 //! a deterministic synthetic tape: closed trades, metrics, rejections, a walk-forward ranking and
-//! the rows recorded for BigQuery. A refactor of the execution layer must leave every snapshot
+//! the rows recorded for run analytics. A refactor of the execution layer must leave every snapshot
 //! unchanged (`odd/tasks/swarm-consensus.md`, S10).
 //!
 //! Snapshots live in `tests/golden/`. To rewrite them after an intended behaviour change, run

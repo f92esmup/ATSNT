@@ -3,16 +3,15 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use adapters::{BigQuerySink, BinanceCsvReader, GcsArtifactSink, MarketDataStream, TapeReader};
+use adapters::{BinanceCsvReader, MarketDataStream, TapeReader};
 use anyhow::{Context, Result};
 use backtest::{
-    artifact_object_name, artifact_run_suffix, bar_tape, calibration_end_ms, check_calibration,
-    embargo_buckets, now_unix_ms, record_hpo, trade_tape, BacktestConfig, CandidateEvaluation,
-    DataWindow, FeaturesOf, HpoDeploymentArtifact, HpoScorecard, RunContext, RunSpec, RunType,
-    SamplingConfig, SinkFailures, StrategyDeploymentArtifact, Tape, WalkForwardConfig,
-    WalkForwardFold, WalkForwardOptimizer, WalkForwardSplitter, TRADES_WARM_UP_MS,
+    bar_tape, calibration_end_ms, check_calibration, embargo_buckets, now_unix_ms, record_hpo,
+    trade_tape, BacktestConfig, CandidateEvaluation, DataWindow, FeaturesOf, HpoDeploymentArtifact,
+    HpoScorecard, RunContext, RunSpec, RunType, SamplingConfig, StrategyDeploymentArtifact, Tape,
+    WalkForwardConfig, WalkForwardFold, WalkForwardOptimizer, WalkForwardSplitter,
+    TRADES_WARM_UP_MS,
 };
-use chrono::Utc;
 use clap::Parser;
 use domain::DollarBarAggregator;
 use rust_decimal::Decimal;
@@ -115,26 +114,6 @@ struct Args {
     /// Initial starting capital in quote currency (overrides execution context, e.g. 200 for 200 USDT)
     #[arg(long)]
     capital: Option<Decimal>,
-
-    /// Record the sweep (hpo parent run plus one hpo_trial run per candidate with
-    /// per-fold metrics) to Google Cloud BigQuery
-    #[arg(long, default_value_t = false)]
-    gcp_bigquery: bool,
-
-    /// Upload the winning Strategy Deployment Artifact to Google Cloud Storage as
-    /// `artifacts/<output-config stem>-<artifact suffix>.json`
-    #[arg(long, default_value_t = false)]
-    gcs_upload: bool,
-
-    /// Unique suffix for the uploaded artifact name (e.g. the Cloud Batch job name);
-    /// defaults to the UTC timestamp `YYYYMMDDTHHMMSSZ`
-    #[arg(long)]
-    artifact_suffix: Option<String>,
-
-    /// Exit non-zero if any BigQuery recording or GCS upload fails (or no winning
-    /// artifact can be uploaded); failures are reported after all local work finishes
-    #[arg(long, default_value_t = false)]
-    strict_sinks: bool,
 
     /// Target Binance Spot instead of USD-M Perpetual Futures
     #[arg(long, default_value_t = false)]
@@ -754,10 +733,7 @@ where
         "========================================================================================="
     );
 
-    let mut sinks = SinkFailures::new(args.strict_sinks);
-
     let Some((winner_thresh, winner_eval, winner_sampling, winner_window)) = winner else {
-        sinks.finish()?;
         anyhow::bail!(
             "no candidate reached {} closed trades in every in-sample and out-of-sample fold \
              ({} evaluated across {} resolution(s)): there is no measurable winner; widen the space, \
@@ -813,8 +789,8 @@ where
         execution_context: engine_config,
     };
 
-    if args.gcp_bigquery && !all_evaluations.is_empty() {
-        let bq = BigQuerySink::from_env().with_strict(args.strict_sinks);
+    if !all_evaluations.is_empty() {
+        let recorder = backtest::wiring::disabled_recorder();
         let sweep_ctx = RunContext::new(RunType::Hpo, &sweep_spec, started_at_ms);
         let eval_only: Vec<CandidateEvaluation<S::Config>> =
             all_evaluations.iter().map(|e| e.1.clone()).collect();
@@ -838,15 +814,8 @@ where
         ) {
             settings.extend(extra);
         }
-        let record_start = Instant::now();
-        println!(
-            "[*] Recording HPO run {} with {} trial runs across {} resolution(s) to BigQuery...",
-            sweep_ctx.run_id,
-            all_evaluations.len(),
-            prepared.resolutions.len()
-        );
-        let recorded = record_hpo(
-            &bq,
+        record_hpo(
+            &recorder,
             &sweep_ctx,
             &sweep_spec,
             &winner_window,
@@ -854,10 +823,7 @@ where
             settings,
             now_unix_ms(),
         )
-        .await
-        .map(|_| ());
-        sinks.record("record HPO run", recorded);
-        print_phase_timing("record_bigquery", record_start);
+        .await?;
     }
 
     // Serialize Winner to output_config as authoritative StrategyDeploymentArtifact
@@ -911,21 +877,5 @@ where
         ),
     }
 
-    if args.gcs_upload {
-        let upload_start = Instant::now();
-        let gcs = GcsArtifactSink::from_env()
-            .with_strict(args.strict_sinks)
-            .with_create_only(true);
-        let suffix = artifact_run_suffix(args.artifact_suffix.as_deref(), Utc::now());
-        let object_name = artifact_object_name(&args.output_config, &suffix);
-        println!("[*] Uploading Strategy Deployment Artifact to GCS ({object_name})...");
-        let uploaded = gcs
-            .upload_file(&args.output_config, &object_name, "application/json")
-            .await;
-        sinks.record("upload Strategy Deployment Artifact", uploaded);
-        print_phase_timing("upload_artifact", upload_start);
-    }
-
-    sinks.finish()?;
     Ok(())
 }

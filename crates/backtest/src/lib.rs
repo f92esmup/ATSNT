@@ -18,7 +18,6 @@ pub mod recording;
 pub mod registry;
 pub mod run;
 pub mod session;
-pub mod sinks;
 pub mod tick_simulation;
 pub mod universe_selector;
 pub mod walk_forward;
@@ -79,7 +78,6 @@ pub use registry::{
     LoadedStrategy, ALLOW_UNPROVEN_STRATEGY_HELP, DEFAULT_STRATEGY_ID,
 };
 pub use run::{FillModel, InvalidRunId, RunId, RunSpec, RunType};
-pub use sinks::{artifact_object_name, artifact_run_suffix, SinkFailures, StrictSinkError};
 pub use tick_simulation::{TickSimulation, TickSimulationConfig, TickSimulationError, TickStep};
 pub use universe_selector::CrossSectionalUniverseSelector;
 pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};

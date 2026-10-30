@@ -3,12 +3,12 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use adapters::{BigQuerySink, BinanceCsvReader, MarketDataStream, TapeReader};
+use adapters::{BinanceCsvReader, MarketDataStream, TapeReader};
 use anyhow::{Context, Result};
 use backtest::{
     calibration_end_ms, check_calibration, now_unix_ms, record_backtest_with_audit,
     record_monte_carlo, BacktestConfig, BacktestEngine, DataWindow, MonteCarloConfig,
-    MonteCarloSimulator, PriceEvent, RunContext, RunSpec, RunType, SamplingConfig, SinkFailures,
+    MonteCarloSimulator, PriceEvent, RunContext, RunSpec, RunType, SamplingConfig,
     TickSimulationConfig,
 };
 use clap::Parser;
@@ -99,15 +99,6 @@ struct Args {
     /// Number of synthetic Monte Carlo paths to simulate
     #[arg(long, default_value_t = 10000)]
     mc_iterations: usize,
-
-    /// Record the run (spec, metrics, trades, equity events and Monte Carlo child run) to BigQuery
-    #[arg(long, default_value_t = false)]
-    gcp_bigquery: bool,
-
-    /// Exit non-zero if any BigQuery recording fails; failures are reported after
-    /// the backtest and Monte Carlo finish
-    #[arg(long, default_value_t = false)]
-    strict_sinks: bool,
 
     /// Target Binance Spot instead of USD-M Perpetual Futures
     #[arg(long, default_value_t = false)]
@@ -536,32 +527,18 @@ async fn main() -> Result<()> {
             FillModelArg::Tick => backtest::FillModel::Tick,
         },
     );
-    let recorder = args
-        .gcp_bigquery
-        .then(|| BigQuerySink::from_env().with_strict(args.strict_sinks));
-    let mut sinks = SinkFailures::new(args.strict_sinks);
-
-    if let Some(bq) = &recorder {
-        let record_start = Instant::now();
-        println!(
-            "[*] Recording backtest run {} to BigQuery ({} trades)...",
-            run_ctx.run_id,
-            closed_trades.len()
-        );
-        let recorded = record_backtest_with_audit(
-            bq,
-            &run_ctx,
-            &run_spec,
-            &data_window,
-            &metrics,
-            &closed_trades,
-            strategy_audit.as_ref(),
-            now_unix_ms(),
-        )
-        .await;
-        sinks.record("record backtest run", recorded);
-        print_phase_timing("record_bigquery", record_start);
-    }
+    let recorder = backtest::wiring::disabled_recorder();
+    record_backtest_with_audit(
+        &recorder,
+        &run_ctx,
+        &run_spec,
+        &data_window,
+        &metrics,
+        &closed_trades,
+        strategy_audit.as_ref(),
+        now_unix_ms(),
+    )
+    .await?;
 
     // 4. Monte Carlo Stress-Testing
     if args.monte_carlo {
@@ -643,30 +620,20 @@ async fn main() -> Result<()> {
             );
             println!("============================================================");
 
-            if let Some(bq) = &recorder {
-                let mc_record_start = Instant::now();
-                let mc_ctx = run_ctx.child(RunType::MonteCarlo, now_unix_ms());
-                println!(
-                    "[*] Recording Monte Carlo run {} (child of {}) to BigQuery...",
-                    mc_ctx.run_id, run_ctx.run_id
-                );
-                let recorded = record_monte_carlo(
-                    bq,
-                    &mc_ctx,
-                    &run_spec,
-                    &data_window,
-                    &mc_report,
-                    now_unix_ms(),
-                )
-                .await;
-                sinks.record("record Monte Carlo run", recorded);
-                print_phase_timing("record_monte_carlo", mc_record_start);
-            }
+            let mc_ctx = run_ctx.child(RunType::MonteCarlo, now_unix_ms());
+            record_monte_carlo(
+                &recorder,
+                &mc_ctx,
+                &run_spec,
+                &data_window,
+                &mc_report,
+                now_unix_ms(),
+            )
+            .await?;
         }
     }
 
     print_phase_timing("total", start_total);
-    sinks.finish()?;
     Ok(())
 }
 

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use adapters::{
-    now_in_madrid, AsyncMarketDataStream, BigQuerySink, BinanceWebSocketStream, BinanceWsConfig,
+    now_in_madrid, AsyncMarketDataStream, BinanceWebSocketStream, BinanceWsConfig,
     GcpSecretManager, TelegramNotifier,
 };
 use anyhow::{Context, Result};
@@ -85,10 +85,6 @@ struct Args {
     /// `parent_run_id`); lets BI compare the session with that backtest's expected range
     #[arg(long, value_parser = RunId::parse)]
     baseline_run_id: Option<RunId>,
-
-    /// Record the session run (lifecycle, closed trades with equity events, final metrics) to Google Cloud BigQuery
-    #[arg(long, default_value_t = false)]
-    gcp_bigquery: bool,
 
     /// Send execution and barrier exit alerts to Telegram
     #[arg(long, default_value_t = false)]
@@ -181,20 +177,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     println!(" Initial Capital:      ${}", args.capital);
     println!(" Risk per Trade:       {:.2}%", args.risk_pct * dec!(100));
 
-    let bq_sink = if args.gcp_bigquery {
-        let sink = BigQuerySink::from_env();
-        println!(
-            " BigQuery Telemetry:   {}",
-            if sink.is_enabled() {
-                "ACTIVE (Recording run to atsnt_bi)"
-            } else {
-                "ENABLED (Pending GCP_PROJECT_ID / GCP_AUTH_TOKEN)"
-            }
-        );
-        Some(sink)
-    } else {
-        None
-    };
+    let recorder = backtest::wiring::disabled_recorder();
 
     let secret_manager = GcpSecretManager::from_env();
     if args.telegram_alerts {
@@ -330,10 +313,14 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     let mut trade_counter: usize = 0;
     let mut end_status = RunStatus::Stopped;
 
-    if let Some(bq) = &bq_sink {
-        println!("[*] Recording paper run {} to BigQuery", run_ctx.run_id);
-        record_lifecycle(bq, &run_ctx, &run_spec, RunStatus::Running, &data_window).await;
-    }
+    record_lifecycle(
+        &recorder,
+        &run_ctx,
+        &run_spec,
+        RunStatus::Running,
+        &data_window,
+    )
+    .await;
 
     let mut total_ticks: u64 = 0;
     let mut total_bars: u64 = 0;
@@ -624,9 +611,10 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                                         );
                                         t.send(msg);
                                     }
-                                    if let (Some(bq), Some(ct)) = (&bq_sink, &closed_trade_opt) {
+                                    if let Some(ct) = &closed_trade_opt {
                                         trade_counter += 1;
-                                        record_closed_trade(bq, &run_ctx, ct, trade_counter).await;
+                                        record_closed_trade(&recorder, &run_ctx, ct, trade_counter)
+                                            .await;
                                     }
                                 }
                                 PaperTradingEvent::EntryTimedOut { closed_unreported_position } => {
@@ -704,14 +692,12 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     }
     let (metrics, _) = session.finish();
 
-    if let Some(bq) = &bq_sink {
-        record_lifecycle(bq, &run_ctx, &run_spec, end_status, &data_window).await;
-        if let Err(e) = bq
-            .record_metrics(&[run_ctx.metrics_row("full", &metrics, None, now_unix_ms())])
-            .await
-        {
-            println!("[WARN] Failed to record paper run metrics: {e}");
-        }
+    record_lifecycle(&recorder, &run_ctx, &run_spec, end_status, &data_window).await;
+    if let Err(e) = recorder
+        .record_metrics(&[run_ctx.metrics_row("full", &metrics, None, now_unix_ms())])
+        .await
+    {
+        println!("[WARN] Failed to record paper run metrics: {e}");
     }
 
     // 5. Display Quantitative Performance Report

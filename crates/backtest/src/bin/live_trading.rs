@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use adapters::{
-    now_in_madrid, AsyncMarketDataStream, BigQuerySink, BinanceGateway, BinanceGatewayConfig,
+    now_in_madrid, AsyncMarketDataStream, BinanceGateway, BinanceGatewayConfig,
     BinancePrivateEvent, BinancePrivateUserDataStream, BinanceWebSocketStream, BinanceWsConfig,
     GcpSecretManager, TelegramNotifier,
 };
@@ -77,10 +77,6 @@ struct Args {
     /// `parent_run_id`); lets BI compare the session with that backtest's expected range
     #[arg(long, value_parser = RunId::parse)]
     baseline_run_id: Option<RunId>,
-
-    /// Record the session run (lifecycle, closed trades with equity events, final metrics) to Google Cloud BigQuery
-    #[arg(long, default_value_t = false)]
-    gcp_bigquery: bool,
 
     /// Send execution and barrier exit alerts to Telegram
     #[arg(long, default_value_t = false)]
@@ -335,20 +331,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         estimated_taker_fee_pct * dec!(100)
     );
 
-    let bq_sink = if args.gcp_bigquery {
-        let sink = BigQuerySink::from_env();
-        println!(
-            " BigQuery Telemetry:   {}",
-            if sink.is_enabled() {
-                "ACTIVE (Recording run to atsnt_bi)"
-            } else {
-                "ENABLED (Pending GCP_PROJECT_ID / GCP_AUTH_TOKEN)"
-            }
-        );
-        Some(sink)
-    } else {
-        None
-    };
+    let recorder = backtest::wiring::disabled_recorder();
 
     if args.telegram_alerts {
         let t = TelegramNotifier::from_gcp_or_env(&secret_manager).await;
@@ -506,13 +489,14 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
         source: Some(ws_source),
         ..DataWindow::default()
     };
-    if let Some(bq) = &bq_sink {
-        println!(
-            "[*] Recording live run {} to BigQuery (Allocated Capital: ${:.2})",
-            run_ctx.run_id, effective_capital
-        );
-        record_lifecycle(bq, &run_ctx, &run_spec, RunStatus::Running, &data_window).await;
-    }
+    record_lifecycle(
+        &recorder,
+        &run_ctx,
+        &run_spec,
+        RunStatus::Running,
+        &data_window,
+    )
+    .await;
 
     let mut account_ok = true;
     let mut account_read_failures: u32 = 0;
@@ -552,7 +536,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     }
     let sink = EventSink {
         telegram,
-        bq: &bq_sink,
+        recorder: &recorder,
         run_ctx: &run_ctx,
         symbol: &symbol_upper,
         monthly_limit_pct: run_spec.execution_context.max_monthly_drawdown_pct,
@@ -820,7 +804,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
                         // Breaker and emergency-close news goes out before the telemetry below.
                         sink.handle(step.trade_events, &mut stats, driver.session().wallet_equity()).await;
 
-                        // Periodic MTM logging and BigQuery telemetry
+                        // Periodic MTM logging
                         if last_mtm_print.elapsed() >= mtm_interval {
                             last_mtm_print = Instant::now();
                             let dd_pct = if peak_equity > Decimal::ZERO && peak_equity > current_equity {
@@ -885,27 +869,32 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     println!(" Final Account Equity: ${:.2}", current_equity);
     println!("============================================================\n");
 
-    if let Some(bq) = &bq_sink {
-        let closed_trades = driver.session().closed_trades();
-        let max_dd_amount = closed_trades
-            .iter()
-            .map(|t| t.excursion.max_drawdown_amount)
-            .max()
-            .unwrap_or_default();
-        let max_dd_pct = closed_trades
-            .iter()
-            .map(|t| t.excursion.max_drawdown_pct)
-            .max()
-            .unwrap_or_default();
-        let metrics =
-            BacktestMetrics::calculate(effective_capital, closed_trades, max_dd_amount, max_dd_pct);
-        record_lifecycle(bq, &run_ctx, &run_spec, RunStatus::Stopped, &data_window).await;
-        if let Err(e) = bq
-            .record_metrics(&[run_ctx.metrics_row("full", &metrics, None, now_unix_ms())])
-            .await
-        {
-            println!("[WARN] Failed to record live run metrics: {e}");
-        }
+    let closed_trades = driver.session().closed_trades();
+    let max_dd_amount = closed_trades
+        .iter()
+        .map(|t| t.excursion.max_drawdown_amount)
+        .max()
+        .unwrap_or_default();
+    let max_dd_pct = closed_trades
+        .iter()
+        .map(|t| t.excursion.max_drawdown_pct)
+        .max()
+        .unwrap_or_default();
+    let metrics =
+        BacktestMetrics::calculate(effective_capital, closed_trades, max_dd_amount, max_dd_pct);
+    record_lifecycle(
+        &recorder,
+        &run_ctx,
+        &run_spec,
+        RunStatus::Stopped,
+        &data_window,
+    )
+    .await;
+    if let Err(e) = recorder
+        .record_metrics(&[run_ctx.metrics_row("full", &metrics, None, now_unix_ms())])
+        .await
+    {
+        println!("[WARN] Failed to record live run metrics: {e}");
     }
 
     Ok(())
@@ -941,10 +930,10 @@ impl LiveStats {
     }
 }
 
-/// Turns the session's events into console output, Telegram alerts and BigQuery rows.
-struct EventSink<'a> {
+/// Turns the session's events into console output, Telegram alerts and run records.
+struct EventSink<'a, R: RunRecorder> {
     telegram: &'a Option<AlertQueue>,
-    bq: &'a Option<BigQuerySink>,
+    recorder: &'a R,
     run_ctx: &'a RunContext,
     symbol: &'a str,
     monthly_limit_pct: Decimal,
@@ -955,7 +944,7 @@ struct EventSink<'a> {
     entry_failure_alerts: AlertThrottle,
 }
 
-impl EventSink<'_> {
+impl<R: RunRecorder> EventSink<'_, R> {
     async fn handle(&self, events: Vec<SessionEvent>, stats: &mut LiveStats, wallet: Decimal) {
         for event in events {
             match event {
@@ -1135,16 +1124,18 @@ impl EventSink<'_> {
                     }
 
                     stats.recorded_trades += 1;
-                    if let Some(bq) = self.bq {
-                        if let Err(e) =
-                            record_closed_trade(bq, self.run_ctx, &trade, stats.recorded_trades)
-                                .await
-                        {
-                            println!(
-                                "[WARN] Failed to record live trade #{}: {e}",
-                                stats.recorded_trades
-                            );
-                        }
+                    if let Err(e) = record_closed_trade(
+                        self.recorder,
+                        self.run_ctx,
+                        &trade,
+                        stats.recorded_trades,
+                    )
+                    .await
+                    {
+                        println!(
+                            "[WARN] Failed to record live trade #{}: {e}",
+                            stats.recorded_trades
+                        );
                     }
                 }
                 SessionEvent::MonthlyBreakerTripped { drawdown } => {
