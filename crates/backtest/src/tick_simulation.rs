@@ -1,17 +1,18 @@
 //! Tick-level simulation: the live session core running on a simulated venue.
 //!
 //! Where [`crate::BacktestEngine`] fills at bar granularity and is cheap enough for
-//! hyper-parameter search, this driver replays every trade through [`adapters::SimulatedVenue`]
-//! and the same [`crate::session::TradingSession`] that runs live: orders travel with latency,
-//! market fills walk the tape and exchange-held exits fire on trigger prices. It is meant for
-//! validating finalists and for paper trading, not for search loops.
+//! hyper-parameter search, this driver replays every trade through a [`ports::TapeVenue`] and
+//! the same [`crate::session::TradingSession`] that runs live: orders travel with latency,
+//! market fills walk the tape and exchange-held exits fire on trigger prices. The simulated
+//! exchange comes from [`crate::wiring::tick_simulation`]. It is meant for validating finalists
+//! and for paper trading, not for search loops.
 //!
 //! A position still open when the data ends is left open (see [`TickSimulation::open_position`])
 //! and is not counted in the metrics, unlike the bar engine, which marks it out.
 
-use adapters::{SimulatedVenue, SimulatedVenueConfig};
 use domain::futures::FundingSchedule;
 use domain::{DollarBar, DomainError, RiskError, Side, Trade};
+use ports::TapeVenue;
 use rust_decimal::Decimal;
 use strategies::Strategy;
 
@@ -35,10 +36,12 @@ pub struct TickSimulationConfig {
     pub symbol: String,
     /// Dollar-bar threshold the strategy samples at.
     pub dollar_bar_threshold: Decimal,
-    /// Milliseconds an order takes to reach the market.
+    /// Milliseconds an order takes to reach the market. It configures the simulated venue that
+    /// [`crate::wiring::tick_simulation`] builds; [`TickSimulation::new`] takes its venue as given.
     pub latency_ms: i64,
     /// Funding rates charged at each settlement; `FundingSchedule::constant` of the
-    /// configuration's rate unless a recorded history is supplied.
+    /// configuration's rate unless a recorded history is supplied. Like `latency_ms`, it
+    /// configures the simulated venue built by [`crate::wiring::tick_simulation`].
     pub funding: FundingSchedule,
 }
 
@@ -62,32 +65,22 @@ pub struct TickStep {
     pub events: Vec<SessionEvent>,
 }
 
-/// One strategy replayed trade by trade against a simulated exchange account.
-pub struct TickSimulation<S: Strategy> {
+/// One strategy replayed trade by trade against the account of a tape venue.
+pub struct TickSimulation<S: Strategy, V: TapeVenue> {
     initial_capital: Decimal,
     driver: SessionDriver<S>,
-    venue: SimulatedVenue,
+    venue: V,
 }
 
-impl<S: Strategy> TickSimulation<S> {
-    /// Creates a flat simulation holding the configured capital.
-    pub fn new(config: TickSimulationConfig, strategy: S) -> Result<Self, TickSimulationError> {
+impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
+    /// Creates a simulation of `strategy` on `venue`, which must start flat holding the configured
+    /// capital. [`crate::wiring::tick_simulation`] builds both from one configuration.
+    pub fn new(
+        config: TickSimulationConfig,
+        strategy: S,
+        venue: V,
+    ) -> Result<Self, TickSimulationError> {
         let backtest = &config.backtest;
-        let maker_fee_pct = if backtest.resting_maker_exits {
-            Some(backtest.maker_fee_pct)
-        } else {
-            None
-        };
-        let venue = SimulatedVenue::new(SimulatedVenueConfig {
-            initial_equity: backtest.initial_capital,
-            taker_fee_pct: backtest.taker_fee_pct,
-            maker_fee_pct,
-            latency_ms: config.latency_ms,
-            risk_per_trade_pct: backtest.risk_per_trade_pct,
-            risk_policy: backtest.risk_policy()?,
-            funding: config.funding.clone(),
-            maintenance_margin_rate: backtest.maintenance_margin_rate,
-        });
         let session = TradingSession::new(
             SessionConfig {
                 symbol: config.symbol.clone(),
@@ -241,7 +234,9 @@ mod tests {
         Some(OrderIntent::new(1, Side::Buy, dec!(100), dec!(98), dec!(104), 5).unwrap())
     }
 
-    fn simulation(decisions: Vec<Option<OrderIntent>>) -> TickSimulation<Scripted> {
+    fn simulation(
+        decisions: Vec<Option<OrderIntent>>,
+    ) -> crate::wiring::SimulatedTickSimulation<Scripted> {
         let config = TickSimulationConfig {
             backtest: BacktestConfig {
                 initial_capital: dec!(1000),
@@ -253,7 +248,7 @@ mod tests {
             latency_ms: 0,
             funding: FundingSchedule::constant(dec!(0.0001)),
         };
-        TickSimulation::new(
+        crate::wiring::tick_simulation(
             config,
             Scripted {
                 decisions: decisions.into(),
@@ -267,7 +262,10 @@ mod tests {
     }
 
     /// Two $1000 prints close the first bar; the entry fills on the next buyer print.
-    async fn replay(simulation: &mut TickSimulation<Scripted>, ticks: &[Trade]) {
+    async fn replay(
+        simulation: &mut crate::wiring::SimulatedTickSimulation<Scripted>,
+        ticks: &[Trade],
+    ) {
         for tick in ticks {
             simulation.on_trade(tick).await;
         }
@@ -436,7 +434,7 @@ mod tests {
             funding: FundingSchedule::constant(Decimal::ZERO),
         };
 
-        let result = TickSimulation::new(
+        let result = crate::wiring::tick_simulation(
             config,
             Scripted {
                 decisions: VecDeque::new(),

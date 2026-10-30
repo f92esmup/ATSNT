@@ -83,7 +83,12 @@ fn main() -> Result<()> {
 
     println!(" Latency | Matched | Mean |error| (bps) | Mean bias (bps)");
     println!("---------+---------+-------------------+----------------");
-    let scores = sweep_latency(&tape, &fills, args.latencies.iter().copied());
+    let scores = sweep_latency(
+        &tape,
+        &fills,
+        args.latencies.iter().copied(),
+        backtest::wiring::parity_venue,
+    );
     for score in &scores {
         println!(
             " {:>5} ms | {:>3}/{:<3} | {:>17.2} | {:>+14.2}",
@@ -104,7 +109,7 @@ fn main() -> Result<()> {
             println!("    Use it as --latency-ms for --fill-model tick and paper trading.");
             println!("    A positive bias means the simulation is pessimistic, negative optimistic.");
             println!("\n Per-fill detail at the best latency:");
-            for c in compare_fills(&tape, &fills, best.latency_ms) {
+            for c in compare_fills(&tape, &fills, best.latency_ms, backtest::wiring::parity_venue) {
                 let show = |v: Option<Decimal>| v.map_or("n/a".to_string(), |v| format!("{v:.2}"));
                 println!(
                     "  {:?} {} @ {} live | sim {} | error {} bps | time {} ms",

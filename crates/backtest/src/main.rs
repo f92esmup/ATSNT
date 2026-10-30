@@ -9,7 +9,7 @@ use backtest::{
     calibration_end_ms, check_calibration, now_unix_ms, record_backtest_with_audit,
     record_monte_carlo, BacktestConfig, BacktestEngine, DataWindow, MonteCarloConfig,
     MonteCarloSimulator, PriceEvent, RunContext, RunSpec, RunType, SamplingConfig, SinkFailures,
-    TickSimulation, TickSimulationConfig,
+    TickSimulationConfig,
 };
 use clap::Parser;
 use domain::futures::FundingSchedule;
@@ -404,7 +404,7 @@ async fn main() -> Result<()> {
                 }
                 None => FundingSchedule::constant(engine_config.funding_rate_pct),
             };
-            let mut simulation = TickSimulation::new(
+            let mut simulation = backtest::wiring::tick_simulation(
                 TickSimulationConfig {
                     backtest: engine_config,
                     symbol: symbol.clone(),

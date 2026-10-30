@@ -1,5 +1,5 @@
 //! Translation of domain results into the run analytics row contract
-//! ([`adapters::analytics`]).
+//! ([`ports::RunRecorder`]).
 
 use domain::PositionSide;
 use ports::{RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow};

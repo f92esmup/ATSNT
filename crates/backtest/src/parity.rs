@@ -2,17 +2,16 @@
 //! tape that was trading at that moment, and measure how far the simulated fills sit from the
 //! real ones.
 //!
-//! The comparison uses the same [`adapters::SimulatedVenue`] the tick-level simulation and the
-//! paper session use, so the latency it recommends is the one to configure there. Inputs are the
-//! fills `live_trading --record-fills` writes and a tape of the same market (for production, the
-//! `aggTrades` archive of that day).
+//! The comparison replays on the simulated venue of [`crate::wiring::parity_venue`], the one the
+//! tick-level simulation and the paper session use, so the latency it recommends is the one to
+//! configure there. Inputs are the fills `live_trading --record-fills` writes and a tape of the
+//! same market (for production, the `aggTrades` archive of that day).
 //!
 //! The submit time is the local wall clock and the fill time is the exchange's, so clock skew
 //! shifts the time error one-to-one; the price error is what the latency sweep is scored on.
 
-use adapters::{SimulatedVenue, SimulatedVenueConfig};
-use domain::futures::FundingSchedule;
-use domain::{RiskPolicy, Side, Trade};
+use domain::{Side, Trade};
+use ports::TapeVenue;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -156,22 +155,13 @@ impl FillRecorder {
     }
 }
 
-/// Replays `order` on `tape` (sorted by time) with `latency_ms` of order latency.
-pub fn simulate_market_order(
+/// Replays `order` on `tape` (sorted by time) on `venue`. The venue must be fresh: it keeps the
+/// state of every order it has seen, and this replay submits one more.
+pub fn simulate_market_order<V: TapeVenue>(
+    venue: &V,
     tape: &[Trade],
     order: &ObservedFill,
-    latency_ms: i64,
 ) -> Option<SimulatedFill> {
-    let venue = SimulatedVenue::new(SimulatedVenueConfig {
-        initial_equity: dec!(1_000_000_000),
-        taker_fee_pct: Decimal::ZERO,
-        maker_fee_pct: None,
-        latency_ms,
-        risk_per_trade_pct: dec!(0.01),
-        risk_policy: RiskPolicy::default(),
-        funding: FundingSchedule::constant(Decimal::ZERO),
-        maintenance_margin_rate: Decimal::ZERO,
-    });
     venue
         .submit_market_order_at(order.side, order.quantity, order.submitted_ms)
         .ok()?;
@@ -194,16 +184,18 @@ pub fn simulate_market_order(
     None
 }
 
-/// Compares every observed fill with its simulation at one latency.
-pub fn compare_fills(
+/// Compares every observed fill with its simulation at one latency. `new_venue` builds the fresh
+/// venue of each replay at a latency; [`crate::wiring::parity_venue`] is the one to pass.
+pub fn compare_fills<V: TapeVenue>(
     tape: &[Trade],
     fills: &[ObservedFill],
     latency_ms: i64,
+    new_venue: impl Fn(i64) -> V,
 ) -> Vec<FillComparison> {
     fills
         .iter()
         .map(|observed| {
-            let simulated = simulate_market_order(tape, observed, latency_ms);
+            let simulated = simulate_market_order(&new_venue(latency_ms), tape, observed);
             let adverse_error_bps = simulated.as_ref().map(|sim| {
                 let diff = match observed.side {
                     Side::Buy => sim.avg_price - observed.avg_price,
@@ -225,15 +217,16 @@ pub fn compare_fills(
 }
 
 /// Scores each candidate latency by how closely it reproduces the observed prices.
-pub fn sweep_latency(
+pub fn sweep_latency<V: TapeVenue>(
     tape: &[Trade],
     fills: &[ObservedFill],
     latencies: impl IntoIterator<Item = i64>,
+    new_venue: impl Fn(i64) -> V,
 ) -> Vec<LatencyScore> {
     latencies
         .into_iter()
         .map(|latency_ms| {
-            let errors: Vec<Decimal> = compare_fills(tape, fills, latency_ms)
+            let errors: Vec<Decimal> = compare_fills(tape, fills, latency_ms, &new_venue)
                 .into_iter()
                 .filter_map(|comparison| comparison.adverse_error_bps)
                 .collect();
@@ -269,6 +262,7 @@ pub fn best_latency(scores: &[LatencyScore]) -> Option<&LatencyScore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wiring::parity_venue;
 
     fn print(timestamp: i64, price: Decimal, quantity: Decimal, side: Side) -> Trade {
         Trade::new(timestamp, price, quantity, side).unwrap()
@@ -308,7 +302,7 @@ mod tests {
     fn an_order_fills_on_the_first_print_after_its_latency() {
         let order = buy(1_000, 1_100, dec!(1), dec!(100.2));
 
-        let sim = simulate_market_order(&rising_tape(), &order, 100).unwrap();
+        let sim = simulate_market_order(&parity_venue(100), &rising_tape(), &order).unwrap();
 
         // 100 ms after 1_000 is the print at 1_100, priced 100.2.
         assert_eq!(sim.avg_price, dec!(100.2));
@@ -320,7 +314,7 @@ mod tests {
     fn a_large_order_walks_several_prints_at_their_volume_weighted_price() {
         let order = buy(1_000, 1_100, dec!(2), dec!(100.25));
 
-        let sim = simulate_market_order(&rising_tape(), &order, 100).unwrap();
+        let sim = simulate_market_order(&parity_venue(100), &rising_tape(), &order).unwrap();
 
         // Prints at 1_100 and 1_150: (100.2 + 100.3) / 2.
         assert_eq!(sim.avg_price, dec!(100.25));
@@ -331,7 +325,7 @@ mod tests {
     fn an_order_the_tape_cannot_fill_has_no_simulated_fill() {
         let order = buy(1_000, 1_100, dec!(1000), dec!(100));
 
-        assert!(simulate_market_order(&rising_tape(), &order, 0).is_none());
+        assert!(simulate_market_order(&parity_venue(0), &rising_tape(), &order).is_none());
     }
 
     #[test]
@@ -339,7 +333,7 @@ mod tests {
         // Live bought at 100.0; the simulation paid 100.2 (20 bps worse).
         let order = buy(1_000, 1_000, dec!(1), dec!(100));
 
-        let comparison = compare_fills(&rising_tape(), &[order], 100);
+        let comparison = compare_fills(&rising_tape(), &[order], 100, parity_venue);
 
         assert_eq!(
             comparison[0].adverse_error_bps.unwrap().round_dp(2),
@@ -368,7 +362,7 @@ mod tests {
             avg_price: dec!(100),
         };
 
-        let comparison = compare_fills(&tape, &[order], 100);
+        let comparison = compare_fills(&tape, &[order], 100, parity_venue);
 
         // Sold at 99.8 against a live 100.0.
         assert_eq!(
@@ -386,7 +380,7 @@ mod tests {
             buy(1_500, 1_650, dec!(1), dec!(101.3)),
         ];
 
-        let scores = sweep_latency(&tape, &fills, [0, 50, 100, 150, 200, 300]);
+        let scores = sweep_latency(&tape, &fills, [0, 50, 100, 150, 200, 300], parity_venue);
         let best = best_latency(&scores).unwrap();
 
         assert_eq!(best.latency_ms, 150);
@@ -403,7 +397,7 @@ mod tests {
     fn nothing_is_recommended_when_no_fill_could_be_simulated() {
         let fills = vec![buy(1_000, 1_100, dec!(1000), dec!(100))];
 
-        let scores = sweep_latency(&rising_tape(), &fills, [0, 100]);
+        let scores = sweep_latency(&rising_tape(), &fills, [0, 100], parity_venue);
 
         assert!(best_latency(&scores).is_none());
     }

@@ -10,6 +10,7 @@ pub mod execution;
 pub mod exits;
 pub mod market_data;
 pub mod run_recorder;
+pub mod tape;
 
 pub use alerts::AlertNotifier;
 pub use clock::Clock;
@@ -19,3 +20,4 @@ pub use market_data::{AsyncMarketDataStream, MarketDataStream};
 pub use run_recorder::{
     RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow,
 };
+pub use tape::{FundingPayment, TapeVenue};

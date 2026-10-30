@@ -21,7 +21,9 @@ use std::sync::{Mutex, MutexGuard};
 
 use domain::futures::{self, FundingSchedule};
 use domain::{OrderIntent, RiskError, RiskPolicy, Side, Trade};
-use ports::{EntryAck, ExecutionReport, ExecutionVenue, ExitGateway, OrderRequest};
+use ports::{
+    EntryAck, ExecutionReport, ExecutionVenue, ExitGateway, FundingPayment, OrderRequest, TapeVenue,
+};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -57,15 +59,6 @@ impl SimulatedVenueConfig {
     pub fn maker_fee_rate(&self) -> Decimal {
         self.maker_fee_pct.unwrap_or(self.taker_fee_pct)
     }
-}
-
-/// A funding payment settled by the venue.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FundingPayment {
-    /// Settlement instant in Unix milliseconds.
-    pub time_ms: i64,
-    /// Amount paid by the account; negative when it received funding.
-    pub amount: Decimal,
 }
 
 /// Why the simulated venue refused an operation.
@@ -191,29 +184,6 @@ impl SimulatedVenue {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Wallet balance: initial equity plus realized PnL minus commissions.
-    pub fn wallet_balance(&self) -> Decimal {
-        self.lock().wallet
-    }
-
-    /// Queues a raw market order sent at `at_ms`, with no sizing or risk gate, and returns its
-    /// id. It reaches the market after the configured latency and runs unlevered. Used to
-    /// replay orders a live run actually sent.
-    pub fn submit_market_order_at(
-        &self,
-        side: Side,
-        quantity: Decimal,
-        at_ms: i64,
-    ) -> Result<String, SimulatedVenueError> {
-        if quantity <= Decimal::ZERO {
-            return Err(SimulatedVenueError::Risk(
-                "the order quantity must be positive".to_string(),
-            ));
-        }
-        let mut state = self.lock();
-        Ok(self.queue_order(&mut state, side, quantity, at_ms, false, 1))
-    }
-
     /// Queues a market order sent at `at_ms`; it reaches the market after the configured
     /// latency. Returns the order id.
     fn queue_order(
@@ -258,32 +228,6 @@ impl SimulatedVenue {
                 "the balance cannot margin the order at any supported leverage".to_string(),
             )
         })
-    }
-
-    /// Funding payments settled since the last call, oldest first.
-    pub fn take_funding(&self) -> Vec<FundingPayment> {
-        std::mem::take(&mut self.lock().funding)
-    }
-
-    /// Side, quantity and average entry price of the open position, if any.
-    pub fn position(&self) -> Option<(Side, Decimal, Decimal)> {
-        self.lock()
-            .position
-            .map(|p| (p.side, p.quantity, p.entry_price))
-    }
-
-    /// Advances the market by one print and returns the executions it caused, oldest first.
-    pub fn on_trade(&self, trade: &Trade) -> Vec<ExecutionReport> {
-        let mut state = self.lock();
-        self.settle_funding(&mut state, trade.timestamp);
-        state.clock_ms = trade.timestamp;
-        state.last_price = Some(trade.price);
-        // Orders already at the market trade first; an exit armed by this print reaches the
-        // market after it, so the print that triggers a stop never fills it.
-        let mut reports = self.match_orders(&mut state, trade);
-        reports.extend(self.liquidate_if_due(&mut state, trade));
-        self.arm_triggered_exits(&mut state, trade.price);
-        reports
     }
 
     /// Charges the settlements that passed since the previous print to the position held at
@@ -524,6 +468,57 @@ impl SimulatedVenue {
                 });
             }
         }
+    }
+}
+
+impl TapeVenue for SimulatedVenue {
+    /// Wallet balance: initial equity plus realized PnL minus commissions.
+    fn wallet_balance(&self) -> Decimal {
+        self.lock().wallet
+    }
+
+    /// Queues a raw market order sent at `at_ms`, with no sizing or risk gate, and returns its
+    /// id. It reaches the market after the configured latency and runs unlevered. Used to
+    /// replay orders a live run actually sent.
+    fn submit_market_order_at(
+        &self,
+        side: Side,
+        quantity: Decimal,
+        at_ms: i64,
+    ) -> Result<String, SimulatedVenueError> {
+        if quantity <= Decimal::ZERO {
+            return Err(SimulatedVenueError::Risk(
+                "the order quantity must be positive".to_string(),
+            ));
+        }
+        let mut state = self.lock();
+        Ok(self.queue_order(&mut state, side, quantity, at_ms, false, 1))
+    }
+
+    /// Funding payments settled since the last call, oldest first.
+    fn take_funding(&self) -> Vec<FundingPayment> {
+        std::mem::take(&mut self.lock().funding)
+    }
+
+    /// Side, quantity and average entry price of the open position, if any.
+    fn position(&self) -> Option<(Side, Decimal, Decimal)> {
+        self.lock()
+            .position
+            .map(|p| (p.side, p.quantity, p.entry_price))
+    }
+
+    /// Advances the market by one print and returns the executions it caused, oldest first.
+    fn on_trade(&self, trade: &Trade) -> Vec<ExecutionReport> {
+        let mut state = self.lock();
+        self.settle_funding(&mut state, trade.timestamp);
+        state.clock_ms = trade.timestamp;
+        state.last_price = Some(trade.price);
+        // Orders already at the market trade first; an exit armed by this print reaches the
+        // market after it, so the print that triggers a stop never fills it.
+        let mut reports = self.match_orders(&mut state, trade);
+        reports.extend(self.liquidate_if_due(&mut state, trade));
+        self.arm_triggered_exits(&mut state, trade.price);
+        reports
     }
 }
 

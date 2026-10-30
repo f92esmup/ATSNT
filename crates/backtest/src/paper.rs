@@ -17,7 +17,8 @@ use crate::config::BacktestConfig;
 use crate::error::BacktestError;
 use crate::metrics::{BacktestMetrics, ClosedTrade};
 use crate::session::SessionEvent;
-use crate::tick_simulation::{TickSimulation, TickSimulationConfig};
+use crate::tick_simulation::TickSimulationConfig;
+use crate::wiring::{tick_simulation, SimulatedTickSimulation};
 
 /// Real-time lifecycle events emitted during paper trading execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,12 +214,12 @@ fn position_side(side: Side) -> PositionSide {
 
 /// Live event-driven paper trading session coordinator.
 ///
-/// Runs the same [`TradingSession`] as live trading against a tick-level
-/// [`adapters::SimulatedVenue`] (order latency, tape-walk market fills, tape-armed exits) and
+/// Runs the same [`TradingSession`] as live trading against the tick-level simulated venue of
+/// [`crate::wiring`] (order latency, tape-walk market fills, tape-armed exits) and
 /// broadcasts execution telemetry in real time. The strategy only sees dollar bars; the
 /// venue sees every trade.
 pub struct PaperTradingSession {
-    simulation: TickSimulation<Box<dyn Strategy>>,
+    simulation: SimulatedTickSimulation<Box<dyn Strategy>>,
     event_sender: broadcast::Sender<PaperTradingEvent>,
     telemetry: Option<(
         TelemetryConfig,
@@ -243,7 +244,7 @@ impl PaperTradingSession {
         strategy: Box<dyn Strategy>,
     ) -> Result<Self, BacktestError> {
         config.backtest.validate()?;
-        let simulation = TickSimulation::new(
+        let simulation = tick_simulation(
             TickSimulationConfig {
                 backtest: config.backtest,
                 symbol: "PAPER".to_string(),

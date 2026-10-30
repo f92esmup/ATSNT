@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use adapters::InMemoryRunRecorder;
 use backtest::{
     record_hpo, run_backtest_slice_with_trades, BacktestConfig, BacktestMetrics, ClosedTrade,
-    DataWindow, RunContext, RunId, RunSpec, RunType, SamplingConfig, TickSimulation,
-    TickSimulationConfig, WalkForwardConfig, WalkForwardOptimizer, WalkForwardSplitter,
+    DataWindow, RunContext, RunId, RunSpec, RunType, SamplingConfig, TickSimulationConfig,
+    WalkForwardConfig, WalkForwardOptimizer, WalkForwardSplitter,
 };
 use domain::futures::FundingSchedule;
 use domain::{DollarBar, Trade};
@@ -146,7 +146,8 @@ async fn tick_run<S: Strategy>(
         latency_ms: TICK_LATENCY_MS,
         funding: FundingSchedule::constant(account.funding_rate_pct),
     };
-    let mut simulation = TickSimulation::new(config, strategy).expect("tick simulation builds");
+    let mut simulation =
+        backtest::wiring::tick_simulation(config, strategy).expect("tick simulation builds");
     for trade in trades {
         simulation.on_trade(trade).await;
     }

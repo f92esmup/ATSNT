@@ -5,9 +5,10 @@
 //!
 //! Checked here: the dependency direction between workspace crates; no I/O crate and no I/O
 //! API in the core (`domain`, `strategies`, `ports`); ports hold only traits and plain data;
-//! network clients stay in adapters (one documented exception); runners resolve strategies
-//! through the registry. Not checked: determinism, and business logic placed in adapters or
-//! binaries, which need review.
+//! network clients stay in adapters (one documented exception); the library names adapters and
+//! reads the wall clock only in composition; runners resolve strategies through the registry.
+//! Not checked: determinism beyond the clock, and business logic placed in adapters or binaries,
+//! which need review.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -336,7 +337,66 @@ fn is_composition_root(path: &Path) -> bool {
         .parent()
         .and_then(|dir| dir.file_name())
         .is_some_and(|dir| dir == "bin");
-    in_bin_dir || path.file_name().is_some_and(|file| file == "main.rs")
+    in_bin_dir || named(path, "main.rs")
+}
+
+/// Whether `path` has the file name `file`.
+fn named(path: &Path, file: &str) -> bool {
+    path.file_name().is_some_and(|name| name == file)
+}
+
+/// The library names no adapter outside composition: the wiring module, the binaries and `main.rs`
+/// build the concrete adapters, and the library's logic is written against the ports.
+#[test]
+fn the_library_names_no_adapter_outside_composition() {
+    let mut offenders = Vec::new();
+    for (path, production) in production_sources("backtest") {
+        if is_composition_root(&path) || named(&path, "wiring.rs") {
+            continue;
+        }
+        for (number, line) in production.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.contains("adapters::") {
+                offenders.push(format!("{}:{}: {trimmed}", path.display(), number + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the library names no adapter; the wiring module builds them:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Only two library files reach the wiring module: the crate root, which re-exports it, and the
+/// paper session, which holds the simulated venue concretely until it is made strategy-agnostic.
+#[test]
+fn the_library_reaches_the_wiring_only_through_its_entries() {
+    const ENTRIES: [&str; 2] = ["lib.rs", "paper.rs"];
+    let mut offenders = Vec::new();
+    for (path, production) in production_sources("backtest") {
+        let is_entry = ENTRIES.iter().any(|entry| named(&path, entry));
+        if is_composition_root(&path) || named(&path, "wiring.rs") || is_entry {
+            continue;
+        }
+        for (number, line) in production.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.contains("wiring::") {
+                offenders.push(format!("{}:{}: {trimmed}", path.display(), number + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "only the entries may reach the wiring module from the library:\n{}",
+        offenders.join("\n")
+    );
 }
 
 #[test]

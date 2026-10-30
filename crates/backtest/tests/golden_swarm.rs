@@ -14,8 +14,7 @@ mod support;
 use std::path::PathBuf;
 
 use backtest::{
-    BacktestConfig, BacktestEngine, BacktestMetrics, ClosedTrade, PriceEvent, TickSimulation,
-    TickSimulationConfig,
+    BacktestConfig, BacktestEngine, BacktestMetrics, ClosedTrade, PriceEvent, TickSimulationConfig,
 };
 use domain::futures::FundingSchedule;
 use domain::{PositionSide, Trade};
@@ -121,7 +120,8 @@ async fn tick_run(allow_short: bool) -> (BacktestMetrics, Vec<ClosedTrade>) {
         latency_ms: TICK_LATENCY_MS,
         funding: FundingSchedule::constant(account.funding_rate_pct),
     };
-    let mut simulation = TickSimulation::new(config, strategy).expect("tick simulation builds");
+    let mut simulation =
+        backtest::wiring::tick_simulation(config, strategy).expect("tick simulation builds");
     for trade in &trades {
         simulation.on_trade(trade).await;
     }

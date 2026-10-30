@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use backtest::config::BacktestConfig;
 use backtest::engine::BacktestEngine;
 use backtest::price_event::PriceEvent;
-use backtest::tick_simulation::{TickSimulation, TickSimulationConfig};
+use backtest::tick_simulation::TickSimulationConfig;
 use domain::futures::FundingSchedule;
 use domain::{InputKind, MarketEvent, PositionSide, Side, TargetPosition, Trade};
 use rust_decimal::Decimal;
@@ -146,7 +146,7 @@ async fn a_scale_in_scale_out_flip_and_stop_out_match_between_bar_and_tick_engin
     let tick_strat = ScriptedTargetStrategy {
         targets: script.into(),
     };
-    let mut sim = TickSimulation::new(
+    let mut sim = backtest::wiring::tick_simulation(
         TickSimulationConfig {
             backtest: config,
             symbol: "BTCUSDT".to_string(),

@@ -93,7 +93,7 @@ impl RunType {
 pub enum FillModel {
     /// Bar-level fills (`BacktestEngine`): the optimizer's fast loop.
     Bar,
-    /// Tick-level fills (`SimulatedVenue`): latency and tape-walk market orders.
+    /// Tick-level fills (a tape venue): latency and tape-walk market orders.
     Tick,
     /// Fills reported by the real exchange.
     Exchange,
