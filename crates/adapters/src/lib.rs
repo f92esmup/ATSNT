@@ -4,7 +4,6 @@ pub mod binance_csv;
 pub mod binance_fetcher;
 pub mod binance_funding;
 pub mod binance_gateway;
-pub mod binance_parquet;
 pub mod binance_private_stream;
 pub mod binance_recent_trades;
 pub mod binance_user_stream;
@@ -14,6 +13,7 @@ pub mod error;
 pub mod fetch_plan;
 pub mod gcp;
 pub mod simulated_venue;
+pub mod storage;
 pub mod traits;
 
 pub use analytics::{InMemoryRunRecorder, NullRunRecorder, RecordedRuns};
@@ -25,7 +25,6 @@ pub use binance_gateway::{
     AccountFix, AccountReport, BinanceGateway, BinanceGatewayConfig, ExitKind, Finding,
     FindingStatus, GatewayError, OrderExecutionReport, PositionClosureReport, ProtectiveExitReport,
 };
-pub use binance_parquet::{BinanceParquetReader, BinanceParquetWriter};
 pub use binance_private_stream::{
     BinancePrivateEvent, BinancePrivateStreamError, BinancePrivateUserDataStream,
     FuturesAccountUpdate, FuturesBalance, FuturesOrderTradeUpdate, FuturesPosition,
@@ -42,6 +41,7 @@ pub use gcp::{
     GcpSecretManager, GcsArtifactSink, SymbolPerformanceSummary, TelegramNotifier,
 };
 pub use simulated_venue::{SimulatedVenue, SimulatedVenueConfig, SimulatedVenueError};
+pub use storage::tape_parquet::{TapeReader, TapeWriter};
 pub use traits::{AlertNotifier, AsyncMarketDataStream, MarketDataStream};
 
 /// Convenience helper to load `.env` key-value pairs into `std::env` if `.env` exists.

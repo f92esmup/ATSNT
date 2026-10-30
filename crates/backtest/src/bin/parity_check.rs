@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 
-use adapters::{AdapterError, BinanceCsvReader, BinanceParquetReader, MarketDataStream};
+use adapters::{AdapterError, BinanceCsvReader, MarketDataStream, TapeReader};
 use anyhow::{Context, Result};
 use backtest::parity::{
     best_latency, compare_fills, parse_fills_jsonl, sweep_latency, tape_window,
@@ -45,7 +45,7 @@ struct Args {
 
 fn open_tape(path: &PathBuf) -> Result<Box<dyn MarketDataStream<Error = AdapterError>>> {
     if path.is_dir() || path.extension().and_then(|s| s.to_str()) == Some("parquet") {
-        Ok(Box::new(BinanceParquetReader::open(path)?))
+        Ok(Box::new(TapeReader::open(path)?))
     } else {
         let file =
             File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;

@@ -7,8 +7,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::blocking::Client;
 use zip::ZipArchive;
 
-use crate::binance_parquet::BinanceParquetWriter;
 use crate::error::AdapterError;
+use crate::storage::tape_parquet::TapeWriter;
 
 #[cfg(test)]
 mod checksum_tests;
@@ -259,7 +259,7 @@ impl BinanceDataFetcher {
                 .map_err(|e| AdapterError::General(e.to_string()))?,
         );
 
-        let mut parquet_writer = BinanceParquetWriter::new(&target_parquet)?;
+        let mut parquet_writer = TapeWriter::new(&target_parquet)?;
         let mut line = String::with_capacity(256);
         let mut line_number = 0usize;
 

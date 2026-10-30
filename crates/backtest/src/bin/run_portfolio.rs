@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use adapters::{BinanceParquetReader, MarketDataStream};
+use adapters::{MarketDataStream, TapeReader};
 use anyhow::{Context, Result};
 use backtest::{load_portfolio_artifact, EventMerger, PortfolioEngine, PortfolioEngineConfig};
 use clap::Parser;
@@ -160,7 +160,7 @@ fn load_asset_bars(
         "[*] Loading and aggregating {symbol} from {}",
         path.display()
     );
-    let mut reader = BinanceParquetReader::open(path).with_context(|| {
+    let mut reader = TapeReader::open(path).with_context(|| {
         format!(
             "Failed to open Parquet dataset for {symbol} at {}",
             path.display()

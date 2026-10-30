@@ -19,8 +19,8 @@ use crate::traits::MarketDataStream;
 /// Default row group / batch size for Parquet streaming
 const BATCH_SIZE: usize = 65_536;
 
-/// Canonical schema for Binance `aggTrades` in Parquet.
-pub fn agg_trades_schema() -> Arc<Schema> {
+/// Canonical schema of a trade tape in Parquet: the columns of Binance `aggTrades` archives.
+pub fn tape_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("timestamp", DataType::Int64, false),
         Field::new("price", DataType::Utf8, false),
@@ -32,7 +32,7 @@ pub fn agg_trades_schema() -> Arc<Schema> {
 /// High-throughput Parquet writer for `Trade` streams.
 ///
 /// Buffers trades and writes columnar `RecordBatch` chunks with Snappy compression.
-pub struct BinanceParquetWriter {
+pub struct TapeWriter {
     writer: ArrowWriter<File>,
     timestamps: Vec<i64>,
     prices: Vec<String>,
@@ -41,11 +41,11 @@ pub struct BinanceParquetWriter {
     total_written: usize,
 }
 
-impl BinanceParquetWriter {
+impl TapeWriter {
     /// Creates a new Parquet writer targeting the specified file path.
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, AdapterError> {
         let file = File::create(path)?;
-        let schema = agg_trades_schema();
+        let schema = tape_schema();
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .build();
@@ -102,7 +102,7 @@ impl BinanceParquetWriter {
             return Ok(());
         }
 
-        let schema = agg_trades_schema();
+        let schema = tape_schema();
         let count = self.timestamps.len();
 
         let ts_array = Arc::new(Int64Array::from(std::mem::replace(
@@ -149,7 +149,7 @@ impl BinanceParquetWriter {
 /// High-throughput Parquet reader streaming `Trade` events.
 ///
 /// Implements `MarketDataStream` to plug seamlessly into `BacktestEngine`.
-pub struct BinanceParquetReader {
+pub struct TapeReader {
     file_queue: VecDeque<PathBuf>,
     current_reader: Option<ParquetRecordBatchReader>,
     current_batch: Option<RecordBatch>,
@@ -157,7 +157,7 @@ pub struct BinanceParquetReader {
     batch_len: usize,
 }
 
-impl BinanceParquetReader {
+impl TapeReader {
     /// Opens a single Parquet file or a directory of Parquet files for streaming execution.
     ///
     /// If given a directory, discovers all `.parquet` files and replays them in sorted chronological order.
@@ -246,7 +246,7 @@ impl BinanceParquetReader {
     }
 }
 
-impl MarketDataStream for BinanceParquetReader {
+impl MarketDataStream for TapeReader {
     type Error = AdapterError;
 
     fn next_trade(&mut self) -> Result<Option<Trade>, Self::Error> {
@@ -336,7 +336,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path().to_path_buf();
 
-        let mut writer = BinanceParquetWriter::new(&path).unwrap();
+        let mut writer = TapeWriter::new(&path).unwrap();
         let t1 = Trade::new(1700000000001, dec!(60000.50), dec!(1.5), Side::Buy).unwrap();
         let t2 = Trade::new(1700000000002, dec!(60001.00), dec!(0.25), Side::Sell).unwrap();
 
@@ -345,7 +345,7 @@ mod tests {
         let count = writer.finish().unwrap();
         assert_eq!(count, 2);
 
-        let mut reader = BinanceParquetReader::open(&path).unwrap();
+        let mut reader = TapeReader::open(&path).unwrap();
         let read1 = reader.next_trade().unwrap().unwrap();
         assert_eq!(read1, t1);
 
@@ -361,17 +361,17 @@ mod tests {
         let file1_path = temp_dir.path().join("01.parquet");
         let file2_path = temp_dir.path().join("02.parquet");
 
-        let mut writer1 = BinanceParquetWriter::new(&file1_path).unwrap();
+        let mut writer1 = TapeWriter::new(&file1_path).unwrap();
         let t1 = Trade::new(1700000000001, dec!(60000.50), dec!(1.5), Side::Buy).unwrap();
         writer1.write_trade(&t1).unwrap();
         writer1.finish().unwrap();
 
-        let mut writer2 = BinanceParquetWriter::new(&file2_path).unwrap();
+        let mut writer2 = TapeWriter::new(&file2_path).unwrap();
         let t2 = Trade::new(1700000000002, dec!(60001.00), dec!(0.25), Side::Sell).unwrap();
         writer2.write_trade(&t2).unwrap();
         writer2.finish().unwrap();
 
-        let mut reader = BinanceParquetReader::open(temp_dir.path()).unwrap();
+        let mut reader = TapeReader::open(temp_dir.path()).unwrap();
         assert_eq!(reader.next_trade().unwrap().unwrap(), t1);
         assert_eq!(reader.next_trade().unwrap().unwrap(), t2);
         assert!(reader.next_trade().unwrap().is_none());

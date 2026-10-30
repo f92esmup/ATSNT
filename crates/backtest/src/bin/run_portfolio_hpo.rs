@@ -4,7 +4,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use adapters::{BinanceCsvReader, BinanceParquetReader, GcsArtifactSink, MarketDataStream};
+use adapters::{BinanceCsvReader, GcsArtifactSink, MarketDataStream, TapeReader};
 use anyhow::{Context, Result};
 use backtest::metrics::trade_returns;
 use backtest::{
@@ -226,7 +226,7 @@ pub struct JointPortfolioEvaluation<C> {
 
 fn open_stream(data: &Path) -> Result<Box<dyn MarketDataStream<Error = adapters::AdapterError>>> {
     if data.is_dir() || data.extension().and_then(|s| s.to_str()) == Some("parquet") {
-        Ok(Box::new(BinanceParquetReader::open(data)?))
+        Ok(Box::new(TapeReader::open(data)?))
     } else {
         let file =
             File::open(data).with_context(|| format!("Failed to open {}", data.display()))?;

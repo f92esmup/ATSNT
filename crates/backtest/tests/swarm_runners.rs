@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use adapters::BinanceParquetWriter;
+use adapters::TapeWriter;
 use backtest::{
     check_calibration, embargo_buckets, trade_tape, CandidateEvaluation, WalkForwardConfig,
     WalkForwardOptimizer, WalkForwardSplitter, TRADES_WARM_UP_MS,
@@ -184,7 +184,7 @@ async fn a_backtest_records_the_strategy_audit_only_when_there_is_one() {
 
 fn write_trades(dir: &Path, trades: &[Trade]) -> PathBuf {
     let path = dir.join("BTCUSDT-aggTrades-swarm.parquet");
-    let mut writer = BinanceParquetWriter::new(&path).expect("create parquet fixture");
+    let mut writer = TapeWriter::new(&path).expect("create parquet fixture");
     for trade in trades {
         writer.write_trade(trade).expect("write trade");
     }

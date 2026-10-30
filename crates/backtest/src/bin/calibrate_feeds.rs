@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use adapters::{BinanceCsvReader, BinanceParquetReader, MarketDataStream};
+use adapters::{BinanceCsvReader, MarketDataStream, TapeReader};
 use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
 use clap::Parser;
@@ -146,9 +146,9 @@ fn build_config(
 /// use the Parquet reader, anything else the CSV reader.
 fn open_stream(data: &Path) -> Result<Box<dyn MarketDataStream<Error = adapters::AdapterError>>> {
     if data.is_dir() || data.extension().and_then(|s| s.to_str()) == Some("parquet") {
-        Ok(Box::new(BinanceParquetReader::open(data).with_context(
-            || format!("Failed to open {}", data.display()),
-        )?))
+        Ok(Box::new(TapeReader::open(data).with_context(|| {
+            format!("Failed to open {}", data.display())
+        })?))
     } else {
         let file =
             File::open(data).with_context(|| format!("Failed to open {}", data.display()))?;

@@ -3,7 +3,7 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use adapters::{BigQuerySink, BinanceCsvReader, BinanceParquetReader, MarketDataStream};
+use adapters::{BigQuerySink, BinanceCsvReader, MarketDataStream, TapeReader};
 use anyhow::{Context, Result};
 use backtest::{
     calibration_end_ms, check_calibration, now_unix_ms, record_backtest_with_audit,
@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
         || args.data.extension().and_then(|s| s.to_str()) == Some("parquet")
     {
         println!("[*] Format: Apache Parquet (High-throughput columnar)");
-        Box::new(BinanceParquetReader::open(&args.data)?)
+        Box::new(TapeReader::open(&args.data)?)
     } else {
         println!("[*] Format: CSV (Buffered line-by-line)");
         let file = File::open(&args.data)

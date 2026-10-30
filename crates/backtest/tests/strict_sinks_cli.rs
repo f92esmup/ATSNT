@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Arc, Mutex};
 
-use adapters::BinanceParquetWriter;
+use adapters::TapeWriter;
 use domain::{Side, Trade};
 use rust_decimal::Decimal;
 
@@ -72,7 +72,7 @@ impl FailingServer {
 /// Writes a deterministic oscillating trade tape where every trade forms one $100 dollar bar.
 fn write_fixture(dir: &Path) -> PathBuf {
     let path = dir.join("BTCUSDT-aggTrades-2026-01.parquet");
-    let mut writer = BinanceParquetWriter::new(&path).expect("create parquet fixture");
+    let mut writer = TapeWriter::new(&path).expect("create parquet fixture");
     for i in 0..4_000i64 {
         let wave = Decimal::from((i % 200 - 100).abs());
         let price = Decimal::from(100) + wave / Decimal::from(10);

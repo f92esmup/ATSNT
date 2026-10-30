@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use adapters::{BinanceParquetReader, MarketDataStream};
+use adapters::{MarketDataStream, TapeReader};
 use anyhow::{Context, Result};
 use backtest::universe_selector::CrossSectionalUniverseSelector;
 use backtest::{EventMerger, PortfolioEngine, PortfolioEngineConfig};
@@ -123,7 +123,7 @@ fn load_or_aggregate_bars(
         asset_path.display(),
         threshold
     );
-    let mut reader = BinanceParquetReader::open(&asset_path).with_context(|| {
+    let mut reader = TapeReader::open(&asset_path).with_context(|| {
         format!(
             "Failed to open Parquet dataset for {symbol} at {}",
             asset_path.display()

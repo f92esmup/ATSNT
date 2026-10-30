@@ -3,9 +3,7 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use adapters::{
-    BigQuerySink, BinanceCsvReader, BinanceParquetReader, GcsArtifactSink, MarketDataStream,
-};
+use adapters::{BigQuerySink, BinanceCsvReader, GcsArtifactSink, MarketDataStream, TapeReader};
 use anyhow::{Context, Result};
 use backtest::{
     artifact_object_name, artifact_run_suffix, bar_tape, calibration_end_ms, check_calibration,
@@ -224,7 +222,7 @@ fn open_stream(
     data: &std::path::Path,
 ) -> Result<Box<dyn MarketDataStream<Error = adapters::AdapterError>>> {
     if data.is_dir() || data.extension().and_then(|s| s.to_str()) == Some("parquet") {
-        Ok(Box::new(BinanceParquetReader::open(data)?))
+        Ok(Box::new(TapeReader::open(data)?))
     } else {
         let file =
             File::open(data).with_context(|| format!("Failed to open {}", data.display()))?;

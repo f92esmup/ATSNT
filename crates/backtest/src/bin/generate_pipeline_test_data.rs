@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use adapters::BinanceParquetWriter;
+use adapters::TapeWriter;
 use anyhow::{Context, Result};
 use domain::{Side, Trade};
 use rand::rngs::StdRng;
@@ -52,7 +52,7 @@ fn write_parquet(path: &Path, trades: &[Trade]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut writer = BinanceParquetWriter::new(path).context("failed to create writer")?;
+    let mut writer = TapeWriter::new(path).context("failed to create writer")?;
     for trade in trades {
         writer.write_trade(trade).context("failed to write trade")?;
     }
