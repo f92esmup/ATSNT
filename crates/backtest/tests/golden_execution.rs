@@ -1,8 +1,9 @@
 //! Characterisation (golden) tests of the run records.
 //!
-//! They pin, byte for byte, the rows the swarm's tick-level run records for run analytics on a
-//! deterministic synthetic tape. The trade-level outcomes themselves are pinned by
-//! `golden_swarm.rs`. A refactor of the recording layer must leave the snapshot unchanged.
+//! They pin, byte for byte, the rows the swarm's long-only tick-level run records for run
+//! analytics, on the same ninety-day tape and account as `golden_swarm.rs`. The trade-level
+//! outcomes themselves are pinned there. A refactor of the recording layer must leave the
+//! snapshot unchanged.
 //!
 //! Snapshots live in `tests/golden/`. To rewrite them after an intended behaviour change, run
 //! `UPDATE_GOLDEN=1 cargo test -p backtest --test golden_execution` and review the diff.
@@ -22,17 +23,17 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Serialize;
 use serde_json::Value;
-use strategies::{MarketType, OptimizableStrategy, PolicyConfig, Strategy, SwarmConsensusStrategy};
+use strategies::{
+    MarketType, OptimizableStrategy, PolicyConfig, Strategy, SwarmConfig, SwarmConsensusStrategy,
+};
 
+/// Ninety days: past the swarm's 70-day warm-up, so the trades are decided (as in `golden_swarm`).
+const DAYS: i64 = 90;
+const CAPITAL: Decimal = dec!(5000);
 const SEED: u64 = 7;
-const TAPE_TRADES: usize = 60_000;
 const DOLLAR_BAR: Decimal = dec!(1_000_000);
 const TICK_LATENCY_MS: i64 = 100;
 const FIXED_RUN_ID: &str = "0198b3c0-7a4e-7c21-8f3d-5b2a9c6e1d40";
-
-fn tape() -> Vec<Trade> {
-    support::synthetic_trades(SEED, TAPE_TRADES)
-}
 
 fn golden_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -154,13 +155,18 @@ fn the_tape_is_deterministic() {
 
 #[tokio::test]
 async fn backtest_recording_rows_are_unchanged() {
-    let trades = tape();
-    let strategy = SwarmConsensusStrategy::from_config(
-        &support::swarm::shared(),
-        support::swarm::busy_policy(),
-    )
-    .expect("swarm builds");
-    let (metrics, closed) = tick_run(support::swarm::account(), strategy, &trades).await;
+    let trades = support::swarm::swarm_trades(DAYS);
+    let account = BacktestConfig {
+        initial_capital: CAPITAL,
+        ..support::swarm::account()
+    };
+    let config = SwarmConfig {
+        allow_short: false,
+        ..support::swarm::shared()
+    };
+    let strategy = SwarmConsensusStrategy::from_config(&config, support::swarm::busy_policy())
+        .expect("swarm builds");
+    let (metrics, closed) = tick_run(account, strategy, &trades).await;
 
     let ctx = run_context(RunType::Backtest).with_fill_model(FillModel::Tick);
     let mut rows = Value::Array(vec![serde_json::json!({

@@ -367,7 +367,8 @@ fn the_library_names_no_adapter_outside_composition() {
 }
 
 /// Only two library files reach the wiring module: the crate root, which re-exports it, and the
-/// paper session, which holds the simulated venue concretely until it is made strategy-agnostic.
+/// paper session. The paper session runs on a spawned task, so it holds the simulated venue
+/// concretely: a generic venue would have to prove its futures are `Send`.
 #[test]
 fn the_library_reaches_the_wiring_only_through_its_entries() {
     const ENTRIES: [&str; 2] = ["lib.rs", "paper.rs"];
