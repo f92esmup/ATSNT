@@ -1,6 +1,6 @@
 use std::future::Future;
 
-/// Outbound alerting port for immediate push notifications (Telegram, Discord, Webhooks).
+/// Outbound alerting port for immediate push notifications (messaging services, webhooks).
 pub trait AlertNotifier: Send + Sync {
     /// Error reported by the notification channel.
     type Error: std::fmt::Display;

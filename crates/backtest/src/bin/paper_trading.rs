@@ -4,12 +4,13 @@
 //! information-driven Dollar Bars, executes strategy signals against simulated liquidity
 //! and realistic friction via the [`PaperTradingSession`], and displays live execution telemetry.
 
+use ports::RunRecorder;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use adapters::{
     now_in_madrid, AsyncMarketDataStream, BigQuerySink, BinanceWebSocketStream, BinanceWsConfig,
-    GcpSecretManager, RunRecorder, TelegramNotifier,
+    GcpSecretManager, TelegramNotifier,
 };
 use anyhow::{Context, Result};
 use backtest::operator_alerts::{

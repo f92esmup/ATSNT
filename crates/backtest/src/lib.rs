@@ -26,6 +26,7 @@ pub mod sinks;
 pub mod tick_simulation;
 pub mod universe_selector;
 pub mod walk_forward;
+pub mod wiring;
 
 pub use alert_throttle::AlertThrottle;
 pub use artifact::{

@@ -1440,6 +1440,8 @@ version = "0.1.0"
 dependencies = [
  "domain",
  "rust_decimal",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

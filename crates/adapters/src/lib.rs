@@ -9,16 +9,14 @@ pub mod binance_private_stream;
 pub mod binance_recent_trades;
 pub mod binance_user_stream;
 pub mod binance_ws;
+pub mod clock;
 pub mod error;
 pub mod fetch_plan;
 pub mod gcp;
 pub mod simulated_venue;
 pub mod traits;
 
-pub use analytics::{
-    InMemoryRunRecorder, RecordedRuns, RunMetricsRow, RunRecorder, RunRow, RunTradeRow,
-    SeriesPointRow,
-};
+pub use analytics::{InMemoryRunRecorder, NullRunRecorder, RecordedRuns};
 pub use binance_auth::BinanceAuth;
 pub use binance_csv::BinanceCsvReader;
 pub use binance_fetcher::{BinanceDataFetcher, FetchParams, FetchSummary};
@@ -36,6 +34,7 @@ pub use binance_private_stream::{
 pub use binance_recent_trades::BinanceRecentTrades;
 pub use binance_user_stream::{BinanceUserDataStream, ExecutionUpdate};
 pub use binance_ws::{BinanceAggTradePayload, BinanceWebSocketStream, BinanceWsConfig};
+pub use clock::SystemClock;
 pub use error::AdapterError;
 pub use fetch_plan::{is_not_archived, plan_fetch_tasks, run_bounded, FetchTask};
 pub use gcp::{

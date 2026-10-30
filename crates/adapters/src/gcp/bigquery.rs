@@ -10,8 +10,8 @@ use tracing::{info, warn};
 
 use super::auth::GcpAuthResolver;
 use super::retry::{send_with_retry, RetryPolicy};
-use crate::analytics::{RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow};
 use crate::error::AdapterError;
+use ports::{RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow};
 
 /// Trait representing rows destined for BigQuery streaming tables, providing deduplication keys.
 pub trait BigQueryRecord: Serialize {
@@ -343,20 +343,28 @@ impl BigQuerySink {
 }
 
 impl RunRecorder for BigQuerySink {
-    async fn record_runs(&self, rows: &[RunRow]) -> Result<(), AdapterError> {
-        self.insert_rows("runs", rows).await
+    async fn record_runs(&self, rows: &[RunRow]) -> Result<(), RecorderError> {
+        self.insert_rows("runs", rows)
+            .await
+            .map_err(|e| RecorderError::Storage(e.to_string()))
     }
 
-    async fn record_metrics(&self, rows: &[RunMetricsRow]) -> Result<(), AdapterError> {
-        self.insert_rows("run_metrics", rows).await
+    async fn record_metrics(&self, rows: &[RunMetricsRow]) -> Result<(), RecorderError> {
+        self.insert_rows("run_metrics", rows)
+            .await
+            .map_err(|e| RecorderError::Storage(e.to_string()))
     }
 
-    async fn record_trades(&self, rows: &[RunTradeRow]) -> Result<(), AdapterError> {
-        self.insert_rows("trades", rows).await
+    async fn record_trades(&self, rows: &[RunTradeRow]) -> Result<(), RecorderError> {
+        self.insert_rows("trades", rows)
+            .await
+            .map_err(|e| RecorderError::Storage(e.to_string()))
     }
 
-    async fn record_series(&self, rows: &[SeriesPointRow]) -> Result<(), AdapterError> {
-        self.insert_rows("run_series", rows).await
+    async fn record_series(&self, rows: &[SeriesPointRow]) -> Result<(), RecorderError> {
+        self.insert_rows("run_series", rows)
+            .await
+            .map_err(|e| RecorderError::Storage(e.to_string()))
     }
 }
 
@@ -383,7 +391,7 @@ mod tests {
     async fn offline_sink_skips_inserts_without_resolving_credentials() {
         let sink = BigQuerySink::offline("atsnt_bi");
         assert!(!sink.is_enabled());
-        let metrics = RunMetricsRow::extras_only("r1", "monte_carlo", "full", "t", "{}");
+        let metrics = crate::analytics::extras_only_metrics("r1", "monte_carlo", "full", "t", "{}");
         assert!(sink.record_metrics(&[metrics]).await.is_ok());
         assert!(sink
             .record_series(&[equity_point("entry", "t1")])
@@ -432,7 +440,7 @@ mod tests {
     fn every_row_kind_carries_an_insert_id_so_a_retried_insert_is_deduplicated() {
         // A retry after a lost response resends committed rows; BigQuery drops rows whose
         // insertId it has just seen, and the v_* views deduplicate by the same keys.
-        let run = crate::analytics::RunRow {
+        let run = ports::RunRow {
             run_id: "r1".into(),
             parent_run_id: None,
             baseline_run_id: None,
@@ -496,7 +504,7 @@ mod tests {
     }
 
     fn one_run_row() -> RunMetricsRow {
-        RunMetricsRow::extras_only("r1", "backtest", "full", "t", "{}")
+        crate::analytics::extras_only_metrics("r1", "backtest", "full", "t", "{}")
     }
 
     #[tokio::test]

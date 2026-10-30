@@ -2,7 +2,7 @@ use domain::Trade;
 
 /// Ingestion port for discrete market trade streams.
 ///
-/// Implemented by historical CSV readers, Parquet files, or live WebSocket clients.
+/// Implemented by historical file readers, stored tapes, or live WebSocket clients.
 pub trait MarketDataStream {
     type Error;
 

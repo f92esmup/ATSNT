@@ -8,7 +8,6 @@
 
 use std::path::Path;
 
-use adapters::AdapterError;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
@@ -40,7 +39,7 @@ impl SinkFailures {
 
     /// Records the outcome of one sink operation, printing `[WARN] Failed to <operation>: <error>`
     /// on failure.
-    pub fn record(&mut self, operation: &str, result: Result<(), AdapterError>) {
+    pub fn record<E: std::fmt::Display>(&mut self, operation: &str, result: Result<(), E>) {
         if let Err(e) = result {
             println!("[WARN] Failed to {operation}: {e}");
             self.failures.push(format!("{operation}: {e}"));

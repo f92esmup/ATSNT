@@ -254,6 +254,25 @@ fn ports_declare_traits_and_plain_data_only() {
     );
 }
 
+/// Ports are contracts only: they name no exchange and no storage format.
+#[test]
+fn ports_name_no_exchange_or_storage_format() {
+    const FORBIDDEN: [&str; 4] = ["Binance", "Kraken", "Parquet", "BigQuery"];
+    let mut offenders = Vec::new();
+    for (path, production) in production_sources("ports") {
+        for (number, line) in production.lines().enumerate() {
+            if let Some(word) = FORBIDDEN.iter().find(|word| line.contains(*word)) {
+                offenders.push(format!("{}:{}: {word}", path.display(), number + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "ports must not name exchanges or formats:\n{}",
+        offenders.join("\n")
+    );
+}
+
 /// Money, prices and quantities are fixed-point in the domain: no float type appears in its
 /// production code.
 #[test]

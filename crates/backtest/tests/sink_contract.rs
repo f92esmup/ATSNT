@@ -21,7 +21,7 @@ fn tolerant_mode_finishes_ok_despite_failures() {
 fn strict_mode_reports_every_failure_at_finish() {
     let mut sinks = SinkFailures::new(true);
     sinks.record("record HPO run", failure("HTTP 500"));
-    sinks.record("upload artifact", Ok(()));
+    sinks.record("upload artifact", Ok::<(), AdapterError>(()));
     sinks.record("upload artifact", failure("HTTP 403"));
     let err = sinks.finish().expect_err("strict mode must fail");
     let msg = err.to_string();
@@ -33,7 +33,7 @@ fn strict_mode_reports_every_failure_at_finish() {
 #[test]
 fn strict_mode_without_failures_finishes_ok() {
     let mut sinks = SinkFailures::new(true);
-    sinks.record("record backtest run", Ok(()));
+    sinks.record("record backtest run", Ok::<(), AdapterError>(()));
     assert!(sinks.finish().is_ok());
 }
 

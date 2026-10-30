@@ -6,7 +6,7 @@ use crate::exits::ExitGateway;
 /// Acknowledgement that the venue accepted an entry order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryAck {
-    /// Venue-assigned identifier of the order (client order id on Binance).
+    /// Venue-assigned identifier of the order (client order id of the venue).
     pub order_id: String,
     /// Venue status at acknowledgement time (e.g. `NEW`, `FILLED`).
     pub status: String,
@@ -70,7 +70,7 @@ pub struct ExecutionReport {
 /// Everything a trading session needs from an execution venue.
 ///
 /// A venue accepts entries and manages exchange-held exits; it reports what happened through
-/// [`ExecutionReport`]s that the driver feeds back to the session. Binance implements it for
+/// [`ExecutionReport`]s that the driver feeds back to the session. A live exchange adapter implements it for
 /// live trading and the simulator implements it for backtests, so one session core runs on
 /// both.
 #[allow(async_fn_in_trait)]

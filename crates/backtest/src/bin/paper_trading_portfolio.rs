@@ -8,14 +8,15 @@
 //! streams execution telemetry to Google Cloud BigQuery, and sends real-time execution alerts,
 //! periodic heartbeats, and consolidated daily performance & universe ranking snapshots to Telegram.
 
+use ports::RunRecorder;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use adapters::{
     now_in_madrid, AsyncMarketDataStream, BigQuerySink, BinanceRecentTrades,
-    BinanceWebSocketStream, BinanceWsConfig, GcpSecretManager, RunRecorder,
-    SymbolPerformanceSummary, TelegramNotifier,
+    BinanceWebSocketStream, BinanceWsConfig, GcpSecretManager, SymbolPerformanceSummary,
+    TelegramNotifier,
 };
 use anyhow::Result;
 use backtest::operator_alerts::{AlertQueue, DEFAULT_ALERT_QUEUE_CAPACITY, HEARTBEAT_INTERVAL_MS};

@@ -3,11 +3,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use adapters::{
-    format_unix_ms_rfc3339, AdapterError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow,
-    SeriesPointRow,
-};
+use adapters::format_unix_ms_rfc3339;
 use domain::PositionSide;
+use ports::{RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow};
 use serde::Serialize;
 
 use crate::metrics::{BacktestMetrics, ClosedTrade};
@@ -195,7 +193,7 @@ impl RunContext {
 
     /// Performance row carrying only run-type specific values.
     pub fn extras_row(&self, scope: &str, extras: serde_json::Value) -> RunMetricsRow {
-        RunMetricsRow::extras_only(
+        extras_only_metrics_row(
             self.run_id.to_string(),
             self.run_type.as_str(),
             scope,
@@ -298,8 +296,8 @@ const MC_PERSISTED_CURVES: [&str; 8] = [
     "Quantile_0.95",
 ];
 
-fn serialization_error(e: serde_json::Error) -> AdapterError {
-    AdapterError::General(format!("run row serialization failed: {e}"))
+fn serialization_error(e: serde_json::Error) -> RecorderError {
+    RecorderError::Serialization(format!("run row serialization failed: {e}"))
 }
 
 /// Persists a completed backtest: run, `full` metrics, trades, and equity events.
@@ -310,7 +308,7 @@ pub async fn record_backtest<R: RunRecorder, C: Serialize>(
     data: &DataWindow,
     metrics: &BacktestMetrics,
     trades: &[ClosedTrade],
-) -> Result<(), AdapterError> {
+) -> Result<(), RecorderError> {
     record_backtest_with_audit(recorder, ctx, spec, data, metrics, trades, None).await
 }
 
@@ -325,7 +323,7 @@ pub async fn record_backtest_with_audit<R: RunRecorder, C: Serialize>(
     metrics: &BacktestMetrics,
     trades: &[ClosedTrade],
     strategy_audit: Option<&serde_json::Value>,
-) -> Result<(), AdapterError> {
+) -> Result<(), RecorderError> {
     let run = ctx
         .run_row(spec, RunStatus::Completed, Some(now_unix_ms()), data)
         .map_err(serialization_error)?;
@@ -352,7 +350,7 @@ pub async fn record_monte_carlo<R: RunRecorder, C: Serialize>(
     spec: &RunSpec<C>,
     data: &DataWindow,
     report: &MonteCarloReport,
-) -> Result<(), AdapterError> {
+) -> Result<(), RecorderError> {
     let run = ctx
         .run_row(spec, RunStatus::Completed, Some(now_unix_ms()), data)
         .map_err(serialization_error)?;
@@ -420,7 +418,7 @@ pub async fn record_hpo<R: RunRecorder, S: Serialize, C: Serialize + Clone>(
     data: &DataWindow,
     evaluations: &[CandidateEvaluation<C>],
     settings: serde_json::Value,
-) -> Result<Option<RunId>, AdapterError> {
+) -> Result<Option<RunId>, RecorderError> {
     let finished = now_unix_ms();
     let mut runs = vec![parent
         .run_row(parent_spec, RunStatus::Completed, Some(finished), data)
@@ -491,7 +489,7 @@ pub async fn record_run_status<R: RunRecorder, C: Serialize>(
     spec: &RunSpec<C>,
     status: RunStatus,
     data: &DataWindow,
-) -> Result<(), AdapterError> {
+) -> Result<(), RecorderError> {
     let finished_at = (status != RunStatus::Running).then(now_unix_ms);
     let row = ctx
         .run_row(spec, status, finished_at, data)
@@ -506,7 +504,7 @@ pub async fn record_closed_trade<R: RunRecorder>(
     ctx: &RunContext,
     trade: &ClosedTrade,
     number: usize,
-) -> Result<(), AdapterError> {
+) -> Result<(), RecorderError> {
     let trades = std::slice::from_ref(trade);
     recorder
         .record_trades(&ctx.trade_rows(trades, number))
@@ -514,4 +512,22 @@ pub async fn record_closed_trade<R: RunRecorder>(
     recorder
         .record_series(&ctx.equity_points(trades, number))
         .await
+}
+
+/// Performance row carrying only run-type specific `extras`, with no trade metrics.
+fn extras_only_metrics_row(
+    run_id: impl Into<String>,
+    run_type: impl Into<String>,
+    scope: impl Into<String>,
+    recorded_at: impl Into<String>,
+    extras: impl Into<String>,
+) -> RunMetricsRow {
+    RunMetricsRow {
+        run_id: run_id.into(),
+        run_type: run_type.into(),
+        scope: scope.into(),
+        recorded_at: recorded_at.into(),
+        extras: Some(extras.into()),
+        ..RunMetricsRow::default()
+    }
 }

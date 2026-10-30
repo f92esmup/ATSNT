@@ -5,6 +5,7 @@
 //! validates pre-trade risk policy constraints, dispatches authenticated live orders via [`BinanceGateway`],
 //! and listens for execution updates and order fills over the private [`BinancePrivateUserDataStream`].
 
+use ports::RunRecorder;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,7 +13,7 @@ use std::time::{Duration, Instant};
 use adapters::{
     now_in_madrid, AsyncMarketDataStream, BigQuerySink, BinanceGateway, BinanceGatewayConfig,
     BinancePrivateEvent, BinancePrivateUserDataStream, BinanceWebSocketStream, BinanceWsConfig,
-    GcpSecretManager, RunRecorder, TelegramNotifier,
+    GcpSecretManager, TelegramNotifier,
 };
 use anyhow::{Context, Result};
 use backtest::driver::SessionDriver;
