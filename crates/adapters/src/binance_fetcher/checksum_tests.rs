@@ -4,7 +4,7 @@
 use std::io::Write;
 
 use super::*;
-use crate::gcp::test_http::ScriptedServer;
+use crate::test_http::ScriptedServer;
 
 /// SHA-256 of the three bytes `abc` (FIPS 180-2 test vector).
 const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";

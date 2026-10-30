@@ -1062,7 +1062,7 @@ mod tests {
 
     #[test]
     fn a_sharpe_over_a_handful_of_trades_neither_gets_a_p_value_nor_deflates_the_others() {
-        // Seen in BigQuery: two near-equal OOS returns give a per-trade Sharpe of 20 and p = 0,
+        // Seen in a production run: two near-equal OOS returns give a per-trade Sharpe of 20 and p = 0,
         // and that outlier inflated the cross-trial variance so every real trial got p = 1.
         let evaluated = vec![
             (evaluation(true), Some(moments(101, 0.03, 0.1))),

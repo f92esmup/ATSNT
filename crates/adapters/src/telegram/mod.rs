@@ -48,19 +48,6 @@ impl TelegramNotifier {
         Self::new(token, chat)
     }
 
-    /// Initializes from Google Cloud Secret Manager with automatic fallback to environment variables.
-    pub async fn from_gcp_or_env(secret_mgr: &crate::gcp::GcpSecretManager) -> Self {
-        let token = match secret_mgr.resolve_secret("TELEGRAM_BOT_TOKEN").await {
-            Some(t) => Some(t),
-            None => secret_mgr.resolve_secret("BOT_TOKEN").await,
-        };
-        let chat = match secret_mgr.resolve_secret("TELEGRAM_CHAT_ID").await {
-            Some(c) => Some(c),
-            None => secret_mgr.resolve_secret("CHAT_ID").await,
-        };
-        Self::new(token, chat)
-    }
-
     /// Returns `true` if valid credentials are configured.
     #[inline]
     pub fn is_enabled(&self) -> bool {
@@ -444,55 +431,6 @@ impl TelegramNotifier {
             positions_desc,
             uptime_str
         )
-    }
-
-    /// Formats a dynamic cross-sectional universe ranking snapshot notification.
-    pub fn format_universe_ranking_update(
-        time_str: &str,
-        rankings: &[domain::AssetRankingScore],
-        top_k: usize,
-        hysteresis_tol: usize,
-    ) -> String {
-        let max_retention = top_k + hysteresis_tol;
-        let mut text = format!(
-            "🌌 *ATSNT: Universe Ranking Snapshot*\n\
-             ━━━━━━━━━━━━━━━━━━━━━━\n\
-             🕒 *Time*: `{time_str}`\n\
-             🎯 *Policy*: Top-{top_k} Entry / Top-{max_retention} Retention\n\
-             ━━━━━━━━━━━━━━━━━━━━━━\n"
-        );
-
-        for item in rankings {
-            let (status_icon, status_label) = if item.rank <= top_k {
-                ("🏆", "ENTRY ALLOWED")
-            } else if item.rank <= max_retention {
-                ("🛡️", "RETAINED")
-            } else {
-                ("⛔", "EXCLUDED")
-            };
-
-            let score_sign = if item.composite_score >= Decimal::ZERO {
-                "+"
-            } else {
-                ""
-            };
-            text.push_str(&format!(
-                "{} *#{} {}* | Score: `{}{:.3}`\n\
-                 └ Alpha: `{:.2}` | Quantum: `{:.2}` | Vol: `{:.2}` ({})\n",
-                status_icon,
-                item.rank,
-                item.symbol,
-                score_sign,
-                item.composite_score,
-                item.momentum_z,
-                item.quantum_z,
-                item.volume_z,
-                status_label
-            ));
-        }
-
-        text.push_str("━━━━━━━━━━━━━━━━━━━━━━");
-        text
     }
 }
 

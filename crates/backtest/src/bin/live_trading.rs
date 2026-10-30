@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use adapters::{
     now_in_madrid, AsyncMarketDataStream, BinanceGateway, BinanceGatewayConfig,
     BinancePrivateEvent, BinancePrivateUserDataStream, BinanceWebSocketStream, BinanceWsConfig,
-    GcpSecretManager, TelegramNotifier,
+    TelegramNotifier,
 };
 use anyhow::{Context, Result};
 use backtest::driver::SessionDriver;
@@ -197,28 +197,20 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     validate_collateral_tolerance(is_testnet, args.allow_foreign_collateral)?;
     let symbol_upper = args.symbol.to_ascii_uppercase();
 
-    let secret_manager = GcpSecretManager::from_env();
-
     let api_key = match args.api_key {
         Some(k) if !k.trim().is_empty() => k,
-        _ => secret_manager
-            .resolve_secret("BINANCE_API_KEY")
-            .await
-            .unwrap_or_default(),
+        _ => std::env::var("BINANCE_API_KEY").unwrap_or_default(),
     };
 
     let secret_key = match args.secret_key {
         Some(s) if !s.trim().is_empty() => s,
-        _ => secret_manager
-            .resolve_secret("BINANCE_SECRET_KEY")
-            .await
-            .unwrap_or_default(),
+        _ => std::env::var("BINANCE_SECRET_KEY").unwrap_or_default(),
     };
 
     if api_key.is_empty() || secret_key.is_empty() {
         eprintln!(
             "\n[ERROR] Binance API credentials not found.\n\
-             Please store BINANCE_API_KEY and BINANCE_SECRET_KEY in GCP Secret Manager,\n\
+             Please set BINANCE_API_KEY and BINANCE_SECRET_KEY in the environment,\n\
              in your local .env file, or pass --api-key and --secret-key.\n"
         );
         std::process::exit(1);
@@ -334,7 +326,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     let recorder = backtest::wiring::disabled_recorder();
 
     if args.telegram_alerts {
-        let t = TelegramNotifier::from_gcp_or_env(&secret_manager).await;
+        let t = TelegramNotifier::from_env();
         println!(
             " Telegram Alerts:      {}",
             if t.is_enabled() {

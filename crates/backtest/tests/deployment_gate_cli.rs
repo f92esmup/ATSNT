@@ -24,7 +24,6 @@ fn run(binary: &str, config: &Path, extra: &[&str]) -> Output {
         // No network in tests: the gate must fire before any connection is opened.
         .env("BINANCE_API_KEY", "test-key")
         .env("BINANCE_SECRET_KEY", "test-secret")
-        .env_remove("GCP_PROJECT_ID")
         .output()
         .expect("run binary")
 }

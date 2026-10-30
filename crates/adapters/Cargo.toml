@@ -29,7 +29,6 @@ futures-util.workspace = true
 ring.workspace = true
 chrono.workspace = true
 rayon.workspace = true
-base64.workspace = true
 
 
 

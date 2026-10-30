@@ -85,7 +85,7 @@ impl RunRecorder for NullRunRecorder {
 }
 
 /// Row carrying only run-type specific `extras`, with no trade metrics. A fixture for the
-/// recorders' tests, shared with the BigQuery sink's tests.
+/// recorders' tests.
 #[cfg(test)]
 pub(crate) fn extras_only_metrics(
     run_id: impl Into<String>,
@@ -174,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_fields_serialize_within_bigquery_scale() {
+    fn numeric_fields_serialize_within_nine_fractional_digits() {
         let mut row = extras_only_metrics("r1", "backtest", "full", "t", "{}");
         row.fee_drag_pct = Some(Decimal::from_str_exact("0.1147980030689286271025803653").unwrap());
         let point = SeriesPointRow {

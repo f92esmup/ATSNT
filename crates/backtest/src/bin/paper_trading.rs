@@ -9,8 +9,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use adapters::{
-    now_in_madrid, AsyncMarketDataStream, BinanceWebSocketStream, BinanceWsConfig,
-    GcpSecretManager, TelegramNotifier,
+    now_in_madrid, AsyncMarketDataStream, BinanceWebSocketStream, BinanceWsConfig, TelegramNotifier,
 };
 use anyhow::{Context, Result};
 use backtest::operator_alerts::{
@@ -179,9 +178,8 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
 
     let recorder = backtest::wiring::disabled_recorder();
 
-    let secret_manager = GcpSecretManager::from_env();
     if args.telegram_alerts {
-        let t = TelegramNotifier::from_gcp_or_env(&secret_manager).await;
+        let t = TelegramNotifier::from_env();
         println!(
             " Telegram Alerts:      {}",
             if t.is_enabled() {

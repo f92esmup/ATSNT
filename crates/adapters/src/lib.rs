@@ -11,9 +11,11 @@ pub mod binance_ws;
 pub mod clock;
 pub mod error;
 pub mod fetch_plan;
-pub mod gcp;
 pub mod simulated_venue;
 pub mod storage;
+pub mod telegram;
+#[cfg(test)]
+pub(crate) mod test_http;
 pub mod traits;
 
 pub use analytics::{InMemoryRunRecorder, NullRunRecorder, RecordedRuns};
@@ -36,12 +38,9 @@ pub use binance_ws::{BinanceAggTradePayload, BinanceWebSocketStream, BinanceWsCo
 pub use clock::SystemClock;
 pub use error::AdapterError;
 pub use fetch_plan::{is_not_archived, plan_fetch_tasks, run_bounded, FetchTask};
-pub use gcp::{
-    datetime_in_madrid, format_unix_ms_rfc3339, now_in_madrid, BigQueryRecord, BigQuerySink,
-    GcpSecretManager, GcsArtifactSink, SymbolPerformanceSummary, TelegramNotifier,
-};
 pub use simulated_venue::{SimulatedVenue, SimulatedVenueConfig, SimulatedVenueError};
 pub use storage::tape_parquet::{TapeReader, TapeWriter};
+pub use telegram::{datetime_in_madrid, now_in_madrid, SymbolPerformanceSummary, TelegramNotifier};
 pub use traits::{AlertNotifier, AsyncMarketDataStream, MarketDataStream};
 
 /// Convenience helper to load `.env` key-value pairs into `std::env` if `.env` exists.
