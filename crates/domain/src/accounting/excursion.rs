@@ -1,9 +1,70 @@
 //! Mark-to-market equity path of the open position, shared by live and simulated sessions.
 
-use domain::Side;
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
-use crate::metrics::TradeExcursion;
+use crate::Side;
+
+/// Mark-to-market equity path of a single trade, sampled at every bar close
+/// while the position is open plus the post-exit cash balance.
+///
+/// Outside trades equity is flat, so these points describe the account curve
+/// without persisting every bar. The drawdown fields are measured against the
+/// session equity peak exactly as the backtest engine does, so the
+/// maximum across trades equals the engine's reported maximum drawdown.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeExcursion {
+    /// Total equity at the close of the entry bar (after entry fees).
+    pub entry_equity: Decimal,
+    /// Lowest equity while open or at exit (maximum adverse excursion).
+    pub trough_equity: Decimal,
+    /// Unix ms timestamp of `trough_equity`.
+    pub trough_time: i64,
+    /// Highest equity while open or at exit (maximum favorable excursion).
+    pub peak_equity: Decimal,
+    /// Unix ms timestamp of `peak_equity`.
+    pub peak_time: i64,
+    /// Cash equity right after the exit fill.
+    pub exit_equity: Decimal,
+    /// Deepest drawdown from the session peak while the trade was open, in currency.
+    pub max_drawdown_amount: Decimal,
+    /// Deepest drawdown from the session peak while the trade was open, as a fraction.
+    pub max_drawdown_pct: Decimal,
+}
+
+impl TradeExcursion {
+    /// Starts a path at the first observed equity sample.
+    pub fn start(time: i64, equity: Decimal) -> Self {
+        Self {
+            entry_equity: equity,
+            trough_equity: equity,
+            trough_time: time,
+            peak_equity: equity,
+            peak_time: time,
+            exit_equity: equity,
+            max_drawdown_amount: Decimal::ZERO,
+            max_drawdown_pct: Decimal::ZERO,
+        }
+    }
+
+    /// Folds an equity sample into the trough/peak extremes.
+    pub fn observe_equity(&mut self, time: i64, equity: Decimal) {
+        if equity < self.trough_equity {
+            self.trough_equity = equity;
+            self.trough_time = time;
+        }
+        if equity > self.peak_equity {
+            self.peak_equity = equity;
+            self.peak_time = time;
+        }
+    }
+
+    /// Folds a drawdown measurement into the per-trade maxima.
+    pub fn observe_drawdown(&mut self, amount: Decimal, pct: Decimal) {
+        self.max_drawdown_amount = self.max_drawdown_amount.max(amount);
+        self.max_drawdown_pct = self.max_drawdown_pct.max(pct);
+    }
+}
 
 /// Tracks the mark-to-market equity path of the open position at bar closes,
 /// mirroring the backtest engine's per-trade excursion semantics.
@@ -82,7 +143,7 @@ impl ExcursionTracker {
 #[cfg(test)]
 mod tests {
     use super::ExcursionTracker;
-    use domain::Side;
+    use crate::Side;
     use rust_decimal_macros::dec;
 
     #[test]

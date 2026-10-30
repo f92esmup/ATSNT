@@ -1,17 +1,13 @@
 pub mod alert_throttle;
 pub mod artifact;
 pub mod config;
-pub mod daily_watermark;
 pub mod driver;
 pub mod engine;
 pub mod error;
-pub mod excursion;
 pub mod execution_core;
-pub mod fee_ledger;
 pub mod live_exits;
 pub mod metrics;
 pub mod monte_carlo;
-pub mod monthly_guard;
 pub mod operator_alerts;
 pub mod optimization;
 pub mod paper;
@@ -38,11 +34,12 @@ pub use artifact::{
     StrategyDeploymentArtifact,
 };
 pub use config::BacktestConfig;
-pub use daily_watermark::DailyWatermark;
+pub use domain::accounting::DailyWatermark;
+pub use domain::accounting::ExcursionTracker;
+pub use domain::accounting::{marked_equity, utc_month_key, MonthlyGuard};
 pub use driver::{DriverStep, SessionDriver};
 pub use engine::BacktestEngine;
 pub use error::BacktestError;
-pub use excursion::ExcursionTracker;
 pub use execution_core::{
     barrier_exit, market_fill_price, BarrierExit, ExecutionCore, PendingEntry, PendingEntryOutcome,
     PendingTarget, TradeLedger,
@@ -57,7 +54,6 @@ pub use monte_carlo::{
     FanChartTrajectory, MonteCarloConfig, MonteCarloMetrics, MonteCarloReport, MonteCarloSimulator,
     ResampleMethod,
 };
-pub use monthly_guard::{marked_equity, utc_month_key, MonthlyGuard};
 pub use optimization::{
     bar_tape, calculate_parameter_stability, calibration_end_ms, check_calibration,
     deflated_sharpe_p_value, embargo_buckets, expected_max_sharpe, plateau_stability,

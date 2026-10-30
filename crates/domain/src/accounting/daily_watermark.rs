@@ -7,7 +7,7 @@ const MS_PER_DAY: i64 = 86_400_000;
 /// Highest marked equity seen since 00:00:00 UTC of the current day.
 ///
 /// The daily drawdown breaker measures loss against this peak, so it must reset at the UTC
-/// day boundary exactly like [`crate::BacktestEngine`] does. A whole-session peak would keep
+/// day boundary exactly like the backtest engine does. A whole-session peak would keep
 /// the live breaker tripped by losses the simulation had already written off.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DailyWatermark {

@@ -16,15 +16,14 @@ use ports::{EntryAck, ExecutionReport, ExecutionVenue, OrderRequest};
 use rust_decimal::Decimal;
 use strategies::{Decision, MarketEvent, Strategy};
 
-use crate::daily_watermark::DailyWatermark;
-use crate::excursion::ExcursionTracker;
 use crate::execution_core::{
     order_limit_kind, Campaign, CampaignClose, TradeLedger, TARGET_EXIT_REASON, TARGET_FLIP_REASON,
 };
-use crate::fee_ledger::FeeLedger;
 use crate::live_exits::{ExitEvent, ExitManager, HaltState};
 use crate::metrics::{ClosedTrade, TradeExcursion};
-use crate::monthly_guard::{marked_equity, MonthlyGuard};
+use domain::accounting::{
+    marked_equity, DailyWatermark, ExcursionTracker, FeeLedger, MonthlyGuard,
+};
 
 /// Static parameters of a session.
 #[derive(Debug, Clone)]

@@ -1,6 +1,6 @@
 //! Monthly drawdown guard shared by the simulator and the live session loop.
 
-use domain::Side;
+use crate::Side;
 use rust_decimal::Decimal;
 
 /// Wallet balance plus the open position's unrealized PnL at `mark_price`.

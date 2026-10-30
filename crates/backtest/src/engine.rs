@@ -5,7 +5,6 @@ use rust_decimal::Decimal;
 use strategies::{Decision, MarketEvent, MarketType, Strategy};
 
 use crate::config::BacktestConfig;
-use crate::daily_watermark::DailyWatermark;
 use crate::execution_core::{
     market_fill_price, ExecutionCore, PendingEntry, PendingEntryOutcome, PendingTarget,
 };
@@ -13,8 +12,9 @@ use crate::metrics::{
     BacktestMetrics, ClosedTrade, TradeExcursion, DAILY_HALT_REJECTION, POSITION_CAP_CLIP,
     REARM_IGNORED_REJECTION, SPOT_SHORTING_DISALLOWED, UNSUPPORTED_DECISION_REJECTION,
 };
-use crate::monthly_guard::utc_month_key;
 use crate::price_event::PriceEvent;
+use domain::accounting::utc_month_key;
+use domain::accounting::DailyWatermark;
 
 /// Deterministic, discrete-event backtesting simulator.
 ///

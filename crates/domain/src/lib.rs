@@ -2,6 +2,7 @@
 //!
 //! Enforces zero I/O, zero network dependencies, and 100% deterministic arithmetic.
 
+pub mod accounting;
 pub mod analytics;
 pub mod bar;
 pub mod decision;
