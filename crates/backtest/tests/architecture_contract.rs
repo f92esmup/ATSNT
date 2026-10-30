@@ -58,8 +58,8 @@ fn internal_dependencies(name: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Production code of every source file of `crates/<name>/src`: the part before the first
-/// `#[cfg(test)]`, since unit tests may use anything.
+/// Production code of every source file of `crates/<name>/src`: the part before the unit-test
+/// module (see [`production_part`]), since unit tests may use anything.
 fn production_sources(name: &str) -> Vec<(PathBuf, String)> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -78,14 +78,27 @@ fn production_sources(name: &str) -> Vec<(PathBuf, String)> {
         })
         .map(|path| {
             let content = fs::read_to_string(&path).expect("readable source");
-            let production = content
-                .split("#[cfg(test)]")
-                .next()
-                .unwrap_or_default()
-                .to_string();
+            let production = production_part(&content).to_string();
             (path, production)
         })
         .collect()
+}
+
+/// The part of a source file before its unit-test module. The cut is the first `#[cfg(test)]`
+/// that is followed by `mod`: a `#[cfg(test)]` on a single `use` or item must not hide the
+/// production code after it.
+fn production_part(content: &str) -> &str {
+    const GATE: &str = "#[cfg(test)]";
+    let mut from = 0;
+    while let Some(found) = content[from..].find(GATE) {
+        let at = from + found;
+        let after = content[at + GATE.len()..].trim_start();
+        if after.starts_with("mod ") {
+            return &content[..at];
+        }
+        from = at + GATE.len();
+    }
+    content
 }
 
 fn assert_depends_only_on(name: &str, allowed: &[&str]) {
@@ -241,6 +254,41 @@ fn ports_declare_traits_and_plain_data_only() {
     );
 }
 
+/// Money, prices and quantities are fixed-point in the domain: no float type appears in its
+/// production code.
+#[test]
+fn the_domain_has_no_floating_point_types() {
+    let mut offenders = Vec::new();
+    for (path, production) in production_sources("domain") {
+        for (number, line) in production.lines().enumerate() {
+            let has_float = line
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .any(|token| token == "f32" || token == "f64");
+            if has_float {
+                offenders.push(format!(
+                    "{}:{}: {}",
+                    path.display(),
+                    number + 1,
+                    line.trim()
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the domain must use Decimal, not floats:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn a_gate_on_one_item_does_not_hide_the_rest_of_the_file() {
+    let source = "use a;\n#[cfg(test)]\nuse b;\npub fn kept() {}\n#[cfg(test)]\nmod tests {\n    fn hidden() {}\n}\n";
+    let production = production_part(source);
+    assert!(production.contains("pub fn kept"), "{production}");
+    assert!(!production.contains("fn hidden"), "{production}");
+}
+
 /// Source files under `dir`, recursively.
 fn rust_sources(dir: &std::path::Path, found: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
@@ -268,7 +316,7 @@ fn runners_do_not_dispatch_on_strategy_names() {
     for path in sources {
         let content = fs::read_to_string(&path).expect("readable source");
         // Unit tests may name strategies freely; the rule is about production code.
-        let production = content.split("#[cfg(test)]").next().unwrap_or_default();
+        let production = production_part(&content);
         for (number, line) in production.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.starts_with("//") {
