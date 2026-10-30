@@ -1,11 +1,12 @@
 # Plan de refactorización: ATSNT local, swarm sobre futuros de Kraken
 
-> **Estado:** propuesta v3. Sustituye a la v2 (commit `c4b04e7`).
+> **Estado:** propuesta v3.1. Sustituye a la v3 (commit `9f9a780`).
 > **Base de código:** commit `50b4ee5`. Verificado en verde antes de escribir este plan: `cargo check --workspace --all-targets`, `cargo test --workspace`, `cargo fmt --check` y `cargo clippy --all-targets -- -D warnings`.
 > **Fecha:** 2026-10-30. Solo documentación: el código no ha cambiado.
 
-## Cambios respecto a la v2
+## Cambios respecto a la v2 y la v3
 
+- **v3.1:** una sola base de riesgo, `min(capital operativo, equity EUR)`, de la que salen el riesgo por operación, el tope de nocional y los dos breakers. Dos efectos de FX separados: breakers y margen. Corrección de la comprobación de artefactos en la fase 1. Siembra del buffer USD antes del dinero real.
 - **Colateral en EUR** (decisión del usuario). Las pérdidas siguen liquidándose en USD, así que el plan obliga a mantener un buffer de USD.
 - **Capital de 5.000 €.** Con 2x, el nocional máximo es de 10.000 €. Los límites de riesgo se recalculan sobre ese capital.
 - **Equipo: Linux con Omarchy** (Arch con systemd). Se usa una unidad de usuario de systemd y se desactiva la suspensión.
@@ -51,7 +52,7 @@ Tomo estas decisiones para avanzar. Si quieres otra, dímelo y ajusto las fases 
 | D11 | Salidas gestionadas por el cliente (en dominio) | No he verificado órdenes condicionales en el API de futuros | Usar órdenes condicionales si la especificación lo confirma |
 | D12 | Apalancamiento máximo configurable, **por defecto 2x** | Kraken lista hasta 10x en la UE, pero la prensa cita un aviso de ESMA que trataría estos perpetuos como CFD, con tope de 2:1 para minoristas (sección 2.6) | Subir el tope en la configuración, solo si tu cuenta lo permite |
 | D13 | La demo (`demo-futures.kraken.com`) sirve para fontanería, no para validar estrategia | Es un entorno de pruebas que se refresca de vez en cuando y no guarda histórico | — |
-| D14 | Capital de referencia de **5.000 €**. Capital operativo configurable | Tu capital. Se recomienda arrancar con 1.000 € (fase 9) | `operating_capital_eur` en la configuración |
+| D14 | Capital de referencia de **5.000 €**. Base de riesgo = **min(capital operativo, equity EUR)**: de ella salen el riesgo por operación, el tope de nocional y los breakers | Tu capital. Con un capital operativo de 1.000 € el bot no arriesga los 4.000 € restantes. Se recomienda arrancar con 1.000 € (fase 9) | `operating_capital_eur` en la configuración |
 | D15 | **Buffer de USD obligatorio.** Regla: buffer ≥ pérdida hasta el stop de las posiciones abiertas + 24 h de funding en el peor caso | Evita convertir EUR a USD en mitad de una pérdida, con su comisión | Constante de configuración; la regla no cambia |
 
 ## 2. Hechos que condicionan el plan
@@ -118,19 +119,21 @@ No hay ninguna referencia a Kraken. Pero el código ya modela perpetuos USD-M: `
 - **Las pérdidas siempre se cargan en USD.** Si falta USD, se convierte colateral con comisión. Los cargos horarios de funding pueden generar pérdidas no realizadas que el USD o las stablecoins no cubren.
 - **Haircut del EUR: 0 %** en la tabla de colateral de Kraken. EURC tiene 1 %. Una tabla EEA antigua usa 2 % para el EUR; no coincide con la tabla actual ([colateral en el EEE](https://support.kraken.com/es/articles/collateral-currencies-eea), [colateral de futuros](https://support.kraken.com/hc/en-us/articles/4843323030164-Futures-Collateral-Currencies)).
 - **Comisión de conversión EUR→USD: no confirmada.** La tabla EEA da 0 % para el EUR, pero la misma página dice que el colateral no USD suele tener comisión de conversión. Un ejemplo de Unified Wallet usa un spread de 0,25 % ([conversiones](https://support.kraken.com/articles/interest-and-conversions-unified-wallet)). **El plan modela 0,25 % como supuesto conservador** hasta confirmarlo en tu cuenta.
-- **FX en el margen.** Con colateral EUR, el equity en USD depende del EURUSD. Afecta al margen y a la liquidación.
+- **Dos efectos de FX, separados.**
+  - *En los breakers* (medidos en EUR): con haircut 0, el colateral EUR no tiene riesgo de cambio. Solo el saldo USD y el PnL abierto en USD se mueven con el EURUSD.
+  - *En el margen y la liquidación* (medidos en USD por el exchange): el colateral EUR sí tiene riesgo de cambio. Si el EUR se deprecia frente al USD, el margen en USD baja y la liquidación se acerca sin que cambien tus breakers.
 
 **Fórmulas que implementa el dominio** (tasas en USD por EUR, mark):
 
 ```text
 equity_USD    = colateral_EUR × EURUSD × (1 − haircut_EUR) + saldo_USD + PnL_no_realizado_USD + funding_pendiente_USD
-equity_EUR    = equity_USD / EURUSD
+equity_EUR    = colateral_EUR × (1 − haircut_EUR) + (saldo_USD + PnL_USD + funding_USD) / EURUSD
 buffer_USD   ≥ pérdida_hasta_stop(posiciones abiertas) + funding_24h_peor_caso      (D15)
 ```
 
 - `haircut_EUR = 0` (verificar en la tabla vigente).
 - La liquidación y el margen se calculan con `equity_USD`, según las reglas del exchange.
-- Los breakers se calculan con `equity_EUR`. Así, un movimiento del EURUSD cuenta como riesgo, porque es tu dinero en EUR el que se mueve.
+- Los breakers se calculan con `equity_EUR`. Con haircut 0, el colateral EUR no aporta riesgo de cambio a esa métrica: solo el saldo USD y el PnL abierto en USD se mueven con el EURUSD.
 
 ### 2.8 Violaciones hexagonales (verificadas con grep)
 
@@ -214,20 +217,20 @@ curl -s https://futures.kraken.com/derivatives/api/v3/instruments \
 
 Pégame la salida. De ella salen el tamaño del contrato, el mínimo y el paso de orden, el tick y el apalancamiento máximo. Hasta entonces, esos valores quedan como **verificar**.
 
-**Paso 1. Reproducir el run 9 sin fiarse de sus totales.** Reproducirlo con el backtester actual y comparar con el logbook. Antes hay que saber qué artefacto contiene sus parámetros: sus valores de breakeven y trailing (sección 5.2 del logbook) no aparecen en `hpo_swarm.json` ni en `hpo_btcusdt_2026.json`. Si no se reproduce, el logbook no sirve de referencia y solo queda la prueba.
+**Paso 1. Reproducir el run 9 sin fiarse de sus totales.** Reproducirlo con el backtester actual y comparar con el logbook. Ningún artefacto reproduce el run 9 exactamente. `hpo_btcusdt_2026.json` (clasificador, el que usa el gate) comparte con él el paso de umbral (0,075), la histéresis (0,55), el riesgo base (1 %) y el breakeven (1,0 ATR). Pero difiere en trailing (1,0 frente a 0,50), take profit (4,0 frente a 2,0), stop (1,5 frente a 1,25), decay (86.400 s frente a 43.200 s), umbral base (0,525 frente a 0,50) y riesgo incremental (0 frente a 0,5 %). Hay que reconstruir la configuración del run 9 desde la sección 5.2 del logbook, o localizar el artefacto que la contiene. Si no se reproduce, el logbook no sirve de referencia y solo queda la prueba.
 
 **Paso 2. Aplicar los deltas de Kraken** en copias del artefacto:
 
-| Delta | Artefacto actual | Prueba |
+| Delta | Artefacto `hpo_btcusdt_2026.json` (clasificador, el del gate) | Prueba |
 |---|---|---|
-| Capital | `initial_capital` en USD | 5.000 € convertidos a USD con un tipo de cambio fijo, verificado y anotado |
-| Comisiones | maker 0,0002, taker 0,0005 | Sin cambio (ya son tramo 1 de derivados; verificar) |
+| Capital | `initial_capital: 200` en USD (`hpo_swarm.json` tiene 10.000) | 5.000 € convertidos a USD con un tipo de cambio fijo, verificado y anotado |
+| Comisiones | maker 0,0002, taker 0,0005. Con `resting_maker_exits: true`, las salidas por take profit pagan comisión maker | Sin cambio (tramo 1 de derivados; verificar) |
 | Apalancamiento | `max_leverage: 20` | `2` |
 | Funding | `funding_rate_pct: 0.0001` por liquidación de 8 h | Histórico de funding de Kraken si se puede obtener (la página regional indica horario; verificar). Si no, barrido de tasas |
-| Conversión | — | 0,25 % sobre cada pérdida realizada (aproximación conservadora; verificar) |
+| Conversión | — | 0,25 % sobre cada pérdida realizada. Es una **cota superior**: con D15 la conversión solo ocurre al reponer el buffer (verificar) |
 | Tamaño mínimo | `min_order_quantity: 0.001` (BTC) | Mínimo real de `PF_XBTUSD` del paso 0 |
 
-**Paso 3. Escenarios.** Tres ejecuciones: (a) con los deltas anteriores; (b) con el doble de comisiones como margen de seguridad; (c) con el doble de funding. Anotar PnL neto, comisiones, conversiones, funding pagado, Sortino y DSR.
+**Paso 3. Escenarios.** Tres ejecuciones: (a) con los deltas anteriores; (b) con el doble de comisiones o con `resting_maker_exits: false` (las salidas por take profit pagan taker) como margen de seguridad; (c) con el doble de funding. Anotar PnL neto, comisiones, conversiones, funding pagado, Sortino y DSR.
 
 **Criterio:**
 
@@ -285,7 +288,7 @@ La lista completa está en la sección 5. Incluye el código de Binance que ya n
 - `domain/src/futures.rs` (central): liquidación con **mark price**, con `equity_USD` según la fórmula de la sección 2.7. Funding por intervalo configurable. El modelo de margen (aislado o cruzado) se toma de la especificación del `PF_` (verificar).
 - `domain/src/fees.rs`: `FeeTier { maker_rate, taker_rate }` como datos, validados en rango. La conversión EUR→USD se registra como fricción propia.
 - **Apalancamiento.** `RiskPolicy` aplica un tope configurable, por defecto 2x (D12). Rechaza cualquier orden que lo supere.
-- **Breakers en EUR.** Diario (3 % del equity de inicio de día UTC, por defecto) y mensual (15 %, por defecto), medidos con `equity_EUR`. Los valores vienen de los artefactos actuales y se recalibran en la fase 1.
+- **Base de riesgo y breakers en EUR.** `risk_base_eur = min(operating_capital_eur, equity_EUR)`. De ella salen tres cosas: el riesgo por operación (0,5 % a 1 %), el tope de nocional (2x) y los breakers. Breaker diario de 3 % y mensual de 15 %, calculados sobre la base al inicio del día UTC o del mes. Los valores vienen de los artefactos actuales y se recalibran en la fase 1.
 - **Capital operativo.** `operating_capital_eur` limita el capital que el bot puede usar, aunque la cuenta tenga más (D14).
 - **Ledger completo.** Cada fill, comisión, pago de funding, conversión y reposición de buffer queda registrado. Lo necesitarás para tus declaraciones en España.
 - Renombrar `*_pct` a `*_rate` (sección 2.9) y migrar los artefactos que se conservan.
@@ -368,12 +371,19 @@ Estructura en tu equipo:
 
 - **Paper:** al menos 4 semanas con datos de producción grabados y el simulador de la fase 7. El demo solo valida el ciclo de órdenes.
 - **Pasar a real** solo si el DSR cumple, el PnL neto OOS es positivo con comisiones, conversiones y funding reales, y la paridad está dentro de tolerancia.
-- **Números con 5.000 €:**
-  - Nocional máximo a 2x: **10.000 €**.
-  - Riesgo por operación de 0,5 % a 1 % del equity (los artefactos actuales): **25 a 50 €**.
-  - Breakers por defecto: diario 3 % (**150 €**) y mensual 15 % (**750 €**). Se recalibran en la fase 1.
+- **Números según la base de riesgo** (`min(capital operativo, equity EUR)`):
+
+| Concepto | Capital operativo 1.000 € | Capital operativo 5.000 € |
+|---|---|---|
+| Riesgo por operación (0,5 % a 1 %) | 5 a 10 € | 25 a 50 € |
+| Tope de nocional (2x) | 2.000 € | 10.000 € |
+| Breaker diario (3 %) | 30 € | 150 € |
+| Breaker mensual (15 %) | 150 € | 750 € |
+
+Se recalibran en la fase 1.
 - **Capital operativo recomendado: 1.000 € durante 4 semanas**, con `operating_capital_eur = 1000`. Después se sube a 5.000 € si no hay incidentes. Es una recomendación, tú decides.
 - **Mínimo de orden.** Con 1.000 € y 2x, el nocional es de 2.000 €. Comprobar que el mínimo de `PF_XBTUSD` cabe en ese nocional (paso 0 de la fase 1). Si no cabe, elegir otro `PF_` o subir el capital operativo.
+- **Sembrar el buffer USD** antes de dinero real: convertir una cantidad pequeña de EUR a USD, registrada en el ledger. Con 1.000 € de capital operativo, son decenas de euros. La regla D15 da el valor exacto según las posiciones abiertas.
 - Escalar según `docs/capital-scaling.md`, reescrito con colateral EUR, buffer USD y 2x.
 
 **Salida:** dos semanas de operación real sin incidentes de conciliación.
@@ -433,7 +443,7 @@ En todas las fases: `cargo fmt --check`, `cargo clippy --all-targets -- -D warni
 | La estrategia no tiene ventaja neta | Alto: no hay producto | Fase 1 antes de construir ejecución. Sin OOS positivo y DSR, no hay dinero real |
 | Pérdidas que el buffer USD no cubre y obligan a convertir | Medio | Regla D15; conversión modelada con 0,25 % y registrada en el ledger |
 | Comisión de conversión real mayor que 0,25 % | Medio | Se confirma en la cuenta antes del tramo real; el gate tiene escenario de comisiones |
-| FX adverso sobre el colateral EUR | Medio | Breakers en EUR; el efecto FX cuenta como riesgo; límites en la configuración |
+| FX adverso sobre el margen: el EUR se deprecia frente al USD, el margen baja y la liquidación se acerca sin que cambien los breakers | Medio | Vigilar la distancia a liquidación en USD cada hora, con alerta por Telegram si baja de un umbral. Los breakers en EUR siguen activos |
 | Kraken o la CNMV/ESMA limitan el apalancamiento a 2:1 | Medio | Tope configurable; el diseño ya asume 2x |
 | Cambio de elegibilidad de la cuenta o de contratos listados | Medio | Catálogo que se refresca; alerta si un `PF_` deja de estar disponible |
 | Funding que se come el resultado | Medio | Funding real en la fase 1; contabilidad separada en el ledger |
