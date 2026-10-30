@@ -12,14 +12,12 @@ pub mod operator_alerts;
 pub mod optimization;
 pub mod paper;
 pub mod parity;
-pub mod portfolio_engine;
 pub mod price_event;
 pub mod recording;
 pub mod registry;
 pub mod run;
 pub mod session;
 pub mod tick_simulation;
-pub mod universe_selector;
 pub mod walk_forward;
 pub mod wiring;
 
@@ -27,10 +25,8 @@ pub use wiring::now_unix_ms;
 
 pub use alert_throttle::AlertThrottle;
 pub use artifact::{
-    load_artifact_shared_config, load_portfolio_artifact, load_strategy_config,
-    HpoDeploymentArtifact, HpoScorecard, LoadedStrategyConfig, PortfolioAssetSpec,
-    PortfolioDeploymentArtifact, PortfolioExecutionSettings, PortfolioScorecard, SamplingConfig,
-    StrategyDeploymentArtifact,
+    load_artifact_shared_config, load_strategy_config, HpoDeploymentArtifact, HpoScorecard,
+    LoadedStrategyConfig, SamplingConfig, StrategyDeploymentArtifact,
 };
 pub use config::BacktestConfig;
 pub use domain::accounting::DailyWatermark;
@@ -64,10 +60,6 @@ pub use paper::{
     PaperSessionOwner, PaperSessionRuntime, PaperTradingConfig, PaperTradingEvent,
     PaperTradingSession, TelemetryConfig, TelemetryEnvelope,
 };
-pub use portfolio_engine::{
-    EventMerger, PortfolioEngine, PortfolioEngineConfig, RollingCorrelationTracker,
-    TaggedPriceEvent,
-};
 pub use price_event::{bucket_trades, PriceEvent};
 pub use recording::{
     record_backtest, record_backtest_with_audit, record_closed_trade, record_hpo,
@@ -79,5 +71,4 @@ pub use registry::{
 };
 pub use run::{FillModel, InvalidRunId, RunId, RunSpec, RunType};
 pub use tick_simulation::{TickSimulation, TickSimulationConfig, TickSimulationError, TickStep};
-pub use universe_selector::CrossSectionalUniverseSelector;
 pub use walk_forward::{WalkForwardConfig, WalkForwardFold, WalkForwardSplitter};

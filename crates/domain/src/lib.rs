@@ -12,7 +12,6 @@ pub mod order;
 pub mod position;
 pub mod risk;
 pub mod trade;
-pub mod universe;
 
 // Backward-compatibility module aliases
 pub use analytics::filters as cusum;
@@ -33,6 +32,5 @@ pub use decision::{
 pub use error::DomainError;
 pub use order::{Order, OrderIntent, OrderStatus, OrderType, TimeInForce};
 pub use position::{Position, PositionSide};
-pub use risk::{PortfolioRiskPolicy, RiskError, RiskPolicy, TargetSizing};
+pub use risk::{RiskError, RiskPolicy, TargetSizing};
 pub use trade::{Side, Trade};
-pub use universe::{AssetRankingScore, UniverseSelectionPolicy};
