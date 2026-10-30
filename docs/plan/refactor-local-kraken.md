@@ -1,6 +1,7 @@
 # Plan de refactorización v4: ATSNT local, swarm en spot de Kraken
 
 > **Estado:** propuesta v4. Sustituye a la v3.2 (commit `010cf57`). La v3.2 queda en el historial por si cambia la elegibilidad para futuros.
+> **Implementación detallada:** [`implementacion-kraken-spot.md`](implementacion-kraken-spot.md), para aprobar. Define los paquetes de trabajo, las puertas y lo que espera a cada una.
 > **Base de código:** commit `50b4ee5`. Verificado en verde antes de escribir este plan: `cargo check --workspace --all-targets`, `cargo test --workspace`, `cargo fmt --check` y `cargo clippy --all-targets -- -D warnings`.
 > **Fecha:** 2026-10-30. Solo documentación: el código no ha cambiado.
 
@@ -45,7 +46,7 @@
 | D8 | Parquet para trades, libro y EURUSD; SQLite para el registro y el ledger | Sin servidor ni cloud |
 | D9 | Telegram, Linux (Omarchy), unidad systemd de usuario y puerto `Clock` | Sin cambios respecto a la v3.2 |
 | D10 | Base de riesgo = `min(capital operativo, equity EUR)`. Sin apalancamiento, el tope de nocional es igual a la base | Capital propio; se deja como parámetro hasta que la prueba pase |
-| D11 | Comisiones del tramo base de Kraken Pro spot: 0,25 % maker / 0,40 % taker, según tu captura, para 0 a 50 K USD de volumen | Pueden bajar con volumen; no se asume ninguna bajada |
+| D11 | Comisiones de la cuenta, leídas con `TradeVolume` (con `pair`). Hasta leerlas, se usa el tramo base de tu captura: 0,25 % maker / 0,40 % taker, para 0 a 50 K USD de volumen | `AssetPairs` ya no trae comisiones. Pueden bajar con volumen; no se asume ninguna bajada |
 | D12 | La prueba usa datos de perpetuos de Binance como proxy de precio, con esa limitación explícita | Es lo único disponible sin Kraken |
 
 ## 2. Hechos verificados
