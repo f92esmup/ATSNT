@@ -269,8 +269,6 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     let paper_config = PaperTradingConfig {
         dollar_bar_threshold: effective_dollar_bar,
         backtest: backtest_config,
-        // Unused by `with_strategy`: the loaded strategy carries its own hyperparameters.
-        strategy: Default::default(),
         channel_capacity: 10_000,
         latency_ms: args.latency_ms,
     };

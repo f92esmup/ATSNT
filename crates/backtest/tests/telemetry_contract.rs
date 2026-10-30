@@ -1,28 +1,52 @@
+use std::collections::VecDeque;
+
 use backtest::{PaperTradingConfig, PaperTradingEvent, PaperTradingSession, TelemetryConfig};
-use domain::{Side, Trade};
+use domain::{DollarBar, OrderIntent, Side, Trade};
 use rust_decimal_macros::dec;
-use strategies::DollarBarsCusumConfig;
+use strategies::{MarketType, Strategy};
+
+/// Four warm-up bars pass; the fifth, the plunge to 90, signals a long with a stop at 85 and a
+/// target at 95, so the tape below fills, crosses the target and exits.
+struct PlungeLong {
+    decisions: VecDeque<Option<OrderIntent>>,
+}
+
+impl Strategy for PlungeLong {
+    fn name(&self) -> &str {
+        "plunge_long"
+    }
+
+    fn compatible_market_types(&self) -> &'static [MarketType] {
+        &[MarketType::UsdMPerpetual]
+    }
+
+    fn on_bar(&mut self, _bar: &DollarBar) -> Option<OrderIntent> {
+        self.decisions.pop_front().flatten()
+    }
+
+    fn reset(&mut self) {}
+}
 
 #[tokio::test]
 async fn configured_session_preserves_raw_events_and_market_metadata() {
     let config = PaperTradingConfig {
         dollar_bar_threshold: dec!(100),
-        strategy: DollarBarsCusumConfig {
-            rolling_window_len: 4,
-            cusum_vol_multiplier: dec!(1),
-            z_entry_threshold: dec!(1.5),
-            z_stop_threshold: dec!(3),
-            time_barrier_bars: 10,
-            min_take_profit_pct: dec!(0.0025),
-        },
         latency_ms: 0,
         ..Default::default()
     };
     let metadata = TelemetryConfig {
         symbol: "ETHUSDT".into(),
-        strategy_id: "cusum-session-42".into(),
+        strategy_id: "session-42".into(),
     };
-    let mut session = PaperTradingSession::new_with_telemetry(config, metadata).unwrap();
+    let signal = OrderIntent::new(1, Side::Buy, dec!(90), dec!(85), dec!(95), 10).unwrap();
+    let mut decisions: VecDeque<Option<OrderIntent>> = vec![None; 4].into();
+    decisions.push_back(Some(signal));
+    let mut session = PaperTradingSession::new_with_telemetry(
+        config,
+        Box::new(PlungeLong { decisions }),
+        metadata,
+    )
+    .unwrap();
     let mut raw = session.subscribe();
     let mut telemetry = session.subscribe_telemetry().unwrap();
     let mut kinds = std::collections::BTreeSet::new();
@@ -43,7 +67,7 @@ async fn configured_session_preserves_raw_events_and_market_metadata() {
             let envelope = telemetry.try_recv().unwrap();
             assert_eq!(envelope.timestamp, Some(timestamp));
             assert_eq!(envelope.symbol, "ETHUSDT");
-            assert_eq!(envelope.strategy_id, "cusum-session-42");
+            assert_eq!(envelope.strategy_id, "session-42");
             assert_eq!(envelope.payload, event);
             kinds.insert(envelope.event_type.clone());
             let json = serde_json::to_value(&envelope).unwrap();
@@ -72,7 +96,12 @@ async fn configured_session_preserves_raw_events_and_market_metadata() {
 
 #[test]
 fn unconfigured_session_does_not_invent_telemetry_metadata() {
-    let session = PaperTradingSession::new(PaperTradingConfig::default()).unwrap();
+    let silent = PlungeLong {
+        decisions: VecDeque::new(),
+    };
+    let session =
+        PaperTradingSession::with_strategy(PaperTradingConfig::default(), Box::new(silent))
+            .unwrap();
     assert!(session.subscribe_telemetry().is_none());
     assert_eq!(
         PaperTradingEvent::PositionClosed {

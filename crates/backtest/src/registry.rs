@@ -22,7 +22,7 @@ use crate::artifact::{
 use crate::config::BacktestConfig;
 
 /// Strategy a runner uses when neither the artifact nor the command line names one.
-pub const DEFAULT_STRATEGY_ID: &str = "dollar_bars_cusum";
+pub const DEFAULT_STRATEGY_ID: &str = "swarm_consensus";
 
 /// Where a loaded strategy's configuration came from.
 #[derive(Debug, Clone, PartialEq, Eq)]

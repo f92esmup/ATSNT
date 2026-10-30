@@ -99,8 +99,8 @@ struct Args {
     )]
     output_config: PathBuf,
 
-    /// Target strategy identifier to optimize (e.g. 'dollar_bars_cusum')
-    #[arg(long, default_value = "dollar_bars_cusum")]
+    /// Target strategy identifier to optimize (e.g. 'swarm_consensus')
+    #[arg(long, default_value = "swarm_consensus")]
     strategy: String,
 
     /// Optional path to JSON file overriding the strategy's default parameter search space

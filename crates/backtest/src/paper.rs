@@ -10,7 +10,7 @@ use domain::{DollarBar, PositionSide, Side, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, Strategy};
+use strategies::Strategy;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::config::BacktestConfig;
@@ -156,8 +156,6 @@ pub struct PaperTradingConfig {
     pub dollar_bar_threshold: Decimal,
     /// Backtesting friction and account parameters.
     pub backtest: BacktestConfig,
-    /// Strategy hyperparameters.
-    pub strategy: DollarBarsCusumConfig,
     /// Capacity of the Tokio broadcast event channel. Default: 10,000.
     pub channel_capacity: usize,
     /// Milliseconds an order takes to reach the simulated market (an assumption until it is
@@ -171,23 +169,6 @@ impl Default for PaperTradingConfig {
         Self {
             dollar_bar_threshold: dec!(50_000),
             backtest: BacktestConfig::default(),
-            strategy: DollarBarsCusumConfig::default(),
-            channel_capacity: 10_000,
-            latency_ms: default_latency_ms(),
-        }
-    }
-}
-
-impl PaperTradingConfig {
-    /// Creates a [`PaperTradingConfig`] adopting parameters and friction models
-    /// from an authoritative [`StrategyDeploymentArtifact`].
-    pub fn from_artifact(
-        artifact: &crate::artifact::StrategyDeploymentArtifact<DollarBarsCusumConfig>,
-    ) -> Self {
-        Self {
-            dollar_bar_threshold: artifact.dollar_bar_threshold().unwrap_or(dec!(50_000)),
-            backtest: artifact.spec.execution_context,
-            strategy: artifact.spec.strategy_config.clone(),
             channel_capacity: 10_000,
             latency_ms: default_latency_ms(),
         }
@@ -231,12 +212,6 @@ pub struct PaperTradingSession {
 }
 
 impl PaperTradingSession {
-    /// Initializes a new paper trading session from the provided configuration.
-    pub fn new(config: PaperTradingConfig) -> Result<Self, BacktestError> {
-        let strategy = DollarBarsCusumStrategy::new(config.strategy.clone())?;
-        Self::with_strategy(config, Box::new(strategy))
-    }
-
     /// Initializes a session around any strategy. The strategy carries its own
     /// hyperparameters, so `config.strategy` is ignored.
     pub fn with_strategy(
@@ -276,6 +251,7 @@ impl PaperTradingSession {
     /// Raw subscriptions and [`Self::process_trade`] return values are unchanged.
     pub fn new_with_telemetry(
         config: PaperTradingConfig,
+        strategy: Box<dyn Strategy>,
         telemetry: TelemetryConfig,
     ) -> Result<Self, BacktestError> {
         let capacity = if config.channel_capacity == 0 {
@@ -283,7 +259,7 @@ impl PaperTradingSession {
         } else {
             config.channel_capacity
         };
-        let mut session = Self::new(config)?;
+        let mut session = Self::with_strategy(config, strategy)?;
         let (sender, _) = broadcast::channel(capacity);
         session.telemetry = Some((telemetry, sender));
         Ok(session)
@@ -520,11 +496,12 @@ impl PaperSessionOwner {
     /// The caller must configure identity from its source, never infer it from Trade.
     pub fn new(
         config: PaperTradingConfig,
+        strategy: Box<dyn Strategy>,
         telemetry: Option<TelemetryConfig>,
         events: broadcast::Sender<TelemetryEnvelope<PaperTradingEvent>>,
     ) -> Result<(Self, mpsc::Sender<Trade>), BacktestError> {
         let capacity = config.channel_capacity.max(1);
-        let session = PaperTradingSession::new(config)?;
+        let session = PaperTradingSession::with_strategy(config, strategy)?;
         let (input, trades) = mpsc::channel(capacity);
         Ok((
             Self {
@@ -557,33 +534,63 @@ impl PaperSessionOwner {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
+    use domain::{DollarBar, OrderIntent, Side};
+    use strategies::MarketType;
+
     use super::*;
-    use domain::Side;
     use rust_decimal_macros::dec;
 
     fn make_trade(timestamp: i64, price: Decimal, quantity: Decimal, side: Side) -> Trade {
         Trade::new(timestamp, price, quantity, side).expect("valid trade")
     }
 
-    fn config(strategy: DollarBarsCusumConfig) -> PaperTradingConfig {
+    fn config() -> PaperTradingConfig {
         PaperTradingConfig {
             dollar_bar_threshold: dec!(100),
-            strategy,
             channel_capacity: 100,
             latency_ms: 0,
             ..Default::default()
         }
     }
 
-    fn cusum(z_stop: Decimal, time_barrier_bars: usize) -> DollarBarsCusumConfig {
-        DollarBarsCusumConfig {
-            rolling_window_len: 4,
-            cusum_vol_multiplier: dec!(1.0),
-            z_entry_threshold: dec!(1.5),
-            z_stop_threshold: z_stop,
-            time_barrier_bars,
-            min_take_profit_pct: dec!(0.0025),
+    /// Emits the scripted decision of each bar in order, and nothing once the script runs out.
+    struct Scripted {
+        decisions: VecDeque<Option<OrderIntent>>,
+    }
+
+    impl Strategy for Scripted {
+        fn name(&self) -> &str {
+            "scripted"
         }
+
+        fn compatible_market_types(&self) -> &'static [MarketType] {
+            &[MarketType::UsdMPerpetual]
+        }
+
+        fn on_bar(&mut self, _bar: &DollarBar) -> Option<OrderIntent> {
+            self.decisions.pop_front().flatten()
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    /// A strategy that never signals.
+    fn silent() -> Box<dyn Strategy> {
+        Box::new(Scripted {
+            decisions: VecDeque::new(),
+        })
+    }
+
+    /// A strategy that signals a long on the fifth bar, the plunge to 90 that [`open_long`] feeds:
+    /// stop at 85, target at 95, and a time barrier of `max_bars` bars.
+    fn long_on_the_plunge(max_bars: usize) -> Box<dyn Strategy> {
+        let signal =
+            OrderIntent::new(1, Side::Buy, dec!(90), dec!(85), dec!(95), max_bars).unwrap();
+        let mut decisions: VecDeque<Option<OrderIntent>> = vec![None; 4].into();
+        decisions.push_back(Some(signal));
+        Box::new(Scripted { decisions })
     }
 
     /// Four $100 bars that give the strategy its volatility baseline.
@@ -635,10 +642,13 @@ mod tests {
 
     #[test]
     fn test_paper_session_initialization() {
-        let session = PaperTradingSession::new(PaperTradingConfig {
-            dollar_bar_threshold: dec!(1000),
-            ..Default::default()
-        })
+        let session = PaperTradingSession::with_strategy(
+            PaperTradingConfig {
+                dollar_bar_threshold: dec!(1000),
+                ..Default::default()
+            },
+            silent(),
+        )
         .expect("init session");
         assert_eq!(session.cash_equity(), dec!(10_000));
         assert!(session.active_position().is_none());
@@ -668,7 +678,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_entry_the_tape_never_fills_is_reported_when_it_times_out() {
-        let mut session = PaperTradingSession::new(config(cusum(dec!(3.0), 10))).unwrap();
+        let mut session =
+            PaperTradingSession::with_strategy(config(), long_on_the_plunge(10)).unwrap();
         warm_up(&mut session).await;
         session
             .process_trade(&make_trade(5000, dec!(90), dec!(1.5), Side::Sell))
@@ -702,10 +713,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_trade_processing_and_bar_formation() {
-        let mut session = PaperTradingSession::new(PaperTradingConfig {
-            dollar_bar_threshold: dec!(1000),
-            ..Default::default()
-        })
+        let mut session = PaperTradingSession::with_strategy(
+            PaperTradingConfig {
+                dollar_bar_threshold: dec!(1000),
+                ..Default::default()
+            },
+            silent(),
+        )
         .expect("init session");
         let mut rx = session.subscribe();
 
@@ -735,7 +749,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_lifecycle_entry_mark_to_market_and_exit() {
-        let mut session = PaperTradingSession::new(config(cusum(dec!(3.0), 10))).unwrap();
+        let mut session =
+            PaperTradingSession::with_strategy(config(), long_on_the_plunge(10)).unwrap();
         let (_, take_profit) = open_long(&mut session).await;
         let position = session.active_position().unwrap();
         assert_eq!(position.side, PositionSide::Long);
@@ -798,7 +813,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_loss_exit_event() {
-        let mut session = PaperTradingSession::new(config(cusum(dec!(2.0), 10))).unwrap();
+        let mut session =
+            PaperTradingSession::with_strategy(config(), long_on_the_plunge(10)).unwrap();
         let (stop_loss, _) = open_long(&mut session).await;
 
         // The tape crosses the stop; the exit trades on the next seller print.
@@ -832,14 +848,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_monthly_breaker_emits_event_and_blocks_new_positions() {
-        let mut session = PaperTradingSession::new(PaperTradingConfig {
-            backtest: BacktestConfig {
-                max_daily_drawdown_pct: dec!(0.5),
-                max_monthly_drawdown_pct: dec!(0.005),
-                ..BacktestConfig::default()
+        let mut session = PaperTradingSession::with_strategy(
+            PaperTradingConfig {
+                backtest: BacktestConfig {
+                    max_daily_drawdown_pct: dec!(0.5),
+                    max_monthly_drawdown_pct: dec!(0.005),
+                    ..BacktestConfig::default()
+                },
+                ..config()
             },
-            ..config(cusum(dec!(2.0), 10))
-        })
+            long_on_the_plunge(10),
+        )
         .unwrap();
         let (stop_loss, _) = open_long(&mut session).await;
 
@@ -884,7 +903,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_time_barrier_exit_event() {
-        let mut session = PaperTradingSession::new(config(cusum(dec!(5.0), 2))).unwrap();
+        let mut session =
+            PaperTradingSession::with_strategy(config(), long_on_the_plunge(2)).unwrap();
         open_long(&mut session).await;
 
         // The fill bar counts as the first held bar; the second one hits the time barrier and
@@ -913,7 +933,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_finish_leaves_an_open_position_out_of_the_metrics() {
-        let mut session = PaperTradingSession::new(config(cusum(dec!(5.0), 10))).unwrap();
+        let mut session =
+            PaperTradingSession::with_strategy(config(), long_on_the_plunge(10)).unwrap();
         open_long(&mut session).await;
         assert!(session.active_position().is_some());
 
@@ -934,6 +955,7 @@ mod tests {
                 channel_capacity: 2,
                 ..Default::default()
             },
+            silent(),
             None,
             events,
         )
@@ -963,16 +985,12 @@ mod tests {
         use tokio::time::{timeout, Duration};
         let (events, _) = broadcast::channel(16);
         let mut rx = events.subscribe();
-        let mut config = PaperTradingConfig {
+        let config = PaperTradingConfig {
             dollar_bar_threshold: dec!(100),
             ..Default::default()
         };
-        config.strategy.rolling_window_len = 4;
-        config.strategy.cusum_vol_multiplier = dec!(1);
-        config.strategy.z_entry_threshold = dec!(1.5);
-        config.strategy.z_stop_threshold = dec!(3);
-        config.strategy.time_barrier_bars = 10;
-        let (mut owner, input) = PaperSessionOwner::new(config, None, events).unwrap();
+        let (mut owner, input) =
+            PaperSessionOwner::new(config, long_on_the_plunge(10), None, events).unwrap();
         for (i, price) in [
             dec!(100),
             dec!(101),
@@ -1011,7 +1029,7 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let mut rx = events.subscribe();
         let (owner, input) =
-            PaperSessionOwner::new(PaperTradingConfig::default(), None, events).unwrap();
+            PaperSessionOwner::new(PaperTradingConfig::default(), silent(), None, events).unwrap();
         let runtime = PaperSessionRuntime::spawn(owner, input);
         let (metrics, trades) = timeout(Duration::from_secs(1), runtime.shutdown())
             .await
@@ -1035,6 +1053,7 @@ mod tests {
                 channel_capacity: 1,
                 ..Default::default()
             },
+            silent(),
             None,
             events,
         )
