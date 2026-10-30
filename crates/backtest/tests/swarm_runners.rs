@@ -7,72 +7,18 @@ use std::process::{Command, Output};
 
 use adapters::BinanceParquetWriter;
 use backtest::{
-    check_calibration, embargo_buckets, trade_tape, BacktestConfig, CandidateEvaluation,
-    WalkForwardConfig, WalkForwardOptimizer, WalkForwardSplitter, TRADES_WARM_UP_MS,
+    check_calibration, embargo_buckets, trade_tape, CandidateEvaluation, WalkForwardConfig,
+    WalkForwardOptimizer, WalkForwardSplitter, TRADES_WARM_UP_MS,
 };
-use domain::{Side, Trade};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-use rust_decimal::Decimal;
+use domain::Trade;
 use rust_decimal_macros::dec;
 use strategies::{PolicyConfig, SwarmConfig, SwarmConsensusStrategy, SwarmPolicySpace};
 
-const DAY_MS: i64 = 86_400_000;
-/// 2026-01-01T00:00:00Z.
-const START_MS: i64 = 1_767_225_600_000;
+mod support;
+use support::swarm::{account, busy_policy, shared, swarm_trades, DAY_MS, START_MS};
+
 const BUCKET_MS: i64 = 1_000;
 const EMBARGO_MS: i64 = 5_000;
-
-/// A seeded random walk: eight bursts of three trades a day for `days` days, the bursts ten
-/// minutes apart so the fast time feeds differ, with a trend that flips every ten days.
-fn swarm_trades(days: i64) -> Vec<Trade> {
-    let mut rng = StdRng::seed_from_u64(11);
-    let mut price = dec!(40000);
-    let mut trades = Vec::new();
-    for day in 0..days {
-        let drift = if (day / 10) % 2 == 0 { 8 } else { -8 };
-        for k in 0..8 {
-            for burst in 0..3 {
-                let timestamp = START_MS
-                    + day * DAY_MS
-                    + k * (DAY_MS / 8)
-                    + burst * 600_000
-                    + rng.gen_range(0..1000);
-                let step = Decimal::new(drift + rng.gen_range(-60..=60), 4);
-                price = (price * (Decimal::ONE + step)).round_dp(2);
-                let quantity = Decimal::new(rng.gen_range(50..150), 2);
-                let side = if rng.gen_bool(0.5) {
-                    Side::Buy
-                } else {
-                    Side::Sell
-                };
-                trades.push(Trade::new(timestamp, price, quantity, side).expect("valid trade"));
-            }
-        }
-    }
-    trades
-}
-
-/// Small thresholds so every feed warms within the tape, calibrated before it starts.
-fn shared() -> SwarmConfig {
-    SwarmConfig {
-        tick_thresholds: [1, 2, 3, 4],
-        volume_thresholds: [dec!(1), dec!(2), dec!(3), dec!(4)],
-        range_thresholds: [dec!(0.001), dec!(0.002), dec!(0.004), dec!(0.008)],
-        calibration_end_ms: START_MS - 1,
-        ..SwarmConfig::default()
-    }
-}
-
-/// A policy that trades often on a 96-agent swarm.
-fn busy_policy() -> PolicyConfig {
-    PolicyConfig {
-        threshold_base: dec!(0.05),
-        threshold_step: dec!(0.05),
-        hysteresis: dec!(0.02),
-        ..PolicyConfig::default()
-    }
-}
 
 fn space() -> SwarmPolicySpace {
     SwarmPolicySpace {
@@ -84,13 +30,6 @@ fn space() -> SwarmPolicySpace {
         stop_atr_multipliers: vec![dec!(3.0)],
         take_profit_atr_multipliers: vec![None],
         ..SwarmPolicySpace::default()
-    }
-}
-
-fn account() -> BacktestConfig {
-    BacktestConfig {
-        latency_ms: 100,
-        ..BacktestConfig::default()
     }
 }
 

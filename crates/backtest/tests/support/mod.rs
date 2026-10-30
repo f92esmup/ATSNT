@@ -7,6 +7,8 @@
 
 #![allow(dead_code)]
 
+pub mod swarm;
+
 use domain::{DollarBar, DollarBarAggregator, Side, Trade};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
