@@ -1,474 +1,363 @@
-# Plan de refactorización: ATSNT local, swarm sobre futuros de Kraken
+# Plan de refactorización v4: ATSNT local, swarm en spot de Kraken
 
-> **Estado:** propuesta v3.2. Sustituye a la v3.1 (commit `fcd9bbd`).
+> **Estado:** propuesta v4. Sustituye a la v3.2 (commit `010cf57`). La v3.2 queda en el historial por si cambia la elegibilidad para futuros.
 > **Base de código:** commit `50b4ee5`. Verificado en verde antes de escribir este plan: `cargo check --workspace --all-targets`, `cargo test --workspace`, `cargo fmt --check` y `cargo clippy --all-targets -- -D warnings`.
 > **Fecha:** 2026-10-30. Solo documentación: el código no ha cambiado.
 
-## Cambios respecto a la v2 y la v3
+## Qué vuelve y qué sale respecto a la v3.2
 
-- **v3.2:** tarifa base de spot corregida según la captura del usuario (0,25 % maker / 0,40 % taker, tramo base hasta 50 K USD). Se añade un escenario de estrés con esa tarifa en el gate.
-- **v3.1:** una sola base de riesgo, `min(capital operativo, equity EUR)`, de la que salen el riesgo por operación, el tope de nocional y los dos breakers. Dos efectos de FX separados: breakers y margen. Corrección de la comprobación de artefactos en la fase 1. Siembra del buffer USD antes del dinero real.
-- **Colateral en EUR** (decisión del usuario). Las pérdidas siguen liquidándose en USD, así que el plan obliga a mantener un buffer de USD.
-- **Capital de 5.000 €.** Con 2x, el nocional máximo es de 10.000 €. Los límites de riesgo se recalculan sobre ese capital.
-- **Equipo: Linux con Omarchy** (Arch con systemd). Se usa una unidad de usuario de systemd y se desactiva la suspensión.
-- **Breakers medidos en EUR** sobre el equity convertido, porque el capital es tuyo en EUR. El margen y la liquidación siguen en USD, según las reglas del exchange.
+**Vuelve al alcance (spot):**
+- Catálogo de pares (AssetPairs) para tamaños, ticks y mínimos.
+- Firma API-Sign de spot, con el vector de la guía de autenticación REST.
+- WebSocket v2 de spot: canales `trade` y `book`, con checksum CRC32 sobre los 10 niveles superiores.
+- Histórico por REST `Trades`: `since` en nanosegundos, 1000 por página, pausa de 1 a 2 s.
+- Pares en EUR.
 
-## Supuestos que he tomado
-
-- Los 5.000 € son tuyos, depositados en Kraken Pro. Si la "cuenta fondeada" es de una firma de fondeo (prop firm) con reglas de drawdown impuestas, avísame: cambia los breakers y la forma de operar.
-- Apalancamiento máximo de 2x (sección 2.6).
-- Colateral en EUR, como has elegido.
+**Sale del alcance:**
+- Perpetuos `PF_`, mark price, funding y liquidación.
+- Buffer de USD, FX y colateral en EUR.
+- Firma Authent, demo de futuros y el test MiFID II.
 
 ## 0. Resumen
 
-**Objetivo.** Un bot local que opera swarm en perpetuos lineales de Kraken Futures, con colateral en EUR, riesgo medido en EUR y sin GCP. Corre en Omarchy.
+**Objetivo.** Solo si la prueba económica pasa: un bot local que opera swarm en spot de Kraken con pares EUR, sin apalancamiento, sin Kraken Prop y sin GCP.
 
-**Lo que este plan no hace.** No crea ventaja. El venue no explica la pérdida del logbook: su run 9 ya usa comisiones de tramo 1 de futuros y aun así perdió dinero. Si la fase 1 falla, el siguiente paso es investigar la estrategia, no construir infraestructura.
+**Lo que este plan no hace.** No crea ventaja. La ida y vuelta en spot cuesta entre 0,65 % y 0,80 % del nocional, unas 8 a 9 veces la del clasificador en perpetuos (sección 2.6). La prueba probablemente fallará. Si falla, se para todo lo que es ejecución y el siguiente paso es investigar la estrategia.
 
 **Orden de trabajo.**
 
-1. **Fase 0:** higiene. Parte ya hecha: claves de Binance revocadas, acceso a GitHub, sistema operativo confirmado.
-2. **Fase 1:** puerta económica. Reproducir el run 9 y aplicar los parámetros de Kraken con 5.000 €.
-3. **Fase 2:** grabadora de futuros, en paralelo. El libro y el mark price no se pueden recuperar después.
-4. **Fases 3 y 4:** hexagonal y borrado, protegidos por goldens de swarm.
-5. **Fases 5 a 7:** dominio de futuros con colateral EUR, adaptador de Kraken Futures y fidelidad de simulación.
-6. **Fases 8 y 9:** operación en Omarchy y paso a dinero real por tramos.
+1. **Fase 0:** higiene.
+2. **Fase 1:** prueba económica spot, con el código actual y datos que descargas tú (sección 4).
+3. **Fases 3 y 4:** refactor hexagonal y borrado. No dependen del resultado de la prueba.
+4. **Fases 2 y 5 a 9:** grabadora, dominio spot, adaptador de Kraken, fidelidad, operación y dinero real. Solo si la prueba pasa.
 
 ## 1. Decisiones
 
-Tomo estas decisiones para avanzar. Si quieres otra, dímelo y ajusto las fases afectadas.
-
-| # | Decisión | Motivo | Cómo cambiarla |
-|---|---|---|---|
-| D1 | Solo `swarm_consensus`. Se eliminan las otras cuatro estrategias y el stack de portfolio y universo | Tu instrucción. El VM con el bot ya no existe | Volver a registrar una estrategia en `registry.rs` |
-| D2 | Futuros perpetuos lineales de Kraken (`PF_`). Spot fuera de alcance | A 200 €/mes el spot queda en el tramo base y es caro. Los derivados tienen tramo 1 de 0,02 % / 0,05 % (sección 2.4) | Reabrir spot como fase posterior |
-| D3 | Largo y corto, como permiten los perpetuos | Sin restricción de venta en corto | — |
-| D4 | Swarm en modo `classifier` para paper y live | El modo legacy emite `Decision::Target` y el registro lo rechaza (`crates/backtest/src/registry.rs:138`) | Ninguna: es una restricción actual del código |
-| D5 | Binance deja de ser fuente de datos y de ejecución al cerrar la fase 1 | Su único uso restante es el histórico público de la fase 1 | Mantener un descargador público si quieres comparar venues |
-| D6 | Parquet para trades, libro, mark price y EURUSD; SQLite para el registro de runs y el ledger | Sin servidor ni cloud. SQLite cubre lo que hoy hace BigQuery | DuckDB para análisis, sin cambiar el diseño |
-| D7 | Telegram se mantiene | No es GCP y ya es un puerto | — |
-| D8 | Linux (Arch, Omarchy) con unidad systemd de usuario | Omarchy usa systemd. El repo ya trae `docs/deployment/*.service`, `journald.conf` y envoltorios `systemd-inhibit` | — |
-| D9 | Se añade el puerto `Clock` | AGENTS.md lo exige; el roadmap lo descartó. Se corrige el roadmap | — |
-| D10 | Colateral en **EUR**. El PnL del contrato es en USD. Margen y liquidación según las reglas del exchange (en USD). Breakers y riesgo medidos en **EUR** | Tu elección. Ver sección 2.7 | — |
-| D11 | Salidas gestionadas por el cliente (en dominio) | No he verificado órdenes condicionales en el API de futuros | Usar órdenes condicionales si la especificación lo confirma |
-| D12 | Apalancamiento máximo configurable, **por defecto 2x** | Kraken lista hasta 10x en la UE, pero la prensa cita un aviso de ESMA que trataría estos perpetuos como CFD, con tope de 2:1 para minoristas (sección 2.6) | Subir el tope en la configuración, solo si tu cuenta lo permite |
-| D13 | La demo (`demo-futures.kraken.com`) sirve para fontanería, no para validar estrategia | Es un entorno de pruebas que se refresca de vez en cuando y no guarda histórico | — |
-| D14 | Capital de referencia de **5.000 €**. Base de riesgo = **min(capital operativo, equity EUR)**: de ella salen el riesgo por operación, el tope de nocional y los breakers | Tu capital. Con un capital operativo de 1.000 € el bot no arriesga los 4.000 € restantes. Se recomienda arrancar con 1.000 € (fase 9) | `operating_capital_eur` en la configuración |
-| D15 | **Buffer de USD obligatorio.** Regla: buffer ≥ pérdida hasta el stop de las posiciones abiertas + 24 h de funding en el peor caso | Evita convertir EUR a USD en mitad de una pérdida, con su comisión | Constante de configuración; la regla no cambia |
-
-## 2. Hechos que condicionan el plan
-
-### 2.1 GCP y datos
-
-- El proyecto se eliminó. Google permite restaurarlo durante 30 días con `gcloud projects undelete` ([documentación](https://docs.cloud.google.com/resource-manager/docs/delete-restore-projects)). No lo necesitamos.
-- Se pierde el historial de runs de BigQuery y los artefactos de GCS que no se descargaron a `configs/`. Lo que importa está en git: `configs/hpo_swarm.json`, `configs/hpo_btcusdt_2026.json`, `configs/swarm_shared.json` y los logbooks de `docs/research/`.
-- Los datos históricos de Binance son públicos y `fetch_data` los vuelve a descargar.
-
-### 2.2 Secretos
-
-- **Hecho:** claves de Binance revocadas.
-- **Pendiente:** recrear el token de Telegram y guardarlo en `.env`.
-- **Nuevo:** claves de API de producción de futuros **sin permiso de retirada**, y claves del demo separadas. Todo en `.env` con permisos `600`.
-
-### 2.3 Swarm tiene dos modos, y solo uno se puede operar
-
-| Modo | Config | Decisión que emite | Artefacto de referencia | Paper y live |
-|---|---|---|---|---|
-| Legacy | `classifier_mode: false` (valor por defecto) | `Decision::Target`, niveles de -3 a 3 | `configs/hpo_swarm.json` (no tiene la clave, así que carga en legacy) | Rechazado por el registro |
-| Classifier | `classifier_mode: true` | `Decision::Entry`, barrera triple | `configs/hpo_btcusdt_2026.json` | Aceptado |
-
-El candidato para operar es el modo classifier. Ambos artefactos son `usd_m_perpetual`.
-
-### 2.4 Comisiones y logbook
-
-**Tarifas** (fuentes de búsqueda, **verificar en tu cuenta**):
-
-| Producto | Tramo base | Primer escalón | Fuentes |
-|---|---|---|---|
-| Spot | 0,25 % maker / 0,40 % taker (captura del usuario) | Tramo base hasta 50 K USD de volumen. Las fuentes web daban 0,40 / 0,80 con un escalón a 2,5 K USD: no coinciden | [tarifas Kraken Pro](https://www.kraken.com/pro/fees), [comparativa](https://www.kraken.com/learn/lowest-fee-crypto-exchange) |
-| Derivados | 0,02 % maker / 0,05 % taker | Tramo 1 hasta 5 M USD de volumen de 30 días | [tabla de derivados](https://support.kraken.com/articles/360048917612-fee-schedule) |
-
-- Las fuentes no coinciden sobre si el volumen spot cuenta para el nivel de derivados.
-- **Pendiente:** la tabla de futuros de tu cuenta (la que aplica a `PF_`) y confirmar si la cuenta fondeada usa la tabla de spot.
-- La prensa cita una promoción sin comisiones de futuros para clientes nuevos del EEE. No la uso en la prueba; compruébala en tu cuenta.
-
-**Tu caso (200 €/mes):** en spot sigues en el tramo base (0,25 % / 0,40 %), que cubre hasta 50 K USD de volumen. En derivados estarías en el tramo 1 (0,02 % / 0,05 %), si la tabla de futuros de tu cuenta lo confirma. Tu intuición de que sale más barato es correcta para futuros, no para spot.
-
-**El artefacto ya asume estas comisiones.** `maker_fee_pct: 0.0002` y `taker_fee_pct: 0.0005` son el tramo 1 de derivados. Por eso el run 9 del logbook ya es swarm con comisiones de Kraken futuros, y aun así perdió dinero.
-
-**El logbook no cuadra consigo mismo** (`docs/research/01-swarm-consensus-optimization-logbook.md`, sección 5.2):
-
-- La fricción por razón de salida suma unos 45 USD: take profit 10,45 (109,79 bruto frente a 99,34 neto), trailing 2,17 (0,97 frente a −1,20) y stop loss 32,62 (−151,42 frente a −184,04).
-- Pero el resumen declara una fricción total de 91,69 USD.
-- Y −40,66 − 91,69 = −132,35, no −85,89.
-
-**Por eso se retiró la estimación de 4,5 y 8,5 veces de la v1.** La fase 1 la sustituye por cifras del backtester.
-
-### 2.5 Kraken en el código
-
-No hay ninguna referencia a Kraken. Pero el código ya modela perpetuos USD-M: `domain/src/futures.rs` tiene funding, liquidación aislada y mínimos de apalancamiento. El trabajo de futuros es parametrizar y adaptar, no construir desde cero.
-
-### 2.6 Acceso a futuros en España
-
-- Kraken ofrece perpetuos en la UE. Sus páginas en español dicen que la plataforma cumple MiFID II en España ([página](https://pro.kraken.com/es/perpetual-futures)).
-- **Requisito:** pasar el test de idoneidad de MiFID II y activar derivados en tu cuenta de Kraken Pro.
-- **Apalancamiento:** Kraken declara hasta 10x para usuarios de la UE en pares elegibles. La prensa especializada informa de un aviso de ESMA sobre perpetuos apalancados (febrero; verificar fecha y texto). Según esa prensa, si se tratan como CFD, el tope para minoristas sería 2:1. No he encontrado confirmación de que Kraken lo haya aplicado.
-- Un artículo de Kraken Learn de junio de 2026 indica que el país cambia la elegibilidad, el apalancamiento y los contratos listados (URL no confirmada; buscarlo en Kraken Learn antes de citarlo).
-
-### 2.7 Colateral en EUR: qué dicen las fuentes
-
-- **PnL en USD.** Los contratos lineales multi-colateral (`PF_`) denominan sus ganancias y pérdidas en USD. El pago de ganancias por defecto es USD, pero puede cambiarse a EUR u otro colateral soportado ([acuerdos EEE](https://support.kraken.com/articles/multi-collateral-derivatives-contracts-eea), [especificación lineal](https://support.kraken.com/hc/en-us/articles/4844359082772-Linear-Multi-Collateral-Perpetual-Contract-Specifications)).
-- **Las pérdidas siempre se cargan en USD.** Si falta USD, se convierte colateral con comisión. Los cargos horarios de funding pueden generar pérdidas no realizadas que el USD o las stablecoins no cubren.
-- **Haircut del EUR: 0 %** en la tabla de colateral de Kraken. EURC tiene 1 %. Una tabla EEA antigua usa 2 % para el EUR; no coincide con la tabla actual ([colateral en el EEE](https://support.kraken.com/es/articles/collateral-currencies-eea), [colateral de futuros](https://support.kraken.com/hc/en-us/articles/4843323030164-Futures-Collateral-Currencies)).
-- **Comisión de conversión EUR→USD: no confirmada.** La tabla EEA da 0 % para el EUR, pero la misma página dice que el colateral no USD suele tener comisión de conversión. Un ejemplo de Unified Wallet usa un spread de 0,25 % ([conversiones](https://support.kraken.com/articles/interest-and-conversions-unified-wallet)). **El plan modela 0,25 % como supuesto conservador** hasta confirmarlo en tu cuenta.
-- **Dos efectos de FX, separados.**
-  - *En los breakers* (medidos en EUR): con haircut 0, el colateral EUR no tiene riesgo de cambio. Solo el saldo USD y el PnL abierto en USD se mueven con el EURUSD.
-  - *En el margen y la liquidación* (medidos en USD por el exchange): el colateral EUR sí tiene riesgo de cambio. Si el EUR se deprecia frente al USD, el margen en USD baja y la liquidación se acerca sin que cambien tus breakers.
-
-**Fórmulas que implementa el dominio** (tasas en USD por EUR, mark):
-
-```text
-equity_USD    = colateral_EUR × EURUSD × (1 − haircut_EUR) + saldo_USD + PnL_no_realizado_USD + funding_pendiente_USD
-equity_EUR    = colateral_EUR × (1 − haircut_EUR) + (saldo_USD + PnL_USD + funding_USD) / EURUSD
-buffer_USD   ≥ pérdida_hasta_stop(posiciones abiertas) + funding_24h_peor_caso      (D15)
-```
-
-- `haircut_EUR = 0` (verificar en la tabla vigente).
-- La liquidación y el margen se calculan con `equity_USD`, según las reglas del exchange.
-- Los breakers se calculan con `equity_EUR`. Con haircut 0, el colateral EUR no aporta riesgo de cambio a esa métrica: solo el saldo USD y el PnL abierto en USD se mueven con el EURUSD.
-
-### 2.8 Violaciones hexagonales (verificadas con grep)
-
-| Dónde | Problema | Acción |
+| # | Decisión | Motivo |
 |---|---|---|
-| `backtest/src/{paper,tick_simulation,recording,parity}.rs` | Importan `adapters::` desde la capa de aplicación | Dependen de puertos; el cableado va a `wiring.rs` (fase 3) |
-| `backtest/src/{sinks,artifact}.rs` | Sinks de BigQuery y GCS | Se eliminan (fases 3 y 4) |
-| `adapters/src/analytics.rs` | Define el trait de persistencia en la capa de adaptadores | Se mueve a `ports/` (fase 3) |
-| `ports/src/execution.rs`, `ports/src/lib.rs` | Nombran Binance en comentarios | Se corrige (fase 3) |
-| `domain/src/futures.rs` | Lógica pura correcta, pero el intervalo de funding está fijado en 8 h | Se parametriza (fase 3). Pasa a ser el módulo central |
-| `backtest/src/{daily_watermark,excursion,fee_ledger,monthly_guard,execution_core,metrics,walk_forward,price_event}.rs` | Reglas puras dentro de la capa de aplicación | Se mueven a `domain` si el grep confirma que no usan E/S (fase 3) |
-| `backtest/src/monte_carlo.rs` | El grep de E/S lo marca por `rayon` | Separar: el núcleo estadístico va a `domain` con RNG determinista; el paralelismo queda en la aplicación |
-| `backtest/src/{driver,session}.rs` | Orquestación | **Se quedan en la capa de aplicación.** No son dominio |
-| `backtest/src/live_exits.rs` | Salidas gestionadas por el exchange, específicas de Binance | Se revisa con D11 (fase 6) |
+| D1 | Solo `swarm_consensus`. Se eliminan las otras cuatro estrategias y el stack de portfolio y universo | Tu instrucción |
+| D2 | Spot de Kraken en cuenta estándar con API | Tu cuenta es de spot y no eres apto para futuros |
+| D3 | Solo largo. El artefacto clasificador `hpo_btcusdt_2026.json` ya tiene `shared_config.allow_short: false`. El legacy `hpo_swarm.json` tiene `allow_short: true` | Spot no permite vender sin tener el activo |
+| D4 | Pares EUR (nombres a verificar en AssetPairs). Sin buffer de USD ni FX en margen. El FX solo se usa en informes | Spot en EUR evita todo lo que añadía el colateral de futuros |
+| D5 | Entradas de mercado, como en el motor. Salidas por take profit en maker cuando la orden descansa | Coincide con `resting_maker_exits` del artefacto |
+| D6 | Sin apalancamiento, sin funding y sin liquidación | Propios de spot |
+| D7 | Binance sale del código tras la prueba. Sus datos se descargan una vez, solo para la prueba | Sin uso posterior |
+| D8 | Parquet para trades, libro y EURUSD; SQLite para el registro y el ledger | Sin servidor ni cloud |
+| D9 | Telegram, Linux (Omarchy), unidad systemd de usuario y puerto `Clock` | Sin cambios respecto a la v3.2 |
+| D10 | Base de riesgo = `min(capital operativo, equity EUR)`. Sin apalancamiento, el tope de nocional es igual a la base | Capital propio; se deja como parámetro hasta que la prueba pase |
+| D11 | Comisiones del tramo base de Kraken Pro spot: 0,25 % maker / 0,40 % taker, según tu captura, para 0 a 50 K USD de volumen | Pueden bajar con volumen; no se asume ninguna bajada |
+| D12 | La prueba usa datos de perpetuos de Binance como proxy de precio, con esa limitación explícita | Es lo único disponible sin Kraken |
 
-### 2.9 Unidades de los campos de comisión
+## 2. Hechos verificados
 
-Los campos `*_pct` son fracciones: `taker_fee_pct: 0.0005` equivale a 0,05 %. Un 0,40 % escrito como `0.40` serían 40 %. Se renombran a `*_rate`, se validan al cargar en el rango `[0, 0.05]` y se migran los artefactos que se conservan.
+### 2.1 Cuenta
+
+- Tienes spot activo y no eres apto para futuros.
+- Según la política general de Kraken, las cuentas estándar pueden usar API. La página de API de Kraken Pro no se pudo leer desde aquí, así que lo que falta comprobar es si la clave de spot ve tu saldo.
+
+### 2.2 Kraken Prop: fuera del plan
+
+Según la página de Kraken Prop que citaste, las cuentas de evaluación y fondeadas no admiten API en ninguna fase, y las órdenes se introducen a mano. No he podido comprobarlo desde aquí.
+
+### 2.3 Comisiones
+
+- Spot, tramo base (captura del usuario): 0,25 % maker / 0,40 % taker, para 0 a 50 K USD de volumen.
+- Las fuentes web daban 0,40 % / 0,80 % con un escalón a 2,5 K USD. No coinciden con tu captura, que es la de tu cuenta.
+- El plan v3.2 usaba esas cifras y queda corregido aquí.
+
+### 2.4 Modos del swarm
+
+| Modo | Decisión | Cortos | Artefacto | Paper y live |
+|---|---|---|---|---|
+| Legacy | `Decision::Target` | `allow_short: true` en `hpo_swarm.json` | `configs/hpo_swarm.json` | Rechazado por el registro |
+| Classifier | `Decision::Entry` | `allow_short: false` en `hpo_btcusdt_2026.json` | `configs/hpo_btcusdt_2026.json` | Aceptado |
+
+El artefacto clasificador ya es solo largo. Pasar a largo no le quita señales. Lo que medirá la prueba es cuántas señales cortas generaba el modo con cortos.
+
+### 2.5 Compatibilidad de spot: bloqueo de código
+
+- `SwarmConsensusStrategy::compatible_market_types()` devuelve solo `UsdMPerpetual` (`crates/strategies/src/swarm_consensus/mod.rs:44-46`).
+- Por eso `backtest --spot` se detiene con "does not support Spot" (`crates/backtest/src/main.rs`, comprobación de `supports_market_type`).
+- La prueba evita ese camino: usa el artefacto perpetuo con apalancamiento 1, funding 0 y mantenimiento 0. Para perpetuos, el motor solo exige que el mantenimiento esté entre 0 y 1 (`crates/backtest/src/config.rs`, validación), así que 0 pasa.
+- Es un atajo: el motor sigue la ruta de perpetuos. Declarar spot en la estrategia es un cambio de una línea, que se hará solo si la prueba pasa.
+
+### 2.6 Economía de la operación
+
+Con entradas de mercado, como en el motor:
+
+| Tramo de la operación | Perpetuo, clasificador | Spot Kraken (captura) |
+|---|---|---|
+| Entrada (siempre taker) | 0,05 % | 0,40 % |
+| Salida por take profit (maker si descansa) | 0,02 % | 0,25 % |
+| Salida por stop loss (taker) | 0,05 % | 0,40 % |
+| **Ida y vuelta por take profit** | **0,07 %** | **0,65 %** |
+| **Ida y vuelta por stop loss** | **0,10 %** | **0,80 %** |
+
+El coste es 9 veces el perpetuo en take profit y 8 veces en stop loss.
+
+### 2.7 Datos
+
+- El descargador `fetch_data` solo baja perpetuos: `data/futures/um` (`crates/adapters/src/binance_fetcher.rs:35-40`).
+- `data.binance.vision` respondió 403 desde este entorno. La descarga la ejecutas tú en tu equipo.
+- Para spot real hace falta una ruta nueva de descarga. Antes de escribirla hay que verificar el formato: si los archivos spot usan marcas de tiempo en microsegundos (verificar en la documentación de Binance; no lo he confirmado).
+
+### 2.8 Fidelidad en spot
+
+- En spot, una orden límite de salida solo se llena si un trade atraviesa su nivel. La variante de salida maker de la prueba asume que el take profit se llena en cuanto el precio toca el nivel, así que es optimista.
+- Hoy el motor no modela cola: esto se corrige en la fase 7. Hasta entonces, una prueba positiva en la variante maker no basta.
 
 ## 3. Arquitectura objetivo
 
 ```text
 crates/
-├── domain/      Puro, sin E/S. Instrumentos de futuros, Currency y Money (monto + divisa),
-│                tarifas, órdenes y su máquina de estados, posición, riesgo, margen y liquidación
-│                (futures.rs, en USD), colateral (EUR, haircut, buffer USD, conversión),
-│                funding con intervalo y divisa parametrizados, breakers en EUR, analítica
-│                (métricas, Monte Carlo con RNG determinista).
-├── strategies/  Solo swarm_consensus, su contrato de pruebas y un registro con una entrada.
-├── ports/       MarketDataStream, AsyncMarketDataStream, DepthStream*, MarkPriceStream*,
-│                FundingStream*, FxRateSource*, TradeTapeWriter*, Clock*, ExecutionVenue,
-│                ExitGateway, InstrumentCatalog*, FeeSource*, trait de persistencia de runs
-│                (movido), AlertNotifier.                                       (* = nuevo)
-├── adapters/    kraken_futures/  REST (público y privado), WebSocket v1, firma, catálogo,
-│                                 gateway, grabadora
-│                storage/         Parquet de trades, libro, mark price y EURUSD; SQLite del
-│                                 registro y del ledger
-│                fx/              fuente de EURUSD (por definir, sección 2.7)
-│                telegram/        (movido desde gcp/)
-│                simulated/       SimulatedVenue, libro simulado y mark price simulado
-└── backtest/    (se renombra a `app` al final) TradingSession, driver, simuladores y modos
-                 backtest, hpo, paper, live y record. Solo `main.rs` y `wiring.rs` nombran adapters.
+├── domain/      Puro, sin E/S. Instrument con MarketType::Spot, Money en EUR, FeeTier,
+│                órdenes y su máquina de estados, posición, riesgo (long-only, sin apalancamiento,
+│                base de riesgo), breakers en EUR, analítica (Monte Carlo con RNG determinista).
+├── strategies/  swarm_consensus (declarará Spot solo cuando la prueba pase), su contrato y un registro con una entrada.
+├── ports/       MarketDataStream, AsyncMarketDataStream, DepthStream*, TradeTapeWriter*, Clock*,
+│                InstrumentCatalog*, FeeSource*, ExecutionVenue, ExitGateway, trait de persistencia
+│                (movido), AlertNotifier.                                              (* = nuevo)
+├── adapters/    kraken_spot/  REST público (AssetPairs, Trades), REST privado (API-Sign), WebSocket v2
+│                              (trade, book con CRC32), WebSocket privado, gateway, grabadora
+│                storage/      Parquet de trades y libro; SQLite del registro y del ledger
+│                telegram/     (movido desde gcp/)
+│                simulated/    SimulatedVenue con libro y cola de limit
+└── backtest/    (se renombra a `app` al final) TradingSession, driver, simuladores y modos.
+                 Solo `main.rs` y `wiring.rs` nombran adapters.
 ```
 
 Reglas que pasan a ser tests en `crates/backtest/tests/architecture_contract.rs`:
 
 - **R1.** `domain`, `strategies` y `ports` no dependen de crates de E/S. (Ya existe.)
 - **R2.** `adapters` no depende de la capa de aplicación.
-- **R3.** Los módulos de librería de la aplicación no importan `adapters::`. Solo `main.rs` y `wiring.rs`.
-- **R4.** `ports` no nombra exchanges ni formatos: nada de `Binance`, `Kraken`, `Parquet` ni `BigQuery`.
-- **R5.** `domain` no usa `f32` ni `f64`, salvo en los módulos de estadística que se listen explícitamente.
+- **R3.** Los módulos de librería de la aplicación no importan `adapters::`.
+- **R4.** `ports` no nombra exchanges ni formatos.
+- **R5.** `domain` no usa `f32` ni `f64`, salvo en los módulos de estadística que se listen.
 - **R6.** Solo `strategies::registry` nombra estrategias. (Ya existe.)
-- **R7.** Ningún `SystemTime::now()` ni `Utc::now()` fuera de `adapters`. El tiempo llega por `Clock`.
+- **R7.** Ningún `SystemTime::now()` ni `Utc::now()` fuera de `adapters`.
 
 ## 4. Fases
 
-Tamaño relativo: S, M o L. Cada fase tiene criterio de salida y no se pasa a la siguiente sin cumplirlo.
+Tamaño relativo: S, M o L. Cada fase tiene criterio de salida.
 
 ### Fase 0: higiene (S)
 
-- **Hecho:** claves de Binance revocadas. Acceso a GitHub concedido. Sistema operativo confirmado: Linux (Omarchy). El plan v1 y el v2 ya están subidos.
+- **Hecho:** claves de Binance revocadas. Acceso a GitHub. Sistema operativo: Linux (Omarchy).
 - **Pendiente:**
-  - Activar derivados en Kraken Pro. Requiere pasar el test de idoneidad de MiFID II.
-  - Crear una cuenta en el demo (`demo-futures.kraken.com`) y sus claves, separadas de las de producción.
-  - Crear las claves de producción de futuros **sin permiso de retirada**.
-  - Recrear el token de Telegram.
-  - Crear `.env` con permisos `600`.
+  - Recrear el token de Telegram en `.env` con permisos `600`.
+  - Crear una clave de API de spot **sin permiso de retirada**, solo con consulta y trading.
+  - Confirmar en tu cuenta que la clave ve el saldo de spot.
 
-**Salida:** `.env` local creado. Derivados activos en la cuenta. Claves del demo y de producción separadas.
+**Salida:** `.env` creado y clave de spot verificada.
 
-### Fase 1: puerta económica (S de código, horas de cómputo)
+### Fase 1: prueba económica spot (S de código, horas de cómputo)
 
-**Pregunta:** ¿swarm tiene ventaja neta con comisiones de futuros, funding, conversión EUR→USD y apalancamiento de 2x sobre 5.000 €?
+**Pregunta:** ¿el swarm solo largo gana algo después de comisiones de spot?
 
-**Paso 0. Verificar los contratos con datos públicos.** Ejecuta esto en tu equipo. Desde este entorno el proxy bloquea `futures.kraken.com` (403):
+**Paso 0. Datos (en tu equipo).** Descarga un mes completo de BTCUSDT con el descargador del repo (README, paso 1):
 
 ```bash
-curl -s https://futures.kraken.com/derivatives/api/v3/instruments \
-  | python3 -c "import json,sys; d=json.load(sys.stdin); [print(json.dumps(i, indent=1)) for i in d.get('instruments', []) if i.get('symbol') in ('PF_XBTUSD','PF_ETHUSD','PF_SOLUSD')]"
+cd ~/atsnt
+cargo run --release -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2026 --month 9
 ```
 
-Pégame la salida. De ella salen el tamaño del contrato, el mínimo y el paso de orden, el tick y el apalancamiento máximo. Hasta entonces, esos valores quedan como **verificar**.
+Anota la ruta del Parquet que escribe. Ese archivo es el proxy de precio.
 
-**Paso 1. Reproducir el run 9 sin fiarse de sus totales.** Reproducirlo con el backtester actual y comparar con el logbook. Ningún artefacto reproduce el run 9 exactamente. `hpo_btcusdt_2026.json` (clasificador, el que usa el gate) comparte con él el paso de umbral (0,075), la histéresis (0,55), el riesgo base (1 %) y el breakeven (1,0 ATR). Pero difiere en trailing (1,0 frente a 0,50), take profit (4,0 frente a 2,0), stop (1,5 frente a 1,25), decay (86.400 s frente a 43.200 s), umbral base (0,525 frente a 0,50) y riesgo incremental (0 frente a 0,5 %). Hay que reconstruir la configuración del run 9 desde la sección 5.2 del logbook, o localizar el artefacto que la contiene. Si no se reproduce, el logbook no sirve de referencia y solo queda la prueba.
+**Paso 1. Crear las tres variantes.** Estas copias van fuera del repo, en `~/atsnt-gate/`, para no commitearlas:
 
-**Paso 2. Aplicar los deltas de Kraken** en copias del artefacto:
+```bash
+cd ~/atsnt
+python3 - <<'EOF'
+import copy, json, pathlib
 
-| Delta | Artefacto `hpo_btcusdt_2026.json` (clasificador, el del gate) | Prueba |
-|---|---|---|
-| Capital | `initial_capital: 200` en USD (`hpo_swarm.json` tiene 10.000) | 5.000 € convertidos a USD con un tipo de cambio fijo, verificado y anotado |
-| Comisiones | maker 0,0002, taker 0,0005. Con `resting_maker_exits: true`, las salidas por take profit pagan comisión maker | Sin cambio (tramo 1 de derivados; verificar) |
-| Apalancamiento | `max_leverage: 20` | `2` |
-| Funding | `funding_rate_pct: 0.0001` por liquidación de 8 h | Histórico de funding de Kraken si se puede obtener (la página regional indica horario; verificar). Si no, barrido de tasas |
-| Conversión | — | 0,25 % sobre cada pérdida realizada. Es una **cota superior**: con D15 la conversión solo ocurre al reponer el buffer (verificar) |
-| Tamaño mínimo | `min_order_quantity: 0.001` (BTC) | Mínimo real de `PF_XBTUSD` del paso 0 |
+src = json.load(open("configs/hpo_btcusdt_2026.json"))
+out = pathlib.Path.home() / "atsnt-gate"
+out.mkdir(exist_ok=True)
 
-**Paso 3. Escenarios.** Cuatro ejecuciones: (a) con los deltas anteriores; (b) con el doble de comisiones o con `resting_maker_exits: false` (las salidas por take profit pagan taker) como margen de seguridad; (c) con el doble de funding; (d) con la tarifa de la captura, 0,25 % maker / 0,40 % taker, si la cuenta la aplica también a futuros. El escenario (b) no cubre esa tarifa: es unas 12 veces la maker y 8 veces la taker de la tabla de derivados. Anotar PnL neto, comisiones, conversiones, funding pagado, Sortino y DSR.
+def write(name, allow_short, spot_costs, resting_maker_exits):
+    d = copy.deepcopy(src)
+    d["shared_config"]["allow_short"] = allow_short
+    ec = d["execution_context"]
+    if spot_costs:
+        ec.update(maker_fee_pct="0.0025", taker_fee_pct="0.0040",
+                  max_leverage="1", funding_rate_pct="0", maintenance_margin_rate="0")
+    ec["resting_maker_exits"] = resting_maker_exits
+    (out / f"{name}.json").write_text(json.dumps(d, indent=2))
+
+write("control_perp_con_cortos", True, False, True)
+write("spot_solo_largo_salida_maker", False, True, True)
+write("spot_solo_largo_salida_taker", False, True, False)
+EOF
+```
+
+**Paso 2. Ejecutar las tres.** Sustituye `RUTA_PARQUET` por la ruta del paso 0. No uses `--spot`: ver la sección 2.5.
+
+```bash
+cd ~/atsnt
+for c in control_perp_con_cortos spot_solo_largo_salida_maker spot_solo_largo_salida_taker; do
+  cargo run --release -p backtest -- --data RUTA_PARQUET --config ~/atsnt-gate/$c.json --capital 5000 \
+    > ~/atsnt-gate/$c.log 2>&1
+done
+```
+
+`--capital 5000` está en USD, que es la moneda del backtester. Es un proxy de tamaño, no tu saldo en EUR.
+
+**Paso 3. Qué reportar** de cada log: PnL neto, comisiones totales, número de operaciones y, en el control, cuántas son cortas.
 
 **Criterio:**
 
-- **Pasa** si en el escenario (a) el PnL neto OOS es positivo y el DSR cumple el criterio del proyecto. El umbral lo fija `run_hpo`; verificarlo en el código antes de decidir.
-- **No pasa.** El venue no explica la pérdida, así que el siguiente paso es investigación de estrategia, no infraestructura. El refactor puede seguir porque elimina código sin uso, pero no se construye ejecución con dinero real hasta que el gate pase.
+- **Pasa** si `spot_solo_largo_salida_maker` tiene PnL neto positivo. Un mes no basta: habría que repetir en al menos 12 meses, con DSR válido, antes de construir nada.
+- **No pasa** si el PnL neto es negativo. Con un mes ya es una señal suficiente. Se paran las fases 2 y 5 a 9, y el siguiente paso es investigar la estrategia.
+- Un PnL negativo con la variante de salida taker confirma que el coste de las salidas en mercado es el problema.
 
-**Salida:** tabla de escenarios completa, con el paso 0 verificado o marcado como pendiente, y decisión tomada.
+**Salida:** tabla de las tres variantes y decisión.
 
-### Fase 2: grabadora de futuros (M), en paralelo
+### Fase 2: grabadora de Kraken spot (M), solo si la fase 1 pasa
 
-**Por qué va pronto:** el libro y el mark price no se pueden pedir hacia atrás por REST. Cada día sin grabar es un día de calibración perdido.
+- `adapters/src/kraken_spot/ws_public.rs`: WebSocket v2 en `wss://ws.kraken.com/v2`, canales `trade` y `book` con profundidad 25.
+- **Checksum CRC32** sobre los 10 niveles superiores. Si falla, volver a suscribirse y resincronizar con snapshot.
+- Persistencia en Parquet por día UTC: `data/kraken-spot/<par>/{trades,book}/AAAA-MM-DD.parquet`.
+- Reconexión con backoff, heartbeat y rotación a medianoche UTC.
+- Alerta por Telegram si hay un hueco de más de 60 s.
+- Opcional, en paralelo desde ya: grabar solo trades por REST `Trades` (sección 6.2). Es barato y sirve para investigación aunque la prueba falle.
 
-Alcance:
-
-- Puertos mínimos que necesita la grabadora: `DepthStream`, `MarkPriceStream`, `FundingStream`, `TradeTapeWriter` y `Clock`.
-- `adapters/src/kraken_futures/ws_public.rs`: WebSocket v1 de producción en `wss://futures.kraken.com/ws/v1`, con los feeds públicos `trade`, `book` y `ticker`. Verificar que el ticker trae mark price, index y funding ([documentación WebSocket de futuros](https://docs.kraken.com/exchange/api-reference/futures-websocket)).
-- **Verificar la integridad del libro en el feed v1.** No asumir el checksum CRC32 de spot. Si no hay checksum, validar por número de secuencia y resincronizar con snapshot ante cualquier hueco.
-- `adapters/src/kraken_futures/catalog.rs`: instrumentos públicos (paso 0 de la fase 1) para tamaños, ticks y apalancamiento de cada `PF_`.
-- Persistencia en Parquet por día UTC: `data/kraken-futures/<símbolo>/{trades,book,mark}/AAAA-MM-DD.parquet`, con un snapshot del libro cada 60 s más deltas.
-- Serie de **EURUSD** en su propio Parquet. Su fuente está por definir (sección 2.7); el repo no tiene esa serie.
-- Funding histórico diario por REST público ([histórico de funding](https://docs.kraken.com/api-reference/historical-funding-rates/historical-funding-rates)).
-- Reconexión con backoff exponencial, heartbeat y rotación de ficheros a medianoche UTC.
-- Salud cada hora: mensajes por segundo, huecos, reconexiones y fallos de secuencia o checksum. Alerta por Telegram si hay un hueco de más de 60 s.
-- Binario temporal `kraken_record`. Pasa a `atsnt record` en la fase 10.
-
-**Salida:** 7 días seguidos sin huecos sin alertar, y todo fallo de integridad del libro resincronizado.
+**Salida:** 7 días seguidos sin huecos sin alertar.
 
 ### Fase 3: consolidación hexagonal con goldens de swarm (L)
 
-Orden obligatorio: primero los goldens, después los movimientos.
+No depende del resultado de la prueba. El código sin uso sale igual.
 
-- **3.1 Goldens de swarm.** Añadir casos de swarm (bar y tick, en modo classifier y en legacy) en `crates/backtest/tests/golden_execution.rs`. Generarlos con `UPDATE_GOLDEN=1 cargo test -p backtest --test golden_execution`, revisar el diff y commitear. Hoy los goldens de estrategia son de cusum y ofi; esos se borran en la fase 4. Los de registro se conservan.
-- **3.2 Reglas R2 a R7** en `architecture_contract.rs`. Fallarán hasta completar 3.3 a 3.10.
-- **3.3 Persistencia.** Mover el trait de persistencia de `adapters/src/analytics.rs` a `ports/src/`. `recording.rs` queda como traducción del dominio al puerto.
-- **3.4 Sin `adapters::` en la librería.** `paper.rs`, `tick_simulation.rs` y `parity.rs` reciben puertos genéricos. El cableado concreto se mueve a `wiring.rs`.
-- **3.5 Reglas puras al dominio.** `daily_watermark`, `excursion`, `fee_ledger`, `monthly_guard`, `execution_core`, `metrics` y `walk_forward` si no tiene E/S. Antes de mover cada módulo, comprobar con grep que no contiene `std::fs`, `tokio`, `rayon`, `rand` ni `SystemTime`.
-- **3.6 Funding.** `FundingSchedule::new(intervalo, tasa, divisa)`. La constante de 8 h queda solo en el perfil histórico de Binance, que se borra en la fase 4.
-- **3.7 Clock.** `SystemClock` en `adapters`; `SimClock` para simulación y tests. Corregir `docs/ROADMAP.md`, que dice que el puerto no hace falta.
-- **3.8 Puertos sin nombres de exchange.** Quitar las menciones de Binance en `ports/src/execution.rs` (`order_id`, documentación de `ExecutionVenue`) y en `ports/src/lib.rs`.
-- **3.9 Renombrar `tape`.** `binance_parquet.rs` pasa a `storage/tape_parquet.rs`, genérico, con el mismo esquema y con columnas para libro, mark price y EURUSD.
-- **3.10 Divisas explícitas.** Introducir `Currency` y `Money` en `domain`. Ningún importe se suma sin divisa. Las funciones de margen y liquidación reciben `equity_USD`; los breakers reciben `equity_EUR`.
+- **3.1 Goldens.** Casos de swarm con `allow_short` true y false, en bar y tick. Generar con `UPDATE_GOLDEN=1 cargo test -p backtest --test golden_execution` y revisar el diff.
+- **3.2 Reglas R2 a R7** en `architecture_contract.rs`.
+- **3.3 Persistencia.** El trait de `adapters/src/analytics.rs` pasa a `ports/`.
+- **3.4 Sin `adapters::` en la librería.** `paper.rs`, `tick_simulation.rs`, `recording.rs` y `parity.rs` reciben puertos.
+- **3.5 Reglas puras a dominio.** `daily_watermark`, `excursion`, `fee_ledger`, `monthly_guard`, `execution_core`, `metrics` y `walk_forward`, tras comprobar con grep que no tienen E/S.
+- **3.6 Clock.** `SystemClock` en `adapters`; `SimClock` para simulación y tests. Corregir `docs/ROADMAP.md`.
+- **3.7 Sin nombres de exchange en `ports`.** Quitar las menciones de Binance en `ports/src/execution.rs` y `ports/src/lib.rs`.
+- **3.8 Renombrar `tape`.** `binance_parquet.rs` pasa a `storage/tape_parquet.rs`.
+- **3.9 Divisas explícitas.** `Currency` y `Money` en `domain`.
 
-**Salida:** `fmt`, `clippy -D warnings` y tests en verde. Goldens idénticos bit a bit. R2 a R7 pasan.
+**Salida:** `fmt`, `clippy -D warnings` y tests en verde. Goldens idénticos. R2 a R7 pasan.
 
-### Fase 4: eliminar estrategias, portfolio y Binance (M)
+### Fase 4: borrado (M)
 
-La lista completa está en la sección 5. Incluye el código de Binance que ya no se usa: gateway, streams, firma, fixtures y el descargador histórico, que solo sirvió para la fase 1.
+- Se borran las cuatro estrategias no swarm, el stack de portfolio y universo, y los binarios que dependen de ellos (sección 5).
+- Se conserva el camino de perpetuos (`domain/src/futures.rs` y el motor) hasta cerrar la prueba, porque el control lo usa. Después se puede borrar.
+- Se borra el código de Binance que no sirve para la prueba: gateway, streams y firma.
 
-**Salida:** `strategy_ids()` devuelve solo `swarm_consensus`. Ningún archivo fuera de swarm nombra otra estrategia (grep vacío). Tests en verde.
+**Salida:** `strategy_ids()` devuelve solo `swarm_consensus`. Tests en verde.
 
-### Fase 5: dominio de futuros con colateral EUR (M)
+### Fase 5: dominio spot (M), solo si la fase 1 pasa
 
-- `domain/src/instrument.rs`: `Instrument` con símbolo (`PF_…`), divisa de PnL (USD), tamaño de contrato, tick, paso y mínimo de orden, apalancamiento máximo y funding por intervalo y divisa. Todo en `Decimal`.
-- `domain/src/collateral.rs`: `CollateralAccount` con saldos por divisa (EUR, USD), haircut del EUR (0 por defecto), comisión de conversión (0,25 % por defecto) y la regla del buffer USD (D15).
-- `domain/src/futures.rs` (central): liquidación con **mark price**, con `equity_USD` según la fórmula de la sección 2.7. Funding por intervalo configurable. El modelo de margen (aislado o cruzado) se toma de la especificación del `PF_` (verificar).
-- `domain/src/fees.rs`: `FeeTier { maker_rate, taker_rate }` como datos, validados en rango. La conversión EUR→USD se registra como fricción propia.
-- **Apalancamiento.** `RiskPolicy` aplica un tope configurable, por defecto 2x (D12). Rechaza cualquier orden que lo supere.
-- **Base de riesgo y breakers en EUR.** `risk_base_eur = min(operating_capital_eur, equity_EUR)`. De ella salen tres cosas: el riesgo por operación (0,5 % a 1 %), el tope de nocional (2x) y los breakers. Breaker diario de 3 % y mensual de 15 %, calculados sobre la base al inicio del día UTC o del mes. Los valores vienen de los artefactos actuales y se recalibran en la fase 1.
-- **Capital operativo.** `operating_capital_eur` limita el capital que el bot puede usar, aunque la cuenta tenga más (D14).
-- **Ledger completo.** Cada fill, comisión, pago de funding, conversión y reposición de buffer queda registrado. Lo necesitarás para tus declaraciones en España.
-- Renombrar `*_pct` a `*_rate` (sección 2.9) y migrar los artefactos que se conservan.
+- `Instrument` con `MarketType::Spot`, pares EUR, tick, paso y mínimos de AssetPairs.
+- `RiskPolicy` rechaza ventas sin posición (`RiskError::ShortNotSupported`), apalancamiento 1 y funding nulo.
+- Base de riesgo `min(capital operativo, equity EUR)`. Riesgo por operación de 0,5 % a 1 %, como en los artefactos actuales (fijar por simulación). Breakers diario y mensual sobre la base.
+- `FeeTier` como datos, con validación de rango. Las comisiones se leen de la cuenta (`FeeSource`).
 
-**Pruebas:** liquidación con mark price y `equity_USD`; funding con intervalo configurable; redondeo al tick y al contrato; tope de apalancamiento; breakers en EUR con un movimiento de EURUSD; conversión a 0,25 % solo cuando hay pérdida que el buffer USD no cubre; regla del buffer (D15) que bloquea una orden que la rompería.
+**Pruebas:** venta en corto rechazada; funding nulo; redondeo al tick y al lote; base de riesgo con capital operativo menor que el equity; breakers sobre la base.
 
-**Salida:** tests de cada regla en verde. La configuración nueva se valida al cargar.
+**Salida:** tests de cada regla en verde.
 
-### Fase 6: adaptador de Kraken Futures (L)
+### Fase 6: adaptador de Kraken spot (L), solo si la fase 1 pasa
 
-- **6.1 Catálogo.** Instrumentos públicos → `Instrument`. Solo se operan los `PF_` que tu cuenta tenga habilitados en la UE.
-- **6.2 Histórico.** Funding histórico por REST público. Para trades y libros históricos no he verificado un endpoint; si no existe, la grabadora de la fase 2 es la única fuente.
-- **6.3 Firma REST.** Según la [guía de Derivatives REST](https://docs.kraken.com/api/docs/guides/futures-rest/):
-  - Cabeceras: `APIKey` (la clave pública, no el secreto), `Authent` y `Nonce` (opcional).
-  - `Authent` = base64( HMAC-SHA512( clave = base64decode(secret), mensaje = SHA256(postData + Nonce + endpointPath) ) ).
-  - **No compartir código con spot**: spot pone la ruta antes del digest y usa API-Sign.
-  - **Lo que la guía no deja claro:** cómo se codifica `postData`, qué parte de la URL es `endpointPath`, si el digest entra como bytes crudos o como hex, y qué se hashea cuando no hay cabecera `Nonce`.
-  - **Oráculo:** el demo. Se validan las firmas con respuestas reales del demo antes de enviar nada a producción.
-  - El nonce debe crecer por clave: milisegundos más un contador protegido.
-- **6.4 REST privado.** Saldos y colateral, envío de órdenes (mercado y límite, con `reduceOnly`), cancelación, órdenes abiertas, fills y posiciones, para conciliar. Verificar los nombres exactos de los endpoints en la guía.
-- **6.5 WebSocket privado.** Autenticación por challenge según la documentación del WS v1 (verificar). Feeds de fills, órdenes y saldos.
-- **6.6 `KrakenFuturesGateway`** implementa `ExecutionVenue` y entra en el `TradingSession` existente. `live_trading.rs` se reescribe con él.
-- **6.7 Límites de tasa.** Medirlos en el demo y limitar por endpoint con un cubo de fichas conservador.
-- **6.8 Pruebas.** HTTP y WebSocket mockeados: AGENTS.md prohíbe la red en tests. El demo se usa en una prueba manual separada, no en la suite.
+- **6.1 Catálogo.** AssetPairs → `Instrument`. Verificar en la referencia los nombres de campo de tick, mínimo de orden y decimales.
+- **6.2 Histórico.** `Trades` con `since` en nanosegundos y `count` hasta 1000, avanzando con `last`. Pausa de 1 a 2 s según la [guía de datos históricos](https://docs.kraken.com/exchange/guides/general/historical-data). Checkpoint con el último `last`.
+- **6.3 Firma API-Sign.** `API-Sign` = base64( HMAC-SHA512( clave = base64decode(secret), mensaje = ruta + SHA256(nonce + postdata) ) ). La ruta empieza en `/0/private`. El nonce crece por clave. Usar `ring`. El vector de prueba sale de la muestra con firma esperada de la [guía de autenticación REST](https://docs.kraken.com/api/docs/guides/spot-rest-auth/), copiada como fixture.
+- **6.4 REST privado.** Balance, TradeVolume (tarifa real), AddOrder, CancelOrder, QueryOrders y TradesHistory paginado.
+- **6.5 WebSocket privado.** Token de 15 minutos con `GetWebSocketsToken`. Canal de ejecuciones ([autenticación WebSocket](https://docs.kraken.com/exchange/guides/websockets/authentication)).
+- **6.6 `KrakenSpotGateway`** implementa `ExecutionVenue`. `live_trading.rs` se reescribe con él.
+- **6.7 Límites de tasa.** Medirlos y limitar por endpoint con un cubo de fichas conservador.
+- **6.8 Pruebas.** HTTP y WebSocket mockeados. Ningún test toca la red.
 
-**Salida:** tests de firma en verde con respuestas reales del demo guardadas como fixtures. Ciclo completo en el demo: enviar, consultar, cancelar y conciliar.
+**Salida:** tests de firma y de checksum en verde con los vectores oficiales.
 
-### Fase 7: fidelidad de simulación (L)
+### Fase 7: fidelidad de simulación (L), solo si la fase 1 pasa
 
-AGENTS.md exige fills realistas. Hoy el simulador no tiene libro ni mark price (ver los "known gaps" del roadmap).
-
-- **Mark price.** Los disparos y la liquidación usan mark price grabado, no último precio.
-- **Funding** cobrado en cada liquidación, con el intervalo y la divisa del contrato.
-- **Liquidación** según la especificación del `PF_` y la fórmula de `equity_USD`.
-- **Conversiones** de EUR a USD según la regla del buffer (D15), con su comisión.
-- **Market orders** recorren el libro L2 grabado. **Limit orders** usan un modelo de cola y solo se ejecutan cuando un trade atraviesa el nivel.
-- **Comisiones.** `FeeSource` lee la tarifa de la cuenta, y simulación y ejecución usan la misma.
+- **Market orders** recorren el libro grabado.
+- **Limit orders** se ejecutan solo cuando un trade atraviesa el nivel (regla de cola).
+- **Comisiones** de la cuenta, con `FeeSource`.
 - **Latencia** medida con `parity_check` sobre órdenes reales mínimas.
 
 **Salida:** `parity_check` con desviación explicada durante al menos 2 semanas de paper.
 
-### Fase 8: operación en Omarchy (M)
-
-Estructura en tu equipo:
+### Fase 8: operación en Omarchy (M), solo si la fase 1 pasa
 
 ```text
 ~/atsnt/
-├── .env                 (600) claves de producción, claves del demo y Telegram
+├── .env                 (600) claves de Kraken spot y Telegram
 ├── bin/                 binario compilado
 ├── configs/             artefactos versionados en git
-├── data/kraken-futures/ Parquet de trades, libro, mark price, funding y EURUSD
+├── data/kraken-spot/    Parquet de trades y libro
 ├── state/atsnt.sqlite   registro de runs y ledger (WAL)
 └── backup/              copias nocturnas
 ```
 
-**Paquetes** (Arch): `sqlite` para las copias y `rustup` para compilar. Comprobar si ya están instalados antes de instalarlos.
+- **Servicio:** unidad de usuario `~/.config/systemd/user/atsnt.service` con `WorkingDirectory=%h/atsnt`, `EnvironmentFile=%h/atsnt/.env`, `Restart=on-failure`, `TimeoutStopSec=30s` y `KillSignal=SIGINT`. `loginctl enable-linger $USER` para arrancar sin sesión.
+- **Que el equipo no se suspenda:** en `/etc/systemd/logind.conf.d/atsnt.conf` (requiere administrador), `HandleLidSwitch=ignore`, `HandleLidSwitchExternalPower=ignore` e `IdleAction=ignore`. Si usas hypridle, quita su listener de suspensión (verificar en tu configuración).
+- **Copias:** un timer de usuario con `sqlite3 state/atsnt.sqlite ".backup …"` cada noche y copia de `data/` a un disco externo.
+- **Ledger:** cada fill, comisión y transferencia queda registrado. Lo necesitarás para tus declaraciones en España.
+- **Alertas:** Telegram, movido a `adapters/telegram/`.
 
-**Servicio.**
+**Salida:** el servicio se reinicia tras matar el proceso. Una copia se restaura en prueba. El equipo no se suspende.
 
-- Unidad de usuario `~/.config/systemd/user/atsnt.service` con `WorkingDirectory=%h/atsnt`, `EnvironmentFile=%h/atsnt/.env`, `Restart=on-failure`, `TimeoutStopSec=30s` y `KillSignal=SIGINT`, como la actual. `%h` es tu directorio personal, así que la unidad no depende del nombre de usuario.
-- `loginctl enable-linger $USER` para que el servicio arranque sin sesión abierta. En algunos sistemas requiere permisos de administrador.
-- Logs en el journal de usuario: `journalctl --user -u atsnt`. El repo ya trae `journald.conf`.
+### Fase 9: paper y dinero real por tramos (calendario)
 
-**Que el equipo no se suspenda.** Si es un portátil, hay que tocar dos sitios:
-
-- **systemd-logind** (requiere permisos de administrador): un archivo en `/etc/systemd/logind.conf.d/atsnt.conf` con `HandleLidSwitch=ignore`, `HandleLidSwitchExternalPower=ignore` e `IdleAction=ignore`.
-- **hypridle**, si lo usas. Revisa su configuración en `~/.config/hypr/hypridle.conf` y quita el listener que suspende por inactividad. No lo he verificado en tu equipo.
-
-**Copias.** Un timer de usuario que ejecute `sqlite3 state/atsnt.sqlite ".backup …"` cada noche, y copia de `data/` a un disco externo. Medir el tamaño tras la fase 2.
-
-**Alertas.** Telegram se mantiene y se mueve a `adapters/telegram/`.
-
-**Informes.** `atsnt report` sustituye las consultas de BigQuery.
-
-**Borrar.** `Dockerfile`, `.dockerignore`, `scripts/gcp/`, `docs/architecture/10-gcp-cloud-architecture.md`, las variables `GCP_*` y los flags `--gcp-bigquery`, `--strict-sinks` y `--upload-winner`.
-
-**Salida:** el servicio se reinicia tras matar el proceso. Una copia nocturna se restaura en una prueba. Una parada genera alerta. El equipo no se suspende con la tapa cerrada ni por inactividad.
-
-### Fase 9: paper y dinero real por tramos (calendario, no código)
-
-- **Paper:** al menos 4 semanas con datos de producción grabados y el simulador de la fase 7. El demo solo valida el ciclo de órdenes.
-- **Pasar a real** solo si el DSR cumple, el PnL neto OOS es positivo con comisiones, conversiones y funding reales, y la paridad está dentro de tolerancia.
-- **Números según la base de riesgo** (`min(capital operativo, equity EUR)`):
-
-| Concepto | Capital operativo 1.000 € | Capital operativo 5.000 € |
-|---|---|---|
-| Riesgo por operación (0,5 % a 1 %) | 5 a 10 € | 25 a 50 € |
-| Tope de nocional (2x) | 2.000 € | 10.000 € |
-| Breaker diario (3 %) | 30 € | 150 € |
-| Breaker mensual (15 %) | 150 € | 750 € |
-
-Se recalibran en la fase 1.
-- **Capital operativo recomendado: 1.000 € durante 4 semanas**, con `operating_capital_eur = 1000`. Después se sube a 5.000 € si no hay incidentes. Es una recomendación, tú decides.
-- **Mínimo de orden.** Con 1.000 € y 2x, el nocional es de 2.000 €. Comprobar que el mínimo de `PF_XBTUSD` cabe en ese nocional (paso 0 de la fase 1). Si no cabe, elegir otro `PF_` o subir el capital operativo.
-- **Sembrar el buffer USD** antes de dinero real: convertir una cantidad pequeña de EUR a USD, registrada en el ledger. Con 1.000 € de capital operativo, son decenas de euros. La regla D15 da el valor exacto según las posiciones abiertas.
-- Escalar según `docs/capital-scaling.md`, reescrito con colateral EUR, buffer USD y 2x.
-
-**Salida:** dos semanas de operación real sin incidentes de conciliación.
-
-### Fase 10: limpieza final (S, opcional)
-
-- Consolidar binarios en `atsnt` con subcomandos: `record`, `fetch`, `calibrate`, `backtest`, `hpo`, `prune`, `paper`, `live`, `parity` y `report`.
-- Renombrar el crate `backtest` a `app`.
+- Paper durante al menos 4 semanas, con datos grabados.
+- Dinero real solo si el DSR y el PnL neto OOS son positivos con comisiones de spot.
+- Capital operativo: se recomienda empezar con una parte pequeña del capital disponible, durante 4 semanas. La decisión del importe es tuya y no se pregunta antes de que la prueba pase.
 
 ## 5. Inventario de borrado
 
 | Ruta | Acción | Fase |
 |---|---|---|
 | `crates/strategies/src/{dollar_bars_cusum,order_flow_imbalance,langevin_potential,quantum_well_swing}.rs` | Borrar, con sus `pub mod`, `pub use` y entradas del registro | 4 |
-| `crates/domain/src/universe.rs` | Borrar | 4 |
-| `crates/backtest/src/{portfolio_engine,universe_selector,sinks}.rs` | Borrar | 4 |
-| `crates/backtest/src/artifact.rs` | Quitar la parte de GCS y conservar el cargador de configuración | 3 |
+| `crates/domain/src/universe.rs`, `crates/backtest/src/{portfolio_engine,universe_selector,sinks}.rs` | Borrar | 4 |
 | `crates/backtest/src/bin/{run_portfolio,run_portfolio_hpo,paper_trading_portfolio,run_universe_portfolio,testnet_exit_check}.rs` | Borrar | 4 |
-| `crates/backtest/src/bin/generate_pipeline_test_data.rs` | Borrar si solo lo usan los scripts borrados | 4 |
-| `crates/adapters/src/binance_*.rs`, `binance_gateway/`, `binance_fetcher/`, `fetch_plan.rs` | Borrar. `binance_parquet.rs` se renombra antes (3.9) | 4 |
-| `crates/adapters/src/bin/{fetch_data,stream_trades,live_gateway}.rs` | Borrar; sustituidos por `kraken_record` y el gateway de futuros | 4 |
+| `crates/adapters/src/binance_*.rs`, `binance_gateway/`, `binance_fetcher/`, `fetch_plan.rs` | Borrar tras la prueba. `binance_parquet.rs` se renombra antes (3.8) | 4 |
+| `crates/adapters/src/bin/{stream_trades,live_gateway}.rs` | Borrar; sustituidos por la grabadora y el gateway de Kraken | 4 |
 | `crates/adapters/tests/fixtures/binance_private_events/` | Borrar | 4 |
-| `crates/backtest/src/bin/live_trading.rs` | Reescribir con `KrakenFuturesGateway` | 6 |
 | `crates/adapters/src/gcp/*` salvo `telegram.rs` | Borrar; mover `telegram.rs` a `adapters/src/telegram/` | 3 |
-| `crates/adapters/src/analytics.rs` | Mover el trait a `ports/` | 3 |
-| `crates/backtest/tests/golden/*cusum*`, `*ofi*` y `hpo_cusum_ranking.json`, con sus casos | Borrar | 4 |
-| Tests que prueban código borrado (`strict_sinks_cli.rs`, partes de `recording_contract.rs`) | Borrar, o reescribir con su código | 4 |
-| `configs/` salvo `hpo_swarm.json`, `hpo_btcusdt_2026.json` y `swarm_shared.json` | Borrar (daytrading, langevin, quantum, matrix, portfolio, universe y execution_*). Añadir `kraken_futures_eur.json` | 4 y 5 |
-| `configs/hpo_results.json` | Revisar su contenido antes de decidir | 4 |
-| `scripts/gcp/`, `scripts/run_production_pipeline.sh`, `scripts/run_joint_portfolio_pipeline.sh`, `scripts/tests/` | Borrar; los sustituye `atsnt` | 8 |
-| `Dockerfile`, `.dockerignore` | Borrar | 8 |
-| `docs/strategy/{01,02,04,05}*.md`, `docs/research/02-*`, `SWARM_OPTIMIZATION_ROADMAP.md` | Mover a `docs/archive/` | 4 |
+| `configs/` salvo `hpo_btcusdt_2026.json`, `hpo_swarm.json` y `swarm_shared.json` | Borrar el resto. Añadir `kraken_spot_eur.json` en la fase 5 | 4 y 5 |
+| `Dockerfile`, `.dockerignore`, `scripts/gcp/`, `scripts/run_production_pipeline.sh`, `scripts/run_joint_portfolio_pipeline.sh`, `scripts/tests/` | Borrar | 8 |
 | `docs/architecture/10-gcp-cloud-architecture.md` | Borrar | 8 |
-| `docs/architecture/{07,08,13}*.md`, `docs/capital-scaling.md`, `docs/deployment/atsnt.service`, `README.md`, `AGENTS.md`, `docs/ROADMAP.md`, `.env.example` | Reescribir (08 pasa a describir el gateway de futuros de Kraken; `atsnt.service` pasa a unidad de usuario con `%h`) | 3, 5 y 8 |
+| `docs/strategy/{01,02,04,05}*.md`, `docs/research/02-*`, `SWARM_OPTIMIZATION_ROADMAP.md` | Mover a `docs/archive/` | 4 |
+| `docs/architecture/{07,08,13}*.md`, `docs/capital-scaling.md`, `docs/deployment/atsnt.service`, `README.md`, `AGENTS.md`, `docs/ROADMAP.md`, `.env.example` | Reescribir | 3, 5 y 8 |
 | `odd/tasks/` | Conservar como historial | — |
 
-## 6. Pruebas y puertas por fase
+## 6. Pruebas y puertas
 
-| Fase | Pruebas nuevas | Puerta de salida |
+| Fase | Pruebas | Puerta de salida |
 |---|---|---|
-| 1 | Verificación de contratos (paso 0); reproducción del run 9 | Tabla de escenarios completa |
-| 2 | Parseo de mensajes WebSocket v1 con fixtures; verificación de secuencia | 7 días sin huecos sin alertar |
-| 3 | Goldens de swarm; reglas R2 a R7; `Money` sin mezcla de divisas | Goldens idénticos bit a bit |
-| 4 | `strategy_ids()`; grep de nombres de estrategias | Tests en verde y sin referencias residuales |
-| 5 | Liquidación con mark price y `equity_USD`; funding configurable; tope de 2x; breakers en EUR; conversión y regla del buffer | Cada regla con test |
-| 6 | Firma con respuestas reales del demo; paginación con HTTP mockeado | Ciclo completo en el demo |
-| 7 | Liquidación y disparos con mark price; fills de market contra libro sintético; cola de limit | `parity_check` dentro de tolerancia |
-| 8 | Reinicio tras matar el proceso; restauración de una copia; el equipo no suspende | Alerta al parar |
+| 1 | Las tres variantes, con los logs | Decisión registrada |
+| 2 | Parseo de WebSocket con fixtures; checksum CRC32 con el vector de la guía | 7 días sin huecos |
+| 3 | Goldens de swarm con `allow_short` true y false; R2 a R7 | Goldens idénticos |
+| 4 | `strategy_ids()`; grep de nombres | Tests en verde |
+| 5 | Venta en corto rechazada; redondeo; base de riesgo; breakers | Cada regla con test |
+| 6 | Firma con vector oficial; paginación con HTTP mockeado | Vectores en verde |
+| 7 | Fills de market contra libro sintético; cola de limit | `parity_check` dentro de tolerancia |
+| 8 | Reinicio tras matar el proceso; restauración de copia | Alerta al parar |
 | 9 | — | Criterios de la fase 9 |
 
-En todas las fases: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` y `cargo test --workspace`. Ningún test toca la red.
+En todas las fases: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` y `cargo test --workspace`.
 
 ## 7. Riesgos
 
 | Riesgo | Impacto | Mitigación |
 |---|---|---|
-| La estrategia no tiene ventaja neta | Alto: no hay producto | Fase 1 antes de construir ejecución. Sin OOS positivo y DSR, no hay dinero real |
-| Pérdidas que el buffer USD no cubre y obligan a convertir | Medio | Regla D15; conversión modelada con 0,25 % y registrada en el ledger |
-| Comisión de conversión real mayor que 0,25 % | Medio | Se confirma en la cuenta antes del tramo real; el gate tiene escenario de comisiones |
-| FX adverso sobre el margen: el EUR se deprecia frente al USD, el margen baja y la liquidación se acerca sin que cambien los breakers | Medio | Vigilar la distancia a liquidación en USD cada hora, con alerta por Telegram si baja de un umbral. Los breakers en EUR siguen activos |
-| Kraken o la CNMV/ESMA limitan el apalancamiento a 2:1 | Medio | Tope configurable; el diseño ya asume 2x |
-| Cambio de elegibilidad de la cuenta o de contratos listados | Medio | Catálogo que se refresca; alerta si un `PF_` deja de estar disponible |
-| Funding que se come el resultado | Medio | Funding real en la fase 1; contabilidad separada en el ledger |
-| La grabadora para (equipo dormido, red, disco) | Alto: se pierden datos del libro y del mark price | Alertas de hueco, copias, servicio con reinicio y equipo sin suspensión |
-| El libro se desincroniza | Medio | Verificación de secuencia; resincronizar con snapshot |
-| El refactor cambia el comportamiento | Alto | Goldens antes de mover |
-| Clave API comprometida | Alto | `.env` con permisos `600`; sin permiso de retirada; restricción por IP si la cuenta lo permite |
-| Cambios en la API de Kraken Futures | Medio | Respuestas reales del demo guardadas como fixtures; revisar el changelog antes de cada despliegue |
-| Registro fiscal incompleto | Medio | El ledger guarda cada fill, comisión, funding, conversión y reposición de buffer desde el primer día |
+| El swarm solo largo no gana después de comisiones de spot | Alto | Fase 1 antes de cualquier ejecución |
+| Comisiones de spot de 0,25 % / 0,40 % | Alto | Salidas maker cuando descansan; volumen; medir cada operación |
+| Con solo largos, pocas señales | Medio | La variante de control lo mide |
+| La prueba usa datos de perpetuos | Medio | Limitación explícita; repetir con datos de Kraken antes de decidir |
+| Clave de API comprometida | Alto | Sin permiso de retirada; `.env` con permisos `600` |
+| Registro fiscal incompleto | Medio | Ledger con cada fill, comisión y transferencia desde el primer día |
+| El equipo se suspende y se pierden datos | Alto | Configuración de logind y de hypridle; alertas de hueco |
 
 ## 8. Fuentes
 
+- Comisiones spot (captura del usuario): tramo base de Kraken Pro, 0,25 % maker / 0,40 % taker.
+- Datos históricos y Trades REST: https://docs.kraken.com/exchange/guides/general/historical-data · https://docs.kraken.com/api/docs/rest-api/get-recent-trades/
+- WebSocket v2 spot, canales trade y book: https://docs.kraken.com/api/docs/websocket-v2/trade · https://docs.kraken.com/api/docs/websocket-v2/book · https://docs.kraken.com/api/docs/guides/spot-ws-book-v2/
+- Autenticación spot: https://docs.kraken.com/api/docs/guides/spot-rest-auth/ · https://docs.kraken.com/exchange/guides/websockets/authentication
 - Restaurar proyectos de GCP: https://docs.cloud.google.com/resource-manager/docs/delete-restore-projects
-- Comisiones de spot: https://www.kraken.com/pro/fees · https://www.kraken.com/learn/lowest-fee-crypto-exchange
-- Comisiones de derivados: https://support.kraken.com/articles/360048917612-fee-schedule · https://support.kraken.com/articles/fees-for-derivatives-trading-eea
-- Perpetuos en España (MiFID II): https://pro.kraken.com/es/perpetual-futures
-- Colateral, haircuts y divisa de liquidación: https://support.kraken.com/hc/en-us/articles/4843323030164-Futures-Collateral-Currencies · https://support.kraken.com/es/articles/collateral-currencies-eea · https://support.kraken.com/articles/multi-collateral-derivatives-contracts-eea · https://support.kraken.com/hc/en-us/articles/4844359082772-Linear-Multi-Collateral-Perpetual-Contract-Specifications · https://support.kraken.com/articles/perpetual-contract-specifications-for-clients-in-the-eea
-- Conversiones: https://support.kraken.com/articles/interest-and-conversions-unified-wallet
-- Autenticación de futuros: https://docs.kraken.com/api/docs/guides/futures-rest/
-- WebSocket de futuros: https://docs.kraken.com/exchange/api-reference/futures-websocket
-- Histórico de funding: https://docs.kraken.com/api-reference/historical-funding-rates/historical-funding-rates
-- Demo de futuros: https://docs.kraken.com/exchange/guides/futures/introduction
-- Funding horario, página regional: https://www.kraken.com/gb/pro/perps/crypto-perpetuals/funding-rates
-- Aviso de ESMA sobre perpetuos (prensa; verificar texto original): https://tradeinformer.com/regulations/esma-perpetual-futures-cfd-regulation-eu-2025
 
-Todas las cifras de Kraken de este documento proceden de búsquedas o de la prensa, y deben verificarse en tu cuenta y en la documentación vigente antes de usarse.
+Las cifras de Kraken de este documento deben verificarse en tu cuenta y en la documentación vigente antes de usarse.
