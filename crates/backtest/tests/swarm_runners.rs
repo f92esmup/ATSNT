@@ -151,13 +151,22 @@ async fn a_backtest_records_the_strategy_audit_only_when_there_is_one() {
         &metrics,
         &[],
         Some(&audit),
+        0,
     )
     .await
     .unwrap();
     let plain = adapters::InMemoryRunRecorder::new();
-    record_backtest(&plain, &ctx, &spec, &DataWindow::default(), &metrics, &[])
-        .await
-        .unwrap();
+    record_backtest(
+        &plain,
+        &ctx,
+        &spec,
+        &DataWindow::default(),
+        &metrics,
+        &[],
+        0,
+    )
+    .await
+    .unwrap();
 
     let extras = audited.snapshot().metrics[0]
         .extras

@@ -1,9 +1,6 @@
 //! Translation of domain results into the run analytics row contract
 //! ([`adapters::analytics`]).
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use adapters::format_unix_ms_rfc3339;
 use domain::PositionSide;
 use ports::{RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow};
 use serde::Serialize;
@@ -67,18 +64,11 @@ pub struct RunContext {
     pub fill_model: FillModel,
 }
 
-/// Current wall-clock time in Unix milliseconds.
-pub fn now_unix_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64)
-}
-
 impl RunContext {
     /// Starts a new top-level run for `spec`.
     pub fn new<C>(run_type: RunType, spec: &RunSpec<C>, started_at_ms: i64) -> Self {
         Self {
-            run_id: RunId::generate(),
+            run_id: RunId::generate(started_at_ms.max(0) as u64),
             parent_run_id: None,
             baseline_run_id: None,
             run_type,
@@ -105,7 +95,7 @@ impl RunContext {
     /// Starts a run nested under this one (HPO trial, Monte Carlo of a backtest).
     pub fn child(&self, run_type: RunType, started_at_ms: i64) -> Self {
         Self {
-            run_id: RunId::generate(),
+            run_id: RunId::generate(started_at_ms.max(0) as u64),
             parent_run_id: Some(self.run_id.clone()),
             baseline_run_id: None,
             run_type,
@@ -123,6 +113,7 @@ impl RunContext {
         status: RunStatus,
         finished_at_ms: Option<i64>,
         data: &DataWindow,
+        now_ms: i64,
     ) -> Result<RunRow, serde_json::Error> {
         let market_type = match serde_json::to_value(spec.market_type)? {
             serde_json::Value::String(s) => s,
@@ -134,7 +125,7 @@ impl RunContext {
             baseline_run_id: self.baseline_run_id.as_ref().map(ToString::to_string),
             run_type: self.run_type.as_str().to_string(),
             status: status.as_str().to_string(),
-            recorded_at: format_unix_ms_rfc3339(now_unix_ms()),
+            recorded_at: format_unix_ms_rfc3339(now_ms),
             started_at: format_unix_ms_rfc3339(self.started_at_ms),
             finished_at: finished_at_ms.map(format_unix_ms_rfc3339),
             strategy_id: spec.strategy_id.clone(),
@@ -157,12 +148,13 @@ impl RunContext {
         scope: &str,
         m: &BacktestMetrics,
         extras: Option<serde_json::Value>,
+        now_ms: i64,
     ) -> RunMetricsRow {
         RunMetricsRow {
             run_id: self.run_id.to_string(),
             run_type: self.run_type.as_str().to_string(),
             scope: scope.to_string(),
-            recorded_at: format_unix_ms_rfc3339(now_unix_ms()),
+            recorded_at: format_unix_ms_rfc3339(now_ms),
             total_trades: Some(m.total_trades as i64),
             winning_trades: Some(m.winning_trades as i64),
             losing_trades: Some(m.losing_trades as i64),
@@ -192,12 +184,12 @@ impl RunContext {
     }
 
     /// Performance row carrying only run-type specific values.
-    pub fn extras_row(&self, scope: &str, extras: serde_json::Value) -> RunMetricsRow {
+    pub fn extras_row(&self, scope: &str, extras: serde_json::Value, now_ms: i64) -> RunMetricsRow {
         extras_only_metrics_row(
             self.run_id.to_string(),
             self.run_type.as_str(),
             scope,
-            format_unix_ms_rfc3339(now_unix_ms()),
+            format_unix_ms_rfc3339(now_ms),
             extras.to_string(),
         )
     }
@@ -308,13 +300,15 @@ pub async fn record_backtest<R: RunRecorder, C: Serialize>(
     data: &DataWindow,
     metrics: &BacktestMetrics,
     trades: &[ClosedTrade],
+    now_ms: i64,
 ) -> Result<(), RecorderError> {
-    record_backtest_with_audit(recorder, ctx, spec, data, metrics, trades, None).await
+    record_backtest_with_audit(recorder, ctx, spec, data, metrics, trades, None, now_ms).await
 }
 
 /// [`record_backtest`] that also stores the strategy's audit (`Strategy::audit`) in the `full`
 /// metrics row's extras as `{"strategy_audit": ...}`. Without an audit the rows are exactly
 /// those of [`record_backtest`].
+#[allow(clippy::too_many_arguments)]
 pub async fn record_backtest_with_audit<R: RunRecorder, C: Serialize>(
     recorder: &R,
     ctx: &RunContext,
@@ -323,14 +317,15 @@ pub async fn record_backtest_with_audit<R: RunRecorder, C: Serialize>(
     metrics: &BacktestMetrics,
     trades: &[ClosedTrade],
     strategy_audit: Option<&serde_json::Value>,
+    now_ms: i64,
 ) -> Result<(), RecorderError> {
     let run = ctx
-        .run_row(spec, RunStatus::Completed, Some(now_unix_ms()), data)
+        .run_row(spec, RunStatus::Completed, Some(now_ms), data, now_ms)
         .map_err(serialization_error)?;
     recorder.record_runs(&[run]).await?;
     let extras = strategy_audit.map(|audit| serde_json::json!({ "strategy_audit": audit }));
     recorder
-        .record_metrics(&[ctx.metrics_row("full", metrics, extras)])
+        .record_metrics(&[ctx.metrics_row("full", metrics, extras, now_ms)])
         .await?;
     if !trades.is_empty() {
         recorder.record_trades(&ctx.trade_rows(trades, 1)).await?;
@@ -350,9 +345,10 @@ pub async fn record_monte_carlo<R: RunRecorder, C: Serialize>(
     spec: &RunSpec<C>,
     data: &DataWindow,
     report: &MonteCarloReport,
+    now_ms: i64,
 ) -> Result<(), RecorderError> {
     let run = ctx
-        .run_row(spec, RunStatus::Completed, Some(now_unix_ms()), data)
+        .run_row(spec, RunStatus::Completed, Some(now_ms), data, now_ms)
         .map_err(serialization_error)?;
     recorder.record_runs(&[run]).await?;
 
@@ -374,7 +370,7 @@ pub async fn record_monte_carlo<R: RunRecorder, C: Serialize>(
         obj.insert("seed".into(), report.config.seed.into());
     }
     recorder
-        .record_metrics(&[ctx.extras_row("full", extras)])
+        .record_metrics(&[ctx.extras_row("full", extras, now_ms)])
         .await?;
 
     let points: Vec<SeriesPointRow> = report
@@ -418,10 +414,17 @@ pub async fn record_hpo<R: RunRecorder, S: Serialize, C: Serialize + Clone>(
     data: &DataWindow,
     evaluations: &[CandidateEvaluation<C>],
     settings: serde_json::Value,
+    now_ms: i64,
 ) -> Result<Option<RunId>, RecorderError> {
-    let finished = now_unix_ms();
+    let finished = now_ms;
     let mut runs = vec![parent
-        .run_row(parent_spec, RunStatus::Completed, Some(finished), data)
+        .run_row(
+            parent_spec,
+            RunStatus::Completed,
+            Some(finished),
+            data,
+            now_ms,
+        )
         .map_err(serialization_error)?];
     let mut metrics = Vec::new();
     let mut winner = None;
@@ -431,7 +434,13 @@ pub async fn record_hpo<R: RunRecorder, S: Serialize, C: Serialize + Clone>(
         let trial_spec = parent_spec.with_config(eval.config.clone());
         runs.push(
             trial
-                .run_row(&trial_spec, RunStatus::Completed, Some(finished), data)
+                .run_row(
+                    &trial_spec,
+                    RunStatus::Completed,
+                    Some(finished),
+                    data,
+                    now_ms,
+                )
                 .map_err(serialization_error)?,
         );
         let summary = serde_json::json!({
@@ -448,17 +457,19 @@ pub async fn record_hpo<R: RunRecorder, S: Serialize, C: Serialize + Clone>(
             "dsr_p_value": eval.dsr_p_value,
             "is_statistically_significant": eval.is_statistically_significant,
         });
-        metrics.push(trial.extras_row("full", summary));
+        metrics.push(trial.extras_row("full", summary, now_ms));
         for fold in &eval.fold_metrics {
             metrics.push(trial.metrics_row(
                 &format!("is_fold_{}", fold.fold_idx),
                 &fold.in_sample,
                 None,
+                now_ms,
             ));
             metrics.push(trial.metrics_row(
                 &format!("oos_fold_{}", fold.fold_idx),
                 &fold.out_of_sample,
                 None,
+                now_ms,
             ));
         }
         if rank == 0 {
@@ -474,7 +485,7 @@ pub async fn record_hpo<R: RunRecorder, S: Serialize, C: Serialize + Clone>(
             winner.as_ref().map(ToString::to_string).into(),
         );
     }
-    metrics.insert(0, parent.extras_row("full", parent_extras));
+    metrics.insert(0, parent.extras_row("full", parent_extras, now_ms));
 
     recorder.record_runs(&runs).await?;
     recorder.record_metrics(&metrics).await?;
@@ -489,10 +500,11 @@ pub async fn record_run_status<R: RunRecorder, C: Serialize>(
     spec: &RunSpec<C>,
     status: RunStatus,
     data: &DataWindow,
+    now_ms: i64,
 ) -> Result<(), RecorderError> {
-    let finished_at = (status != RunStatus::Running).then(now_unix_ms);
+    let finished_at = (status != RunStatus::Running).then_some(now_ms);
     let row = ctx
-        .run_row(spec, status, finished_at, data)
+        .run_row(spec, status, finished_at, data, now_ms)
         .map_err(serialization_error)?;
     recorder.record_runs(&[row]).await
 }
@@ -530,4 +542,11 @@ fn extras_only_metrics_row(
         extras: Some(extras.into()),
         ..RunMetricsRow::default()
     }
+}
+
+/// RFC 3339 text of a Unix instant in milliseconds, in UTC.
+fn format_unix_ms_rfc3339(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
 }

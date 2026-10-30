@@ -6,8 +6,6 @@
 //! [`RunSpec`] it executed so results can always be joined back to the
 //! strategy parameters and friction schedule that produced them.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use serde::{Deserialize, Serialize};
 use strategies::MarketType;
 
@@ -140,11 +138,8 @@ pub enum InvalidRunId {
 pub struct RunId(String);
 
 impl RunId {
-    /// Generates a new identifier from the system clock and a random tail.
-    pub fn generate() -> Self {
-        let unix_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
+    /// Generates a new identifier whose time component is `unix_ms`, with a random tail.
+    pub fn generate(unix_ms: u64) -> Self {
         Self::from_parts(unix_ms, rand::random::<u128>())
     }
 

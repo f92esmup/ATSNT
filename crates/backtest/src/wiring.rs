@@ -4,6 +4,12 @@
 //! the recorder from here and pass them down as ports.
 
 use adapters::{NullRunRecorder, SystemClock};
+use ports::Clock;
+
+/// Current wall-clock time in Unix milliseconds, for the binaries that stamp their runs.
+pub fn now_unix_ms() -> i64 {
+    SystemClock.now_ms()
+}
 
 /// The clock of the binaries: the machine's wall clock.
 pub fn system_clock() -> SystemClock {

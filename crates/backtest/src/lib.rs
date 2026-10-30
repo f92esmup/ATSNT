@@ -28,6 +28,8 @@ pub mod universe_selector;
 pub mod walk_forward;
 pub mod wiring;
 
+pub use wiring::now_unix_ms;
+
 pub use alert_throttle::AlertThrottle;
 pub use artifact::{
     load_artifact_shared_config, load_portfolio_artifact, load_strategy_config,
@@ -73,7 +75,7 @@ pub use portfolio_engine::{
 };
 pub use price_event::{bucket_trades, PriceEvent};
 pub use recording::{
-    now_unix_ms, record_backtest, record_backtest_with_audit, record_closed_trade, record_hpo,
+    record_backtest, record_backtest_with_audit, record_closed_trade, record_hpo,
     record_monte_carlo, record_run_status, DataWindow, RunContext, RunStatus, GIT_SHA,
 };
 pub use registry::{

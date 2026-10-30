@@ -901,7 +901,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
             BacktestMetrics::calculate(effective_capital, closed_trades, max_dd_amount, max_dd_pct);
         record_lifecycle(bq, &run_ctx, &run_spec, RunStatus::Stopped, &data_window).await;
         if let Err(e) = bq
-            .record_metrics(&[run_ctx.metrics_row("full", &metrics, None)])
+            .record_metrics(&[run_ctx.metrics_row("full", &metrics, None, now_unix_ms())])
             .await
         {
             println!("[WARN] Failed to record live run metrics: {e}");
@@ -1218,7 +1218,7 @@ async fn record_lifecycle<R: RunRecorder>(
     status: RunStatus,
     data: &DataWindow,
 ) {
-    if let Err(e) = record_run_status(recorder, ctx, spec, status, data).await {
+    if let Err(e) = record_run_status(recorder, ctx, spec, status, data, now_unix_ms()).await {
         println!(
             "[WARN] Failed to record live run status {}: {e}",
             status.as_str()

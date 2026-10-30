@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const WORKSPACE_CRATES: [&str; 5] = ["domain", "ports", "strategies", "adapters", "backtest"];
 
@@ -298,6 +298,45 @@ fn the_domain_has_no_floating_point_types() {
         "the domain must use Decimal, not floats:\n{}",
         offenders.join("\n")
     );
+}
+
+/// The library and the core receive instants as parameters, so the rows of a run do not depend on
+/// when they were replayed. Adapters and composition (the binaries and `main.rs`) read the wall
+/// clock. `Instant` stays allowed: it measures durations and reaches no record.
+#[test]
+fn only_adapters_and_composition_read_the_wall_clock() {
+    let wall_clock = ["SystemTime::now", "Utc::now", "Local::now"];
+    let mut offenders = Vec::new();
+    for name in ["domain", "ports", "strategies", "backtest"] {
+        for (path, production) in production_sources(name) {
+            if is_composition_root(&path) {
+                continue;
+            }
+            for (number, line) in production.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                if let Some(api) = wall_clock.iter().find(|api| trimmed.contains(*api)) {
+                    offenders.push(format!("{}:{}: {api}", path.display(), number + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the library takes instants as parameters, the wall clock is read in composition:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Binaries and the `main.rs` entry point start runs, so they are composition.
+fn is_composition_root(path: &Path) -> bool {
+    let in_bin_dir = path
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .is_some_and(|dir| dir == "bin");
+    in_bin_dir || path.file_name().is_some_and(|file| file == "main.rs")
 }
 
 #[test]

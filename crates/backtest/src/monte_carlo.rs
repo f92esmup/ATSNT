@@ -103,6 +103,7 @@ impl MonteCarloSimulator {
         &self,
         initial_capital: Decimal,
         trades: &[ClosedTrade],
+        now_secs: i64,
     ) -> Result<MonteCarloReport, String> {
         if trades.is_empty() {
             return Err("Cannot run Monte Carlo on empty trade history".to_string());
@@ -278,21 +279,11 @@ impl MonteCarloSimulator {
             }
         }
 
-        let report_id = format!(
-            "mc_{}_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-            iterations
-        );
+        let report_id = format!("mc_{}_{}", now_secs, iterations);
 
         Ok(MonteCarloReport {
             report_id,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
+            timestamp: now_secs,
             config: self.config.clone(),
             metrics,
             fan_chart,
@@ -456,7 +447,7 @@ mod tests {
         };
 
         let sim = MonteCarloSimulator::new(config);
-        let report = sim.run(dec!(10000.0), &trades).unwrap();
+        let report = sim.run(dec!(10000.0), &trades, 0).unwrap();
 
         assert_eq!(report.metrics.total_simulations, 500);
         assert!(report.metrics.p95_max_drawdown_pct >= report.metrics.p50_max_drawdown_pct);
@@ -475,7 +466,7 @@ mod tests {
         };
 
         let sim = MonteCarloSimulator::new(config);
-        let report = sim.run(dec!(10000.0), &trades).unwrap();
+        let report = sim.run(dec!(10000.0), &trades, 0).unwrap();
 
         assert_eq!(report.metrics.total_simulations, 500);
         assert!(report.metrics.worst_max_drawdown_pct >= report.metrics.p99_max_drawdown_pct);

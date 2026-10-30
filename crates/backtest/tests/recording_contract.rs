@@ -6,6 +6,9 @@ use domain::PositionSide;
 use rust_decimal_macros::dec;
 use strategies::{DollarBarsCusumConfig, MarketType};
 
+/// The instant the rows are recorded at. Only the shape of the recorded timestamps depends on it.
+const NOW_MS: i64 = 1_700_000_300_000;
+
 fn spec() -> RunSpec<DollarBarsCusumConfig> {
     RunSpec {
         strategy_id: "dollar_bars_cusum".to_string(),
@@ -64,6 +67,7 @@ fn run_row_records_full_spec_and_lineage() {
             RunStatus::Completed,
             Some(1_700_000_200_000),
             &window,
+            NOW_MS,
         )
         .unwrap();
 
@@ -91,7 +95,7 @@ fn metrics_row_maps_every_metric_and_scope() {
     let metrics =
         BacktestMetrics::calculate(dec!(10_000), &[closed_trade()], dec!(10), dec!(0.001));
 
-    let row = ctx.metrics_row("full", &metrics, Some(serde_json::json!({"k": 1})));
+    let row = ctx.metrics_row("full", &metrics, Some(serde_json::json!({"k": 1})), NOW_MS);
 
     assert_eq!(row.scope, "full");
     assert_eq!(row.run_type, "backtest");
@@ -112,8 +116,8 @@ fn halted_runs_flag_the_metrics_row_and_others_omit_the_column() {
     halted.halted = true;
 
     let ctx = RunContext::new(RunType::Backtest, &spec(), 0);
-    let normal_row = ctx.metrics_row("full", &normal, None);
-    let halted_row = ctx.metrics_row("full", &halted, None);
+    let normal_row = ctx.metrics_row("full", &normal, None, NOW_MS);
+    let halted_row = ctx.metrics_row("full", &halted, None, NOW_MS);
 
     assert_eq!(normal_row.halted, None);
     assert_eq!(halted_row.halted, Some(true));
@@ -204,6 +208,7 @@ mod persistence {
             &DataWindow::default(),
             &metrics,
             &closed,
+            NOW_MS,
         )
         .await
         .unwrap();
@@ -231,12 +236,19 @@ mod persistence {
             seed: Some(7),
         };
         let report = MonteCarloSimulator::new(config)
-            .run(dec!(10_000), &closed)
+            .run(dec!(10_000), &closed, NOW_MS / 1_000)
             .unwrap();
 
-        record_monte_carlo(&recorder, &mc_ctx, &spec(), &DataWindow::default(), &report)
-            .await
-            .unwrap();
+        record_monte_carlo(
+            &recorder,
+            &mc_ctx,
+            &spec(),
+            &DataWindow::default(),
+            &report,
+            NOW_MS,
+        )
+        .await
+        .unwrap();
 
         let rec = recorder.snapshot();
         assert_eq!(rec.runs[0].run_type, "monte_carlo");
@@ -313,6 +325,7 @@ mod persistence {
             &DataWindow::default(),
             &evaluations,
             serde_json::json!({"folds": 2}),
+            NOW_MS,
         )
         .await
         .unwrap();
@@ -393,7 +406,13 @@ mod persistence {
 
 fn fill_model_of(context: &RunContext) -> String {
     context
-        .run_row(&spec(), RunStatus::Running, None, &DataWindow::default())
+        .run_row(
+            &spec(),
+            RunStatus::Running,
+            None,
+            &DataWindow::default(),
+            NOW_MS,
+        )
         .unwrap()
         .fill_model
 }
@@ -523,7 +542,13 @@ fn assert_row_matches_schema(table: &str, row: &serde_json::Value, omitted_when_
 fn run_rows_match_the_bigquery_runs_table() {
     let ctx = RunContext::new(RunType::Backtest, &spec(), 1_700_000_000_000);
     let row = ctx
-        .run_row(&spec(), RunStatus::Running, None, &DataWindow::default())
+        .run_row(
+            &spec(),
+            RunStatus::Running,
+            None,
+            &DataWindow::default(),
+            NOW_MS,
+        )
         .unwrap();
 
     assert_row_matches_schema(
@@ -542,7 +567,7 @@ fn metrics_rows_match_the_bigquery_run_metrics_table() {
 
     assert_row_matches_schema(
         "run_metrics",
-        &serde_json::to_value(ctx.metrics_row("full", &metrics, None)).unwrap(),
+        &serde_json::to_value(ctx.metrics_row("full", &metrics, None, NOW_MS)).unwrap(),
         &["rejected_orders"],
     );
 }
@@ -579,7 +604,7 @@ fn paper_run_records_the_baseline_it_was_started_from() {
     };
 
     let row = paper
-        .run_row(&spec(), RunStatus::Running, None, &window)
+        .run_row(&spec(), RunStatus::Running, None, &window, NOW_MS)
         .unwrap();
 
     assert_eq!(
@@ -604,7 +629,7 @@ fn runs_without_a_baseline_omit_the_column() {
 
     for ctx in [&backtest, &child] {
         let row = ctx
-            .run_row(&spec(), RunStatus::Running, None, &window)
+            .run_row(&spec(), RunStatus::Running, None, &window, NOW_MS)
             .unwrap();
         assert_eq!(row.baseline_run_id, None);
         let json = serde_json::to_value(&row).unwrap();
@@ -614,7 +639,7 @@ fn runs_without_a_baseline_omit_the_column() {
 
 #[test]
 fn run_id_parse_accepts_generated_ids_and_rejects_typos() {
-    let id = RunId::generate();
+    let id = RunId::generate(NOW_MS.unsigned_abs());
     assert_eq!(RunId::parse(id.as_str()).unwrap(), id);
     for bad in [
         "",

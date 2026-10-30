@@ -854,6 +854,7 @@ where
             &winner_window,
             &eval_only,
             settings,
+            now_unix_ms(),
         )
         .await
         .map(|_| ());

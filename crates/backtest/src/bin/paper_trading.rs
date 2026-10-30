@@ -709,7 +709,7 @@ async fn run(alerts: &mut Option<AlertQueue>) -> Result<()> {
     if let Some(bq) = &bq_sink {
         record_lifecycle(bq, &run_ctx, &run_spec, end_status, &data_window).await;
         if let Err(e) = bq
-            .record_metrics(&[run_ctx.metrics_row("full", &metrics, None)])
+            .record_metrics(&[run_ctx.metrics_row("full", &metrics, None, now_unix_ms())])
             .await
         {
             println!("[WARN] Failed to record paper run metrics: {e}");
@@ -795,7 +795,9 @@ async fn record_lifecycle<R: RunRecorder>(
     status: RunStatus,
     data: &DataWindow,
 ) {
-    if let Err(e) = backtest::record_run_status(recorder, ctx, spec, status, data).await {
+    if let Err(e) =
+        backtest::record_run_status(recorder, ctx, spec, status, data, now_unix_ms()).await
+    {
         println!(
             "[WARN] Failed to record paper run status {}: {e}",
             status.as_str()

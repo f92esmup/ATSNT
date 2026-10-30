@@ -341,6 +341,7 @@ async fn walk_forward_ranking_and_its_recording_are_unchanged() {
         &DataWindow::default(),
         &ranking,
         serde_json::json!({"folds": 2}),
+        0,
     )
     .await
     .expect("hpo recorded");
@@ -378,7 +379,7 @@ fn backtest_recording_rows_are_unchanged() {
     ] {
         rows.push(serde_json::json!({
             "strategy": name,
-            "metrics": ctx.metrics_row("full", &metrics, None),
+            "metrics": ctx.metrics_row("full", &metrics, None, 0),
             "trades": ctx.trade_rows(&trades, 1),
             "equity": ctx.equity_points(&trades, 1),
         }));

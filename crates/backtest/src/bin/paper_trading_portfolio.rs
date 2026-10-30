@@ -1206,7 +1206,9 @@ async fn record_lifecycle<R: RunRecorder>(
     status: RunStatus,
     data: &DataWindow,
 ) {
-    if let Err(e) = backtest::record_run_status(recorder, ctx, spec, status, data).await {
+    if let Err(e) =
+        backtest::record_run_status(recorder, ctx, spec, status, data, now_unix_ms()).await
+    {
         eprintln!(
             "[WARN] Failed to record portfolio paper run status {}: {e}",
             status.as_str()

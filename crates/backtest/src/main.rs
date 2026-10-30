@@ -556,6 +556,7 @@ async fn main() -> Result<()> {
             &metrics,
             &closed_trades,
             strategy_audit.as_ref(),
+            now_unix_ms(),
         )
         .await;
         sinks.record("record backtest run", recorded);
@@ -584,7 +585,11 @@ async fn main() -> Result<()> {
             let mc_start = Instant::now();
             let simulator = MonteCarloSimulator::new(mc_config);
             let mc_report = simulator
-                .run(engine_config.initial_capital, &closed_trades)
+                .run(
+                    engine_config.initial_capital,
+                    &closed_trades,
+                    now_unix_ms() / 1_000,
+                )
                 .map_err(|e| anyhow::anyhow!("Monte Carlo error: {e}"))?;
             print_phase_timing("monte_carlo", mc_start);
 
@@ -645,8 +650,15 @@ async fn main() -> Result<()> {
                     "[*] Recording Monte Carlo run {} (child of {}) to BigQuery...",
                     mc_ctx.run_id, run_ctx.run_id
                 );
-                let recorded =
-                    record_monte_carlo(bq, &mc_ctx, &run_spec, &data_window, &mc_report).await;
+                let recorded = record_monte_carlo(
+                    bq,
+                    &mc_ctx,
+                    &run_spec,
+                    &data_window,
+                    &mc_report,
+                    now_unix_ms(),
+                )
+                .await;
                 sinks.record("record Monte Carlo run", recorded);
                 print_phase_timing("record_monte_carlo", mc_record_start);
             }

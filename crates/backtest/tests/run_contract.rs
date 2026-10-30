@@ -98,5 +98,10 @@ fn run_id_is_uuid_v7_formatted_and_time_ordered() {
         "RFC 4122 variant"
     );
     assert!(early.as_str() < late.as_str());
-    assert_ne!(RunId::generate(), RunId::generate());
+    // Two ids in the same millisecond still differ: the random tail keeps them apart.
+    let same_millisecond = 1_791_544_244_000;
+    assert_ne!(
+        RunId::generate(same_millisecond),
+        RunId::generate(same_millisecond)
+    );
 }
