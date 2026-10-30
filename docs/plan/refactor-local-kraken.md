@@ -1,11 +1,12 @@
 # Plan de refactorización: ATSNT local, swarm sobre futuros de Kraken
 
-> **Estado:** propuesta v3.1. Sustituye a la v3 (commit `9f9a780`).
+> **Estado:** propuesta v3.2. Sustituye a la v3.1 (commit `fcd9bbd`).
 > **Base de código:** commit `50b4ee5`. Verificado en verde antes de escribir este plan: `cargo check --workspace --all-targets`, `cargo test --workspace`, `cargo fmt --check` y `cargo clippy --all-targets -- -D warnings`.
 > **Fecha:** 2026-10-30. Solo documentación: el código no ha cambiado.
 
 ## Cambios respecto a la v2 y la v3
 
+- **v3.2:** tarifa base de spot corregida según la captura del usuario (0,25 % maker / 0,40 % taker, tramo base hasta 50 K USD). Se añade un escenario de estrés con esa tarifa en el gate.
 - **v3.1:** una sola base de riesgo, `min(capital operativo, equity EUR)`, de la que salen el riesgo por operación, el tope de nocional y los dos breakers. Dos efectos de FX separados: breakers y margen. Corrección de la comprobación de artefactos en la fase 1. Siembra del buffer USD antes del dinero real.
 - **Colateral en EUR** (decisión del usuario). Las pérdidas siguen liquidándose en USD, así que el plan obliga a mantener un buffer de USD.
 - **Capital de 5.000 €.** Con 2x, el nocional máximo es de 10.000 €. Los límites de riesgo se recalculan sobre ese capital.
@@ -84,13 +85,14 @@ El candidato para operar es el modo classifier. Ambos artefactos son `usd_m_perp
 
 | Producto | Tramo base | Primer escalón | Fuentes |
 |---|---|---|---|
-| Spot | 0,40 % maker / 0,80 % taker | 2,5 K USD de volumen de 30 días | [tarifas Kraken Pro](https://www.kraken.com/pro/fees), [comparativa](https://www.kraken.com/learn/lowest-fee-crypto-exchange) |
+| Spot | 0,25 % maker / 0,40 % taker (captura del usuario) | Tramo base hasta 50 K USD de volumen. Las fuentes web daban 0,40 / 0,80 con un escalón a 2,5 K USD: no coinciden | [tarifas Kraken Pro](https://www.kraken.com/pro/fees), [comparativa](https://www.kraken.com/learn/lowest-fee-crypto-exchange) |
 | Derivados | 0,02 % maker / 0,05 % taker | Tramo 1 hasta 5 M USD de volumen de 30 días | [tabla de derivados](https://support.kraken.com/articles/360048917612-fee-schedule) |
 
 - Las fuentes no coinciden sobre si el volumen spot cuenta para el nivel de derivados.
+- **Pendiente:** la tabla de futuros de tu cuenta (la que aplica a `PF_`) y confirmar si la cuenta fondeada usa la tabla de spot.
 - La prensa cita una promoción sin comisiones de futuros para clientes nuevos del EEE. No la uso en la prueba; compruébala en tu cuenta.
 
-**Tu caso (200 €/mes):** en spot no bajas de tramo, porque el primer escalón empieza en 2,5 K USD. En derivados ya estás en el tramo 1. Tu intuición de que sale más barato es correcta para futuros, no para spot.
+**Tu caso (200 €/mes):** en spot sigues en el tramo base (0,25 % / 0,40 %), que cubre hasta 50 K USD de volumen. En derivados estarías en el tramo 1 (0,02 % / 0,05 %), si la tabla de futuros de tu cuenta lo confirma. Tu intuición de que sale más barato es correcta para futuros, no para spot.
 
 **El artefacto ya asume estas comisiones.** `maker_fee_pct: 0.0002` y `taker_fee_pct: 0.0005` son el tramo 1 de derivados. Por eso el run 9 del logbook ya es swarm con comisiones de Kraken futuros, y aun así perdió dinero.
 
@@ -230,7 +232,7 @@ Pégame la salida. De ella salen el tamaño del contrato, el mínimo y el paso d
 | Conversión | — | 0,25 % sobre cada pérdida realizada. Es una **cota superior**: con D15 la conversión solo ocurre al reponer el buffer (verificar) |
 | Tamaño mínimo | `min_order_quantity: 0.001` (BTC) | Mínimo real de `PF_XBTUSD` del paso 0 |
 
-**Paso 3. Escenarios.** Tres ejecuciones: (a) con los deltas anteriores; (b) con el doble de comisiones o con `resting_maker_exits: false` (las salidas por take profit pagan taker) como margen de seguridad; (c) con el doble de funding. Anotar PnL neto, comisiones, conversiones, funding pagado, Sortino y DSR.
+**Paso 3. Escenarios.** Cuatro ejecuciones: (a) con los deltas anteriores; (b) con el doble de comisiones o con `resting_maker_exits: false` (las salidas por take profit pagan taker) como margen de seguridad; (c) con el doble de funding; (d) con la tarifa de la captura, 0,25 % maker / 0,40 % taker, si la cuenta la aplica también a futuros. El escenario (b) no cubre esa tarifa: es unas 12 veces la maker y 8 veces la taker de la tabla de derivados. Anotar PnL neto, comisiones, conversiones, funding pagado, Sortino y DSR.
 
 **Criterio:**
 
