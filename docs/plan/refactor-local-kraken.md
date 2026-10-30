@@ -1,33 +1,38 @@
 # Plan de refactorización: ATSNT local, swarm sobre futuros de Kraken
 
-> **Estado:** propuesta v2. Sustituye a la v1 (commit `f1bfaf0`).
+> **Estado:** propuesta v3. Sustituye a la v2 (commit `c4b04e7`).
 > **Base de código:** commit `50b4ee5`. Verificado en verde antes de escribir este plan: `cargo check --workspace --all-targets`, `cargo test --workspace`, `cargo fmt --check` y `cargo clippy --all-targets -- -D warnings`.
 > **Fecha:** 2026-10-30. Solo documentación: el código no ha cambiado.
 
-## Cambios respecto a la v1
+## Cambios respecto a la v2
 
-- **Spot sale del alcance.** Se opera en futuros perpetuos lineales de Kraken (`PF_`, colateral multi-divisa).
-- **Margen, liquidación y breakers en USD.** EUR solo para informes, salvo que elijas colateral en EUR.
-- **Apalancamiento por defecto: 2x**, no 10x.
-- **La prueba económica ya no es sobre comisiones.** El artefacto de swarm ya usa comisiones de tramo 1 de futuros, así que la prueba mide la estrategia.
-- **Corregida la estimación de fricción de la v1.** Se basaba en un logbook cuyas cifras no cuadran (sección 2.4).
+- **Colateral en EUR** (decisión del usuario). Las pérdidas siguen liquidándose en USD, así que el plan obliga a mantener un buffer de USD.
+- **Capital de 5.000 €.** Con 2x, el nocional máximo es de 10.000 €. Los límites de riesgo se recalculan sobre ese capital.
+- **Equipo: Linux con Omarchy** (Arch con systemd). Se usa una unidad de usuario de systemd y se desactiva la suspensión.
+- **Breakers medidos en EUR** sobre el equity convertido, porque el capital es tuyo en EUR. El margen y la liquidación siguen en USD, según las reglas del exchange.
+
+## Supuestos que he tomado
+
+- Los 5.000 € son tuyos, depositados en Kraken Pro. Si la "cuenta fondeada" es de una firma de fondeo (prop firm) con reglas de drawdown impuestas, avísame: cambia los breakers y la forma de operar.
+- Apalancamiento máximo de 2x (sección 2.6).
+- Colateral en EUR, como has elegido.
 
 ## 0. Resumen
 
-**Objetivo.** Un bot local que opera swarm en perpetuos lineales de Kraken Futures, con el margen en USD, los informes en EUR y sin GCP.
+**Objetivo.** Un bot local que opera swarm en perpetuos lineales de Kraken Futures, con colateral en EUR, riesgo medido en EUR y sin GCP. Corre en Omarchy.
 
-**Lo que este plan no hace.** No crea ventaja. Y el venue ya no explica la pérdida del logbook: su run 9 ya usa comisiones de tramo 1 de futuros y aun así perdió dinero. Si la fase 1 falla, el siguiente paso es investigación de estrategia, no infraestructura.
+**Lo que este plan no hace.** No crea ventaja. El venue no explica la pérdida del logbook: su run 9 ya usa comisiones de tramo 1 de futuros y aun así perdió dinero. Si la fase 1 falla, el siguiente paso es investigar la estrategia, no construir infraestructura.
 
 **Orden de trabajo.**
 
-1. **Fase 0:** higiene. Parte ya hecha (claves de Binance revocadas, acceso a GitHub).
-2. **Fase 1:** puerta económica. Reproducir el run 9 y aplicar los parámetros de Kraken.
+1. **Fase 0:** higiene. Parte ya hecha: claves de Binance revocadas, acceso a GitHub, sistema operativo confirmado.
+2. **Fase 1:** puerta económica. Reproducir el run 9 y aplicar los parámetros de Kraken con 5.000 €.
 3. **Fase 2:** grabadora de futuros, en paralelo. El libro y el mark price no se pueden recuperar después.
 4. **Fases 3 y 4:** hexagonal y borrado, protegidos por goldens de swarm.
-5. **Fases 5 a 7:** dominio de futuros en USD, adaptador de Kraken Futures y fidelidad de simulación.
-6. **Fases 8 y 9:** operación local y paso a dinero real por tramos.
+5. **Fases 5 a 7:** dominio de futuros con colateral EUR, adaptador de Kraken Futures y fidelidad de simulación.
+6. **Fases 8 y 9:** operación en Omarchy y paso a dinero real por tramos.
 
-## 1. Decisiones por defecto
+## 1. Decisiones
 
 Tomo estas decisiones para avanzar. Si quieres otra, dímelo y ajusto las fases afectadas.
 
@@ -38,14 +43,16 @@ Tomo estas decisiones para avanzar. Si quieres otra, dímelo y ajusto las fases 
 | D3 | Largo y corto, como permiten los perpetuos | Sin restricción de venta en corto | — |
 | D4 | Swarm en modo `classifier` para paper y live | El modo legacy emite `Decision::Target` y el registro lo rechaza (`crates/backtest/src/registry.rs:138`) | Ninguna: es una restricción actual del código |
 | D5 | Binance deja de ser fuente de datos y de ejecución al cerrar la fase 1 | Su único uso restante es el histórico público de la fase 1 | Mantener un descargador público si quieres comparar venues |
-| D6 | Parquet para trades, libro y mark price; SQLite para el registro de runs | Sin servidor ni cloud. SQLite cubre lo que hoy hace BigQuery | DuckDB para análisis, sin cambiar el diseño |
+| D6 | Parquet para trades, libro, mark price y EURUSD; SQLite para el registro de runs y el ledger | Sin servidor ni cloud. SQLite cubre lo que hoy hace BigQuery | DuckDB para análisis, sin cambiar el diseño |
 | D7 | Telegram se mantiene | No es GCP y ya es un puerto | — |
-| D8 | Linux con unidad systemd de usuario | El repo ya trae `docs/deployment/*.service`, `journald.conf` y envoltorios `systemd-inhibit` | Si usas macOS, launchd; las fases no cambian |
+| D8 | Linux (Arch, Omarchy) con unidad systemd de usuario | Omarchy usa systemd. El repo ya trae `docs/deployment/*.service`, `journald.conf` y envoltorios `systemd-inhibit` | — |
 | D9 | Se añade el puerto `Clock` | AGENTS.md lo exige; el roadmap lo descartó. Se corrige el roadmap | — |
-| D10 | Margen, liquidación, breakers y riesgo en **USD**. Informes en **EUR** | Las pérdidas de `PF_` siempre se cargan en USD (sección 2.7) | Colateral en EUR: decisión tuya, con sus costes (sección 2.7) |
+| D10 | Colateral en **EUR**. El PnL del contrato es en USD. Margen y liquidación según las reglas del exchange (en USD). Breakers y riesgo medidos en **EUR** | Tu elección. Ver sección 2.7 | — |
 | D11 | Salidas gestionadas por el cliente (en dominio) | No he verificado órdenes condicionales en el API de futuros | Usar órdenes condicionales si la especificación lo confirma |
 | D12 | Apalancamiento máximo configurable, **por defecto 2x** | Kraken lista hasta 10x en la UE, pero la prensa cita un aviso de ESMA que trataría estos perpetuos como CFD, con tope de 2:1 para minoristas (sección 2.6) | Subir el tope en la configuración, solo si tu cuenta lo permite |
 | D13 | La demo (`demo-futures.kraken.com`) sirve para fontanería, no para validar estrategia | Es un entorno de pruebas que se refresca de vez en cuando y no guarda histórico | — |
+| D14 | Capital de referencia de **5.000 €**. Capital operativo configurable | Tu capital. Se recomienda arrancar con 1.000 € (fase 9) | `operating_capital_eur` en la configuración |
+| D15 | **Buffer de USD obligatorio.** Regla: buffer ≥ pérdida hasta el stop de las posiciones abiertas + 24 h de funding en el peor caso | Evita convertir EUR a USD en mitad de una pérdida, con su comisión | Constante de configuración; la regla no cambia |
 
 ## 2. Hechos que condicionan el plan
 
@@ -92,7 +99,7 @@ El candidato para operar es el modo classifier. Ambos artefactos son `usd_m_perp
 - Pero el resumen declara una fricción total de 91,69 USD.
 - Y −40,66 − 91,69 = −132,35, no −85,89.
 
-**Por eso se retira la estimación de 4,5 y 8,5 veces de la v1.** Se basaba en 91,69. La fase 1 la sustituye por cifras del backtester.
+**Por eso se retiró la estimación de 4,5 y 8,5 veces de la v1.** La fase 1 la sustituye por cifras del backtester.
 
 ### 2.5 Kraken en el código
 
@@ -105,13 +112,25 @@ No hay ninguna referencia a Kraken. Pero el código ya modela perpetuos USD-M: `
 - **Apalancamiento:** Kraken declara hasta 10x para usuarios de la UE en pares elegibles. La prensa especializada informa de un aviso de ESMA sobre perpetuos apalancados (febrero; verificar fecha y texto). Según esa prensa, si se tratan como CFD, el tope para minoristas sería 2:1. No he encontrado confirmación de que Kraken lo haya aplicado.
 - Un artículo de Kraken Learn de junio de 2026 indica que el país cambia la elegibilidad, el apalancamiento y los contratos listados (URL no confirmada; buscarlo en Kraken Learn antes de citarlo).
 
-### 2.7 Colateral y divisa de liquidación
+### 2.7 Colateral en EUR: qué dicen las fuentes
 
-- Los contratos lineales multi-colateral (`PF_`) denominan sus PnL en **USD**. El pago por defecto es USD, pero puede cambiarse a otro colateral soportado, EUR entre ellos, con haircuts distintos por activo ([acuerdos EEE](https://support.kraken.com/articles/multi-collateral-derivatives-contracts-eea), [especificación lineal](https://support.kraken.com/hc/en-us/articles/4844359082772-Linear-Multi-Collateral-Perpetual-Contract-Specifications)).
-- **Las pérdidas siempre se cargan en USD.** Si falta USD, se cobra comisión sobre el saldo convertido.
-- El funding puede liquidarse en otra divisa según el contrato. Verificarlo en la especificación de cada `PF_`.
+- **PnL en USD.** Los contratos lineales multi-colateral (`PF_`) denominan sus ganancias y pérdidas en USD. El pago de ganancias por defecto es USD, pero puede cambiarse a EUR u otro colateral soportado ([acuerdos EEE](https://support.kraken.com/articles/multi-collateral-derivatives-contracts-eea), [especificación lineal](https://support.kraken.com/hc/en-us/articles/4844359082772-Linear-Multi-Collateral-Perpetual-Contract-Specifications)).
+- **Las pérdidas siempre se cargan en USD.** Si falta USD, se convierte colateral con comisión. Los cargos horarios de funding pueden generar pérdidas no realizadas que el USD o las stablecoins no cubren.
+- **Haircut del EUR: 0 %** en la tabla de colateral de Kraken. EURC tiene 1 %. Una tabla EEA antigua usa 2 % para el EUR; no coincide con la tabla actual ([colateral en el EEE](https://support.kraken.com/es/articles/collateral-currencies-eea), [colateral de futuros](https://support.kraken.com/hc/en-us/articles/4843323030164-Futures-Collateral-Currencies)).
+- **Comisión de conversión EUR→USD: no confirmada.** La tabla EEA da 0 % para el EUR, pero la misma página dice que el colateral no USD suele tener comisión de conversión. Un ejemplo de Unified Wallet usa un spread de 0,25 % ([conversiones](https://support.kraken.com/articles/interest-and-conversions-unified-wallet)). **El plan modela 0,25 % como supuesto conservador** hasta confirmarlo en tu cuenta.
+- **FX en el margen.** Con colateral EUR, el equity en USD depende del EURUSD. Afecta al margen y a la liquidación.
 
-**Consecuencia para el diseño:** margen, liquidación y breakers se calculan en USD. EUR sirve para informes. Mantener un colchón de USD evita las conversiones. Si eliges colateral EUR, se añaden haircuts, exposición FX en el margen y la comisión de conversión, que se modela como fricción.
+**Fórmulas que implementa el dominio** (tasas en USD por EUR, mark):
+
+```text
+equity_USD    = colateral_EUR × EURUSD × (1 − haircut_EUR) + saldo_USD + PnL_no_realizado_USD + funding_pendiente_USD
+equity_EUR    = equity_USD / EURUSD
+buffer_USD   ≥ pérdida_hasta_stop(posiciones abiertas) + funding_24h_peor_caso      (D15)
+```
+
+- `haircut_EUR = 0` (verificar en la tabla vigente).
+- La liquidación y el margen se calculan con `equity_USD`, según las reglas del exchange.
+- Los breakers se calculan con `equity_EUR`. Así, un movimiento del EURUSD cuenta como riesgo, porque es tu dinero en EUR el que se mueve.
 
 ### 2.8 Violaciones hexagonales (verificadas con grep)
 
@@ -135,19 +154,21 @@ Los campos `*_pct` son fracciones: `taker_fee_pct: 0.0005` equivale a 0,05 %. Un
 
 ```text
 crates/
-├── domain/      Puro, sin E/S. Instrumentos de futuros, moneda y Money (monto + divisa),
-│                tarifas, órdenes y su máquina de estados, posición, riesgo, margen y
-│                liquidación (futures.rs), funding con intervalo y divisa parametrizados,
-│                contabilidad (comisiones, drawdown diario y mensual en USD), analítica
+├── domain/      Puro, sin E/S. Instrumentos de futuros, Currency y Money (monto + divisa),
+│                tarifas, órdenes y su máquina de estados, posición, riesgo, margen y liquidación
+│                (futures.rs, en USD), colateral (EUR, haircut, buffer USD, conversión),
+│                funding con intervalo y divisa parametrizados, breakers en EUR, analítica
 │                (métricas, Monte Carlo con RNG determinista).
 ├── strategies/  Solo swarm_consensus, su contrato de pruebas y un registro con una entrada.
 ├── ports/       MarketDataStream, AsyncMarketDataStream, DepthStream*, MarkPriceStream*,
-│                FundingStream*, TradeTapeWriter*, Clock*, ExecutionVenue, ExitGateway,
-│                InstrumentCatalog*, FeeSource*, FxRateSource*, trait de persistencia de runs
-│                (movido), AlertNotifier.                                   (* = nuevo)
+│                FundingStream*, FxRateSource*, TradeTapeWriter*, Clock*, ExecutionVenue,
+│                ExitGateway, InstrumentCatalog*, FeeSource*, trait de persistencia de runs
+│                (movido), AlertNotifier.                                       (* = nuevo)
 ├── adapters/    kraken_futures/  REST (público y privado), WebSocket v1, firma, catálogo,
 │                                 gateway, grabadora
-│                storage/         Parquet de trades, libro y mark price; SQLite del registro
+│                storage/         Parquet de trades, libro, mark price y EURUSD; SQLite del
+│                                 registro y del ledger
+│                fx/              fuente de EURUSD (por definir, sección 2.7)
 │                telegram/        (movido desde gcp/)
 │                simulated/       SimulatedVenue, libro simulado y mark price simulado
 └── backtest/    (se renombra a `app` al final) TradingSession, driver, simuladores y modos
@@ -170,22 +191,21 @@ Tamaño relativo: S, M o L. Cada fase tiene criterio de salida y no se pasa a la
 
 ### Fase 0: higiene (S)
 
-- **Hecho:** claves de Binance revocadas. Acceso a GitHub concedido. El plan v1 ya está subido.
+- **Hecho:** claves de Binance revocadas. Acceso a GitHub concedido. Sistema operativo confirmado: Linux (Omarchy). El plan v1 y el v2 ya están subidos.
 - **Pendiente:**
   - Activar derivados en Kraken Pro. Requiere pasar el test de idoneidad de MiFID II.
   - Crear una cuenta en el demo (`demo-futures.kraken.com`) y sus claves, separadas de las de producción.
   - Crear las claves de producción de futuros **sin permiso de retirada**.
   - Recrear el token de Telegram.
   - Crear `.env` con permisos `600`.
-- Confirmar el sistema operativo. Si no es Linux, decirlo antes de la fase 8.
 
 **Salida:** `.env` local creado. Derivados activos en la cuenta. Claves del demo y de producción separadas.
 
 ### Fase 1: puerta económica (S de código, horas de cómputo)
 
-**Pregunta:** ¿swarm tiene ventaja neta con comisiones de futuros, funding y apalancamiento de 2x?
+**Pregunta:** ¿swarm tiene ventaja neta con comisiones de futuros, funding, conversión EUR→USD y apalancamiento de 2x sobre 5.000 €?
 
-**Paso 0. Verificar los contratos con datos públicos.** Ejecuta esto en tu equipo, donde sí hay acceso a Kraken. Desde este entorno el proxy bloquea `futures.kraken.com` (403):
+**Paso 0. Verificar los contratos con datos públicos.** Ejecuta esto en tu equipo. Desde este entorno el proxy bloquea `futures.kraken.com` (403):
 
 ```bash
 curl -s https://futures.kraken.com/derivatives/api/v3/instruments \
@@ -200,18 +220,19 @@ Pégame la salida. De ella salen el tamaño del contrato, el mínimo y el paso d
 
 | Delta | Artefacto actual | Prueba |
 |---|---|---|
+| Capital | `initial_capital` en USD | 5.000 € convertidos a USD con un tipo de cambio fijo, verificado y anotado |
 | Comisiones | maker 0,0002, taker 0,0005 | Sin cambio (ya son tramo 1 de derivados; verificar) |
 | Apalancamiento | `max_leverage: 20` | `2` |
 | Funding | `funding_rate_pct: 0.0001` por liquidación de 8 h | Histórico de funding de Kraken si se puede obtener (la página regional indica horario; verificar). Si no, barrido de tasas |
-| Conversión | — | Si el colateral es EUR, comisión de conversión (verificar) |
+| Conversión | — | 0,25 % sobre cada pérdida realizada (aproximación conservadora; verificar) |
 | Tamaño mínimo | `min_order_quantity: 0.001` (BTC) | Mínimo real de `PF_XBTUSD` del paso 0 |
 
-**Paso 3. Escenarios.** Tres ejecuciones: (a) con los deltas anteriores; (b) con el doble de comisiones como margen de seguridad; (c) con el doble de funding. Anotar PnL neto, comisiones, funding pagado, Sortino y DSR.
+**Paso 3. Escenarios.** Tres ejecuciones: (a) con los deltas anteriores; (b) con el doble de comisiones como margen de seguridad; (c) con el doble de funding. Anotar PnL neto, comisiones, conversiones, funding pagado, Sortino y DSR.
 
 **Criterio:**
 
 - **Pasa** si en el escenario (a) el PnL neto OOS es positivo y el DSR cumple el criterio del proyecto. El umbral lo fija `run_hpo`; verificarlo en el código antes de decidir.
-- **No pasa.** El venue ya no explica la pérdida, así que el siguiente paso es investigación de estrategia, no infraestructura. El refactor puede seguir porque elimina código sin uso, pero no se construye ejecución con dinero real hasta que el gate pase.
+- **No pasa.** El venue no explica la pérdida, así que el siguiente paso es investigación de estrategia, no infraestructura. El refactor puede seguir porque elimina código sin uso, pero no se construye ejecución con dinero real hasta que el gate pase.
 
 **Salida:** tabla de escenarios completa, con el paso 0 verificado o marcado como pendiente, y decisión tomada.
 
@@ -222,10 +243,11 @@ Pégame la salida. De ella salen el tamaño del contrato, el mínimo y el paso d
 Alcance:
 
 - Puertos mínimos que necesita la grabadora: `DepthStream`, `MarkPriceStream`, `FundingStream`, `TradeTapeWriter` y `Clock`.
-- `adapters/src/kraken_futures/ws_public.rs`: WebSocket v1 de producción en `wss://futures.kraken.com/ws/v1`, con los feeds públicos `trade`, `book`, `ticker` (verificar que el ticker trae mark price, index y funding) ([documentación WebSocket de futuros](https://docs.kraken.com/exchange/api-reference/futures-websocket)).
+- `adapters/src/kraken_futures/ws_public.rs`: WebSocket v1 de producción en `wss://futures.kraken.com/ws/v1`, con los feeds públicos `trade`, `book` y `ticker`. Verificar que el ticker trae mark price, index y funding ([documentación WebSocket de futuros](https://docs.kraken.com/exchange/api-reference/futures-websocket)).
 - **Verificar la integridad del libro en el feed v1.** No asumir el checksum CRC32 de spot. Si no hay checksum, validar por número de secuencia y resincronizar con snapshot ante cualquier hueco.
 - `adapters/src/kraken_futures/catalog.rs`: instrumentos públicos (paso 0 de la fase 1) para tamaños, ticks y apalancamiento de cada `PF_`.
 - Persistencia en Parquet por día UTC: `data/kraken-futures/<símbolo>/{trades,book,mark}/AAAA-MM-DD.parquet`, con un snapshot del libro cada 60 s más deltas.
+- Serie de **EURUSD** en su propio Parquet. Su fuente está por definir (sección 2.7); el repo no tiene esa serie.
 - Funding histórico diario por REST público ([histórico de funding](https://docs.kraken.com/api-reference/historical-funding-rates/historical-funding-rates)).
 - Reconexión con backoff exponencial, heartbeat y rotación de ficheros a medianoche UTC.
 - Salud cada hora: mensajes por segundo, huecos, reconexiones y fallos de secuencia o checksum. Alerta por Telegram si hay un hueco de más de 60 s.
@@ -245,8 +267,8 @@ Orden obligatorio: primero los goldens, después los movimientos.
 - **3.6 Funding.** `FundingSchedule::new(intervalo, tasa, divisa)`. La constante de 8 h queda solo en el perfil histórico de Binance, que se borra en la fase 4.
 - **3.7 Clock.** `SystemClock` en `adapters`; `SimClock` para simulación y tests. Corregir `docs/ROADMAP.md`, que dice que el puerto no hace falta.
 - **3.8 Puertos sin nombres de exchange.** Quitar las menciones de Binance en `ports/src/execution.rs` (`order_id`, documentación de `ExecutionVenue`) y en `ports/src/lib.rs`.
-- **3.9 Renombrar `tape`.** `binance_parquet.rs` pasa a `storage/tape_parquet.rs`, genérico, con el mismo esquema y con columnas para libro y mark price.
-- **3.10 Divisas explícitas.** Introducir `Currency` y `Money` en `domain`. Ningún importe se suma sin divisa; las funciones de margen y breakers reciben USD.
+- **3.9 Renombrar `tape`.** `binance_parquet.rs` pasa a `storage/tape_parquet.rs`, genérico, con el mismo esquema y con columnas para libro, mark price y EURUSD.
+- **3.10 Divisas explícitas.** Introducir `Currency` y `Money` en `domain`. Ningún importe se suma sin divisa. Las funciones de margen y liquidación reciben `equity_USD`; los breakers reciben `equity_EUR`.
 
 **Salida:** `fmt`, `clippy -D warnings` y tests en verde. Goldens idénticos bit a bit. R2 a R7 pasan.
 
@@ -256,17 +278,19 @@ La lista completa está en la sección 5. Incluye el código de Binance que ya n
 
 **Salida:** `strategy_ids()` devuelve solo `swarm_consensus`. Ningún archivo fuera de swarm nombra otra estrategia (grep vacío). Tests en verde.
 
-### Fase 5: dominio de futuros en USD (M)
+### Fase 5: dominio de futuros con colateral EUR (M)
 
-- `domain/src/instrument.rs`: `Instrument` con símbolo (`PF_…`), colateral y divisa de liquidación (USD), tamaño de contrato, tick, paso y mínimo de orden, apalancamiento máximo y funding por intervalo y divisa. Todo en `Decimal`.
-- `domain/src/futures.rs` (central): liquidación con **mark price**, no con último precio; funding por intervalo configurable; margen según la especificación del `PF_` (verificar si el margen es aislado o cruzado y los haircuts de colateral no USD).
-- `domain/src/fees.rs`: `FeeTier { maker_rate, taker_rate }` como datos, validados en rango. Comisión de conversión de divisa como fricción explícita.
+- `domain/src/instrument.rs`: `Instrument` con símbolo (`PF_…`), divisa de PnL (USD), tamaño de contrato, tick, paso y mínimo de orden, apalancamiento máximo y funding por intervalo y divisa. Todo en `Decimal`.
+- `domain/src/collateral.rs`: `CollateralAccount` con saldos por divisa (EUR, USD), haircut del EUR (0 por defecto), comisión de conversión (0,25 % por defecto) y la regla del buffer USD (D15).
+- `domain/src/futures.rs` (central): liquidación con **mark price**, con `equity_USD` según la fórmula de la sección 2.7. Funding por intervalo configurable. El modelo de margen (aislado o cruzado) se toma de la especificación del `PF_` (verificar).
+- `domain/src/fees.rs`: `FeeTier { maker_rate, taker_rate }` como datos, validados en rango. La conversión EUR→USD se registra como fricción propia.
 - **Apalancamiento.** `RiskPolicy` aplica un tope configurable, por defecto 2x (D12). Rechaza cualquier orden que lo supere.
-- **Breakers y contabilidad en USD.** Informes en EUR a partir de `FxRateSource` (puerto).
-- **Ledger completo.** Cada fill, comisión, pago de funding y conversión queda registrado. Lo necesitarás para tus declaraciones en España.
+- **Breakers en EUR.** Diario (3 % del equity de inicio de día UTC, por defecto) y mensual (15 %, por defecto), medidos con `equity_EUR`. Los valores vienen de los artefactos actuales y se recalibran en la fase 1.
+- **Capital operativo.** `operating_capital_eur` limita el capital que el bot puede usar, aunque la cuenta tenga más (D14).
+- **Ledger completo.** Cada fill, comisión, pago de funding, conversión y reposición de buffer queda registrado. Lo necesitarás para tus declaraciones en España.
 - Renombrar `*_pct` a `*_rate` (sección 2.9) y migrar los artefactos que se conservan.
 
-**Pruebas:** liquidación con mark price; funding con intervalo configurable; redondeo al tick y al contrato; tope de apalancamiento; breakers en USD; conversión a EUR determinista con tasa fija; comisión de conversión aplicada solo cuando hay conversión.
+**Pruebas:** liquidación con mark price y `equity_USD`; funding con intervalo configurable; redondeo al tick y al contrato; tope de apalancamiento; breakers en EUR con un movimiento de EURUSD; conversión a 0,25 % solo cuando hay pérdida que el buffer USD no cubre; regla del buffer (D15) que bloquea una orden que la rompería.
 
 **Salida:** tests de cada regla en verde. La configuración nueva se valida al cargar.
 
@@ -295,41 +319,62 @@ AGENTS.md exige fills realistas. Hoy el simulador no tiene libro ni mark price (
 
 - **Mark price.** Los disparos y la liquidación usan mark price grabado, no último precio.
 - **Funding** cobrado en cada liquidación, con el intervalo y la divisa del contrato.
-- **Liquidación** según la especificación del `PF_`.
+- **Liquidación** según la especificación del `PF_` y la fórmula de `equity_USD`.
+- **Conversiones** de EUR a USD según la regla del buffer (D15), con su comisión.
 - **Market orders** recorren el libro L2 grabado. **Limit orders** usan un modelo de cola y solo se ejecutan cuando un trade atraviesa el nivel.
 - **Comisiones.** `FeeSource` lee la tarifa de la cuenta, y simulación y ejecución usan la misma.
 - **Latencia** medida con `parity_check` sobre órdenes reales mínimas.
 
 **Salida:** `parity_check` con desviación explicada durante al menos 2 semanas de paper.
 
-### Fase 8: operación local (M)
+### Fase 8: operación en Omarchy (M)
 
 Estructura en tu equipo:
 
 ```text
 ~/atsnt/
 ├── .env                 (600) claves de producción, claves del demo y Telegram
+├── bin/                 binario compilado
 ├── configs/             artefactos versionados en git
-├── data/kraken-futures/ Parquet de trades, libro, mark price y funding
+├── data/kraken-futures/ Parquet de trades, libro, mark price, funding y EURUSD
 ├── state/atsnt.sqlite   registro de runs y ledger (WAL)
 └── backup/              copias nocturnas
 ```
 
-- **Registro.** SQLite con `runs`, `run_metrics`, `trades`, `run_series` y el ledger de fills, comisiones, funding y conversiones. Vistas `v_runs`, `v_trades` y `v_equity`. Reescribir `docs/architecture/13-bi-data-contract.md`, que hoy describe BigQuery.
-- **Servicio.** Unidad de usuario `~/.config/systemd/user/atsnt.service` con `Restart=on-failure` y `KillSignal=SIGINT`, como la actual. `loginctl enable-linger` para que arranque sin sesión abierta. Desactivar la suspensión del equipo; requiere permisos de administrador y depende de tu sistema operativo.
-- **Copias.** `sqlite3 state/atsnt.sqlite ".backup …"` cada noche, y copia de `data/` a un disco externo. Medir el tamaño tras la fase 2.
-- **Alertas.** Telegram se mantiene y se mueve a `adapters/telegram/`.
-- **Informes.** `atsnt report` sustituye las consultas de BigQuery.
-- **Borrar.** `Dockerfile`, `.dockerignore`, `scripts/gcp/`, `docs/architecture/10-gcp-cloud-architecture.md`, las variables `GCP_*` y los flags `--gcp-bigquery`, `--strict-sinks` y `--upload-winner`.
+**Paquetes** (Arch): `sqlite` para las copias y `rustup` para compilar. Comprobar si ya están instalados antes de instalarlos.
 
-**Salida:** el servicio se reinicia tras matar el proceso. Una copia nocturna se restaura en una prueba. Una parada genera alerta.
+**Servicio.**
+
+- Unidad de usuario `~/.config/systemd/user/atsnt.service` con `WorkingDirectory=%h/atsnt`, `EnvironmentFile=%h/atsnt/.env`, `Restart=on-failure`, `TimeoutStopSec=30s` y `KillSignal=SIGINT`, como la actual. `%h` es tu directorio personal, así que la unidad no depende del nombre de usuario.
+- `loginctl enable-linger $USER` para que el servicio arranque sin sesión abierta. En algunos sistemas requiere permisos de administrador.
+- Logs en el journal de usuario: `journalctl --user -u atsnt`. El repo ya trae `journald.conf`.
+
+**Que el equipo no se suspenda.** Si es un portátil, hay que tocar dos sitios:
+
+- **systemd-logind** (requiere permisos de administrador): un archivo en `/etc/systemd/logind.conf.d/atsnt.conf` con `HandleLidSwitch=ignore`, `HandleLidSwitchExternalPower=ignore` e `IdleAction=ignore`.
+- **hypridle**, si lo usas. Revisa su configuración en `~/.config/hypr/hypridle.conf` y quita el listener que suspende por inactividad. No lo he verificado en tu equipo.
+
+**Copias.** Un timer de usuario que ejecute `sqlite3 state/atsnt.sqlite ".backup …"` cada noche, y copia de `data/` a un disco externo. Medir el tamaño tras la fase 2.
+
+**Alertas.** Telegram se mantiene y se mueve a `adapters/telegram/`.
+
+**Informes.** `atsnt report` sustituye las consultas de BigQuery.
+
+**Borrar.** `Dockerfile`, `.dockerignore`, `scripts/gcp/`, `docs/architecture/10-gcp-cloud-architecture.md`, las variables `GCP_*` y los flags `--gcp-bigquery`, `--strict-sinks` y `--upload-winner`.
+
+**Salida:** el servicio se reinicia tras matar el proceso. Una copia nocturna se restaura en una prueba. Una parada genera alerta. El equipo no se suspende con la tapa cerrada ni por inactividad.
 
 ### Fase 9: paper y dinero real por tramos (calendario, no código)
 
 - **Paper:** al menos 4 semanas con datos de producción grabados y el simulador de la fase 7. El demo solo valida el ciclo de órdenes.
-- **Pasar a real** solo si el DSR cumple, el PnL neto OOS es positivo con comisiones y funding reales, y la paridad está dentro de tolerancia.
-- **Apalancamiento de 2x.** Con 500 € son unos 1.000 € de nocional. Comprobar que el mínimo de orden de `PF_XBTUSD` cabe en ese nocional (paso 0 de la fase 1). Si no cabe, elegir otro `PF_` o aumentar el capital.
-- **Tramo inicial** en el mínimo de orden verificado. Escalar según `docs/capital-scaling.md`, reescrito alrededor de 2x y margen en USD. Breakers diario y mensual activos.
+- **Pasar a real** solo si el DSR cumple, el PnL neto OOS es positivo con comisiones, conversiones y funding reales, y la paridad está dentro de tolerancia.
+- **Números con 5.000 €:**
+  - Nocional máximo a 2x: **10.000 €**.
+  - Riesgo por operación de 0,5 % a 1 % del equity (los artefactos actuales): **25 a 50 €**.
+  - Breakers por defecto: diario 3 % (**150 €**) y mensual 15 % (**750 €**). Se recalibran en la fase 1.
+- **Capital operativo recomendado: 1.000 € durante 4 semanas**, con `operating_capital_eur = 1000`. Después se sube a 5.000 € si no hay incidentes. Es una recomendación, tú decides.
+- **Mínimo de orden.** Con 1.000 € y 2x, el nocional es de 2.000 €. Comprobar que el mínimo de `PF_XBTUSD` cabe en ese nocional (paso 0 de la fase 1). Si no cabe, elegir otro `PF_` o subir el capital operativo.
+- Escalar según `docs/capital-scaling.md`, reescrito con colateral EUR, buffer USD y 2x.
 
 **Salida:** dos semanas de operación real sin incidentes de conciliación.
 
@@ -362,7 +407,7 @@ Estructura en tu equipo:
 | `Dockerfile`, `.dockerignore` | Borrar | 8 |
 | `docs/strategy/{01,02,04,05}*.md`, `docs/research/02-*`, `SWARM_OPTIMIZATION_ROADMAP.md` | Mover a `docs/archive/` | 4 |
 | `docs/architecture/10-gcp-cloud-architecture.md` | Borrar | 8 |
-| `docs/architecture/{07,08,13}*.md`, `docs/capital-scaling.md`, `docs/deployment/atsnt.service`, `README.md`, `AGENTS.md`, `docs/ROADMAP.md`, `.env.example` | Reescribir (08 pasa a describir el gateway de futuros de Kraken) | 3, 5 y 8 |
+| `docs/architecture/{07,08,13}*.md`, `docs/capital-scaling.md`, `docs/deployment/atsnt.service`, `README.md`, `AGENTS.md`, `docs/ROADMAP.md`, `.env.example` | Reescribir (08 pasa a describir el gateway de futuros de Kraken; `atsnt.service` pasa a unidad de usuario con `%h`) | 3, 5 y 8 |
 | `odd/tasks/` | Conservar como historial | — |
 
 ## 6. Pruebas y puertas por fase
@@ -373,10 +418,10 @@ Estructura en tu equipo:
 | 2 | Parseo de mensajes WebSocket v1 con fixtures; verificación de secuencia | 7 días sin huecos sin alertar |
 | 3 | Goldens de swarm; reglas R2 a R7; `Money` sin mezcla de divisas | Goldens idénticos bit a bit |
 | 4 | `strategy_ids()`; grep de nombres de estrategias | Tests en verde y sin referencias residuales |
-| 5 | Liquidación con mark price; funding configurable; tope de 2x; breakers en USD; conversión a EUR | Cada regla con test |
+| 5 | Liquidación con mark price y `equity_USD`; funding configurable; tope de 2x; breakers en EUR; conversión y regla del buffer | Cada regla con test |
 | 6 | Firma con respuestas reales del demo; paginación con HTTP mockeado | Ciclo completo en el demo |
 | 7 | Liquidación y disparos con mark price; fills de market contra libro sintético; cola de limit | `parity_check` dentro de tolerancia |
-| 8 | Reinicio tras matar el proceso; restauración de una copia | Alerta al parar |
+| 8 | Reinicio tras matar el proceso; restauración de una copia; el equipo no suspende | Alerta al parar |
 | 9 | — | Criterios de la fase 9 |
 
 En todas las fases: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` y `cargo test --workspace`. Ningún test toca la red.
@@ -386,24 +431,27 @@ En todas las fases: `cargo fmt --check`, `cargo clippy --all-targets -- -D warni
 | Riesgo | Impacto | Mitigación |
 |---|---|---|
 | La estrategia no tiene ventaja neta | Alto: no hay producto | Fase 1 antes de construir ejecución. Sin OOS positivo y DSR, no hay dinero real |
+| Pérdidas que el buffer USD no cubre y obligan a convertir | Medio | Regla D15; conversión modelada con 0,25 % y registrada en el ledger |
+| Comisión de conversión real mayor que 0,25 % | Medio | Se confirma en la cuenta antes del tramo real; el gate tiene escenario de comisiones |
+| FX adverso sobre el colateral EUR | Medio | Breakers en EUR; el efecto FX cuenta como riesgo; límites en la configuración |
 | Kraken o la CNMV/ESMA limitan el apalancamiento a 2:1 | Medio | Tope configurable; el diseño ya asume 2x |
 | Cambio de elegibilidad de la cuenta o de contratos listados | Medio | Catálogo que se refresca; alerta si un `PF_` deja de estar disponible |
 | Funding que se come el resultado | Medio | Funding real en la fase 1; contabilidad separada en el ledger |
-| Conversión USD/EUR cara si el colateral es EUR | Medio | Colchón de USD por defecto; comisión modelada como fricción |
-| La grabadora para (equipo dormido, red, disco) | Alto: se pierden datos del libro y del mark price | Alertas de hueco, copias y servicio con reinicio |
+| La grabadora para (equipo dormido, red, disco) | Alto: se pierden datos del libro y del mark price | Alertas de hueco, copias, servicio con reinicio y equipo sin suspensión |
 | El libro se desincroniza | Medio | Verificación de secuencia; resincronizar con snapshot |
 | El refactor cambia el comportamiento | Alto | Goldens antes de mover |
 | Clave API comprometida | Alto | `.env` con permisos `600`; sin permiso de retirada; restricción por IP si la cuenta lo permite |
 | Cambios en la API de Kraken Futures | Medio | Respuestas reales del demo guardadas como fixtures; revisar el changelog antes de cada despliegue |
-| Registro fiscal incompleto | Medio | El ledger guarda cada fill, comisión, funding y conversión desde el primer día |
+| Registro fiscal incompleto | Medio | El ledger guarda cada fill, comisión, funding, conversión y reposición de buffer desde el primer día |
 
 ## 8. Fuentes
 
 - Restaurar proyectos de GCP: https://docs.cloud.google.com/resource-manager/docs/delete-restore-projects
 - Comisiones de spot: https://www.kraken.com/pro/fees · https://www.kraken.com/learn/lowest-fee-crypto-exchange
-- Comisiones de derivados: https://support.kraken.com/articles/360048917612-fee-schedule
+- Comisiones de derivados: https://support.kraken.com/articles/360048917612-fee-schedule · https://support.kraken.com/articles/fees-for-derivatives-trading-eea
 - Perpetuos en España (MiFID II): https://pro.kraken.com/es/perpetual-futures
-- Colateral y divisa de liquidación: https://support.kraken.com/articles/multi-collateral-derivatives-contracts-eea · https://support.kraken.com/hc/en-us/articles/4844359082772-Linear-Multi-Collateral-Perpetual-Contract-Specifications · https://support.kraken.com/articles/perpetual-contract-specifications-for-clients-in-the-eea
+- Colateral, haircuts y divisa de liquidación: https://support.kraken.com/hc/en-us/articles/4843323030164-Futures-Collateral-Currencies · https://support.kraken.com/es/articles/collateral-currencies-eea · https://support.kraken.com/articles/multi-collateral-derivatives-contracts-eea · https://support.kraken.com/hc/en-us/articles/4844359082772-Linear-Multi-Collateral-Perpetual-Contract-Specifications · https://support.kraken.com/articles/perpetual-contract-specifications-for-clients-in-the-eea
+- Conversiones: https://support.kraken.com/articles/interest-and-conversions-unified-wallet
 - Autenticación de futuros: https://docs.kraken.com/api/docs/guides/futures-rest/
 - WebSocket de futuros: https://docs.kraken.com/exchange/api-reference/futures-websocket
 - Histórico de funding: https://docs.kraken.com/api-reference/historical-funding-rates/historical-funding-rates
