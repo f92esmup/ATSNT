@@ -11,9 +11,6 @@ domain.workspace = true
 ports.workspace = true
 strategies.workspace = true
 adapters.workspace = true
-reqwest.workspace = true
-tokio-tungstenite.workspace = true
-futures-util.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -32,10 +29,6 @@ chrono.workspace = true
 [[bin]]
 name = "backtest"
 path = "src/main.rs"
-
-[[bin]]
-name = "testnet_exit_check"
-path = "src/bin/testnet_exit_check.rs"
 
 [[bin]]
 name = "run_hpo"
@@ -57,21 +50,6 @@ path = "src/bin/calibrate_feeds.rs"
 name = "prune_swarm"
 path = "src/bin/prune_swarm.rs"
 
-[[bin]]
-name = "generate_pipeline_test_data"
-path = "src/bin/generate_pipeline_test_data.rs"
-
-[[bin]]
-name = "run_portfolio"
-path = "src/bin/run_portfolio.rs"
-
-[[bin]]
-name = "paper_trading_portfolio"
-path = "src/bin/paper_trading_portfolio.rs"
-
-[[bin]]
-name = "run_portfolio_hpo"
-path = "src/bin/run_portfolio_hpo.rs"
 
 
 [dev-dependencies]

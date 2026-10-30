@@ -166,18 +166,13 @@ fn the_core_crates_depend_on_no_io_crate() {
     );
 }
 
-/// The application crate reaches the network through adapters. The one exception is the testnet
-/// harness, which observes the exchange with its own raw REST and WebSocket clients so that it
-/// checks the gateway it drives instead of trusting it.
+/// The application crate reaches the network through adapters only: it names no HTTP or socket
+/// client, so an exchange call cannot bypass the gateway the adapters provide.
 #[test]
-fn only_the_testnet_harness_talks_to_the_network_from_the_application_crate() {
-    let allowed = "testnet_exit_check.rs";
+fn the_application_crate_names_no_network_client() {
     let network = ["reqwest", "tokio_tungstenite", "futures_util"];
     let mut offenders = Vec::new();
     for (path, production) in production_sources("backtest") {
-        if path.file_name().and_then(|name| name.to_str()) == Some(allowed) {
-            continue;
-        }
         for (number, line) in production.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.starts_with("//") {
@@ -190,7 +185,7 @@ fn only_the_testnet_harness_talks_to_the_network_from_the_application_crate() {
     }
     assert!(
         offenders.is_empty(),
-        "network clients belong in adapters (only {allowed} is exempt):\n{}",
+        "network clients belong in adapters:\n{}",
         offenders.join("\n")
     );
 }
