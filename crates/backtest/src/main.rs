@@ -51,7 +51,7 @@ struct Args {
     #[arg(long)]
     shared_config: Option<PathBuf>,
 
-    /// Strategy to run: "dollar_bars_cusum" (or "cusum") vs "order_flow_imbalance" (or "ofi").
+    /// Strategy to run (default: "swarm_consensus", alias "swarm").
     /// Inferred automatically from --config artifact if omitted; one that contradicts the
     /// artifact's is refused.
     #[arg(long)]

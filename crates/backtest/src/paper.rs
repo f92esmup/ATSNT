@@ -656,8 +656,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn any_registered_strategy_can_drive_a_paper_session() {
-        let strategy = strategies::OrderFlowImbalanceStrategy::new(Default::default()).unwrap();
+    async fn a_silent_strategy_still_forms_bars_in_a_paper_session() {
+        let strategy = Scripted {
+            decisions: VecDeque::new(),
+        };
         let mut session = PaperTradingSession::with_strategy(
             PaperTradingConfig {
                 dollar_bar_threshold: dec!(100),

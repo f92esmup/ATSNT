@@ -153,7 +153,7 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
     /// Search space defining hyperparameter domains and stability perturbations.
     type Space: HyperparameterSpace<Config = Self::Config>;
 
-    /// Canonical identifier for the strategy (e.g. "dollar_bars_cusum").
+    /// Canonical identifier for the strategy (e.g. "swarm_consensus").
     fn id() -> &'static str;
 
     /// The strategy's frozen first stage.

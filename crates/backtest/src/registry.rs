@@ -357,8 +357,6 @@ pub fn load_strategy_with_shared(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
-    use strategies::{DollarBarsCusumConfig, OrderFlowImbalanceConfig};
 
     fn temp_file(name: &str, content: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("atsnt-{}-{name}", std::process::id()));
@@ -366,17 +364,18 @@ mod tests {
         path
     }
 
+    /// A swarm artifact with its trade sampling, optionally carrying an HPO scorecard.
     fn artifact_with_scorecard(
         name: &str,
         scorecard: Option<serde_json::Value>,
     ) -> std::path::PathBuf {
         let mut artifact = serde_json::json!({
             "schema_version": "1.0",
-            "strategy_id": "dollar_bars_cusum",
+            "strategy_id": "swarm_consensus",
             "symbol": "BTCUSDT",
             "market_type": "usd_m_perpetual",
-            "sampling": {"type": "dollar_bar", "threshold": "1000000"},
-            "strategy_config": serde_json::to_value(DollarBarsCusumConfig::default()).unwrap(),
+            "sampling": {"type": "trades", "price_bucket_ms": 1000},
+            "strategy_config": serde_json::to_value(strategies::PolicyConfig::default()).unwrap(),
             "execution_context": serde_json::to_value(crate::BacktestConfig::default()).unwrap(),
         });
         if let Some(card) = scorecard {
@@ -392,10 +391,17 @@ mod tests {
         artifact["hpo_scorecard"].clone()
     }
 
+    fn swarm_shared(calibration_end_ms: i64) -> strategies::SwarmConfig {
+        strategies::SwarmConfig {
+            calibration_end_ms,
+            ..strategies::SwarmConfig::default()
+        }
+    }
+
     #[test]
     fn a_losing_artifact_is_refused_unless_explicitly_allowed() {
         let path = artifact_with_scorecard("losing.json", Some(losing_scorecard()));
-        let loaded = load_strategy("cusum", Some(&path)).unwrap();
+        let loaded = load_strategy("swarm", Some(&path)).unwrap();
 
         let refused = loaded
             .ensure_deployable(DeploymentPolicy::Enforce)
@@ -417,17 +423,17 @@ mod tests {
         let artifact = artifact_with_scorecard("no-card.json", None);
         let bare = temp_file(
             "bare-gate.json",
-            &serde_json::to_string(&DollarBarsCusumConfig::default()).unwrap(),
+            &serde_json::to_string(&strategies::PolicyConfig::default()).unwrap(),
         );
 
         for path in [artifact, bare] {
-            let loaded = load_strategy("cusum", Some(&path)).unwrap();
+            let loaded = load_strategy("swarm", Some(&path)).unwrap();
             assert_eq!(
                 loaded.ensure_deployable(DeploymentPolicy::Enforce).unwrap(),
                 None
             );
         }
-        let default = load_strategy("cusum", None).unwrap();
+        let default = load_strategy("swarm", None).unwrap();
         assert_eq!(
             default
                 .ensure_deployable(DeploymentPolicy::Enforce)
@@ -438,7 +444,7 @@ mod tests {
 
     #[test]
     fn an_override_that_changes_nothing_says_so() {
-        let loaded = load_strategy("cusum", None).unwrap();
+        let loaded = load_strategy("swarm", None).unwrap();
 
         let notice = loaded
             .ensure_deployable(DeploymentPolicy::AllowUnproven)
@@ -453,32 +459,32 @@ mod tests {
 
     #[test]
     fn without_a_file_a_strategy_loads_its_own_default_hyperparameters() {
-        let loaded = load_strategy("ofi", None).unwrap();
+        let loaded = load_strategy("swarm", None).unwrap();
 
-        assert_eq!(loaded.strategy_id, "order_flow_imbalance");
+        assert_eq!(loaded.strategy_id, "swarm_consensus");
         assert_eq!(loaded.source, ConfigSource::Default);
         assert_eq!(
             loaded.config_json,
-            serde_json::to_value(OrderFlowImbalanceConfig::default()).unwrap()
+            serde_json::to_value(strategies::PolicyConfig::default()).unwrap()
         );
         assert!(loaded.dollar_bar_threshold.is_none());
-        assert!(loaded.report_lines()[0].starts_with("[*] Using default order_flow_imbalance"));
+        assert!(loaded.report_lines()[0].starts_with("[*] Using default swarm_consensus"));
     }
 
     #[test]
-    fn an_artifact_supplies_the_declared_market_threshold_and_context() {
+    fn an_artifact_supplies_its_symbol_market_and_execution_context() {
         let artifact = format!(
-            r#"{{"schema_version":"1.0","strategy_id":"dollar_bars_cusum","symbol":"ETHUSDT","market_type":"usd_m_perpetual","sampling":{{"type":"dollar_bar","threshold":"750000"}},"strategy_config":{},"execution_context":{}}}"#,
-            serde_json::to_string(&DollarBarsCusumConfig::default()).unwrap(),
+            r#"{{"schema_version":"1.0","strategy_id":"swarm_consensus","symbol":"ETHUSDT","market_type":"usd_m_perpetual","sampling":{{"type":"trades","price_bucket_ms":1000}},"strategy_config":{},"execution_context":{}}}"#,
+            serde_json::to_string(&strategies::PolicyConfig::default()).unwrap(),
             serde_json::to_string(&BacktestConfig::default()).unwrap(),
         );
         let path = temp_file("artifact.json", &artifact);
 
-        let loaded = load_strategy("cusum", Some(&path)).unwrap();
+        let loaded = load_strategy("swarm", Some(&path)).unwrap();
         std::fs::remove_file(&path).unwrap();
 
-        assert_eq!(loaded.strategy_id, "dollar_bars_cusum");
-        assert_eq!(loaded.dollar_bar_threshold, Some(dec!(750_000)));
+        assert_eq!(loaded.strategy_id, "swarm_consensus");
+        assert!(loaded.dollar_bar_threshold.is_none());
         assert_eq!(loaded.symbol.as_deref(), Some("ETHUSDT"));
         assert_eq!(loaded.market_type, Some(MarketType::UsdMPerpetual));
         assert_eq!(loaded.execution_context, Some(BacktestConfig::default()));
@@ -491,10 +497,10 @@ mod tests {
     fn a_bare_hyperparameter_file_still_loads() {
         let path = temp_file(
             "bare.json",
-            &serde_json::to_string(&OrderFlowImbalanceConfig::default()).unwrap(),
+            &serde_json::to_string(&strategies::PolicyConfig::default()).unwrap(),
         );
 
-        let loaded = load_strategy("order_flow_imbalance", Some(&path)).unwrap();
+        let loaded = load_strategy("swarm", Some(&path)).unwrap();
         std::fs::remove_file(&path).unwrap();
 
         assert_eq!(loaded.source, ConfigSource::Bare);
@@ -504,43 +510,28 @@ mod tests {
     #[test]
     fn the_artifact_id_is_honoured_and_aliases_resolve() {
         let path = temp_file(
-            "ofi-artifact.json",
-            r#"{"strategy_id":"ofi","schema_version":"1.0"}"#,
+            "swarm-artifact.json",
+            r#"{"strategy_id":"swarm","schema_version":"1.0"}"#,
         );
 
         // Nothing on the command line, or the same strategy under another spelling: fine.
         assert_eq!(
             resolve_strategy_id(None, Some(&path)).unwrap(),
-            "order_flow_imbalance"
+            "swarm_consensus"
         );
         assert_eq!(
-            resolve_strategy_id(Some("order_flow_imbalance"), Some(&path)).unwrap(),
-            "order_flow_imbalance"
+            resolve_strategy_id(Some("swarm_consensus"), Some(&path)).unwrap(),
+            "swarm_consensus"
         );
         std::fs::remove_file(&path).unwrap();
         assert_eq!(
-            resolve_strategy_id(Some("ofi"), None).unwrap(),
-            "order_flow_imbalance"
+            resolve_strategy_id(Some("swarm"), None).unwrap(),
+            "swarm_consensus"
         );
         assert_eq!(
             resolve_strategy_id(None, None).unwrap(),
             DEFAULT_STRATEGY_ID
         );
-    }
-
-    #[test]
-    fn a_command_line_strategy_that_contradicts_the_artifact_is_refused() {
-        let path = temp_file(
-            "contradiction.json",
-            r#"{"strategy_id":"ofi","schema_version":"1.0"}"#,
-        );
-
-        let error = resolve_strategy_id(Some("cusum"), Some(&path)).unwrap_err();
-        std::fs::remove_file(&path).unwrap();
-
-        let message = error.to_string();
-        assert!(message.contains("--strategy dollar_bars_cusum conflicts"));
-        assert!(message.contains("order_flow_imbalance"));
     }
 
     #[test]
@@ -552,9 +543,7 @@ mod tests {
 
         for message in [by_name, by_id] {
             assert!(message.contains("Unknown strategy 'nope'"));
-            assert!(
-                message.contains("dollar_bars_cusum") && message.contains("order_flow_imbalance")
-            );
+            assert!(message.contains("swarm_consensus"));
         }
     }
 
@@ -570,14 +559,6 @@ mod tests {
     }
 
     #[test]
-    fn paper_and_live_accept_the_entry_strategies() {
-        for id in ["dollar_bars_cusum", "order_flow_imbalance"] {
-            let loaded = load_strategy(id, None).unwrap();
-            assert!(loaded.ensure_accepts_decisions().is_ok(), "{id}");
-        }
-    }
-
-    #[test]
     fn paper_and_live_accept_swarm_classifier() {
         let classifier_config =
             serde_json::to_string(&strategies::PolicyConfig::classifier_default()).unwrap();
@@ -585,19 +566,6 @@ mod tests {
         std::fs::write(temp.path(), classifier_config).unwrap();
         let loaded = load_strategy("swarm", Some(temp.path())).unwrap();
         assert!(loaded.ensure_accepts_decisions().is_ok());
-    }
-
-    fn swarm_shared(calibration_end_ms: i64) -> strategies::SwarmConfig {
-        strategies::SwarmConfig {
-            calibration_end_ms,
-            ..strategies::SwarmConfig::default()
-        }
-    }
-
-    #[test]
-    fn a_dollar_bar_strategy_carries_no_shared_config() {
-        let loaded = load_strategy("cusum", None).unwrap();
-        assert_eq!(loaded.shared_config_json, None);
     }
 
     #[test]
@@ -667,11 +635,10 @@ mod tests {
     }
 
     #[test]
-    fn a_file_for_another_strategy_is_rejected_instead_of_misread() {
-        // Hyperparameters of the CUSUM strategy are not an order-flow configuration.
+    fn a_file_that_is_no_configuration_is_rejected_instead_of_misread() {
         let path = temp_file("wrong.json", r#"{"unrelated": true}"#);
 
-        let result = load_strategy("order_flow_imbalance", Some(&path));
+        let result = load_strategy("swarm", Some(&path));
         std::fs::remove_file(&path).unwrap();
 
         assert!(result.is_err());

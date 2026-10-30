@@ -2,24 +2,10 @@
 // assertions, so it is never compiled into production code.
 #[cfg(test)]
 mod contract;
-pub mod dollar_bars_cusum;
-pub mod langevin_potential;
-pub mod order_flow_imbalance;
-pub mod quantum_well_swing;
 pub mod registry;
 pub mod strategy;
 pub mod swarm_consensus;
 
-pub use dollar_bars_cusum::{DollarBarsCusumConfig, DollarBarsCusumSpace, DollarBarsCusumStrategy};
-pub use langevin_potential::{
-    LangevinConfig, LangevinPotentialStrategy, LangevinSpace, WellTopology,
-};
-pub use order_flow_imbalance::{
-    OrderFlowImbalanceConfig, OrderFlowImbalanceSpace, OrderFlowImbalanceStrategy,
-};
-pub use quantum_well_swing::{
-    QuantumWellSwingConfig, QuantumWellSwingSpace, QuantumWellSwingStrategy,
-};
 pub use registry::{
     canonical_id, dispatch, dispatch_all, strategy_ids, strategy_names, unknown_strategy_message,
     StrategyVisitor,

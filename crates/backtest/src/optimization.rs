@@ -291,30 +291,6 @@ pub fn run_tape_slice<S: OptimizableStrategy>(
     Ok(engine.finish_with_trades(mark_price))
 }
 
-/// Runs a deterministic backtest against a contiguous slice of `DollarBar`s.
-///
-/// A dollar-bar strategy's shared configuration is `()`, so the default one is the only one;
-/// a strategy with a real shared configuration goes through [`run_tape_slice`].
-pub fn run_backtest_slice<S: OptimizableStrategy>(
-    config: BacktestConfig,
-    strat_config: &S::Config,
-    bars: &[DollarBar],
-) -> Result<BacktestMetrics, BacktestError> {
-    run_backtest_slice_with_trades::<S>(config, strat_config, bars).map(|(metrics, _)| metrics)
-}
-
-/// [`run_backtest_slice`] that also returns the closed trades.
-pub fn run_backtest_slice_with_trades<S: OptimizableStrategy>(
-    config: BacktestConfig,
-    strat_config: &S::Config,
-    bars: &[DollarBar],
-) -> Result<(BacktestMetrics, Vec<ClosedTrade>), BacktestError> {
-    config.validate()?;
-    let shared = S::SharedConfig::default();
-    let tape = bar_tape::<S>(&shared, bars)?;
-    run_tape_slice::<S>(config, &shared, strat_config, &tape, 0..tape.len())
-}
-
 /// One optimisation run's frozen inputs: the tape, the shared configuration and the account.
 pub struct TapeRun<'a, S: OptimizableStrategy> {
     /// The tape every candidate replays.
@@ -852,7 +828,6 @@ mod tests {
     use super::*;
     use crate::walk_forward::WalkForwardConfig;
     use crate::walk_forward::WalkForwardSplitter;
-    use strategies::{DollarBarsCusumSpace, DollarBarsCusumStrategy};
 
     fn generate_synthetic_bars(count: usize) -> Vec<DollarBar> {
         let mut bars = Vec::with_capacity(count);
@@ -1122,17 +1097,12 @@ mod tests {
             ..BacktestConfig::default()
         };
 
-        let param_space = DollarBarsCusumSpace {
-            rolling_window_lens: vec![5, 10],
-            cusum_vol_multipliers: vec![dec!(1.0), dec!(1.5)],
-            z_entry_thresholds: vec![dec!(1.0), dec!(1.5)],
-            z_stop_thresholds: vec![dec!(2.5)],
-            time_barrier_bars: vec![5],
-            ..DollarBarsCusumSpace::default()
+        let param_space = MockSpace {
+            windows: vec![5, 10],
+            thresholds: vec![dec!(1.0), dec!(1.5)],
         };
 
-        let optimizer =
-            WalkForwardOptimizer::<DollarBarsCusumStrategy>::new(engine_config, param_space);
+        let optimizer = WalkForwardOptimizer::<MockStrategy>::new(engine_config, param_space);
         let results = optimizer.run_optimization(&bars, &folds, 8).unwrap();
 
         assert!(!results.is_empty());
@@ -1510,6 +1480,43 @@ mod tests {
         assert!(!results.is_empty());
         for i in 1..results.len() {
             assert!(results[i - 1].fitness >= results[i].fitness);
+        }
+    }
+
+    #[test]
+    fn each_candidate_keeps_full_in_and_out_of_sample_metrics_per_fold() {
+        let bars = generate_synthetic_bars(600);
+        let folds = WalkForwardSplitter::generate_rolling_folds(
+            bars.len(),
+            &WalkForwardConfig {
+                num_folds: 3,
+                train_ratio: 0.7,
+                embargo_bars: 5,
+            },
+        )
+        .unwrap();
+        let optimizer =
+            WalkForwardOptimizer::<MockStrategy>::with_default_space(BacktestConfig::default());
+        let evaluations = optimizer.run_optimization(&bars, &folds, 4).unwrap();
+        assert!(!evaluations.is_empty());
+        for eval in &evaluations {
+            assert_eq!(eval.fold_metrics.len(), folds.len());
+            let fold_ids: Vec<usize> = eval.fold_metrics.iter().map(|f| f.fold_idx).collect();
+            let expected: Vec<usize> = folds.iter().map(|f| f.fold_idx).collect();
+            assert_eq!(fold_ids, expected);
+            let oos_trades: usize = eval
+                .fold_metrics
+                .iter()
+                .map(|f| f.out_of_sample.total_trades)
+                .sum();
+            assert_eq!(oos_trades, eval.total_oos_trades);
+            let mean_is = eval
+                .fold_metrics
+                .iter()
+                .map(|f| f.in_sample.sortino_ratio.unwrap_or_default())
+                .sum::<Decimal>()
+                / Decimal::from(folds.len());
+            assert_eq!(mean_is, eval.mean_is_sortino);
         }
     }
 }

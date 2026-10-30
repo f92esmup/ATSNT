@@ -18,7 +18,7 @@ use crate::config::BacktestConfig;
 /// without schema changes; analytics sinks persist them as JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunSpec<C> {
-    /// Canonical strategy identifier (e.g. "dollar_bars_cusum").
+    /// Canonical strategy identifier (e.g. "swarm_consensus").
     pub strategy_id: String,
     /// Target trading symbol in uppercase (e.g. "BTCUSDT").
     pub symbol: String,

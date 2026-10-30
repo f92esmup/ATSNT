@@ -582,7 +582,7 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use std::collections::VecDeque;
-    use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType};
+    use strategies::MarketType;
 
     /// Emits one scripted decision per bar and counts how many bars it was shown.
     struct Scripted {
@@ -614,6 +614,15 @@ mod tests {
         }
 
         fn reset(&mut self) {}
+    }
+
+    /// A strategy that signals a long on the plunge to 90 (the fifth bar of the tests' tape) with
+    /// the given stop, target and time barrier.
+    fn plunge_to_90(stop: Decimal, take_profit: Decimal, max_bars_hold: usize) -> Scripted {
+        let signal =
+            domain::OrderIntent::new(5000, Side::Buy, dec!(90), stop, take_profit, max_bars_hold)
+                .unwrap();
+        Scripted::new(vec![None, None, None, None, Some(signal)])
     }
 
     /// Long intent at 100 with SL 95, TP 110 and the given time barrier.
@@ -935,15 +944,7 @@ mod tests {
         };
         let mut engine = BacktestEngine::new(btc_cfg);
 
-        let strat_cfg = DollarBarsCusumConfig {
-            rolling_window_len: 4,
-            cusum_vol_multiplier: dec!(1.0),
-            z_entry_threshold: dec!(1.5),
-            z_stop_threshold: dec!(3.0),
-            time_barrier_bars: 10,
-            min_take_profit_pct: dec!(0.0025),
-        };
-        let mut strategy = DollarBarsCusumStrategy::new(strat_cfg).unwrap();
+        let mut strategy = plunge_to_90(dec!(85), dec!(100), 10);
 
         // Feed baseline bars to establish volatility
         engine.process_bar(
@@ -1001,15 +1002,7 @@ mod tests {
         let btc_cfg = BacktestConfig::default();
         let mut engine = BacktestEngine::new(btc_cfg);
 
-        let strat_cfg = DollarBarsCusumConfig {
-            rolling_window_len: 4,
-            cusum_vol_multiplier: dec!(1.0),
-            z_entry_threshold: dec!(1.5),
-            z_stop_threshold: dec!(2.0),
-            time_barrier_bars: 10,
-            min_take_profit_pct: dec!(0.0025),
-        };
-        let mut strategy = DollarBarsCusumStrategy::new(strat_cfg).unwrap();
+        let mut strategy = plunge_to_90(dec!(85), dec!(110), 10);
 
         // Baseline
         engine.process_bar(
@@ -1065,15 +1058,8 @@ mod tests {
         let btc_cfg = BacktestConfig::default();
         let mut engine = BacktestEngine::new(btc_cfg);
 
-        let strat_cfg = DollarBarsCusumConfig {
-            rolling_window_len: 4,
-            cusum_vol_multiplier: dec!(1.0),
-            z_entry_threshold: dec!(1.5),
-            z_stop_threshold: dec!(5.0), // wide stop
-            time_barrier_bars: 2,        // short time barrier
-            min_take_profit_pct: dec!(0.0025),
-        };
-        let mut strategy = DollarBarsCusumStrategy::new(strat_cfg).unwrap();
+        // A wide stop, so the time barrier is what closes the position.
+        let mut strategy = plunge_to_90(dec!(80), dec!(110), 2);
 
         // Baseline
         engine.process_bar(
@@ -1132,15 +1118,7 @@ mod tests {
         };
         let mut engine = BacktestEngine::new(btc_cfg);
 
-        let strat_cfg = DollarBarsCusumConfig {
-            rolling_window_len: 4,
-            cusum_vol_multiplier: dec!(1.0),
-            z_entry_threshold: dec!(1.5),
-            z_stop_threshold: dec!(3.0),
-            time_barrier_bars: 10,
-            min_take_profit_pct: dec!(0.0025),
-        };
-        let mut strategy = DollarBarsCusumStrategy::new(strat_cfg).unwrap();
+        let mut strategy = plunge_to_90(dec!(85), dec!(100), 10);
 
         // Baseline bars to warm up rolling stats
         engine.process_bar(
@@ -1202,24 +1180,42 @@ mod tests {
             maker_fee_pct: dec!(0.0002),
             taker_fee_pct: dec!(0.0005),
             slippage_pct: dec!(0.0005),
-            risk_per_trade_pct: dec!(0.05), // large position to trigger breaker
+            risk_per_trade_pct: dec!(0.1), // large position to trigger breaker
             max_daily_drawdown_pct: dec!(0.05), // 5% daily breaker
             ..BacktestConfig::default()
         };
         let mut engine = BacktestEngine::new(btc_cfg);
 
-        let strat_cfg = DollarBarsCusumConfig {
-            rolling_window_len: 4,
-            cusum_vol_multiplier: dec!(1.0),
-            z_entry_threshold: dec!(1.5),
-            z_stop_threshold: dec!(2.0),
-            time_barrier_bars: 10,
-            min_take_profit_pct: dec!(0.0025),
-        };
-        let mut strategy = DollarBarsCusumStrategy::new(strat_cfg).unwrap();
-
         let day_1_ms: i64 = 1_000_000;
         let day_2_ms: i64 = day_1_ms + 86_400_000; // Next UTC day (+24h)
+
+        // The day-1 plunge stops out and trips the breaker; the day-2 plunge signals again.
+        let first =
+            domain::OrderIntent::new(5000, Side::Buy, dec!(90), dec!(75), dec!(110), 10).unwrap();
+        let second = domain::OrderIntent::new(
+            day_2_ms + 4000,
+            Side::Buy,
+            dec!(50),
+            dec!(40),
+            dec!(110),
+            10,
+        )
+        .unwrap();
+        let mut strategy = Scripted::new(vec![
+            None,
+            None,
+            None,
+            None,
+            Some(first),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(second),
+        ]);
 
         // Day 1 Baseline
         engine.process_bar(

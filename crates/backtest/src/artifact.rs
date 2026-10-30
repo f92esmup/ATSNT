@@ -256,7 +256,18 @@ pub fn load_strategy_config<C: DeserializeOwned>(path: &Path) -> Result<LoadedSt
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
-    use strategies::DollarBarsCusumConfig;
+    use serde::{Deserialize, Serialize};
+
+    /// Stands in for a strategy's hyperparameters: the artifact types are generic over them.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    struct TestConfig {
+        rolling_window_len: usize,
+        volatility_multiplier: Decimal,
+        z_entry_threshold: Decimal,
+        z_stop_threshold: Decimal,
+        time_barrier_bars: usize,
+        min_take_profit_pct: Decimal,
+    }
 
     fn scorecard() -> HpoScorecard {
         HpoScorecard {
@@ -356,9 +367,9 @@ mod tests {
 
     #[test]
     fn artifact_round_trip_serialization() {
-        let config = DollarBarsCusumConfig {
+        let config = TestConfig {
             rolling_window_len: 20,
-            cusum_vol_multiplier: dec!(2.0),
+            volatility_multiplier: dec!(2.0),
             z_entry_threshold: dec!(1.8),
             z_stop_threshold: dec!(3.5),
             time_barrier_bars: 15,
@@ -368,7 +379,7 @@ mod tests {
         let artifact = StrategyDeploymentArtifact {
             schema_version: "1.0".to_string(),
             spec: RunSpec {
-                strategy_id: "dollar_bars_cusum".to_string(),
+                strategy_id: "test_strategy".to_string(),
                 symbol: "BTCUSDT".to_string(),
                 market_type: MarketType::UsdMPerpetual,
                 sampling: SamplingConfig::DollarBar {
@@ -393,26 +404,25 @@ mod tests {
         };
 
         let json = serde_json::to_string_pretty(&artifact).unwrap();
-        let parsed: StrategyDeploymentArtifact<DollarBarsCusumConfig> =
-            serde_json::from_str(&json).unwrap();
+        let parsed: StrategyDeploymentArtifact<TestConfig> = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.spec.strategy_id, "dollar_bars_cusum");
+        assert_eq!(parsed.spec.strategy_id, "test_strategy");
         assert_eq!(parsed.dollar_bar_threshold(), Some(dec!(10_000_000)));
         assert_eq!(parsed.spec.strategy_config, config);
         assert_eq!(parsed.spec.market_type, MarketType::UsdMPerpetual);
     }
 
-    fn cusum_artifact() -> StrategyDeploymentArtifact<DollarBarsCusumConfig> {
+    fn sample_artifact() -> StrategyDeploymentArtifact<TestConfig> {
         StrategyDeploymentArtifact {
             schema_version: "1.0".to_string(),
             spec: RunSpec {
-                strategy_id: "dollar_bars_cusum".to_string(),
+                strategy_id: "test_strategy".to_string(),
                 symbol: "BTCUSDT".to_string(),
                 market_type: MarketType::UsdMPerpetual,
                 sampling: SamplingConfig::DollarBar {
                     threshold: dec!(1_000_000),
                 },
-                strategy_config: DollarBarsCusumConfig::default(),
+                strategy_config: TestConfig::default(),
                 execution_context: BacktestConfig::default(),
             },
             hpo_scorecard: Some(scorecard()),
@@ -449,7 +459,7 @@ mod tests {
 
     #[test]
     fn an_hpo_artifact_without_a_shared_config_is_byte_identical_to_the_plain_artifact() {
-        let plain = cusum_artifact();
+        let plain = sample_artifact();
         let hpo = HpoDeploymentArtifact {
             artifact: plain.clone(),
             shared_config: None,
@@ -465,18 +475,16 @@ mod tests {
     fn an_hpo_artifact_stores_its_shared_config_and_round_trips() {
         let shared = serde_json::json!({"genome_seed": 123456, "calibration_end_ms": 42});
         let hpo = HpoDeploymentArtifact {
-            artifact: cusum_artifact(),
+            artifact: sample_artifact(),
             shared_config: Some(shared.clone()),
         };
         let json = serde_json::to_string_pretty(&hpo).unwrap();
 
-        let parsed: HpoDeploymentArtifact<DollarBarsCusumConfig> =
-            serde_json::from_str(&json).unwrap();
+        let parsed: HpoDeploymentArtifact<TestConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, hpo);
         // The plain artifact type still reads it, ignoring the new key.
-        let plain: StrategyDeploymentArtifact<DollarBarsCusumConfig> =
-            serde_json::from_str(&json).unwrap();
-        assert_eq!(plain, cusum_artifact());
+        let plain: StrategyDeploymentArtifact<TestConfig> = serde_json::from_str(&json).unwrap();
+        assert_eq!(plain, sample_artifact());
 
         let path =
             std::env::temp_dir().join(format!("atsnt-{}-shared-artifact.json", std::process::id()));
@@ -487,13 +495,12 @@ mod tests {
 
     #[test]
     fn an_old_artifact_without_the_new_fields_still_loads() {
-        let old = serde_json::to_string(&cusum_artifact()).unwrap();
+        let old = serde_json::to_string(&sample_artifact()).unwrap();
         assert!(!old.contains("shared_config"));
 
-        let parsed: HpoDeploymentArtifact<DollarBarsCusumConfig> =
-            serde_json::from_str(&old).unwrap();
+        let parsed: HpoDeploymentArtifact<TestConfig> = serde_json::from_str(&old).unwrap();
         assert_eq!(parsed.shared_config, None);
-        assert_eq!(parsed.artifact, cusum_artifact());
+        assert_eq!(parsed.artifact, sample_artifact());
 
         let path =
             std::env::temp_dir().join(format!("atsnt-{}-old-artifact.json", std::process::id()));
@@ -508,9 +515,9 @@ mod tests {
         let artifact_path = temp_dir.join("test_artifact.json");
         let bare_path = temp_dir.join("test_bare.json");
 
-        let config = DollarBarsCusumConfig {
+        let config = TestConfig {
             rolling_window_len: 20,
-            cusum_vol_multiplier: dec!(2.0),
+            volatility_multiplier: dec!(2.0),
             z_entry_threshold: dec!(1.8),
             z_stop_threshold: dec!(3.5),
             time_barrier_bars: 15,
@@ -520,7 +527,7 @@ mod tests {
         let artifact = StrategyDeploymentArtifact {
             schema_version: "1.0".to_string(),
             spec: RunSpec {
-                strategy_id: "dollar_bars_cusum".to_string(),
+                strategy_id: "test_strategy".to_string(),
                 symbol: "BTCUSDT".to_string(),
                 market_type: MarketType::UsdMPerpetual,
                 sampling: SamplingConfig::DollarBar {
@@ -535,20 +542,19 @@ mod tests {
         fs::write(&artifact_path, serde_json::to_string(&artifact).unwrap()).unwrap();
         fs::write(&bare_path, serde_json::to_string(&config).unwrap()).unwrap();
 
-        let loaded_artifact =
-            load_strategy_config::<DollarBarsCusumConfig>(&artifact_path).unwrap();
+        let loaded_artifact = load_strategy_config::<TestConfig>(&artifact_path).unwrap();
         assert!(matches!(loaded_artifact, LoadedStrategyConfig::Artifact(_)));
         assert_eq!(
             loaded_artifact.dollar_bar_threshold(),
             Some(dec!(1_000_000))
         );
-        assert_eq!(loaded_artifact.strategy_id(), Some("dollar_bars_cusum"));
+        assert_eq!(loaded_artifact.strategy_id(), Some("test_strategy"));
         assert_eq!(
             loaded_artifact.market_type(),
             Some(MarketType::UsdMPerpetual)
         );
 
-        let loaded_bare = load_strategy_config::<DollarBarsCusumConfig>(&bare_path).unwrap();
+        let loaded_bare = load_strategy_config::<TestConfig>(&bare_path).unwrap();
         assert!(matches!(loaded_bare, LoadedStrategyConfig::Bare(_)));
         assert_eq!(loaded_bare.dollar_bar_threshold(), None);
         assert_eq!(loaded_bare.strategy_config(), &config);

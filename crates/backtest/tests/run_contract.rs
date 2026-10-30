@@ -3,17 +3,17 @@ use backtest::{
     SamplingConfig, StrategyDeploymentArtifact,
 };
 use rust_decimal_macros::dec;
-use strategies::{DollarBarsCusumConfig, MarketType};
+use strategies::{MarketType, PolicyConfig};
 
-fn sample_spec() -> RunSpec<DollarBarsCusumConfig> {
+fn sample_spec() -> RunSpec<PolicyConfig> {
     RunSpec {
-        strategy_id: "dollar_bars_cusum".to_string(),
+        strategy_id: "swarm_consensus".to_string(),
         symbol: "BTCUSDT".to_string(),
         market_type: MarketType::UsdMPerpetual,
         sampling: SamplingConfig::DollarBar {
             threshold: dec!(1_000_000),
         },
-        strategy_config: DollarBarsCusumConfig::default(),
+        strategy_config: PolicyConfig::default(),
         execution_context: BacktestConfig::default(),
     }
 }
@@ -21,16 +21,18 @@ fn sample_spec() -> RunSpec<DollarBarsCusumConfig> {
 #[test]
 fn deployed_artifact_json_still_loads_through_run_spec() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../configs/hpo_btcusdt_2026_1k.json");
-    let loaded = load_strategy_config::<DollarBarsCusumConfig>(&path).unwrap();
+        .join("../../configs/hpo_btcusdt_2026.json");
+    let loaded = load_strategy_config::<PolicyConfig>(&path).unwrap();
     let LoadedStrategyConfig::Artifact(artifact) = loaded else {
         panic!("deployed artifact must parse as an artifact, not a bare config");
     };
-    assert_eq!(artifact.spec.strategy_id, "dollar_bars_cusum");
+    assert_eq!(artifact.spec.strategy_id, "swarm_consensus");
     assert_eq!(artifact.spec.symbol, "BTCUSDT");
     assert_eq!(artifact.spec.market_type, MarketType::UsdMPerpetual);
-    assert_eq!(artifact.dollar_bar_threshold(), Some(dec!(1_000_000)));
-    assert_eq!(artifact.spec.strategy_config.rolling_window_len, 25);
+    assert!(matches!(
+        artifact.spec.sampling,
+        SamplingConfig::Trades { .. }
+    ));
     assert_eq!(artifact.spec.execution_context.taker_fee_pct, dec!(0.0005));
     assert!(artifact.hpo_scorecard.is_some());
 }
@@ -43,7 +45,7 @@ fn artifact_serializes_with_flat_legacy_layout() {
         hpo_scorecard: None,
     };
     let value = serde_json::to_value(&artifact).unwrap();
-    assert_eq!(value["strategy_id"], "dollar_bars_cusum");
+    assert_eq!(value["strategy_id"], "swarm_consensus");
     assert_eq!(value["sampling"]["type"], "dollar_bar");
     assert_eq!(value["execution_context"]["taker_fee_pct"], "0.0005");
     assert!(value.get("spec").is_none());
@@ -52,8 +54,8 @@ fn artifact_serializes_with_flat_legacy_layout() {
 #[test]
 fn run_spec_exposes_strategy_params_as_json() {
     let params = sample_spec().params_json().unwrap();
-    assert_eq!(params["rolling_window_len"], 20);
-    assert!(params.get("z_entry_threshold").is_some());
+    assert!(params.get("threshold_base").is_some());
+    assert!(params.get("base_risk").is_some());
 }
 
 #[test]

@@ -332,24 +332,6 @@ fn run_hpo_refuses_data_without_the_warm_up() {
     );
 }
 
-#[test]
-fn run_hpo_keeps_the_trade_flags_away_from_dollar_bar_strategies() {
-    let dir = tempfile::tempdir().unwrap();
-    let data = write_trades(dir.path(), &swarm_trades(3));
-    let output = dir.path().join("never.json");
-
-    let out = Command::new(env!("CARGO_BIN_EXE_run_hpo"))
-        .arg("--data")
-        .arg(&data)
-        .arg("--output-config")
-        .arg(&output)
-        .args(["--strategy", "cusum", "--embargo-ms", "5000"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    assert!(text(&out).contains("--embargo-ms"), "{}", text(&out));
-}
-
 fn run_backtest(data: &Path, extra: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_backtest"))
         .arg("--data")

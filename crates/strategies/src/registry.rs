@@ -13,10 +13,6 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::dollar_bars_cusum::DollarBarsCusumStrategy;
-use crate::langevin_potential::LangevinPotentialStrategy;
-use crate::order_flow_imbalance::OrderFlowImbalanceStrategy;
-use crate::quantum_well_swing::QuantumWellSwingStrategy;
 use crate::strategy::OptimizableStrategy;
 use crate::swarm_consensus::SwarmConsensusStrategy;
 
@@ -73,11 +69,7 @@ macro_rules! register_strategies {
 }
 
 register_strategies! {
-    DollarBarsCusumStrategy => ["cusum"],
-    OrderFlowImbalanceStrategy => ["ofi"],
     SwarmConsensusStrategy => ["swarm"],
-    LangevinPotentialStrategy => ["langevin"],
-    QuantumWellSwingStrategy => ["quantum", "quantum_well"],
 }
 
 /// Error text for an unknown strategy name, listing what is registered.
@@ -136,9 +128,8 @@ mod tests {
 
     #[test]
     fn aliases_resolve_to_their_canonical_id() {
-        assert_eq!(canonical_id("cusum"), Some("dollar_bars_cusum"));
-        assert_eq!(canonical_id("dollar_bars_cusum"), Some("dollar_bars_cusum"));
-        assert_eq!(canonical_id("ofi"), Some("order_flow_imbalance"));
+        assert_eq!(canonical_id("swarm"), Some("swarm_consensus"));
+        assert_eq!(canonical_id("swarm_consensus"), Some("swarm_consensus"));
         assert_eq!(canonical_id("nope"), None);
     }
 
@@ -159,8 +150,7 @@ mod tests {
 
     #[test]
     fn dispatch_resolves_aliases_and_rejects_unknown_names() {
-        assert_eq!(dispatch("ofi", IdOf), Some("order_flow_imbalance"));
-        assert_eq!(dispatch("cusum", IdOf), Some("dollar_bars_cusum"));
+        assert_eq!(dispatch("swarm", IdOf), Some("swarm_consensus"));
         assert_eq!(dispatch("nope", IdOf), None);
     }
 

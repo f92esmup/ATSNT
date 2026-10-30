@@ -821,17 +821,19 @@ mod tests {
     };
     use domain::PositionSide;
     use rust_decimal_macros::dec;
-    use strategies::{DollarBarsCusumConfig, DollarBarsCusumStrategy, MarketType};
+    use strategies::{
+        MarketType, OptimizableStrategy, PolicyConfig, SwarmConfig, SwarmConsensusStrategy,
+    };
 
     fn spec() -> RunSpec<serde_json::Value> {
         RunSpec {
-            strategy_id: "dollar_bars_cusum".into(),
+            strategy_id: "swarm_consensus".into(),
             symbol: "BTCUSDT".into(),
             market_type: MarketType::UsdMPerpetual,
             sampling: SamplingConfig::DollarBar {
                 threshold: dec!(1_000_000),
             },
-            strategy_config: serde_json::to_value(DollarBarsCusumConfig::default()).unwrap(),
+            strategy_config: serde_json::to_value(PolicyConfig::default()).unwrap(),
             execution_context: BacktestConfig::default(),
         }
     }
@@ -890,7 +892,9 @@ mod tests {
 
     #[test]
     fn paper_runner_rejects_the_futures_only_strategy_for_spot() {
-        let strategy = DollarBarsCusumStrategy::new(DollarBarsCusumConfig::default()).unwrap();
+        let strategy =
+            SwarmConsensusStrategy::from_config(&SwarmConfig::default(), PolicyConfig::default())
+                .unwrap();
 
         assert!(validate_strategy_market(&strategy, MarketType::Spot).is_err());
         assert!(validate_strategy_market(&strategy, MarketType::UsdMPerpetual).is_ok());

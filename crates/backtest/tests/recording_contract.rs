@@ -4,20 +4,35 @@ use backtest::{
 };
 use domain::PositionSide;
 use rust_decimal_macros::dec;
-use strategies::{DollarBarsCusumConfig, MarketType};
+use serde::{Deserialize, Serialize};
+use strategies::MarketType;
 
 /// The instant the rows are recorded at. Only the shape of the recorded timestamps depends on it.
 const NOW_MS: i64 = 1_700_000_300_000;
 
-fn spec() -> RunSpec<DollarBarsCusumConfig> {
+/// Hyperparameters of a test strategy: the recorder stores them as JSON and does not interpret them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct TestConfig {
+    rolling_window_len: usize,
+}
+
+impl Default for TestConfig {
+    fn default() -> Self {
+        Self {
+            rolling_window_len: 20,
+        }
+    }
+}
+
+fn spec() -> RunSpec<TestConfig> {
     RunSpec {
-        strategy_id: "dollar_bars_cusum".to_string(),
+        strategy_id: "test_strategy".to_string(),
         symbol: "BTCUSDT".to_string(),
         market_type: MarketType::UsdMPerpetual,
         sampling: SamplingConfig::DollarBar {
             threshold: dec!(1_000_000),
         },
-        strategy_config: DollarBarsCusumConfig::default(),
+        strategy_config: TestConfig::default(),
         execution_context: BacktestConfig::default(),
     }
 }
@@ -280,11 +295,10 @@ mod persistence {
     #[tokio::test]
     async fn hpo_records_parent_and_one_trial_run_per_candidate_with_fold_metrics() {
         use backtest::{record_hpo, CandidateEvaluation, FoldMetrics};
-        use strategies::DollarBarsCusumSpace;
 
         let recorder = InMemoryRunRecorder::new();
         let parent_spec = RunSpec {
-            strategy_config: DollarBarsCusumSpace::default(),
+            strategy_config: TestConfig::default(),
             ..spec_without_config()
         };
         let parent = RunContext::new(RunType::Hpo, &parent_spec, 0);
@@ -299,9 +313,8 @@ mod persistence {
             ),
         };
         let candidate = |window| CandidateEvaluation {
-            config: DollarBarsCusumConfig {
+            config: TestConfig {
                 rolling_window_len: window,
-                ..DollarBarsCusumConfig::default()
             },
             mean_is_sortino: dec!(1.5),
             mean_oos_sortino: dec!(0.8),
@@ -390,18 +403,17 @@ mod persistence {
         assert!(rec.trades.is_empty() && rec.series.is_empty());
     }
 
-    fn spec_without_config() -> RunSpec<DollarBarsCusumSpace> {
+    fn spec_without_config() -> RunSpec<TestConfig> {
         let base = spec();
         RunSpec {
             strategy_id: base.strategy_id,
             symbol: base.symbol,
             market_type: base.market_type,
             sampling: base.sampling,
-            strategy_config: DollarBarsCusumSpace::default(),
+            strategy_config: TestConfig::default(),
             execution_context: base.execution_context,
         }
     }
-    use strategies::DollarBarsCusumSpace;
 }
 
 fn fill_model_of(context: &RunContext) -> String {
