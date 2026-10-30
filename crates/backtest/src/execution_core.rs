@@ -27,6 +27,12 @@ use crate::metrics::{
 };
 use crate::price_event::PriceEvent;
 
+pub use domain::accounting::fills::market_fill_price;
+use domain::accounting::fills::{
+    closing_side, fill_fee, opening_side, opening_slippage_per_unit, position_side, signed_side,
+    vwap,
+};
+
 /// Result of evaluating a due pending entry against a price event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingEntryOutcome {
@@ -212,43 +218,6 @@ pub struct BarrierExit {
     pub reason: &'static str,
 }
 
-/// Fill price of a market order on `side` against `reference`, and the slippage per unit.
-///
-/// A buy pays `reference + reference * pct`; a sell receives `reference - reference * pct`.
-pub fn market_fill_price(
-    side: Side,
-    reference: Decimal,
-    slippage_pct: Decimal,
-) -> (Decimal, Decimal) {
-    let slip = reference * slippage_pct;
-    let fill_price = match side {
-        Side::Buy => reference + slip,
-        Side::Sell => reference - slip,
-    };
-    (fill_price, slip)
-}
-
-/// The order side that closes a position on `side`.
-fn closing_side(side: PositionSide) -> Side {
-    match side {
-        PositionSide::Long => Side::Sell,
-        PositionSide::Short => Side::Buy,
-    }
-}
-
-/// The order side that opened a position on `side`.
-fn opening_side(side: PositionSide) -> Side {
-    match side {
-        PositionSide::Long => Side::Buy,
-        PositionSide::Short => Side::Sell,
-    }
-}
-
-/// Fee of a fill of `quantity` at `price` charged at `rate`: `(price · quantity) · rate`.
-fn fill_fee(price: Decimal, quantity: Decimal, rate: Decimal) -> Decimal {
-    price * quantity * rate
-}
-
 /// The highest leverage the configuration allows, as a whole number (1 when unreadable).
 fn max_leverage(config: &BacktestConfig) -> u32 {
     config.max_leverage.trunc().to_u32().unwrap_or(1)
@@ -281,21 +250,6 @@ fn liquidation_of(position: &Position, margin: Decimal, config: &BacktestConfig)
         margin,
         maintenance,
     )
-}
-
-/// Slippage per unit an opening market order on `side` reports: the model slippage `slip` on
-/// the `open` plus the adverse part of the gap from the `reference` price the order was sized
-/// at. A gap in favour does not cancel the slippage.
-fn opening_slippage_per_unit(
-    side: Side,
-    slip: Decimal,
-    open: Decimal,
-    reference: Decimal,
-) -> Decimal {
-    slip + match side {
-        Side::Buy => (open - reference).max(Decimal::ZERO),
-        Side::Sell => (reference - open).max(Decimal::ZERO),
-    }
 }
 
 /// Evaluates the protective exits of a position on `side` against one price event (a
@@ -1359,34 +1313,6 @@ impl ExecutionCore {
     }
 }
 
-/// Volume-weighted average price of fills summing to `notional` over `quantity`.
-fn vwap(notional: Decimal, quantity: Decimal) -> Decimal {
-    if quantity > Decimal::ZERO {
-        notional / quantity
-    } else {
-        Decimal::ZERO
-    }
-}
-
-/// The side of a signed quantity; `None` for 0.
-fn signed_side(quantity: Decimal) -> Option<PositionSide> {
-    if quantity > Decimal::ZERO {
-        Some(PositionSide::Long)
-    } else if quantity < Decimal::ZERO {
-        Some(PositionSide::Short)
-    } else {
-        None
-    }
-}
-
-/// The position side an opening order on `side` creates.
-fn position_side(side: Side) -> PositionSide {
-    match side {
-        Side::Buy => PositionSide::Long,
-        Side::Sell => PositionSide::Short,
-    }
-}
-
 /// The order-level limit a target delta order of `quantity` at `price` breaks, as the
 /// [`RiskError::kind`] counted for it: the minimum lot, the minimum notional, then the maximum
 /// order notional (the same limits and names an entry is rejected with).
@@ -1486,18 +1412,6 @@ mod tests {
             breakeven_dist: None,
             deadline_ms: None,
         }
-    }
-
-    #[test]
-    fn market_fill_price_adds_slippage_on_buys_and_subtracts_on_sells() {
-        assert_eq!(
-            market_fill_price(Side::Buy, dec!(100), dec!(0.001)),
-            (dec!(100.1), dec!(0.1))
-        );
-        assert_eq!(
-            market_fill_price(Side::Sell, dec!(100), dec!(0.001)),
-            (dec!(99.9), dec!(0.1))
-        );
     }
 
     #[test]
