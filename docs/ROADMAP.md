@@ -10,8 +10,8 @@ truth; this page summarises them.
   rules, the run recorder and clock ports, the library free of adapters, the accounting rules in
   `domain`, the tape store renamed, the cloud and Telegram code disconnected, the other strategies
   and the portfolio stack removed, and the Dockerfile and non-swarm configs retired.
-- **Batch 2, in progress.** The economics screen is runnable (`scripts/gate_a.sh`). Unused
-  configs and dependencies are gone. The metrics moved to `domain`. Clippy denies `unwrap` and
+- **Batch 2, done** (commits `69c3312` to `e915cb7`). The economics screen is runnable
+  (`scripts/gate_a.sh`). Unused configs and dependencies are gone. The metrics moved to `domain`. Clippy denies `unwrap` and
   `expect` outside tests. The run recorder writes to SQLite with `--record`. The GCP scripts are
   retired and the history is in [`archive`](archive/README.md).
 
@@ -32,6 +32,11 @@ truth; this page summarises them.
   GA passes, because the order book cannot be rebuilt afterwards.
 - **WP-13 to WP-17.** Request signing, the private REST and WebSocket clients, the spot gateway,
   simulation fidelity (WP-15), local operation, and paper and real trading in tranches.
+
+- **Kraken branch to reconcile.** `feat/kraken-eur-spot-portfolio` on the remote has five commits
+  with an earlier Kraken WebSocket client (`kraken_ws.rs`), six EUR pair configs and a sweep CLI.
+  They do not merge with the refactor: seven files conflict, all of them removed by it. Decide how
+  to reconcile them before WP-08. See [`HANDOFF.md`](../HANDOFF.md).
 
 ## Decisions
 

@@ -4,7 +4,7 @@
 > **Implementación detallada:** [`implementacion-kraken-spot.md`](implementacion-kraken-spot.md), para aprobar. Define los paquetes de trabajo, las puertas y lo que espera a cada una.
 > **Base de código:** commit `50b4ee5`. Verificado en verde antes de escribir este plan: `cargo check --workspace --all-targets`, `cargo test --workspace`, `cargo fmt --check` y `cargo clippy --all-targets -- -D warnings`.
 > **Fecha:** 2026-10-30. Solo documentación: el código no ha cambiado.
-> **Estado (2026-10-31):** lote 1 y lote 2 en `claude/awesome-lamport-ch9ytr`. Ver [`docs/ROADMAP.md`](../ROADMAP.md).
+> **Estado (2026-10-31):** lote 1 y lote 2 en `claude/awesome-lamport-ch9ytr` y en `main` (tras el push). Ver [`docs/ROADMAP.md`](../ROADMAP.md) y [`HANDOFF.md`](../../HANDOFF.md).
 
 ## Qué vuelve y qué sale respecto a la v3.2
 

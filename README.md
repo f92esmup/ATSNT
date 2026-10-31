@@ -7,8 +7,10 @@ only and without leverage, once its economics pass the gates in
 
 ## Status
 
-- **Stage:** the refactor is complete and the second batch of cleanup is in progress. The only
-  registered strategy is `swarm_consensus`.
+- **Stage:** the refactor is complete: batch 1 (the swarm-only refactor) and batch 2 (gate A,
+  cleanup and the SQLite run store) are done. The only registered strategy is `swarm_consensus`.
+  The next step is gate A, which the owner runs locally. A Kraken client from an earlier branch,
+  `feat/kraken-eur-spot-portfolio`, does not merge with this refactor; see [`HANDOFF.md`](HANDOFF.md).
 - **Gates:** G0, the plan, is approved. GA, the economics screen, runs on a perpetual BTCUSDT
   proxy: its owner runs it locally with `scripts/gate_a.sh`. GB (Kraken data, twelve months,
   walk-forward and DSR) and GP (paper trading) have not started.
@@ -101,6 +103,7 @@ tables are described in [`docs/architecture/13-run-registry.md`](docs/architectu
 
 ## Documentation
 
+- [`HANDOFF.md`](HANDOFF.md): current state, next steps, decisions and rules for the next session. Read it first.
 - [`docs/plan/refactor-local-kraken.md`](docs/plan/refactor-local-kraken.md): the strategy and
   its decisions (v4).
 - [`docs/plan/implementacion-kraken-spot.md`](docs/plan/implementacion-kraken-spot.md): the work

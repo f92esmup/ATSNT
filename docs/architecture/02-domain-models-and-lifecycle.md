@@ -53,7 +53,7 @@ flowchart LR
 To prevent state desynchronization between trading logic and exchange state, execution is decoupled into three distinct stages:
 
 ```text
-[ Strategy ]             [ Risk Manager ]                 [ Exchange / Backtest Engine ]              [ Portfolio ]
+[ Strategy ]             [ Risk Manager ]                 [ Exchange / Backtest Engine ]              [ Position  ]
      │                           │                                       │                                  │
      │ 1. OrderIntent            │                                       │                                  │
      ├──────────────────────────►│                                       │                                  │
