@@ -24,7 +24,8 @@ fuera del repositorio y aquí queda resumido.
   - `cargo clippy --workspace --all-targets -- -D warnings`: limpio.
   - `cargo test --workspace`: 802 pruebas en verde, 0 fallos.
   - Los goldens (`crates/backtest/tests/golden/`) y `AGENTS.md` no han cambiado desde `4e02bef`.
-- Toolchain: rustc y cargo 1.97.0.
+- Toolchain: rustc y cargo 1.97.0 (cierre anterior). El 2026-10-31 el entorno del agente tenía 1.99.0.
+- Verificación del 2026-10-31 sobre `9bf0d38`: `cargo fmt --all -- --check` limpio, `cargo clippy --workspace --all-targets -- -D warnings` limpio, 802 pruebas en verde, 0 fallos.
 
 ### 1.2 Qué existe
 
@@ -39,7 +40,7 @@ fuera del repositorio y aquí queda resumido.
 ### 1.3 Qué no existe en `main`
 
 - **No hay datos.** El repositorio no tiene `data/`. Los archivos mensuales de BTCUSDT los descarga
-  el usuario con `fetch_data`.
+  el usuario con `fetch_data`. El 2026-10-31 el agente descargó feb–sep de 2026 en el worktree `claude/prueba-a`; esos archivos no están versionados.
 - **No hay cliente de Kraken en `main`.** Sí existe uno en la rama remota
   `feat/kraken-eur-spot-portfolio`, que no fusiona limpio con el refactor (§3 y §11).
 - **No hay claves** de ningún exchange en el repositorio, ni deben añadirse.
@@ -51,14 +52,14 @@ fuera del repositorio y aquí queda resumido.
 | Compuerta | Estado | Quién la ejecuta |
 |---|---|---|
 | G0: plan aprobado | Hecho | — |
-| GA: prueba económica (refutación) | Pendiente | El usuario, en su equipo, con `scripts/gate_a.sh` |
+| GA: prueba económica (refutación) | **NO PASA** (2026-10-31, `docs/plan/resultado-prueba-a.md`) | Ejecutada por el agente en `claude/prueba-a` |
 | GB: 12 meses de Kraken, walk-forward y DSR (WP-08 a WP-12) | No empezada | Usuario y agente, tras GA |
 | GP: paper de 4 semanas y dinero real por tramos (WP-13 a WP-17) | No empezada | Usuario y agente, tras GB |
 
 Fases de la v4 (`docs/plan/refactor-local-kraken.md` §4):
 
 - Fase 0 (higiene): pendiente del usuario (WP-00).
-- Fase 1 (prueba económica): pendiente (GA).
+- Fase 1 (prueba económica): GA ejecutada, NO PASA. Pendiente la decisión sobre L3N (§5.2).
 - Fase 2 (grabadora de Kraken): no empezada. Empieza en cuanto GA pase.
 - Fase 3 (consolidación hexagonal): hecha, salvo 3.9 (Money y Currency, aplazado a WP-11), SimClock
   (no añadido) y `walk_forward.rs` (se queda en backtest).
@@ -127,6 +128,7 @@ Ramas remotas existentes (`git ls-remote --heads origin`):
   anterior. **No fusiona limpio con `main`**: 7 ficheros en conflicto, todos eliminados por el
   refactor. Decisión pendiente (§11).
 - `feat/dynamic-topk-universe`: en `50b4ee5`, sin commits propios.
+- `claude/prueba-a` (creada el 2026-10-31 desde `9bf0d38`): registro de la prueba A y propuesta de cadencia. No fusionada.
 
 ## 4. Decisiones fijas (no reabrir sin el usuario)
 
@@ -139,6 +141,7 @@ Ramas remotas existentes (`git ls-remote --heads origin`):
 | Comisiones base 0,25 % maker / 0,40 % taker (captura del usuario). Se leerán de `TradeVolume` al llegar a WP-13 | v4 D11 |
 | GA es una refutación: ventana feb–sep 2026 sobre proxy de perpetuos; umbral propuesto de 50 operaciones | Respuesta del usuario sobre la ventana; plan aprobado |
 | GB exige 12 meses de cinta de Kraken con walk-forward y DSR | Respuesta del usuario |
+| Umbral de 50 operaciones para la prueba A | Aprobado por el usuario el 2026-10-31 (U4) |
 | El registro de runs es SQLite (`--record`); el ledger de fills va en WP-16 | v4 D8; implementación WP-16 |
 | Telegram vía `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` | `.env.example`; `crates/adapters/src/telegram/mod.rs` |
 | La ejecución de Binance sale del código después de GA, tenga o no éxito GA. El descargador se queda hasta WP-09 | Plan aprobado; v4 D7 |
@@ -148,10 +151,12 @@ Ramas remotas existentes (`git ls-remote --heads origin`):
 
 ### 5.1 Usuario (antes de cualquier trabajo de agente)
 
+Estado al 2026-10-31: los pasos 3 a 5 los ejecutó el agente o los cerró el usuario (ver `docs/plan/resultado-prueba-a.md`). Los pasos 1 y 2 siguen siendo del usuario.
+
 1. **WP-00.** Crear la clave de Kraken spot con permisos de consulta, de órdenes y de WebSocket, y
    **sin retirada**. Comprobar que ve el saldo. Crear `.env` con permisos 600 (ver `.env.example`),
    con el token de Telegram nuevo.
-2. **Red del entorno.** Permitir `docs.kraken.com`: desde el menú del entorno, Edit, Network access;
+2. **Red del entorno.** (Comprobado el 2026-10-31 desde el entorno del agente: `docs.kraken.com` y `data.binance.vision` responden 200; el entorno del usuario puede diferir.) Permitir `docs.kraken.com`: desde el menú del entorno, Edit, Network access;
    añadir el host en Allowed domains con «Allow package managers» marcado, o ampliar el acceso. Guía:
    https://code.claude.com/docs/en/cloud-environments#network-access. Sin esto no se pueden leer los
    textos literales de firma y de checksum de Kraken.
@@ -173,7 +178,7 @@ Ramas remotas existentes (`git ls-remote --heads origin`):
    ```
    Enviar `~/atsnt-gate/summary.txt` y el log de la referencia
    (`~/atsnt-gate/referencia_maker_con_cortacircuitos.log`).
-5. **Umbral.** Confirmar o cambiar el umbral de 50 operaciones tras el preflight.
+5. **Umbral.** Aprobado por el usuario el 2026-10-31: 50 operaciones.
 
 ### 5.2 Agente, según el veredicto de GA
 
@@ -186,6 +191,8 @@ cortacircuitos en 1):
   estar contaminada (§10, punto 1).
 
 **Si NO PASA — L3N:**
+
+*Estado (2026-10-31): veredicto NO PASA. Pendiente la confirmación del usuario. No se ha borrado nada.*
 
 - Borrar la ruta de ejecución y streaming de Binance: `crates/adapters/src/binance_gateway.rs` y
   `binance_gateway/`, `binance_auth.rs` (si solo lo usan el gateway y los streams),
@@ -376,15 +383,13 @@ cortacircuitos en 1):
 
 ## 9. Entorno
 
-- Disco del sandbox en el momento de escribir: 252 GB, 13 GB libres (69 % usado). `target/` pesa 18 GB.
+- Disco (2026-10-31): `/home` con 475 GB, 304 GB libres. El `target/` del checkout de Kraken pesa 86 GB. El worktree `prueba-a` tiene su propio `target/`.
   Mídelo antes de cada sesión.
 - Para ahorrar disco: `CARGO_INCREMENTAL=0`. Si falta espacio, borrar ejecutables de test antiguos de
   `target/debug/deps` (son regenerables). No tocar fuentes ni datos.
-- Red: `docs.kraken.com` está bloqueado hasta que el usuario lo permita (§5.1, punto 2).
-  `index.crates.io` responde, así que crates.io es accesible. Según la v4 (§2.7), `data.binance.vision`
-  respondió 403 desde este entorno; los archivos los descarga el usuario.
+- Red (2026-10-31, entorno del agente): `docs.kraken.com` y `data.binance.vision` responden 200. El estado anterior (bloqueo y 403) era del entorno anterior. `index.crates.io` responde, así que crates.io es accesible.
 - Herramientas: python3 (`gate_a.sh`), `cc` (SQLite embebido), `realpath` de GNU (`gate_a.sh`).
-- rustc y cargo 1.97.0.
+- rustc y cargo 1.99.0 el 2026-10-31 (el handoff anterior decía 1.97.0).
 - `cargo fmt --all` reescribe ficheros. Tras formatear, vuelve a leerlos antes de editarlos.
 
 ## 10. Hallazgos que cambian supuestos
@@ -392,7 +397,7 @@ cortacircuitos en 1):
 1. **Guarda de calibración.** `main.rs:329` y `run_hpo.rs:384` exigen que el primer trade evaluado sea
    posterior a `calibration_end_ms` (2026-01-31T23:59:59.730Z). Si el HPO que produjo
    `hpo_btcusdt_2026.json` usó la misma guarda, evaluó datos de feb-2026 en adelante. Eso no encaja con
-   «solo enero». **Pendiente de confirmar** con el historial del HPO.
+   «solo enero». **Pendiente de confirmar** con el historial del HPO. Evidencia nueva (2026-10-31): el scorecard del artefacto reporta 84 operaciones OOS, y la ventana feb–sep de la prueba A da 87 operaciones. Es compatible con el solapamiento, pero no lo prueba.
 2. **Las 70 jornadas son del HPO.** `TRADES_WARM_UP_MS` (`optimization.rs:30`) corta los folds del
    walk-forward; el CLI por trades no lo impone. El golden sintético abre su primera operación hacia el
    día 17.
@@ -406,7 +411,7 @@ cortacircuitos en 1):
 6. **Scorecard negativo.** El artefacto tiene OOS negativo fuera de muestra: profit factor medio 0,64;
    Sortino medio −0,22; DSR no significativo; 84 operaciones OOS. `odd/tasks/hpo-scoring.md:112`
    concluye que el borde bruto es pequeño y los costes, 3,4 veces mayores. Los costes de spot son 8–9
-   veces los de perpetuos (v4 §2.6). **Se espera un NO PASA.**
+   veces los de perpetuos (v4 §2.6). **Se esperaba un NO PASA, y se cumplió (2026-10-31): neto −2307,51 con 87 operaciones; bruto −133,2 en la variante maker.**
 7. **Fracciones de los cortacircuitos.** `validate` acepta fracciones en (0, 1] (`config.rs:177-187`).
    Un valor de 1 no dispara nunca, y la prueba lo usa para medir la ventana completa.
 8. **`rusqlite` con `bundled`** compila SQLite en C. Requiere `cc`, que está en el entorno.
@@ -419,6 +424,8 @@ cortacircuitos en 1):
 12. **Formato.** `cargo fmt --all` reordena imports y reflota firmas; los ficheros cambian en disco.
 
 ## 11. Deuda y preguntas abiertas
+
+- **Propuesta de cadencia y coste (2026-10-31):** `docs/plan/propuesta-cadencia-swarm-consensus.md`. Opcional. El veredicto NO PASA y el bruto negativo reducen su probabilidad de éxito. Antes de descargar 2024–2025 (unos 6 GB) hace falta permiso del usuario.
 
 - **Rama `feat/kraken-eur-spot-portfolio` (`b35e929`). Decisión pendiente.** Tiene cinco commits que
   `main` no tiene: `3c13234` (live gateway con prueba de orden spot), `c05c95b` (pares spot EUR en
@@ -453,8 +460,7 @@ cortacircuitos en 1):
 - Money y Currency (v4 3.9): aplazados a WP-11.
 - `SimClock`: no añadido (sin consumidores).
 - Rama `feat/dynamic-topk-universe`: sin commits propios respecto a `50b4ee5`. Sin acción.
-- Trailers: conflicto entre la nota de atribución y las instrucciones del sistema (§8.1). Pendiente de
-  decisión del usuario.
+- Trailers: conflicto entre la nota de atribución del sistema, el CLAUDE.md del usuario (sin atribución de IA) y el handoff (§8.1). Los commits del 2026-10-31 no llevan trailer. Pendiente de decisión del usuario.
 - Ventana del HPO del artefacto: confirmar con el historial del usuario (§10, punto 1).
 - `crates/adapters/src/binance_auth.rs`: el test contiene el vector oficial de prueba de firma HMAC de la
   documentación de Binance (valores de ejemplo públicos). Ya estaba en `main` antes de este trabajo. Un
@@ -463,13 +469,15 @@ cortacircuitos en 1):
 ## 12. Acciones pendientes del usuario
 
 - **U1 (WP-00):** clave de Kraken spot sin retirada; `.env` con permisos 600 y token de Telegram nuevo.
-- **U2:** permitir `docs.kraken.com` en la red del entorno (instrucciones en §5.1).
-- **U3:** ejecutar la prueba A (preflight y ventana completa) y enviar el resumen.
-- **U4:** confirmar o cambiar el umbral de 50 operaciones.
+- **U2:** comprobado el 2026-10-31 desde el entorno del agente (responde 200). El entorno del usuario puede diferir (§5.1, punto 2).
+- **U3:** ejecutada por el agente el 2026-10-31 (`docs/plan/resultado-prueba-a.md`).
+- **U4:** cerrado. 50 operaciones aprobadas por el usuario el 2026-10-31.
 - **U5:** decidir sobre los cambios propuestos a `AGENTS.md`.
 - **U6:** nivel de verificación de Kraken (límites de tasa, WP-13).
 - **U7:** decidir cómo reconciliar la rama `feat/kraken-eur-spot-portfolio` con el refactor, o si se
   descarta (§11).
+
+**L3N (2026-10-31):** pendiente la confirmación del usuario para borrar la ruta de ejecución de Binance (§5.2). Veredicto NO PASA.
 
 Kraken Prop queda fuera del sistema: sus órdenes son manuales.
 
