@@ -15,5 +15,3 @@
 **/*.rs.bk
 *.pdb
 *.log
-# HPO artifacts downloaded from Cloud Batch jobs (named <config stem>-<job>.json)
-/configs/hpo_*-hpo-*.json

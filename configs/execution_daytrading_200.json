@@ -1,8 +1,0 @@
-{
-  "initial_capital": "200",
-  "maker_fee_pct": "0.0002",
-  "taker_fee_pct": "0.0005",
-  "slippage_pct": "0.0005",
-  "risk_per_trade_pct": "0.01",
-  "max_daily_drawdown_pct": "0.20"
-}

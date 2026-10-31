@@ -41,7 +41,7 @@ struct Args {
     #[arg(long)]
     dollar_bar: Option<Decimal>,
 
-    /// Optional path to JSON strategy configuration (e.g. configs/hpo_results.json)
+    /// Optional path to JSON strategy configuration (e.g. configs/hpo_btcusdt_2026.json)
     #[arg(short, long, visible_alias = "strategy-config")]
     config: Option<PathBuf>,
 

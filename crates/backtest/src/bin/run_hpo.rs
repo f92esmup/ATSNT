@@ -94,7 +94,7 @@ struct Args {
         short,
         long,
         visible_alias = "output",
-        default_value = "configs/hpo_results.json"
+        default_value = "configs/hpo_swarm_results.json"
     )]
     output_config: PathBuf,
 
