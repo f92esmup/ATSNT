@@ -110,6 +110,11 @@ struct Args {
     /// Apply Binance BNB fee discount (0.075% maker/taker) when targeting Spot
     #[arg(long, default_value_t = false)]
     bnb_discount: bool,
+
+    /// Write the run analytics (runs, metrics, trades, equity series) to this SQLite file,
+    /// created if missing
+    #[arg(long)]
+    record: Option<PathBuf>,
 }
 
 /// The line printed when the monthly circuit breaker halts a replay. It names the time of the
@@ -535,7 +540,7 @@ async fn main() -> Result<()> {
             FillModelArg::Tick => backtest::FillModel::Tick,
         },
     );
-    let recorder = backtest::wiring::disabled_recorder();
+    let recorder = backtest::wiring::recorder(args.record.as_deref())?;
     record_backtest_with_audit(
         &recorder,
         &run_ctx,

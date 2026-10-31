@@ -42,6 +42,7 @@ pub use clock::SystemClock;
 pub use error::AdapterError;
 pub use fetch_plan::{is_not_archived, plan_fetch_tasks, run_bounded, FetchTask};
 pub use simulated_venue::{SimulatedVenue, SimulatedVenueConfig, SimulatedVenueError};
+pub use storage::sqlite_runs::SqliteRunRecorder;
 pub use storage::tape_parquet::{TapeReader, TapeWriter};
 pub use telegram::{datetime_in_madrid, now_in_madrid, SymbolPerformanceSummary, TelegramNotifier};
 pub use traits::{AlertNotifier, AsyncMarketDataStream, MarketDataStream};

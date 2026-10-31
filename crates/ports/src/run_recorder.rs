@@ -13,6 +13,8 @@
 //! Strategy hyperparameters and other open-ended structures travel as JSON
 //! strings so new strategies need no schema change.
 
+use std::future::Future;
+
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -209,20 +211,32 @@ pub struct SeriesPointRow {
 }
 
 /// Outbound port persisting run analytics.
+///
+/// Every method returns a `Send` future, so a recorder can be used from a task spawned on the
+/// runtime. The trait has no object form: a composition that picks one recorder among several
+/// wraps them in an enum.
 pub trait RunRecorder: Send + Sync {
     /// Appends lifecycle rows (one per run and status change).
-    #[allow(async_fn_in_trait)]
-    async fn record_runs(&self, rows: &[RunRow]) -> Result<(), RecorderError>;
+    fn record_runs(
+        &self,
+        rows: &[RunRow],
+    ) -> impl Future<Output = Result<(), RecorderError>> + Send;
 
     /// Appends performance rows.
-    #[allow(async_fn_in_trait)]
-    async fn record_metrics(&self, rows: &[RunMetricsRow]) -> Result<(), RecorderError>;
+    fn record_metrics(
+        &self,
+        rows: &[RunMetricsRow],
+    ) -> impl Future<Output = Result<(), RecorderError>> + Send;
 
     /// Appends closed trade rows.
-    #[allow(async_fn_in_trait)]
-    async fn record_trades(&self, rows: &[RunTradeRow]) -> Result<(), RecorderError>;
+    fn record_trades(
+        &self,
+        rows: &[RunTradeRow],
+    ) -> impl Future<Output = Result<(), RecorderError>> + Send;
 
     /// Appends series points.
-    #[allow(async_fn_in_trait)]
-    async fn record_series(&self, rows: &[SeriesPointRow]) -> Result<(), RecorderError>;
+    fn record_series(
+        &self,
+        rows: &[SeriesPointRow],
+    ) -> impl Future<Output = Result<(), RecorderError>> + Send;
 }

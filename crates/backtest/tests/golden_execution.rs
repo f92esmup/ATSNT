@@ -19,6 +19,7 @@ use backtest::{
 };
 use domain::futures::FundingSchedule;
 use domain::Trade;
+use ports::{RunMetricsRow, RunRecorder, RunTradeRow, SeriesPointRow};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Serialize;
@@ -178,4 +179,76 @@ async fn backtest_recording_rows_are_unchanged() {
     })]);
     normalize(&mut rows, &mut BTreeMap::new());
     assert_golden("recording_backtest_rows", &rows);
+}
+
+async fn record_all<R: RunRecorder>(
+    recorder: &R,
+    metrics: &[RunMetricsRow],
+    trades: &[RunTradeRow],
+    series: &[SeriesPointRow],
+) {
+    recorder
+        .record_metrics(metrics)
+        .await
+        .expect("metrics record");
+    recorder.record_trades(trades).await.expect("trades record");
+    recorder.record_series(series).await.expect("series record");
+}
+
+/// The golden run's rows, written to the SQLite store and to memory, must match row for row: the
+/// store holds the same counts, and each trade's net PnL as the exact text of its decimal.
+#[tokio::test]
+async fn backtest_recording_rows_round_trip_through_the_sqlite_store() {
+    let trades = support::swarm::swarm_trades(DAYS);
+    let account = BacktestConfig {
+        initial_capital: CAPITAL,
+        ..support::swarm::account()
+    };
+    let config = SwarmConfig {
+        allow_short: false,
+        ..support::swarm::shared()
+    };
+    let strategy = SwarmConsensusStrategy::from_config(&config, support::swarm::busy_policy())
+        .expect("swarm builds");
+    let (metrics, closed) = tick_run(account, strategy, &trades).await;
+    let ctx = run_context(RunType::Backtest).with_fill_model(FillModel::Tick);
+    let metric_rows = vec![ctx.metrics_row("full", &metrics, None, 0)];
+    let trade_rows = ctx.trade_rows(&closed, 1);
+    let series_rows = ctx.equity_points(&closed, 1);
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("runs.sqlite");
+    let store = adapters::SqliteRunRecorder::open(&path).expect("store opens");
+    let memory = adapters::InMemoryRunRecorder::new();
+    record_all(&store, &metric_rows, &trade_rows, &series_rows).await;
+    record_all(&memory, &metric_rows, &trade_rows, &series_rows).await;
+    let expected = memory.snapshot();
+    assert!(!expected.trades.is_empty(), "the golden run closes trades");
+
+    let connection = rusqlite::Connection::open(&path).expect("second connection");
+    let count = |table: &str| -> usize {
+        let rows: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count query");
+        usize::try_from(rows).expect("row count fits in usize")
+    };
+    assert_eq!(count("run_metrics"), expected.metrics.len());
+    assert_eq!(count("trades"), expected.trades.len());
+    assert_eq!(count("run_series"), expected.series.len());
+
+    let stored_net: Vec<String> = connection
+        .prepare("SELECT net_pnl FROM trades ORDER BY seq")
+        .expect("statement")
+        .query_map([], |row| row.get(0))
+        .expect("rows")
+        .collect::<rusqlite::Result<_>>()
+        .expect("texts");
+    let expected_net: Vec<String> = expected
+        .trades
+        .iter()
+        .map(|row| row.net_pnl.round_dp(9).normalize().to_string())
+        .collect();
+    assert_eq!(stored_net, expected_net);
 }

@@ -53,4 +53,5 @@ path = "src/bin/prune_swarm.rs"
 
 
 [dev-dependencies]
+rusqlite.workspace = true
 tempfile = "3"

@@ -28,6 +28,7 @@ futures-util.workspace = true
 ring.workspace = true
 chrono.workspace = true
 rayon.workspace = true
+rusqlite.workspace = true
 
 
 

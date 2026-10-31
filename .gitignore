@@ -4,6 +4,9 @@
 # Reports & Local artifacts
 /storage/
 
+# Local run registry (SQLite) written by --record
+/state/
+
 # Environment & Credentials
 .env
 .env.*

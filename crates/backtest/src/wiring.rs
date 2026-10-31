@@ -3,10 +3,16 @@
 //! The library names no adapter (see the architecture contract): the binaries take the clock, the
 //! recorder and the simulated venue from here and pass them down as ports.
 
-use adapters::{NullRunRecorder, SimulatedVenue, SimulatedVenueConfig, SystemClock};
+use std::path::Path;
+
+use adapters::{
+    NullRunRecorder, SimulatedVenue, SimulatedVenueConfig, SqliteRunRecorder, SystemClock,
+};
 use domain::futures::FundingSchedule;
 use domain::{RiskError, RiskPolicy};
-use ports::Clock;
+use ports::{
+    Clock, RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow,
+};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategies::Strategy;
@@ -23,10 +29,57 @@ pub fn system_clock() -> SystemClock {
     SystemClock
 }
 
-/// The recorder of runs whose analytics are not persisted. No storage is wired in yet, so
-/// long-running binaries keep nothing and their memory does not grow with the run.
+/// The recorder of runs whose analytics are not persisted: the paper and live binaries keep
+/// nothing, so their memory does not grow with the run.
 pub fn disabled_recorder() -> NullRunRecorder {
     NullRunRecorder
+}
+
+/// The recorder of a binary's `--record` option: the SQLite store at `path`, or nothing when the
+/// option is absent.
+pub fn recorder(path: Option<&Path>) -> Result<Recorder, RecorderError> {
+    match path {
+        Some(path) => Ok(Recorder::Sqlite(SqliteRunRecorder::open(path)?)),
+        None => Ok(Recorder::Null(NullRunRecorder)),
+    }
+}
+
+/// A run recorder chosen at start-up: the SQLite store, or nothing.
+pub enum Recorder {
+    /// Keeps nothing.
+    Null(NullRunRecorder),
+    /// Writes to the SQLite store.
+    Sqlite(SqliteRunRecorder),
+}
+
+impl RunRecorder for Recorder {
+    async fn record_runs(&self, rows: &[RunRow]) -> Result<(), RecorderError> {
+        match self {
+            Self::Null(recorder) => recorder.record_runs(rows).await,
+            Self::Sqlite(recorder) => recorder.record_runs(rows).await,
+        }
+    }
+
+    async fn record_metrics(&self, rows: &[RunMetricsRow]) -> Result<(), RecorderError> {
+        match self {
+            Self::Null(recorder) => recorder.record_metrics(rows).await,
+            Self::Sqlite(recorder) => recorder.record_metrics(rows).await,
+        }
+    }
+
+    async fn record_trades(&self, rows: &[RunTradeRow]) -> Result<(), RecorderError> {
+        match self {
+            Self::Null(recorder) => recorder.record_trades(rows).await,
+            Self::Sqlite(recorder) => recorder.record_trades(rows).await,
+        }
+    }
+
+    async fn record_series(&self, rows: &[SeriesPointRow]) -> Result<(), RecorderError> {
+        match self {
+            Self::Null(recorder) => recorder.record_series(rows).await,
+            Self::Sqlite(recorder) => recorder.record_series(rows).await,
+        }
+    }
 }
 
 /// A tick-level simulation on the simulated exchange.

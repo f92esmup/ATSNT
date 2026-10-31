@@ -125,6 +125,10 @@ struct Args {
     /// Apply Binance BNB fee discount (0.075% maker/taker) when targeting Spot
     #[arg(long, default_value_t = false)]
     bnb_discount: bool,
+
+    /// Write the sweep's run analytics to this SQLite file, created if missing
+    #[arg(long)]
+    record: Option<PathBuf>,
 }
 
 impl Args {
@@ -793,7 +797,7 @@ where
     };
 
     if !all_evaluations.is_empty() {
-        let recorder = backtest::wiring::disabled_recorder();
+        let recorder = backtest::wiring::recorder(args.record.as_deref())?;
         let sweep_ctx = RunContext::new(RunType::Hpo, &sweep_spec, started_at_ms);
         let eval_only: Vec<CandidateEvaluation<S::Config>> =
             all_evaluations.iter().map(|e| e.1.clone()).collect();
