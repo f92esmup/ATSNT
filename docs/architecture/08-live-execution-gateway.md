@@ -1,5 +1,7 @@
 # Live Execution Gateway & Pre-Trade Risk Architecture Specification
 
+> **Status (2026-10-31):** describes the Binance live gateway, which the Kraken spot gateway replaces (WP-14). The GCP and testnet mentions are history.
+
 ## 1. Architectural Philosophy: The Real Capital Boundary
 
 **Monitoring & Reporting boundary:** Telemetry and post-trade analytics are decoupled from live execution and streamed to Google Cloud BigQuery for downstream analytics consumers, while critical execution and risk events trigger real-time mobile alerts via Telegram Bot. Live values must be unavailable or explicitly stale until a real supported source exists. This cross-link does not change the gateway profile, guarantees or task status; the [closure tracker](../../odd/tasks/milestone-5-6-closure.md) owns that evidence.

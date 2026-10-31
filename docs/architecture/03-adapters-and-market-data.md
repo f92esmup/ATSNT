@@ -1,5 +1,7 @@
 # Market Data Adapters & Binance Ingestion Specification
 
+> **Status (2026-10-31):** describes the Binance ingestion. The Binance adapters stay until the Kraken adapter replaces them (WP-08 to WP-10). The tape store and the ports are current.
+
 ## 1. Architectural Role
 In accordance with Hexagonal Architecture (Ports and Adapters), the contracts live in the `ports` crate (`crates/ports`, depending only on `domain`) and the adapters crate (`crates/adapters`) contains their concrete implementations. The dependency rule is enforced by `crates/backtest/tests/architecture_contract.rs`. The core trading engine and domain logic remain completely decoupled from network protocols, file formats, and broker-specific APIs.
 

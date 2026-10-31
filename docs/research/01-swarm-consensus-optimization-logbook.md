@@ -1,5 +1,7 @@
 # Bitácora de Investigación y Optimización: Swarm Consensus Strategy
 
+> **Histórico (2026-10-31):** las ejecuciones citadas corrieron en Google Cloud Batch, que ya no forma parte del repositorio. Se conserva como bitácora.
+
 **Estrategia**: `SwarmConsensusStrategy` (Estrategia 03)  
 **Activo**: `BTCUSDT` (Perpetual Futures USD-M)  
 **Dataset de Evaluación**: Ticks reales Binance 2026 (Febrero – Octubre)  

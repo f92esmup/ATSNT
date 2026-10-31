@@ -1,6 +1,6 @@
 # Plan de implementación: swarm en spot de Kraken
 
-> **Estado:** para aprobar. No se ejecuta nada hasta que lo apruebes.
+> **Estado (2026-10-31):** aprobado en G0. Lote 1 y lote 2 hechos en `claude/awesome-lamport-ch9ytr`; GA, GB y GP pendientes. Ver [`docs/ROADMAP.md`](../ROADMAP.md).
 > **Relación con otros documentos:** la estrategia y las decisiones están en [`refactor-local-kraken.md`](refactor-local-kraken.md) (v4). Este documento detalla cómo se construye.
 > **Base de código:** commit `50b4ee5`. Línea base en verde: `cargo check`, `cargo test --workspace`, `cargo fmt --check`, `cargo clippy -D warnings`.
 > **Fecha:** 2026-10-30.

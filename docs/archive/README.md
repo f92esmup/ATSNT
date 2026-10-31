@@ -12,5 +12,8 @@ them name components that no longer exist in the code.
   for the portfolio stack that was removed.
 - `architecture/07-web-telemetry-dashboard.md`: a design for a telemetry dashboard. No dashboard
   exists in the code.
+- `deployment/`: the systemd units and the journald settings of the paper binary of the portfolio
+  stack, and an alert unit that the removed GCP deployment script installed. The units name
+  removed binaries; WP-16 writes the unit for the local machine.
 
 The live documents are in `docs/` (see `docs/ROADMAP.md`) and in `docs/plan/`.

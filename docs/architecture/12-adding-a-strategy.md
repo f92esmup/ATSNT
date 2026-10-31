@@ -29,7 +29,7 @@ Strategies emit one of two decision types:
 
 ### `OptimizableStrategy` trait
 To participate in Hyperparameter Optimization (HPO), walk-forward analysis, and artifact serialization, implement `OptimizableStrategy`:
-- `id(&self) -> &'static str`: snake_case identifier used in CLI flags and BigQuery telemetry.
+- `id(&self) -> &'static str`: snake_case identifier used in CLI flags and as the `strategy_id` of the run registry.
 - `type SharedConfig`: dataset-wide or calibrated shared configuration (`()` for self-contained strategies, or calibrated feed thresholds such as `SwarmConfig`).
 - `type Config`: candidate parameters (`Clone + Send + Sync + Serialize + DeserializeOwned + Debug + Display + Default`).
 - `type Space`: hyperparameter grid space implementing `HyperparameterSpace`.
@@ -38,7 +38,7 @@ To participate in Hyperparameter Optimization (HPO), walk-forward analysis, and 
 - `type Policy`: implements `FeaturePolicy<Features = Self::Features>`.
 
 #### Single-Stage vs. Two-Stage Strategies
-- **Single-Stage Strategies** (e.g. `DollarBarsCusumStrategy`, `OrderFlowImbalanceStrategy`):
+- **Single-Stage Strategies** (the CUSUM and order-flow strategies, since removed, were of this kind):
   Features are simply the incoming dollar bars (`type Features = DollarBar`, `type Extractor = BarPassThrough`, `type Policy = Self`, `type SharedConfig = ()`).
 - **Two-Stage Strategies** (e.g. `SwarmConsensusStrategy`):
   Separates heavy computation (e.g. aggregating 16 multi-timeframe feeds and evaluating 96 ensemble agents) from policy evaluation. In HPO, the extractor runs **exactly once** over the trade tape to generate a feature tape; thousands of candidate policy thresholds are then evaluated at high speed without recomputing features.
@@ -59,8 +59,6 @@ In `crates/strategies/src/registry.rs`, import the type and add it to the macro 
 use crate::my_strategy::MyStrategy;
 
 register_strategies! {
-    DollarBarsCusumStrategy => ["cusum"],
-    OrderFlowImbalanceStrategy => ["ofi"],
     SwarmConsensusStrategy => ["swarm"],
     MyStrategy => ["my"],      // <- the one line
 }

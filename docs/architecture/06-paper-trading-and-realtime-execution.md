@@ -1,5 +1,7 @@
 # Real-Time Paper Trading & Asynchronous Execution Specification
 
+> **Status (2026-10-31):** describes the Binance paper session as it was before the swarm-only refactor; the strategy names here are historical. It is rewritten with the Kraken simulation (WP-15).
+
 ## 1. Architectural Philosophy: The Paper Trading Bridge
 
 Paper Trading is the critical intermediate proving ground between **historical discrete-event backtesting** (Milestones 1 & 2) and **authenticated live capital execution** (Milestone 6).

@@ -61,7 +61,7 @@ The return of a trade is $r_i = \text{pnl}^{\text{net}}_i / \text{equity at entr
 
 $$\text{Sortino} = \frac{\bar r}{\sqrt{\frac{1}{N}\sum_{i=1}^{N} \min(r_i, 0)^2}}$$
 
-It is **undefined** (`None`, NULL in BigQuery) without trades or without downside. A fixed cap there (the former `100`) reads as an excellent measurement, so the ratio is left undefined instead. The profit factor follows the same rule: it is undefined without losing trades. In a fold mean, an undefined Sortino counts as 0.
+It is **undefined** (`None`, NULL in the run registry) without trades or without downside. A fixed cap there (the former `100`) reads as an excellent measurement, so the ratio is left undefined instead. The profit factor follows the same rule: it is undefined without losing trades. In a fold mean, an undefined Sortino counts as 0.
 
 ---
 
@@ -157,7 +157,7 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
     type Extractor: FeatureExtractor<Features = Self::Features>;
     type Policy: FeaturePolicy<Features = Self::Features>;
 
-    /// Canonical identifier for the strategy (e.g. "dollar_bars_cusum", "swarm_consensus").
+    /// Canonical identifier for the strategy (e.g. "swarm_consensus").
     fn id() -> &'static str;
 
     /// Constructs a strategy instance from shared configuration and candidate parameters.
@@ -177,7 +177,7 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
 ### 4.2 Decoupled Engine Execution & The Feature Tape (`Tape<F>`)
 The `WalkForwardOptimizer<S: OptimizableStrategy>` operates agnostically across Rayon worker threads:
 - **Feature Tape (`Tape<F>`)**: Evaluates computationally intensive indicators or multi-feed ensemble models **once** across the dataset into a `Tape<F> { features: Vec<(i64, F)>, prices: Vec<PriceEvent> }`.
-  - For single-stage dollar bar strategies (`DollarBarsCusum`, `OrderFlowImbalance`), the tape wraps dollar bars (`Tape<DollarBar>`) with zero-copy price events.
+  - For single-stage dollar bar strategies (the removed CUSUM and order-flow strategies), the tape wraps dollar bars (`Tape<DollarBar>`) with zero-copy price events.
   - For two-stage strategies (`SwarmConsensus`), trades pass through `FeatureExtractor` once into `Tape<ConsensusSample>`, while market prices are downsampled into uniform buckets (e.g. 1 s `--price-bucket-ms`).
 - **Candidate Generation**: Delegated to `parameter_space.generate_candidates(max_candidates)`.
 - **Plateau Stability**: Evaluated mathematically via `calculate_parameter_stability::<S>()`, delegating local coordinate perturbation to `space.perturb_neighbors(base)`.
@@ -213,22 +213,18 @@ let results = optimizer.run_optimization(&bars, &folds, 60)?;
 
 ## 5. Configuration Persistence & Strategy Loading
 
-### 5.1 Output Schema (`configs/hpo_results.json`)
+### 5.1 Output Schema (`configs/hpo_swarm_results.json`)
 The HPO engine produces a structured JSON artifact summarizing the optimization run:
 
 ```json
 {
   "timestamp": 1700000000000,
-  "strategy": "dollar_bars_cusum",
+  "strategy": "swarm_consensus",
   "dataset": "BTCUSDT_2024_Q1_aggTrades",
   "trials_evaluated": 60,
   "winner": {
     "config": {
-      "rolling_window_len": 20,
-      "cusum_vol_multiplier": "2.00",
-      "z_entry_threshold": "1.80",
-      "z_stop_threshold": "3.50",
-      "time_barrier_bars": 15
+      "...": "the policy parameters of the winning candidate"
     },
     "mean_is_sortino": "0.21",
     "mean_oos_sortino": "0.14",
@@ -246,38 +242,23 @@ The HPO engine produces a structured JSON artifact summarizing the optimization 
 
 ---
 
-## 6. Automated Production Pipeline Integration
+## 6. Running the optimization
 
-For unattended staging sweeps, the HPO engine is orchestrated automatically by [`scripts/run_production_pipeline.sh`](../../scripts/run_production_pipeline.sh):
+`run_hpo --help` lists the options. A walk-forward sweep of the swarm over a tape writes the winner
+to `configs/hpo_swarm_results.json` and, with `--record`, its run to the run registry:
 
 ```bash
-# Standard execution (defaults to dollar_bars_cusum):
-./scripts/run_production_pipeline.sh --symbol BTCUSDT --year 2026 --candidates 60 --folds 5
-
-# Custom strategy with runtime parameter space override:
-./scripts/run_production_pipeline.sh --strategy dollar_bars_cusum --param-space configs/custom_space.json
-
-# Simulate every trial with a real account's risk, drawdown, leverage and notional caps:
-./scripts/run_production_pipeline.sh --execution-context configs/execution_real_500eur.json --candidates 120
-
-# Out-of-sample check: search January-August, backtest the winner on September onwards:
-./scripts/run_production_pipeline.sh --year 2026 --holdout-from-month 9 --candidates 120
+cargo run --release -p backtest --bin run_hpo -- \
+  --strategy swarm_consensus --data data/historical/BTCUSDT \
+  --shared-config configs/swarm_shared.json --candidates 200 --record state/runs.sqlite
 ```
 
-`--holdout-from-month MM` (2-12, not with `--month`) links the year's files into `splits/<symbol>-<year>-holdout-MM/{train,holdout}`:
-the HPO reads the months before MM, the backtest MM onwards (the current month's daily archives included). It
-fails when either side has no data.
+The search space is the strategy's default; `--param-space <json>` overrides it. For how the
+values depend on the account size, see [Capital scaling](../capital-scaling.md).
 
-`--execution-context` feeds the HPO stage only; the winning artifact carries the same context into
-the backtest, paper and live runs, and the option is refused with `--skip-hpo`. The shipped search
-space (`configs/param_space_daytrading_cusum.json`) covers the window, the CUSUM multiplier, the entry
-and stop z-scores, the minimum take-profit floor (`min_take_profit_pcts`, the lever against fees) and
-the intraday holding horizon (`time_barrier_bars`, 100 to 2,000 bars). See [Capital scaling](../capital-scaling.md) for how these
-values depend on the account size.
-
-1. **Purged Walk-Forward Folds**: Dynamically constructs rolling train/embargo/test folds across the in-memory Dollar Bar series.
+1. **Purged Walk-Forward Folds**: Dynamically constructs rolling train/embargo/test folds across the in-memory series of the input.
 2. **Rayon Thread Pool**: Evaluates candidate parameter combinations concurrently across all physical CPU cores.
-3. **Artifact Serialization**: Persists the winning parameter set to `configs/hpo_<symbol>_<year>.json` and complete audit metrics to `storage/reports/hpo_run_<timestamp>.json`.
-4. **Instant Backtest Handshake**: The downstream Backtest and Monte Carlo stage ingests the winning configuration artifact immediately with zero manual intervention.
+3. **Artifact Serialization**: Persists the winning parameter set to the `--output-config` file (default `configs/hpo_swarm_results.json`). With `--record`, the run's metrics go to the run registry.
+4. **Backtest handshake**: `backtest --config` reads the winning artifact directly; no step copies it.
 
 

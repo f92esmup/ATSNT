@@ -113,7 +113,7 @@ Equity ($)
 
 ## 5. Persisted Telemetry (Run Model)
 
-Results are not written to local JSON files. With `--gcp-bigquery`, a Monte Carlo stress test is recorded as a `monte_carlo` run whose `parent_run_id` is the backtest run it resampled (see [10-gcp-cloud-architecture.md §4](10-gcp-cloud-architecture.md#4-bigquery-data-warehouse-schemas-atsnt_bi)):
+Results are not written to local JSON files. With `--record <PATH>`, a Monte Carlo stress test is recorded as a `monte_carlo` run whose `parent_run_id` is the backtest run it resampled (see [the run registry](13-run-registry.md)):
 
 - `run_metrics` (`scope = full`): `extras` JSON with every percentile (`p01`..`p99`, worst), `probability_of_ruin_pct`, underwater statistics, and the simulation settings actually used (`iterations`, `resample_method`, `block_size`, `ruin_threshold_pct`, `seed`).
 - `run_series` (`series = mc_equity`, `x` = trade index): 8 representative curves from the fan chart — `Realized`, `Worst_Stress_1`, `Best_Ceiling_1`, and `Quantile_0.05/0.25/0.50/0.75/0.95` (ranked by final equity, best first).
@@ -126,4 +126,4 @@ Results are not written to local JSON files. With `--gcp-bigquery`, a Monte Carl
 To respect our architectural principles:
 - **`crates/domain`**: Implements pure mathematical functions (`bootstrap_resample`, `compute_drawdown_distribution`, `calculate_ruin_probability`). Zero I/O, zero network, 100% deterministic via seeded RNG.
 - **`crates/backtest`**: Coordinates execution of the strategy over the event stream, invokes domain Monte Carlo routines, and compiles the `BacktestReport`.
-- **`crates/adapters`**: Implements the `RunRecorder` port (`BigQuerySink`, plus `InMemoryRunRecorder` for tests) that persists runs, metrics, trades, and event series to BigQuery for downstream consumers, `GcsArtifactSink` for deployment artifact uploads, and `TelegramNotifier` for real-time mobile push alerting. `crates/backtest::recording` translates domain results into those rows.
+- **`crates/adapters`**: Implements the `RunRecorder` port (`SqliteRunRecorder`, plus `InMemoryRunRecorder` for tests) that persists runs, metrics, trades and event series to the local run registry, and `TelegramNotifier` for real-time mobile alerts. `crates/backtest::recording` translates domain results into those rows.

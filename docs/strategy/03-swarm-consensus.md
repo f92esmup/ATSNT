@@ -903,8 +903,8 @@ The metrics pipeline (Sortino, profit factor, DSR, minimum trades per fold) work
     quantity of 0 (it closes the position), and a flip whose opening leg is not placed (dust,
     `OrderSizeExceeded`, unmarginable, or clipped to nothing): the position ended flat;
   - `TargetFlip`: the campaign ended in a flip whose opening leg filled on the same event.
-  Both are additive to the BI string domain and are documented in
-  `docs/architecture/13-bi-data-contract.md`.
+  Both are additive to the run registry's string domain and are documented in
+  `docs/architecture/13-run-registry.md`.
 - A level change inside a campaign is **not** a trade. Counting each one would multiply the trade
   count and inflate significance. The fill count and the peak level per campaign go to the
   strategy audit (Section 16), not to `ClosedTrade`, whose schema does not change.
