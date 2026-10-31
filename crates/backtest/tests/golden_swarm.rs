@@ -24,7 +24,8 @@ use serde::Serialize;
 use strategies::{MarketEvent, OptimizableStrategy, Strategy, SwarmConfig, SwarmConsensusStrategy};
 use support::swarm::{account, busy_policy, shared, swarm_trades};
 
-/// Ninety days: past the swarm's 70-day warm-up, so the trades are decided.
+/// Ninety days: the swarm makes no trade on a one-day tape; on this one its first trade lands around
+/// day 17.
 const DAYS: i64 = 90;
 const CAPITAL: Decimal = dec!(5000);
 const DOLLAR_BAR: Decimal = dec!(1_000_000);

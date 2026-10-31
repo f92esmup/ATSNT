@@ -27,7 +27,8 @@ use strategies::{
     MarketType, OptimizableStrategy, PolicyConfig, Strategy, SwarmConfig, SwarmConsensusStrategy,
 };
 
-/// Ninety days: past the swarm's 70-day warm-up, so the trades are decided (as in `golden_swarm`).
+/// Ninety days: the swarm makes no trade on a one-day tape; on this one its first trade lands around
+/// day 17, so the trades are decided (as in `golden_swarm`).
 const DAYS: i64 = 90;
 const CAPITAL: Decimal = dec!(5000);
 const SEED: u64 = 7;

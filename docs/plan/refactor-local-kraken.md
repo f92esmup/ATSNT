@@ -155,63 +155,45 @@ Tamaño relativo: S, M o L. Cada fase tiene criterio de salida.
 
 **Pregunta:** ¿el swarm solo largo gana algo después de comisiones de spot?
 
-**Paso 0. Datos (en tu equipo).** Descarga un mes completo de BTCUSDT con el descargador del repo (README, paso 1):
+**Qué cambia respecto a la versión anterior de esta fase.** Un mes no basta. La guarda de calibración del CLI (`main.rs:329`) exige datos posteriores al `calibration_end_ms` del artefacto (31-ene-2026), y el swarm necesita historia para decidir. La prueba usa ocho meses mensuales, de feb a sep de 2026, sobre un directorio de cinta dedicado. Los cortacircuitos del artefacto (diario 5 %, mensual 15 %) se desactivan en las variantes para medir la ventana completa; la referencia con los cortacircuitos del artefacto se corre aparte. Es una **refutación**: el artefacto probablemente ya ha visto esa ventana, así que un resultado positivo no pasa la prueba.
+
+**Paso 0. Datos (en tu equipo).** Descarga los ocho meses de BTCUSDT perpetuos (proxy de precio) con el descargador del repo:
 
 ```bash
 cd ~/atsnt
-cargo run --release -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2026 --month 9
-```
-
-Anota la ruta del Parquet que escribe. Ese archivo es el proxy de precio.
-
-**Paso 1. Crear las tres variantes.** Estas copias van fuera del repo, en `~/atsnt-gate/`, para no commitearlas:
-
-```bash
-cd ~/atsnt
-python3 - <<'EOF'
-import copy, json, pathlib
-
-src = json.load(open("configs/hpo_btcusdt_2026.json"))
-out = pathlib.Path.home() / "atsnt-gate"
-out.mkdir(exist_ok=True)
-
-def write(name, allow_short, spot_costs, resting_maker_exits):
-    d = copy.deepcopy(src)
-    d["shared_config"]["allow_short"] = allow_short
-    ec = d["execution_context"]
-    if spot_costs:
-        ec.update(maker_fee_pct="0.0025", taker_fee_pct="0.0040",
-                  max_leverage="1", funding_rate_pct="0", maintenance_margin_rate="0")
-    ec["resting_maker_exits"] = resting_maker_exits
-    (out / f"{name}.json").write_text(json.dumps(d, indent=2))
-
-write("control_perp_con_cortos", True, False, True)
-write("spot_solo_largo_salida_maker", False, True, True)
-write("spot_solo_largo_salida_taker", False, True, False)
-EOF
-```
-
-**Paso 2. Ejecutar las tres.** Sustituye `RUTA_PARQUET` por la ruta del paso 0. No uses `--spot`: ver la sección 2.5.
-
-```bash
-cd ~/atsnt
-for c in control_perp_con_cortos spot_solo_largo_salida_maker spot_solo_largo_salida_taker; do
-  cargo run --release -p backtest -- --data RUTA_PARQUET --config ~/atsnt-gate/$c.json --capital 5000 \
-    > ~/atsnt-gate/$c.log 2>&1
+for m in 2 3 4 5 6 7 8 9; do
+  cargo run --release -p adapters --bin fetch_data -- --symbol BTCUSDT --year 2026 --month "$m"
 done
 ```
 
-`--capital 5000` está en USD, que es la moneda del backtester. Es un proxy de tamaño, no tu saldo en EUR.
+Cada mes queda como `data/historical/BTCUSDT/BTCUSDT-aggTrades-2026-MM.parquet`.
 
-**Paso 3. Qué reportar** de cada log: PnL neto, comisiones totales, número de operaciones y, en el control, cuántas son cortas.
+**Paso 1. Preflight con febrero.** Antes de la ventana completa, mide el ritmo de operaciones con un solo mes:
 
-**Criterio:**
+```bash
+cd ~/atsnt
+scripts/gate_a.sh --months "02"
+```
 
-- **Pasa** si `spot_solo_largo_salida_maker` tiene PnL neto positivo. Un mes no basta: habría que repetir en al menos 12 meses, con DSR válido, antes de construir nada.
-- **No pasa** si el PnL neto es negativo. Con un mes ya es una señal suficiente. Se paran las fases 2 y 5 a 9, y el siguiente paso es investigar la estrategia.
-- Un PnL negativo con la variante de salida taker confirma que el coste de las salidas en mercado es el problema.
+Si hay cero operaciones, no sigas: el swarm necesita más historia en este tape y hay que entenderlo primero. Con el número de operaciones de este preflight se confirma o se ajusta el umbral de 50 operaciones del criterio.
 
-**Salida:** tabla de las tres variantes y decisión.
+**Paso 2. Ventana completa.**
+
+```bash
+cd ~/atsnt
+scripts/gate_a.sh
+```
+
+El script enlaza los ocho meses en `~/atsnt-gate/tape-02-03-04-05-06-07-08-09/`, escribe las configuraciones en `~/atsnt-gate/` (las tres variantes con cortacircuitos en 1 y la referencia con los del artefacto), corre las cuatro simulaciones con `--capital 5000` y deja el resumen en `~/atsnt-gate/summary.txt`. `--capital 5000` está en USD, la moneda del backtester: es un proxy de tamaño, no tu saldo en EUR.
+
+**Criterio** (sobre `spot_solo_largo_salida_maker`, neto con comisiones):
+
+- **NO PASA:** neto ≤ 0 con al menos 50 operaciones. Se para: no se construye la ruta de Kraken y se investiga la estrategia.
+- **NO CONCLUYENTE:** menos de 50 operaciones. Se decide juntos.
+- **PASA LA PANTALLA:** neto > 0 con al menos 50 operaciones. No autoriza ejecución: la ventana puede estar contaminada, y la prueba B (12 meses de Kraken, walk-forward y DSR) sigue siendo obligatoria.
+- **Informativo:** la variante taker, el control con cortos (cuántas operaciones cortas genera el modo con cortos) y la referencia con los cortacircuitos del artefacto, que indica en qué mes saltarían.
+
+**Salida:** tabla de las cuatro simulaciones y veredicto (`summary.txt`).
 
 ### Fase 2: grabadora de Kraken spot (M), solo si la fase 1 pasa
 

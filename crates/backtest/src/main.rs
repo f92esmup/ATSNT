@@ -109,6 +109,17 @@ struct Args {
     bnb_discount: bool,
 }
 
+/// The line printed when the monthly circuit breaker halts a replay. It names the time of the
+/// trade that tripped the breaker, so a run shows the month in which it lost.
+fn monthly_halt_message(at_ms: Option<i64>) -> String {
+    let when = at_ms
+        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+        .map_or_else(|| "an unknown time".to_string(), |time| time.to_rfc3339());
+    format!(
+        "\n[!] Monthly circuit breaker tripped at {when}: simulation halted early, remaining market data skipped."
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -336,9 +347,7 @@ async fn main() -> Result<()> {
                     strategy.on_event(&MarketEvent::Trade(&trade))
                 });
                 if engine.is_halted() {
-                    println!(
-                        "\n[!] Monthly circuit breaker tripped: simulation halted early, remaining market data skipped."
-                    );
+                    println!("{}", monthly_halt_message(data_window.end_ms));
                     break;
                 }
             }
@@ -367,9 +376,7 @@ async fn main() -> Result<()> {
                     }
                     engine.process_bar(&mut strategy, &bar);
                     if engine.is_halted() {
-                        println!(
-                            "\n[!] Monthly circuit breaker tripped: simulation halted early, remaining market data skipped."
-                        );
+                        println!("{}", monthly_halt_message(data_window.end_ms));
                         break;
                     }
                 }
@@ -410,9 +417,7 @@ async fn main() -> Result<()> {
                 data_window.end_ms = Some(trade.timestamp);
                 simulation.on_trade(&trade).await;
                 if simulation.is_halted() {
-                    println!(
-                        "\n[!] Monthly circuit breaker tripped: simulation halted early, remaining market data skipped."
-                    );
+                    println!("{}", monthly_halt_message(data_window.end_ms));
                     break;
                 }
             }
