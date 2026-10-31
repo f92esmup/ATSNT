@@ -5,6 +5,9 @@
 //! parity_check --tape data/BTCUSDT-aggTrades-2026-10-17.parquet --fills fills.jsonl
 //! ```
 
+// AGENTS.md: no unwrap or expect in production code; test builds keep them.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;

@@ -5,6 +5,9 @@
 //! whose thresholds and `calibration_end_ms` come from [`domain::calibrate`]. The evaluated data
 //! of a later run must start strictly after `calibration_end_ms` (no look-ahead).
 
+// AGENTS.md: no unwrap or expect in production code; test builds keep them.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};

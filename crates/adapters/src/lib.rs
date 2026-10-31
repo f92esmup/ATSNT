@@ -1,3 +1,6 @@
+// AGENTS.md: no unwrap or expect in production code; test builds keep them.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod analytics;
 pub mod binance_auth;
 pub mod binance_csv;

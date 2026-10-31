@@ -2,6 +2,9 @@
 //!
 //! Enforces zero I/O, zero network dependencies, and 100% deterministic arithmetic.
 
+// AGENTS.md: no unwrap or expect in production code; test builds keep them.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod accounting;
 pub mod analytics;
 pub mod bar;

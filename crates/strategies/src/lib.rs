@@ -1,3 +1,6 @@
+// AGENTS.md: no unwrap or expect in production code; test builds keep them.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 // Test-only: the generic strategy contract suite, run by the registry tests. Its panics are
 // assertions, so it is never compiled into production code.
 #[cfg(test)]

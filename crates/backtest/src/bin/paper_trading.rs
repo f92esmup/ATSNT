@@ -4,6 +4,9 @@
 //! information-driven Dollar Bars, executes strategy signals against simulated liquidity
 //! and realistic friction via the [`PaperTradingSession`], and displays live execution telemetry.
 
+// AGENTS.md: no unwrap or expect in production code; test builds keep them.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use ports::RunRecorder;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

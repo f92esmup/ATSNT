@@ -5,6 +5,9 @@
 //! `--keep-per-feed` are selected for each of the 16 feeds. The resulting elite population is
 //! stored in `SwarmConfig.custom_agents` and saved to `--output`.
 
+// AGENTS.md: no unwrap or expect in production code; test builds keep them.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};

@@ -5,6 +5,9 @@
 //! validates pre-trade risk policy constraints, dispatches authenticated live orders via [`BinanceGateway`],
 //! and listens for execution updates and order fills over the private [`BinancePrivateUserDataStream`].
 
+// AGENTS.md: no unwrap or expect in production code; test builds keep them.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use ports::RunRecorder;
 use std::path::PathBuf;
 use std::sync::Arc;

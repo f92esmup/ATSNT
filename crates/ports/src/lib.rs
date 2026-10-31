@@ -4,6 +4,9 @@
 //! simulator, messaging services) and the application crate wires them together, so the core
 //! never names a concrete exchange, storage format or transport.
 
+// AGENTS.md: no unwrap or expect in production code; test builds keep them.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod alerts;
 pub mod clock;
 pub mod execution;
