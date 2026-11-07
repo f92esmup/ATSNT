@@ -1,62 +1,96 @@
 # Adding a Strategy
 
-A new strategy touches three files: its own file or module under `crates/strategies/src/`, one `pub mod` line in
-`crates/strategies/src/lib.rs`, and an import plus **one registry line** in
-`crates/strategies/src/registry.rs`. No runner (backtest, HPO, paper, live) matches on strategy
-names; the test `runners_do_not_dispatch_on_strategy_names` in
-`crates/backtest/tests/architecture_contract.rs` fails `cargo test` if one starts to, and it takes
-the names to look for from the registry, so a new strategy and its aliases are covered without
-editing it.
+A strategy is one module, one `pub mod` line and one registry line. Nothing else changes. No runner
+matches on strategy names: the test `runners_do_not_dispatch_on_strategy_names` in
+`crates/backtest/tests/architecture_contract.rs` fails `cargo test` if one starts to. It reads the
+ids and aliases from `strategies::registry::strategy_names()`, so a new strategy is covered without
+editing the test.
 
-## 1. Write the strategy (`crates/strategies/src/<name>.rs` or module)
+Strategies are grouped by market, one folder per market under `crates/strategies/src/`. USD-M
+perpetual strategies live in `usdm_perpetual/`, declared in `crates/strategies/src/lib.rs`. The
+`spot/` folder does not exist yet; it is created with the first spot strategy.
 
-Implement the unified strategy traits from `crates/strategies/src/strategy.rs`:
+## 1. Write the strategy
 
-### `Strategy` trait
-- `name(&self) -> &str`: human-readable identifier.
-- `compatible_market_types(&self) -> &'static [MarketType]`: e.g. `&[MarketType::UsdMPerpetual]`.
-- `input_kind(&self) -> InputKind`: either `InputKind::DollarBars` (default) or `InputKind::Trades`.
-- `on_event(&mut self, event: &MarketEvent<'_>) -> Option<Decision>`: handles market events (`MarketEvent::DollarBar` or `MarketEvent::Trade`) and returns an optional `Decision`.
-  - `on_bar(&mut self, bar: &DollarBar) -> Option<OrderIntent>` is available as a defaulted shortcut for single-stage dollar bar strategies.
-- `reset(&mut self)`: restores initial internal state.
-- `audit(&self) -> Option<serde_json::Value>`: optional strategy-specific audit metrics (e.g. swarm agent votes, rule activations), defaults to `None`.
-- `emits_targets(&self) -> bool`: returns `true` if the strategy produces `Decision::Target`. Defaults to `false`. Strategies emitting targets are currently gated to backtesting engines (`backtest`) and offline-rejected before network connection by `paper_trading` and `live_trading`.
+The contract is in `crates/strategies/src/strategy.rs`. Two traits matter.
 
-### Decisions
-Strategies emit one of two decision types:
-- `Decision::Entry(OrderIntent)`: triple-barrier trade entries carrying limit/market execution price, take profit, stop loss, and maximum holding bars.
-- `Decision::Target(TargetPosition)`: target-position models specifying signed integer discrete allocation levels (-3..=3), fractional risk, and aggregate stop distance.
+### `Strategy`: how it reacts to the market
 
-### `OptimizableStrategy` trait
-To participate in Hyperparameter Optimization (HPO), walk-forward analysis, and artifact serialization, implement `OptimizableStrategy`:
-- `id(&self) -> &'static str`: snake_case identifier used in CLI flags and as the `strategy_id` of the run registry.
-- `type SharedConfig`: dataset-wide or calibrated shared configuration (`()` for self-contained strategies, or calibrated feed thresholds such as `SwarmConfig`).
-- `type Config`: candidate parameters (`Clone + Send + Sync + Serialize + DeserializeOwned + Debug + Display + Default`).
-- `type Space`: hyperparameter grid space implementing `HyperparameterSpace`.
-- `type Features`: extracted feature type passed to the decision policy (`DollarBar` or custom feature structs).
-- `type Extractor`: implements `FeatureExtractor<Features = Self::Features>`.
-- `type Policy`: implements `FeaturePolicy<Features = Self::Features>`.
+- `name(&self) -> &str`: a human-readable name.
+- `compatible_market_types(&self) -> &'static [MarketType]`: the markets it trades, for example
+  `&[MarketType::UsdMPerpetual]`. `supports_market_type` checks a requested market against this list.
+- `input_kind(&self) -> InputKind`: `InputKind::DollarBars` (the default) or `InputKind::Trades`.
+  Runners prepare exactly that stream.
+- `on_event(&mut self, event: &MarketEvent<'_>) -> Option<Decision>`: the method runners call. Its
+  default sends a dollar bar to `on_bar` and wraps the resulting intent as `Decision::Entry`, and it
+  ignores trades. Trade-driven strategies override it.
+- `reset(&mut self)`: restores the initial state.
+- `emits_targets(&self) -> bool`, default `false`: `true` when the strategy emits `Decision::Target`.
+  Backtests accept such a strategy. The execution gate, `ensure_accepts_decisions` in
+  `crates/backtest/src/registry.rs`, refuses it, because no execution path accepts targets yet.
+- `audit(&self) -> Option<serde_json::Value>`, default `None`: optional audit data stored with the run records
+  under `strategy_audit`.
 
-#### Single-Stage vs. Two-Stage Strategies
-- **Single-Stage Strategies** (the CUSUM and order-flow strategies, since removed, were of this kind):
-  Features are simply the incoming dollar bars (`type Features = DollarBar`, `type Extractor = BarPassThrough`, `type Policy = Self`, `type SharedConfig = ()`).
-- **Two-Stage Strategies** (e.g. `SwarmConsensusStrategy`):
-  Separates heavy computation (e.g. aggregating 16 multi-timeframe feeds and evaluating 96 ensemble agents) from policy evaluation. In HPO, the extractor runs **exactly once** over the trade tape to generate a feature tape; thousands of candidate policy thresholds are then evaluated at high speed without recomputing features.
+The decisions are defined in the `domain` crate (`crates/domain/src/decision.rs`):
 
-A strategy depends only on the `domain` crate and does no I/O: no file system, network, async runtime, or clock. `architecture_contract.rs` enforces this isolation.
+- `Decision::Entry(OrderIntent)`: a triple-barrier entry, accepted only when flat with nothing pending.
+- `Decision::Target(TargetPosition)`: a signed exposure level, accepted at any time and replacing a
+  pending target.
+
+### `OptimizableStrategy`: how it is searched and loaded
+
+Implement it to take part in hyperparameter optimisation, walk-forward analysis and artifacts. The
+trait starts at `crates/strategies/src/strategy.rs:134`.
+
+- `fn id() -> &'static str`: the canonical snake_case id used by the CLI flags and stored as the
+  `strategy_id` of the run registry. It takes no `self`.
+- `type SharedConfig`: configuration shared by every candidate of one run and frozen for it; `()`
+  when there is none. It implements `Default`.
+- `type Config`: the candidate parameters. It implements `Clone + Send + Sync + Serialize +
+  DeserializeOwned + Debug + Display`.
+- `type Space: HyperparameterSpace<Config = Self::Config>`: the candidate grid, with
+  `generate_candidates` and `perturb_neighbors`.
+- `type Extractor: FeatureExtractor`: the frozen first stage. Its `Features` type is what the
+  decision stage reads.
+- `fn extractor(shared: &Self::SharedConfig) -> Result<Self::Extractor, DomainError>`.
+- `fn from_config(shared: &Self::SharedConfig, config: Self::Config) -> Result<Self, DomainError>`.
+- `fn on_features(&mut self, features: &<Self::Extractor as FeatureExtractor>::Features) ->
+  Option<Decision>`: the decision stage.
+- `fn default_space() -> Self::Space`.
+
+`FeatureExtractor` has an associated `Features` type, `on_event(&mut self, event) -> Option<Features>`
+and `reset(&mut self)`.
+
+#### Single-stage strategies (dollar bars)
+
+The features are the bars themselves: `type SharedConfig = ()`, `type Extractor = BarPassThrough`
+(its `Features` is `DollarBar`), and `on_features` decides on each bar. The removed CUSUM strategies
+were of this kind.
+
+#### Two-stage strategies (`swarm_consensus`)
+
+The extractor, `SwarmEnsemble`, turns trades into `ConsensusSample`s, and the decision stage,
+`ConsensusPolicy`, decides on them. The optimizer runs the extractor once over the trade tape to
+build a feature tape, then evaluates each candidate policy on that tape without recomputing features.
+The contract suite checks that the two stages agree with a one-stage run. See
+`crates/strategies/src/usdm_perpetual/swarm_consensus/mod.rs`.
+
+A strategy depends only on the `domain` crate and does no I/O: no file system, network, async
+runtime or clock. `architecture_contract.rs` enforces this.
 
 ## 2. Declare and register it
 
-In `crates/strategies/src/lib.rs`, declare the module (and, by convention, re-export the type):
+Declare the module in its market's `mod.rs`. For USD-M perpetuals, that is
+`crates/strategies/src/usdm_perpetual/mod.rs`:
 
 ```rust
 pub mod my_strategy;
 ```
 
-In `crates/strategies/src/registry.rs`, import the type and add it to the macro call:
+Then import the type and add one line to the macro call in `crates/strategies/src/registry.rs`:
 
 ```rust
-use crate::my_strategy::MyStrategy;
+use crate::usdm_perpetual::my_strategy::MyStrategy;
 
 register_strategies! {
     SwarmConsensusStrategy => ["swarm"],
@@ -64,23 +98,28 @@ register_strategies! {
 }
 ```
 
-The second element lists optional short aliases. That is all the wiring needed; a `configs/param_space_*.json` file is optional for searching a space other than `default_space`.
+The second element lists optional short aliases. `swarm_consensus` is re-exported at the crate
+root, so `crate::swarm_consensus` and `strategies::swarm_consensus` keep working after the move to
+`usdm_perpetual/`.
 
 ## 3. What you get without further code
 
-- `--strategy my_strategy_id` (or the alias) in `backtest` and `run_hpo` (and in `paper_trading`/`live_trading` if `emits_targets() == false`).
-- Artifact and bare-config loading (`backtest::load_strategy`).
-- The generic contract suite (`crates/strategies/src/contract.rs`), run for every registered strategy by `registry::tests::every_registered_strategy_honours_the_contract`:
-  - valid id and buildable default configuration;
-  - config JSON round-trip;
-  - search space verification (all candidates and neighbours build deterministically);
-  - deterministic replay;
-  - `reset()` equal to a fresh instance;
-  - well-formed decisions on volatile and flat market feeds.
+- `--strategy <id or alias>` in `backtest` and `run_hpo`.
+- Artifact and bare-config loading through `backtest::load_strategy` (`crates/backtest/src/registry.rs`).
+- The generic contract suite (`crates/strategies/src/contract.rs`), run for every registered strategy
+  by `registry::tests::every_registered_strategy_honours_the_contract`. It checks:
+  - a non-empty id;
+  - a default configuration that builds, and a strategy that describes itself;
+  - JSON round-trip of the shared and the candidate configuration;
+  - search-space candidates and neighbours that build, within the candidate budget;
+  - deterministic replay, and `reset()` matching a fresh instance;
+  - the two-stage run agreeing with the one-stage run;
+  - well-formed decisions on synthetic and flat feeds.
 
 ## 4. What stays yours
 
-Strategy-specific unit tests, a sensible `default_space`, and verification across fidelity tiers:
-1. Fast bar-level or trade-resolution backtest.
-2. Parallel Walk-Forward Optimization via `run_hpo`.
-3. High-fidelity verification of winners using `backtest --fill-model tick`.
+- Unit tests specific to the strategy, and a sensible `default_space`.
+- Verification at increasing fidelity:
+  1. a bar-level backtest, or a trade-resolution one with `backtest --fill-model tick`;
+  2. a walk-forward optimisation with `run_hpo`;
+  3. a high-fidelity check of the winners with `backtest --fill-model tick`.
