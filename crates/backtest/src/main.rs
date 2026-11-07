@@ -103,13 +103,9 @@ struct Args {
     #[arg(long, default_value_t = 10000)]
     mc_iterations: usize,
 
-    /// Target Binance Spot instead of USD-M Perpetual Futures
+    /// Target Spot instead of USD-M Perpetual Futures
     #[arg(long, default_value_t = false)]
     spot: bool,
-
-    /// Apply Binance BNB fee discount (0.075% maker/taker) when targeting Spot
-    #[arg(long, default_value_t = false)]
-    bnb_discount: bool,
 
     /// Write the run analytics (runs, metrics, trades, equity series) to this SQLite file,
     /// created if missing
@@ -173,10 +169,10 @@ async fn main() -> Result<()> {
     for line in loaded.report_lines() {
         println!("{line}");
     }
-    // The backtest still runs (it is how a candidate is judged); it only says what paper and
-    // live trading will do with this artifact.
+    // The backtest still runs (it is how a candidate is judged); it only reports whether the
+    // artifact may be deployed.
     if let Some(reason) = loaded.deployment_blocker() {
-        println!("[GATE] paper_trading and live_trading will refuse it: {reason}");
+        println!("[GATE] not deployable: {reason}");
     }
     let input_kind = loaded.strategy.input_kind();
     let calibration_end = calibration_end_ms(&loaded.shared_config_json);
@@ -249,11 +245,7 @@ async fn main() -> Result<()> {
         println!("[*] Adopting 1:1 realistic friction schedule from deployment artifact");
         artifact_ctx
     } else if args.spot {
-        if args.bnb_discount {
-            BacktestConfig::spot_with_bnb_discount()
-        } else {
-            BacktestConfig::spot()
-        }
+        BacktestConfig::spot()
     } else {
         BacktestConfig {
             initial_capital: dec!(10_000),
@@ -271,10 +263,6 @@ async fn main() -> Result<()> {
         engine_config.max_leverage = Decimal::ONE;
         engine_config.funding_rate_pct = Decimal::ZERO;
         engine_config.maintenance_margin_rate = Decimal::ZERO;
-        if args.bnb_discount {
-            engine_config.maker_fee_pct = dec!(0.00075);
-            engine_config.taker_fee_pct = dec!(0.00075);
-        }
     }
 
     if let Some(cap) = args.capital {

@@ -4,8 +4,8 @@
 //!
 //! The comparison replays on the simulated venue of [`crate::wiring::parity_venue`], the one the
 //! tick-level simulation and the paper session use, so the latency it recommends is the one to
-//! configure there. Inputs are the fills `live_trading --record-fills` writes and a tape of the
-//! same market (for production, the `aggTrades` archive of that day).
+//! configure there. Inputs are the fills of a real run, as JSON lines, and a tape of the same
+//! market (for production, the `aggTrades` archive of that day).
 //!
 //! The submit time is the local wall clock and the fill time is the exchange's, so clock skew
 //! shifts the time error one-to-one; the price error is what the latency sweep is scored on.
@@ -69,7 +69,7 @@ pub struct LatencyScore {
     pub mean_bias_bps: Decimal,
 }
 
-/// Parses the JSON-lines fills `live_trading --record-fills` writes; blank lines are skipped.
+/// Parses the JSON-lines fills of a real run; blank lines are skipped.
 pub fn parse_fills_jsonl(text: &str) -> Result<Vec<ObservedFill>, serde_json::Error> {
     text.lines()
         .filter(|line| !line.trim().is_empty())

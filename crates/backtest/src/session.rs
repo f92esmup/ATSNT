@@ -1,8 +1,8 @@
 //! Venue-independent trading session: signal gating, entry, protection, exit and accounting.
 //!
 //! The session is a state machine driven by three inputs (trades, bars and execution reports)
-//! and talks to the market only through [`ports::ExecutionVenue`]. Live runs it on Binance and
-//! simulations run it on a simulated venue, so the lifecycle logic is written once. It performs
+//! and talks to the market only through [`ports::ExecutionVenue`]. Live runs and simulations
+//! each supply their own venue, so the lifecycle logic is written once. It performs
 //! no I/O of its own: everything the caller may want to log, alert or persist comes back as
 //! [`SessionEvent`]s.
 

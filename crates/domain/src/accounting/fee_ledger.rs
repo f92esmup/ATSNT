@@ -7,8 +7,8 @@ const QUOTE_ASSET: &str = "USDT";
 
 /// Running total of the commissions reported by the exchange for the current position.
 ///
-/// The simulator charges `taker_fee_pct` on every fill; live must report what Binance charged
-/// instead, otherwise fee tiers, BNB discounts and partial fills silently skew the live PnL
+/// The simulator charges `taker_fee_pct` on every fill; live must report what the venue charged
+/// instead, otherwise fee tiers, venue discounts and partial fills silently skew the live PnL
 /// that is compared against the backtest.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FeeLedger {

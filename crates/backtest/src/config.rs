@@ -251,7 +251,7 @@ impl BacktestConfig {
         Ok(())
     }
 
-    /// Realistic Binance Spot configuration (0.10% maker/taker, 1x leverage, 0% funding, 0% maintenance margin).
+    /// Realistic Spot configuration (0.10% maker/taker, 1x leverage, 0% funding, 0% maintenance margin).
     pub fn spot() -> Self {
         Self {
             market_type: MarketType::Spot,
@@ -272,15 +272,6 @@ impl BacktestConfig {
             maintenance_margin_rate: Decimal::ZERO,
             latency_ms: 0,
             resting_maker_exits: false,
-        }
-    }
-
-    /// Realistic Binance Spot configuration with BNB fee discount (0.075% maker/taker).
-    pub fn spot_with_bnb_discount() -> Self {
-        Self {
-            maker_fee_pct: dec!(0.00075),
-            taker_fee_pct: dec!(0.00075),
-            ..Self::spot()
         }
     }
 }
@@ -336,14 +327,6 @@ mod tests {
         let mut invalid_margin = spot;
         invalid_margin.maintenance_margin_rate = dec!(0.004);
         assert!(invalid_margin.validate().is_err());
-    }
-
-    #[test]
-    fn spot_bnb_discount_config_carries_discounted_fees() {
-        let spot_bnb = BacktestConfig::spot_with_bnb_discount();
-        assert_eq!(spot_bnb.maker_fee_pct, dec!(0.00075));
-        assert_eq!(spot_bnb.taker_fee_pct, dec!(0.00075));
-        assert!(spot_bnb.validate().is_ok());
     }
 
     #[test]

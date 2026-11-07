@@ -118,13 +118,9 @@ struct Args {
     #[arg(long)]
     capital: Option<Decimal>,
 
-    /// Target Binance Spot instead of USD-M Perpetual Futures
+    /// Target Spot instead of USD-M Perpetual Futures
     #[arg(long, default_value_t = false)]
     spot: bool,
-
-    /// Apply Binance BNB fee discount (0.075% maker/taker) when targeting Spot
-    #[arg(long, default_value_t = false)]
-    bnb_discount: bool,
 
     /// Write the sweep's run analytics to this SQLite file, created if missing
     #[arg(long)]
@@ -590,11 +586,7 @@ where
                     BacktestConfig::default()
                 }
             } else if args.spot {
-                if args.bnb_discount {
-                    BacktestConfig::spot_with_bnb_discount()
-                } else {
-                    BacktestConfig::spot()
-                }
+                BacktestConfig::spot()
             } else {
                 BacktestConfig::default()
             }
@@ -605,10 +597,6 @@ where
         engine_config.max_leverage = Decimal::ONE;
         engine_config.funding_rate_pct = Decimal::ZERO;
         engine_config.maintenance_margin_rate = Decimal::ZERO;
-        if args.bnb_discount {
-            engine_config.maker_fee_pct = rust_decimal_macros::dec!(0.00075);
-            engine_config.taker_fee_pct = rust_decimal_macros::dec!(0.00075);
-        }
     }
     if let Some(cap) = args.capital {
         engine_config.initial_capital = cap;

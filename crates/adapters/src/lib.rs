@@ -2,15 +2,9 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod analytics;
-pub mod binance_auth;
 pub mod binance_csv;
 pub mod binance_fetcher;
 pub mod binance_funding;
-pub mod binance_gateway;
-pub mod binance_private_stream;
-pub mod binance_recent_trades;
-pub mod binance_user_stream;
-pub mod binance_ws;
 pub mod clock;
 pub mod error;
 pub mod fetch_plan;
@@ -22,22 +16,9 @@ pub(crate) mod test_http;
 pub mod traits;
 
 pub use analytics::{InMemoryRunRecorder, NullRunRecorder, RecordedRuns};
-pub use binance_auth::BinanceAuth;
 pub use binance_csv::BinanceCsvReader;
 pub use binance_fetcher::{BinanceDataFetcher, FetchParams, FetchSummary};
 pub use binance_funding::{funding_schedule_from_history, parse_funding_history};
-pub use binance_gateway::{
-    AccountFix, AccountReport, BinanceGateway, BinanceGatewayConfig, ExitKind, Finding,
-    FindingStatus, GatewayError, OrderExecutionReport, PositionClosureReport, ProtectiveExitReport,
-};
-pub use binance_private_stream::{
-    BinancePrivateEvent, BinancePrivateStreamError, BinancePrivateUserDataStream,
-    FuturesAccountUpdate, FuturesBalance, FuturesOrderTradeUpdate, FuturesPosition,
-    ListenKeyRenewer, SpotAccountPosition, SpotBalance, SpotBalanceDelta,
-};
-pub use binance_recent_trades::BinanceRecentTrades;
-pub use binance_user_stream::{BinanceUserDataStream, ExecutionUpdate};
-pub use binance_ws::{BinanceAggTradePayload, BinanceWebSocketStream, BinanceWsConfig};
 pub use clock::SystemClock;
 pub use error::AdapterError;
 pub use fetch_plan::{is_not_archived, plan_fetch_tasks, run_bounded, FetchTask};

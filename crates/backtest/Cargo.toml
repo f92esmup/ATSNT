@@ -35,14 +35,6 @@ name = "run_hpo"
 path = "src/bin/run_hpo.rs"
 
 [[bin]]
-name = "paper_trading"
-path = "src/bin/paper_trading.rs"
-
-[[bin]]
-name = "live_trading"
-path = "src/bin/live_trading.rs"
-
-[[bin]]
 name = "calibrate_feeds"
 path = "src/bin/calibrate_feeds.rs"
 
