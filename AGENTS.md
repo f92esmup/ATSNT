@@ -28,12 +28,24 @@ The project enforces strict separation of concerns:
 
 3. **Adapters (`adapters`)**:
    - Concrete implementations of ports:
-     - Live exchange adapter (e.g., Binance WebSocket + REST).
+     - Live exchange adapter (e.g., Kraken WebSocket + REST).
      - Deterministic backtest simulator adapter (feeding historical data).
      - Storage and persistence adapters.
 
 4. **Strategies (`strategy`)**:
    - Strategy traits that consume normalized market events and emit trading signals or order intents.
+
+### Enforced Rules
+
+`crates/backtest/tests/architecture_contract.rs` checks these rules. The checks match source text, so they catch the usual violations, not every alias. A rule that blocks a change is discussed, never disabled silently.
+
+- **R1**: `domain` depends on no other workspace crate; `ports` and `strategies` depend only on `domain`.
+- **R2**: `adapters` depends only on `domain` and `ports`.
+- **R3**: the `backtest` library names no `adapters::` outside the wiring module, the binaries and `main.rs`.
+- **R4**: `ports` names no exchange or storage format (`Binance`, `Kraken`, `Parquet`, `BigQuery`).
+- **R5**: `domain` uses no `f32` or `f64`.
+- **R6**: `backtest` runners select strategies through the registry and never match on strategy names.
+- **R7**: `domain`, `ports`, `strategies` and the `backtest` library never read the wall clock; the binaries and `main.rs` may.
 
 ---
 
@@ -44,7 +56,7 @@ The project enforces strict separation of concerns:
 - Enforce explicit state machines for order lifecycles (`PendingNew` -> `New` -> `PartiallyFilled` -> `Filled` / `Canceled` / `Rejected`). Invalid state transitions must be compile-time or runtime errors.
 
 ### Error Handling
-- Never use `unwrap()` or `expect()` in production or domain code.
+- Never use `unwrap()` or `expect()` in production or domain code. Every crate root and binary root denies `clippy::unwrap_used` and `clippy::expect_used` outside `cfg(test)`, so `cargo clippy` fails on them.
 - Define domain-specific error enums using `thiserror`.
 - Reserve `anyhow` strictly for application entrypoints (`main.rs`) or top-level integration harnesses.
 
