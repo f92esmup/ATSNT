@@ -14,7 +14,7 @@ truth; this page summarises them.
   (`scripts/gate_a.sh`). Unused configs and dependencies are gone. The metrics moved to `domain`. Clippy denies `unwrap` and
   `expect` outside tests. The run recorder writes to SQLite with `--record`. The cloud scripts are
   retired and their history is in [`archive`](archive/README.md).
-- **Cleanup, ready to merge (`refactor/cleanup-local-venues`).** The Binance execution path, the paper, live and parity binaries, and `--bnb-discount` are removed (L3N, commit `940e4de`). The swarm sits under `usdm_perpetual/`, and the spot fees are the Kraken Pro entry tier.
+- **Cleanup, merged into `main` (`refactor/cleanup-local-venues`, 2026-11-07).** The Binance execution path, the paper, live and parity binaries, and `--bnb-discount` are removed (L3N, commit `940e4de`). The swarm sits under `usdm_perpetual/`, and the spot fees are the Kraken Pro entry tier.
 
 ## Gates
 
@@ -39,8 +39,8 @@ GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until
 - **Kraken branch, archived.** `feat/kraken-eur-spot-portfolio` is kept as the tag
   `archive/kraken-eur-spot-portfolio` (commit `b35e929`). It has five commits with an earlier Kraken
   WebSocket client (`kraken_ws.rs`), six EUR pair configs and a sweep CLI. It does not merge with the
-  refactor: seven files conflict, all of them removed by it. Deleting the remote branch waits for the
-  owner's confirmation. See [`HANDOFF.md`](../HANDOFF.md).
+  refactor: seven files conflict, all of them removed by it. The remote branch was deleted after the
+  owner's confirmation (2026-11-07); the tag keeps its commits. See [`HANDOFF.md`](../HANDOFF.md).
 
 ## Decisions
 

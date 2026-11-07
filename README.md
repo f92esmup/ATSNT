@@ -10,7 +10,7 @@ only and without leverage, once its economics pass the gates in
 - **Stage:** the refactor is complete: batch 1 (the swarm-only refactor) and batch 2 (gate A,
   cleanup and the SQLite run store) are done. The only registered strategy is `swarm_consensus`,
   under `usdm_perpetual/`. The cleanup branch removes the Binance execution path and its binaries
-  (L3N) and is ready to merge. A Kraken client from an earlier branch, `feat/kraken-eur-spot-portfolio`,
+  (L3N) and is merged into `main`. A Kraken client from an earlier branch, `feat/kraken-eur-spot-portfolio`,
   is archived as the tag `archive/kraken-eur-spot-portfolio`; it does not merge with this refactor.
   See [`HANDOFF.md`](HANDOFF.md).
 - **Gates:** G0, the plan, is approved. GA, the economics screen on a perpetual BTCUSDT proxy, did

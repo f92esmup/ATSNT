@@ -60,7 +60,7 @@ Actualizado el 2026-11-07: los estados de §1, §5.2, §7 y §11 reflejan la lim
 Fases de la v4 (`docs/plan/refactor-local-kraken.md` §4):
 
 - Fase 0 (higiene): pendiente del usuario (WP-00).
-- Fase 1 (prueba económica): GA ejecutada, NO PASA. L3N ejecutada en `refactor/cleanup-local-venues` (commit `940e4de`), pendiente de fusión en `main`.
+- Fase 1 (prueba económica): GA ejecutada, NO PASA. L3N ejecutada en `refactor/cleanup-local-venues` (commit `940e4de`) y fusionada en `main` el 2026-11-07.
 - Fase 2 (grabadora de Kraken): parada, porque GA no pasó.
 - Fase 3 (consolidación hexagonal): hecha, salvo 3.9 (Money y Currency, aplazado a WP-11), SimClock
   (no añadido) y `walk_forward.rs` (se queda en backtest).
@@ -127,7 +127,7 @@ Ramas remotas existentes (`git ls-remote --heads origin`):
 - `claude/awesome-lamport-ch9ytr`: rama de trabajo de los lotes 1 y 2.
 - `feat/kraken-eur-spot-portfolio` (`b35e929`): cinco commits de un cliente de Kraken de una etapa
   anterior. **No fusiona limpio con `main`**: 7 ficheros en conflicto, todos eliminados por el
-  refactor. Decisión pendiente (§11).
+  refactor. Archivada como tag y borrada de origin el 2026-11-07 (§11).
 - `feat/dynamic-topk-universe`: en `50b4ee5`, sin commits propios.
 - `claude/prueba-a` (creada el 2026-10-31 desde `9bf0d38`): registro de la prueba A y propuesta de cadencia. No fusionada.
 
@@ -193,7 +193,7 @@ cortacircuitos en 1):
 
 **Si NO PASA — L3N:**
 
-*Estado (2026-11-07): veredicto NO PASA. El usuario aprobó el plan de limpieza. Ejecutada en `refactor/cleanup-local-venues` (commit `940e4de`); pendiente de fusión en `main`.*
+*Estado (2026-11-07): veredicto NO PASA. El usuario aprobó el plan de limpieza. Ejecutada en `refactor/cleanup-local-venues` (commit `940e4de`) y fusionada en `main`.*
 
 - Borrar la ruta de ejecución y streaming de Binance: `crates/adapters/src/binance_gateway.rs` y
   `binance_gateway/`, `binance_auth.rs` (si solo lo usan el gateway y los streams),
@@ -205,7 +205,7 @@ cortacircuitos en 1):
   `binance_funding` y `test_http.rs`. La investigación de estrategia necesita historia.
 - Quitar `--bnb-discount` de `backtest` y `run_hpo`. `--spot` se mantiene hasta WP-11.
 - Archivar `docs/architecture/06` y `08`: hecho, en `docs/archive/architecture/`.
-- Rama de Kraken: archivada como tag `archive/kraken-eur-spot-portfolio` (commit `b35e929`). Borrar la rama remota espera la confirmación del usuario (§11).
+- Rama de Kraken: archivada como tag `archive/kraken-eur-spot-portfolio` (commit `b35e929`). La rama remota se borró tras la confirmación expresa del usuario (2026-11-07, §11).
 - Pendiente de decisión: el camino de perpetuos (`crates/domain/src/futures.rs` y el motor de
   perpetuos).
 
@@ -428,7 +428,7 @@ cortacircuitos en 1):
 
 - **Propuesta de cadencia y coste (2026-10-31):** `docs/plan/propuesta-cadencia-swarm-consensus.md`. Opcional. El veredicto NO PASA y el bruto negativo reducen su probabilidad de éxito. Antes de descargar 2024–2025 (unos 6 GB) hace falta permiso del usuario.
 
-- **Rama `feat/kraken-eur-spot-portfolio` (`b35e929`). Decisión pendiente.** Tiene cinco commits que
+- **Rama `feat/kraken-eur-spot-portfolio` (`b35e929`). Archivada como tag y borrada (2026-11-07).** Tiene cinco commits que
   `main` no tiene: `3c13234` (live gateway con prueba de orden spot), `c05c95b` (pares spot EUR en
   simulación y paper), `b2f5009` (dollar bars de 11 resoluciones para el universo Kraken), `c8886a5`
   (benchmark parametrizable y correlación dinámica en EUR) y `b35e929` (CLI de sweep de dollar bars y
@@ -474,9 +474,9 @@ cortacircuitos en 1):
 - **U4:** cerrado. 50 operaciones aprobadas por el usuario el 2026-10-31.
 - **U5:** decidir sobre los cambios propuestos a `AGENTS.md`.
 - **U6:** nivel de verificación de Kraken (límites de tasa, WP-13).
-- **U7:** confirmar el push del tag `archive/kraken-eur-spot-portfolio` y el borrado de la rama remota `feat/kraken-eur-spot-portfolio` (§11). El usuario aprobó archivar y borrar; cada push a `main` y cada borrado remoto piden confirmación expresa (§3).
+- **U7:** hecho el 2026-11-07. El tag `archive/kraken-eur-spot-portfolio` está en origin (`0e7bd98`, que apunta a `b35e929`) y la rama remota `feat/kraken-eur-spot-portfolio` se borró tras la confirmación expresa del usuario (§11). Cada push a `main` y cada borrado remoto siguen pidiendo confirmación expresa (§3).
 
-**L3N (2026-11-07):** aprobada por el usuario y ejecutada en `refactor/cleanup-local-venues` (commit `940e4de`), pendiente de fusión en `main`. Veredicto NO PASA.
+**L3N (2026-11-07):** aprobada por el usuario y ejecutada en `refactor/cleanup-local-venues` (commit `940e4de`), fusionada en `main`. Veredicto NO PASA.
 
 Kraken Prop queda fuera del sistema: sus órdenes son manuales.
 
