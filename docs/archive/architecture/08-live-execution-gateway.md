@@ -4,7 +4,7 @@
 
 ## 1. Architectural Philosophy: The Real Capital Boundary
 
-**Monitoring & Reporting boundary:** Telemetry and post-trade analytics are decoupled from live execution and streamed to Google Cloud BigQuery for downstream analytics consumers, while critical execution and risk events trigger real-time mobile alerts via Telegram Bot. Live values must be unavailable or explicitly stale until a real supported source exists. This cross-link does not change the gateway profile, guarantees or task status; the [closure tracker](../../odd/tasks/milestone-5-6-closure.md) owns that evidence.
+**Monitoring & Reporting boundary:** Telemetry and post-trade analytics are decoupled from live execution and streamed to Google Cloud BigQuery for downstream analytics consumers, while critical execution and risk events trigger real-time mobile alerts via Telegram Bot. Live values must be unavailable or explicitly stale until a real supported source exists. This cross-link does not change the gateway profile, guarantees or task status; the [closure tracker](../../../odd/tasks/milestone-5-6-closure.md) owns that evidence.
 
 The Live Execution Gateway (`crates/adapters`) represents the final frontier: transitioning algorithmic strategies from simulated paper trading to **live financial execution** with real exchange capital.
 
@@ -43,7 +43,7 @@ The Live Execution Gateway (`crates/adapters`) represents the final frontier: tr
 ### Safety Guarantees
 
 1. **Pre-Trade Gatekeeping (The Circuit Breaker)**:
-   - No order reaches network sockets without clearing the pure domain [`RiskPolicy`](../../crates/domain/src/risk.rs).
+   - No order reaches network sockets without clearing the pure domain [`RiskPolicy`](../../../crates/domain/src/risk.rs).
    - If account drawdown breaches `max_daily_drawdown_pct`, the engine hard-halts all order dispatch.
    - Sizing is clamped to `max_leverage`, floored to the lot step and rejected below the minimum lot or notional (`OrderBelowMinLotSize`, `OrderBelowMinNotional`). The gateway applies the symbol's real `LOT_SIZE`/`MIN_NOTIONAL` filters (futures) or 1x with the Spot filters.
    - If order size exceeds `max_order_notional` or position exposure exceeds `max_position_notional`, the order is rejected in-memory in zero microseconds.
@@ -84,12 +84,12 @@ The gateway seamlessly switches between testnet and production with a single con
 ## 3. Component Reference
 
 ### 3.1 Cryptographic Signer (`BinanceAuth`)
-- Located at [`crates/adapters/src/binance_auth.rs`](../../crates/adapters/src/binance_auth.rs).
+- Located at `crates/adapters/src/binance_auth.rs`, removed in L3N (commit `940e4de`).
 - Implements `sign(payload: &str) -> String` and `sign_query(query: &str, recv_window: Option<u64>) -> String`.
 - Appends current Unix millisecond timestamp and calculates HMAC-SHA256 tag.
 
 ### 3.2 Pre-Trade Risk Policy (`RiskPolicy`)
-- Located at [`crates/domain/src/risk.rs`](../../crates/domain/src/risk.rs).
+- Located at [`crates/domain/src/risk.rs`](../../../crates/domain/src/risk.rs).
 - Pure business rule with zero I/O or network dependencies.
 - Enforces:
   - `max_order_notional`: Hard ceiling on a single order (e.g. $10,000 USDT).
@@ -101,7 +101,7 @@ The gateway seamlessly switches between testnet and production with a single con
 - **Fees**: live PnL accumulates the commissions Binance reports for each fill (`FeeLedger`); the configured taker fee is only a fallback.
 
 ### 3.3 Execution Gateway (`BinanceGateway`)
-- Located at [`crates/adapters/src/binance_gateway.rs`](../../crates/adapters/src/binance_gateway.rs).
+- Located at `crates/adapters/src/binance_gateway.rs`, removed in L3N (commit `940e4de`).
 - Methods:
   - `fetch_balance(asset: &str) -> Result<Decimal, GatewayError>`: Queries available balance.
   - `place_order(symbol, intent, quantity, current_pos, drawdown) -> Result<OrderExecutionReport, GatewayError>`: Runs pre-trade risk checks and submits authenticated order.
@@ -117,7 +117,7 @@ For standard Spot orders, `place_order` also fails closed before dispatch unless
 The live session keeps its exits on the exchange so they survive a crash of the bot:
 
 - After the entry order is `FILLED`, `BinanceGateway::place_protective_exits` places a `STOP_MARKET` and a `TAKE_PROFIT_MARKET` conditional order through `POST /fapi/v1/algoOrder` (`algoType=CONDITIONAL`, `closePosition=true`, `workingType=MARK_PRICE`, opposite side to the entry). The legacy `/fapi/v1/order` rejects these types. Trigger prices are aligned to the symbol tick toward the entry price.
-- `ExitManager` ([`crates/backtest/src/live_exits.rs`](../../crates/backtest/src/live_exits.rs)) owns the lifecycle with bounded retries (3 immediate attempts, then retried on the next bar or tick):
+- `ExitManager` ([`crates/backtest/src/live_exits.rs`](../../../crates/backtest/src/live_exits.rs)) owns the lifecycle with bounded retries (3 immediate attempts, then retried on the next bar or tick):
   - If either protective order cannot be placed, the position is closed at market (`MARKET`, `reduceOnly`) and all orders cancelled; a critical alert is raised. A position is never left unprotected silently.
   - When the exchange closes the position (SL or TP fill), `cancel_exit_orders` removes the leftover orders (Binance Futures has no OCO). The entry preflight rejects when conditional orders exist, so cleanup is mandatory.
   - Time barrier: not expressible on the exchange, so the bot closes at market after `max_bars_hold` bars (close first, cancel afterwards). Only this barrier depends on the process being alive; SL and TP do not.
@@ -146,14 +146,14 @@ Before any stream is opened, `live_trading` calls `BinanceGateway::verify_accoun
 - Manual check against the testnet: `testnet_exit_check verify-account`. Validated read-only on 2026-10-16 against the real Binance USD-M testnet: all eight endpoints parse, and the report flags the default testnet account correctly (non-USDT collateral and cross margin). The `marginType` write itself has only been exercised against a simulated exchange; confirm it on an account that has only USDT before relying on it.
 
 ### 3.4 User Data Stream Listener (`BinanceUserDataStream`)
-- Located at [`crates/adapters/src/binance_user_stream.rs`](../../crates/adapters/src/binance_user_stream.rs).
+- Located at `crates/adapters/src/binance_user_stream.rs`, removed in L3N (commit `940e4de`).
 - Connects to WebSocket using `listenKey`.
-- Asynchronously processes `executionReport` events into normalized [`ExecutionUpdate`](../../crates/adapters/src/binance_user_stream.rs#L16).
+- Asynchronously processes `executionReport` events into normalized `ExecutionUpdate` (line 16 of the removed `binance_user_stream.rs`).
 
 ---
 
 ### 3.5 Trading Session and Execution Venue (`TradingSession`, `ExecutionVenue`)
-- Located at [`crates/backtest/src/session.rs`](../../crates/backtest/src/session.rs); the contract is [`ports::ExecutionVenue`](../../crates/ports/src/execution.rs).
+- Located at [`crates/backtest/src/session.rs`](../../../crates/backtest/src/session.rs); the contract is [`ports::ExecutionVenue`](../../../crates/ports/src/execution.rs).
 - The session is the venue-independent lifecycle: strategy signal -> gates (account profile, monthly breaker, emergency halt, pending entry or exits) -> entry through the venue -> exchange-held exits on the fill -> time barrier -> accounting of the closed trade. It performs no I/O: callers receive `SessionEvent`s to log, alert and persist.
 - Inputs are `on_trade`, `on_bar` and `on_execution` (an `ExecutionReport` per fill). Partial fills price the position at their volume-weighted average; commissions come from the reports (`FeeLedger`); the daily breaker reference is the UTC-day peak (`DailyWatermark`); trades carry the same exit labels as the simulator (`StopLoss`, `TakeProfit`, `TimeBarrier`, `MonthlyCircuitBreaker`) and the measured slippage versus the signal and trigger prices.
 - A venue implements `ExecutionVenue` (which extends `ExitGateway`). `BinanceGateway` is the live venue and the `live_trading` runner drives the session with it (trades, bars and private-stream fills in; `EventSink` turns the events into console output, Telegram alerts and BigQuery rows); a simulated venue will plug into the same session so backtest, paper and live share one lifecycle. The unit tests drive the session with a fake venue and no network.
