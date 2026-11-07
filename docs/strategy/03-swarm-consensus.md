@@ -49,7 +49,7 @@ holds the position that level asks for.
 | Target | The level the policy asks for, with its risk fraction and stop distance. |
 | Campaign | Everything from leaving flat to returning to flat (or flipping). It counts as one closed trade. |
 | Decision | What any strategy returns: `Entry(OrderIntent)` (triple barrier) or `Target(TargetPosition)`. |
-| Features | The output of a strategy's first, frozen stage. For the swarm, a `ConsensusSample`; for CUSUM and OFI, the dollar bar itself. |
+| Features | The output of a strategy's first, frozen stage. For the swarm, a `ConsensusSample`; for the removed CUSUM and OFI, the dollar bar itself. |
 | Price event | An OHLC bucket of trades (one trade, one dollar bar, or 1 s of trades) that the execution core fills against. |
 
 ---
@@ -147,9 +147,9 @@ pub trait Strategy: Send {
 - `Strategy::on_bar` stays, with a default that decides nothing. The default `on_event` sends a
   dollar bar to `on_bar` and wraps its intent in `Decision::Entry`, and ignores raw trades. The
   default `input_kind` is `DollarBars`.
-- `dollar_bars_cusum`, `order_flow_imbalance`, and every existing test strategy therefore keep
-  their `on_bar` code **unedited**. Only a strategy that consumes trades or emits targets
-  overrides `input_kind` and `on_event`.
+- The removed `dollar_bars_cusum` and `order_flow_imbalance` kept their `on_bar` code
+  **unedited**, as any bar-based strategy does under this contract. Only a strategy that consumes
+  trades or emits targets overrides `input_kind` and `on_event`.
 - Runners select behaviour by `input_kind()` and by the `Decision` variant, never by strategy name
   (`architecture_contract.rs` keeps enforcing this).
 
@@ -185,9 +185,10 @@ uses:
 
 Concretely:
 
-- **CUSUM and OFI**: `SharedConfig = ()`, `Extractor = BarPassThrough` (returns the bar it
-  receives), and `on_features(bar) = on_bar(bar)` wrapped in `Decision::Entry`. Their HPO tape is
-  the bar vector, which is exactly what `run_hpo` builds today.
+- **CUSUM and OFI** (removed; see `docs/archive/strategy/`): `SharedConfig = ()`,
+  `Extractor = BarPassThrough` (returns the bar it receives), and `on_features(bar) = on_bar(bar)`
+  wrapped in `Decision::Entry`. Their HPO tape was the bar vector, which is what `run_hpo` built
+  for them.
 - **Swarm**:
   - `SharedConfig` is the structural configuration (Section 14.1);
   - `Extractor` is `SwarmEnsemble`;
@@ -1020,9 +1021,9 @@ Candidates whose level-3 risk `base_risk + 2·risk_increment` exceeds `max_level
    config)` and a fresh engine. Replay the fold's features and price events, merged by timestamp,
    then score. Candidates run in parallel (rayon), as today.
 
-For CUSUM and OFI, the features **are** the dollar bars and the price events are the same bars.
-That is today's `Vec<DollarBar>`, so their HPO results stay identical, and a golden test proves
-it (ODD T1.2).
+For the removed CUSUM and OFI, the features **were** the dollar bars, and the price events were
+the same bars. That was their `Vec<DollarBar>`, so their HPO results stayed identical, and a golden
+test checked it (ODD T1.2).
 
 For the swarm, the extractor is the ensemble and the price events are 1 s buckets. At that
 resolution, ten months of BTCUSDT is about 26M events, roughly 2 GB in memory. Rebuilding the
@@ -1041,8 +1042,8 @@ ensemble per candidate would repeat the same work 1,680 times.
   `Trades` strategies, `--embargo-ms` (default 86,400,000) is converted to buckets as
   `embargo_ms / price_bucket_ms`. For `DollarBars` strategies, `--embargo-bars` keeps its meaning.
 - **Continuity.** The extractor state runs continuously across folds (it was built once, causally),
-  so no swarm fold starts cold. CUSUM and OFI keep today's fresh-per-slice behaviour, because their
-  "extractor" is the bars themselves.
+  so no swarm fold starts cold. The removed CUSUM and OFI kept the fresh-per-slice behaviour, because their
+  "extractor" was the bars themselves.
 - **Slice edges.** Each slice starts flat. A position still open at the end of a slice closes as
   `EndOfSimulation`.
 
