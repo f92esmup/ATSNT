@@ -1,7 +1,8 @@
 //! The one place strategies are registered.
 //!
-//! Adding a strategy to ATSNT means implementing [`OptimizableStrategy`] and adding **one line**
-//! to the `register_strategies!` call below. That line makes it selectable by name (and alias)
+//! Adding a strategy to ATSNT means implementing [`OptimizableStrategy`] in a module under its market
+//! folder, with one `pub mod` line in that folder's `mod.rs`, and adding **one line** to the
+//! `register_strategies!` call below. That line makes it selectable by name (and alias)
 //! in the backtest CLI and the HPO runner, loadable from deployment artifacts, and puts it under the generic contract test suite
 //! (`crates/strategies/src/contract.rs`, compiled only in tests).
 //!
