@@ -69,3 +69,9 @@ Inline for every task. The units run one after another and none has a Writer rea
   3. Deletion of `docs/stale-architecture-residue` on origin and locally.
   4. U1 and U6 stay pending, owned by the user (HANDOFF §12). The agent takes no action on either.
   Risk: none (documentation only; the deleted branch's content is already in `main`).
+- L19 (2026-11-07, user, verbatim: "Todo lo que te corresponda termínalo. Vale? Porque quiero empezar a desarrollar una nueva estrategia."). Steps:
+  1. The CUSUM and OFI residue was checked against the code before any edit. CodeGraph lists `SwarmConsensusStrategy` as the only registered strategy, and `CusumFilter` has no caller outside `crates/domain/src/analytics/`. No `dollar_bars_cusum` or `order_flow_imbalance` symbol remains; `order_flow_imbalance_accumulation` is a test name in `sampling.rs`. Commit `9cc47e0` rewrites the present-tense references in `docs/strategy/03-swarm-consensus.md` and `docs/architecture/05-monte-carlo-and-telemetry.md`. The golden-test citation (ODD T1.2) keeps its record in `odd/tasks/swarm-consensus.md`.
+  2. Commit `993f630` updates HANDOFF §11 and U5: the AGENTS.md change is approved (2026-11-07) and sits in `docs/agents-md-rules` (`3dbf0e8`), pending its merge into `main`. U1 and U6 stay pending with the user (§12).
+  3. Not finished, and not the agent's to finish: the `.env.example` check (the permission settings deny reading the file, so S5's check stays open; the user can run `grep -n -i -E "gcp|google|bigquery|gcs" .env.example`); the trailer decision (HANDOFF.md:463); the HPO window (HANDOFF.md:464); and a gate A run at the account's fees, which is not in the record.
+  4. Waiting for the user's approval: the push of the three new commits on `docs/agents-md-rules`, and the PR and merge of that branch into `main`.
+  Risk: none (documentation only).
