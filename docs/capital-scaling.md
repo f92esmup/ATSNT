@@ -30,8 +30,9 @@ code today sizes perpetual futures (`RiskPolicy::size_order`, `crates/domain/src
 
 ## Fees decide the strategy
 
-A round trip costs 0.65 % of the notional when the take profit exits as a maker, and 0.80 % when
-the stop loss exits as a taker, at the base tier (plan v4, §2.6). Costs are paid on the whole
+A round trip costs 1.20 % of the notional when the take profit exits as a maker, and 1.60 % when
+the stop loss exits as a taker, at the Kraken Pro entry tier the owner reported on 2026-11-07
+(plan v4, §2.6). Costs are paid on the whole
 notional, so the strategy must clear them trade by trade before any sizing question matters. The
 economics screen measures exactly that.
 

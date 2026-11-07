@@ -251,14 +251,14 @@ impl BacktestConfig {
         Ok(())
     }
 
-    /// Spot configuration with the Kraken base-tier fees (0.25% maker, 0.40% taker; plan v4 D11),
+    /// Spot configuration with the Kraken Pro entry-tier fees (0.40% maker, 0.80% taker),
     /// 1x leverage, 0% funding and 0% maintenance margin.
     pub fn spot() -> Self {
         Self {
             market_type: MarketType::Spot,
             initial_capital: dec!(10_000),
-            maker_fee_pct: dec!(0.0025),
-            taker_fee_pct: dec!(0.0040),
+            maker_fee_pct: dec!(0.0040),
+            taker_fee_pct: dec!(0.0080),
             slippage_pct: dec!(0.0005),
             risk_per_trade_pct: dec!(0.01),
             max_daily_drawdown_pct: dec!(0.05),
@@ -313,8 +313,8 @@ mod tests {
         assert_eq!(spot.max_leverage, Decimal::ONE);
         assert_eq!(spot.funding_rate_pct, Decimal::ZERO);
         assert_eq!(spot.maintenance_margin_rate, Decimal::ZERO);
-        assert_eq!(spot.maker_fee_pct, dec!(0.0025));
-        assert_eq!(spot.taker_fee_pct, dec!(0.0040));
+        assert_eq!(spot.maker_fee_pct, dec!(0.0040));
+        assert_eq!(spot.taker_fee_pct, dec!(0.0080));
         assert!(spot.validate().is_ok());
 
         let mut invalid_leverage = spot;

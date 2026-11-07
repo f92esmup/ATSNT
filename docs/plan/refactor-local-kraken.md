@@ -24,7 +24,7 @@
 
 **Objetivo.** Solo si la prueba económica pasa: un bot local que opera swarm en spot de Kraken con pares EUR, sin apalancamiento, sin Kraken Prop y sin GCP.
 
-**Lo que este plan no hace.** No crea ventaja. La ida y vuelta en spot cuesta entre 0,65 % y 0,80 % del nocional, unas 8 a 9 veces la del clasificador en perpetuos (sección 2.6). La prueba probablemente fallará. Si falla, se para todo lo que es ejecución y el siguiente paso es investigar la estrategia.
+**Lo que este plan no hace.** No crea ventaja. La ida y vuelta en spot cuesta entre 1,20 % y 1,60 % del nocional, unas 16 a 17 veces la del clasificador en perpetuos (sección 2.6). La prueba probablemente fallará. Si falla, se para todo lo que es ejecución y el siguiente paso es investigar la estrategia.
 
 **Orden de trabajo.**
 
@@ -47,7 +47,7 @@
 | D8 | Parquet para trades, libro y EURUSD; SQLite para el registro y el ledger | Sin servidor ni cloud |
 | D9 | Telegram, Linux (Omarchy), unidad systemd de usuario y puerto `Clock` | Sin cambios respecto a la v3.2 |
 | D10 | Base de riesgo = `min(capital operativo, equity EUR)`. Sin apalancamiento, el tope de nocional es igual a la base | Capital propio; se deja como parámetro hasta que la prueba pase |
-| D11 | Comisiones de la cuenta, leídas con `TradeVolume` (con `pair`). Hasta leerlas, se usa el tramo base de tu captura: 0,25 % maker / 0,40 % taker, para 0 a 50 K USD de volumen | `AssetPairs` ya no trae comisiones. Pueden bajar con volumen; no se asume ninguna bajada |
+| D11 | Comisiones de la cuenta, leídas con `TradeVolume` (con `pair`). Hasta leerlas, se usan las que indicaste el 2026-11-07: tramo de entrada de Kraken Pro, 0,40 % maker / 0,80 % taker | `AssetPairs` ya no trae comisiones. Pueden bajar con volumen; no se asume ninguna bajada |
 | D12 | La prueba usa datos de perpetuos de Binance como proxy de precio, con esa limitación explícita | Es lo único disponible sin Kraken |
 
 ## 2. Hechos verificados
@@ -63,9 +63,8 @@ Según la página de Kraken Prop que citaste, las cuentas de evaluación y fonde
 
 ### 2.3 Comisiones
 
-- Spot, tramo base (captura del usuario): 0,25 % maker / 0,40 % taker, para 0 a 50 K USD de volumen.
-- Las fuentes web daban 0,40 % / 0,80 % con un escalón a 2,5 K USD. No coinciden con tu captura, que es la de tu cuenta.
-- El plan v3.2 usaba esas cifras y queda corregido aquí.
+- Spot, tramo de entrada de Kraken Pro, según tu cuenta (indicado el 2026-11-07): 0,40 % maker / 0,80 % taker.
+- Este plan (v4) había fijado 0,25 % / 0,40 % desde tu captura. Esas cifras quedan sustituidas. Las páginas públicas de Kraken Pro dan 0,40 % / 0,80 % en el tramo de entrada; algunas fuentes antiguas dan 0,25 % / 0,40 %.
 
 ### 2.4 Modos del swarm
 
@@ -87,15 +86,15 @@ El artefacto clasificador ya es solo largo. Pasar a largo no le quita señales. 
 
 Con entradas de mercado, como en el motor:
 
-| Tramo de la operación | Perpetuo, clasificador | Spot Kraken (captura) |
+| Tramo de la operación | Perpetuo, clasificador | Spot Kraken (cuenta) |
 |---|---|---|
-| Entrada (siempre taker) | 0,05 % | 0,40 % |
-| Salida por take profit (maker si descansa) | 0,02 % | 0,25 % |
-| Salida por stop loss (taker) | 0,05 % | 0,40 % |
-| **Ida y vuelta por take profit** | **0,07 %** | **0,65 %** |
-| **Ida y vuelta por stop loss** | **0,10 %** | **0,80 %** |
+| Entrada (siempre taker) | 0,05 % | 0,80 % |
+| Salida por take profit (maker si descansa) | 0,02 % | 0,40 % |
+| Salida por stop loss (taker) | 0,05 % | 0,80 % |
+| **Ida y vuelta por take profit** | **0,07 %** | **1,20 %** |
+| **Ida y vuelta por stop loss** | **0,10 %** | **1,60 %** |
 
-El coste es 9 veces el perpetuo en take profit y 8 veces en stop loss.
+El coste es 17 veces el perpetuo en take profit y 16 veces en stop loss.
 
 ### 2.7 Datos
 
@@ -329,7 +328,7 @@ En todas las fases: `cargo fmt --check`, `cargo clippy --all-targets -- -D warni
 | Riesgo | Impacto | Mitigación |
 |---|---|---|
 | El swarm solo largo no gana después de comisiones de spot | Alto | Fase 1 antes de cualquier ejecución |
-| Comisiones de spot de 0,25 % / 0,40 % | Alto | Salidas maker cuando descansan; volumen; medir cada operación |
+| Comisiones de spot de 0,40 % / 0,80 % | Alto | Salidas maker cuando descansan; volumen; medir cada operación |
 | Con solo largos, pocas señales | Medio | La variante de control lo mide |
 | La prueba usa datos de perpetuos | Medio | Limitación explícita; repetir con datos de Kraken antes de decidir |
 | Clave de API comprometida | Alto | Sin permiso de retirada; `.env` con permisos `600` |
@@ -338,7 +337,7 @@ En todas las fases: `cargo fmt --check`, `cargo clippy --all-targets -- -D warni
 
 ## 8. Fuentes
 
-- Comisiones spot (captura del usuario): tramo base de Kraken Pro, 0,25 % maker / 0,40 % taker.
+- Comisiones spot (indicadas por el usuario el 2026-11-07): tramo de entrada de Kraken Pro, 0,40 % maker / 0,80 % taker.
 - Datos históricos y Trades REST: https://docs.kraken.com/exchange/guides/general/historical-data · https://docs.kraken.com/api/docs/rest-api/get-recent-trades/
 - WebSocket v2 spot, canales trade y book: https://docs.kraken.com/api/docs/websocket-v2/trade · https://docs.kraken.com/api/docs/websocket-v2/book · https://docs.kraken.com/api/docs/guides/spot-ws-book-v2/
 - Autenticación spot: https://docs.kraken.com/api/docs/guides/spot-rest-auth/ · https://docs.kraken.com/exchange/guides/websockets/authentication

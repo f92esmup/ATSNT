@@ -139,7 +139,7 @@ Ramas remotas existentes (`git ls-remote --heads origin`):
 | Venue objetivo: Kraken spot, EUR, solo largo, sin apalancamiento, sin funding | v4 D2, D3, D4, D6 |
 | Kraken Prop: órdenes manuales, fuera del sistema | Respuesta del usuario sobre la página de Kraken Prop |
 | Capital de referencia 5.000 € (`operating_capital_eur`, se fija en GP) | Respuesta del usuario; `docs/capital-scaling.md` |
-| Comisiones base 0,25 % maker / 0,40 % taker (captura del usuario). Se leerán de `TradeVolume` al llegar a WP-13 | v4 D11 |
+| Comisiones de entrada 0,40 % maker / 0,80 % taker, indicadas por el usuario el 2026-11-07 (la captura de la v4 daba 0,25 % / 0,40 %). Se leerán de `TradeVolume` al llegar a WP-13 | v4 D11 |
 | GA es una refutación: ventana feb–sep 2026 sobre proxy de perpetuos; umbral propuesto de 50 operaciones | Respuesta del usuario sobre la ventana; plan aprobado |
 | GB exige 12 meses de cinta de Kraken con walk-forward y DSR | Respuesta del usuario |
 | Umbral de 50 operaciones para la prueba A | Aprobado por el usuario el 2026-10-31 (U4) |

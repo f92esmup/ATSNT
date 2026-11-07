@@ -14,7 +14,7 @@ truth; this page summarises them.
   (`scripts/gate_a.sh`). Unused configs and dependencies are gone. The metrics moved to `domain`. Clippy denies `unwrap` and
   `expect` outside tests. The run recorder writes to SQLite with `--record`. The GCP scripts are
   retired and the history is in [`archive`](archive/README.md).
-- **Cleanup, ready to merge (`refactor/cleanup-local-venues`).** The Binance execution path, the paper, live and parity binaries, and `--bnb-discount` are removed (L3N, commit `940e4de`). The swarm sits under `usdm_perpetual/`, and the spot fees are the Kraken base tier.
+- **Cleanup, ready to merge (`refactor/cleanup-local-venues`).** The Binance execution path, the paper, live and parity binaries, and `--bnb-discount` are removed (L3N, commit `940e4de`). The swarm sits under `usdm_perpetual/`, and the spot fees are the Kraken Pro entry tier.
 
 ## Gates
 
@@ -53,8 +53,8 @@ GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until
 
 ## Known gaps
 
-- Fees are the base tier of the owner's screenshot: 0.25 % maker and 0.40 % taker. `TradeVolume`
-  replaces them when WP-13 lands.
+- Fees are the entry tier the owner reported on 2026-11-07: 0.40 % maker and 0.80 % taker. An
+  earlier screenshot showed 0.25 % and 0.40 %. `TradeVolume` replaces them when WP-13 lands.
 - Simulation fidelity (queue position, walking the book) is WP-15.
 - Spot accounting is not modelled as a ledger: there is one cash balance (`equity`), no EUR balances
   and no fee tiers (WP-11). `ExecutionCore::spot_balances` derives the base and free quote from the
