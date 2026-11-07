@@ -63,3 +63,9 @@ Inline for every task. The units run one after another and none has a Writer rea
   4. Trailers, explained to the user. The global CLAUDE.md forbids AI attribution in commits, and the harness reminder says that file takes precedence. Commits carry no trailer. HANDOFF §8.1 still asks for two trailers, and HANDOFF.md:463 keeps the decision pending.
   5. U1 and U6 are not yet interpreted; one clarifying question is open with the user. U1 is owner-only (Kraken key without withdrawal, `.env` at 600, new Telegram token), so the agent does not handle it. U6 is the Kraken verification level (rate limits, WP-13, on hold).
   Risk: none (documentation only).
+- L18 (2026-11-07, user, verbatim: "Si, subir y si, botar. Tmb dejamos u1 y u6 como pendientes."). It answers two approvals asked in the message above: "Sí, subir" for `docs/agents-md-rules`, and "Sí, borrar" for `docs/stale-architecture-residue`, locally and on origin. Steps, in order:
+  1. Before the deletion, `git cherry -v main docs/stale-architecture-residue` reports `1f0cd7f` as already applied (leading minus), and `git diff --stat docs/stale-architecture-residue main` is empty. The rebase merge gave the same tree a new SHA (`a681a62`), so the local branch is removed with `-D` after this check.
+  2. Push of `docs/agents-md-rules` (`3dbf0e8`, `ef65cf5`, and this entry) to origin. No pull request: HANDOFF §8.1 says "Sin PR sin petición".
+  3. Deletion of `docs/stale-architecture-residue` on origin and locally.
+  4. U1 and U6 stay pending, owned by the user (HANDOFF §12). The agent takes no action on either.
+  Risk: none (documentation only; the deleted branch's content is already in `main`).
