@@ -706,7 +706,8 @@ mod tests {
     #[test]
     fn the_swarm_module_has_no_floating_point_tokens() {
         let forbidden = [concat!("f", "32"), concat!("f", "64")];
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/swarm_consensus");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/usdm_perpetual/swarm_consensus");
         let mut scanned = 0;
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
