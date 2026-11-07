@@ -444,7 +444,7 @@ cortacircuitos en 1):
     `crates/backtest/src/portfolio_engine.rs`.
   - Hasta resolverlo, `main` no tiene cliente de Kraken. Esa rama es la única fuente de ese código.
 - `AGENTS.md`: cambios aprobados el 2026-11-07 (ejemplo de Binance a Kraken, reglas R1 a R7, lint).
-  En la rama `docs/agents-md-rules` (`3dbf0e8`, subida a origin), pendiente de fusionar en `main` (§12, U5).
+  En la rama `docs/agents-md-rules` (`3dbf0e8`, subida a origin), fusionada en `main` con la PR de esa rama el 2026-11-07 (§12, U5).
 - Restos de CUSUM en `docs/architecture/04` y `05`, con banner. `06` y `08` están archivados. Conviene
   reescribir 04 y 05 en WP-14 a WP-16.
 - `docs/architecture/03`: pendiente de reescribir con Kraken (WP-09 para datos; WP-14 para ejecución).
@@ -472,7 +472,7 @@ cortacircuitos en 1):
 - **U2:** comprobado el 2026-10-31 desde el entorno del agente (responde 200). El entorno del usuario puede diferir (§5.1, punto 2).
 - **U3:** ejecutada por el agente el 2026-10-31 (`docs/plan/resultado-prueba-a.md`).
 - **U4:** cerrado. 50 operaciones aprobadas por el usuario el 2026-10-31.
-- **U5:** cambios aprobados el 2026-11-07. Están en `docs/agents-md-rules` (`3dbf0e8`); falta fusionarlos en `main`.
+- **U5:** cambios aprobados el 2026-11-07 y fusionados en `main` con la PR de `docs/agents-md-rules` (`3dbf0e8`).
 - **U6:** nivel de verificación de Kraken (límites de tasa, WP-13).
 - **U7:** hecho el 2026-11-07. El tag `archive/kraken-eur-spot-portfolio` está en origin (`0e7bd98`, que apunta a `b35e929`) y la rama remota `feat/kraken-eur-spot-portfolio` se borró tras la confirmación expresa del usuario (§11). Cada push a `main` y cada borrado remoto siguen pidiendo confirmación expresa (§3).
 
