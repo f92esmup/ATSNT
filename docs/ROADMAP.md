@@ -56,6 +56,9 @@ GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until
 - Fees are the base tier of the owner's screenshot: 0.25 % maker and 0.40 % taker. `TradeVolume`
   replaces them when WP-13 lands.
 - Simulation fidelity (queue position, walking the book) is WP-15.
-- Spot accounting is not modelled: one cash balance, no base or EUR balances, no fee tiers and no
-  minimum order size (WP-11). There is no spread, latency defaults to 0 ms, and maker fills ignore
-  queue priority.
+- Spot accounting is not modelled as a ledger: there is one cash balance (`equity`), no EUR balances
+  and no fee tiers (WP-11). `ExecutionCore::spot_balances` derives the base and free quote from the
+  position, but no engine path reads it. The lot and notional filters are one global set of defaults
+  (0.001 minimum quantity and step, 5 minimum notional), not per-pair rules. An entry the margin rule
+  cannot fund is dropped without a rejection count (`execution_core.rs:733-735`). There is no spread,
+  latency defaults to 0 ms, and maker fills ignore queue priority.
