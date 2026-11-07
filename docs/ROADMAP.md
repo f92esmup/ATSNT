@@ -62,3 +62,13 @@ GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until
   (0.001 minimum quantity and step, 5 minimum notional), not per-pair rules. An entry the margin rule
   cannot fund is dropped without a rejection count (`execution_core.rs:733-735`). There is no spread,
   latency defaults to 0 ms, and maker fills ignore queue priority.
+- The spot defaults (`BacktestConfig::spot()`: 1 % risk, 1x leverage) size an entry whose stop is at
+  or below 1 % to the whole balance, so its fee and slippage do not fit, except through lot rounding.
+  The entry is dropped with no rejection count (`execution_core.rs:733-735`) and the report prints
+  `Rejected Signals: none`. Until rejections are counted, a run with no trades under these defaults
+  is a sizing artefact, not a strategy result.
+- Bar and tick fills disagree on breaker refusals. On the same synthetic tape at `--risk-per-trade`
+  0.001, the bar path refuses 346 signals on `DailyHalt` and makes 118 trades. The tick path refuses
+  none and makes 123 trades, with max drawdown 9.81 % against 9.88 %. The cause is not traced: either
+  the tick path does not count breaker refusals, or the breaker does not fire there. Check before
+  real money.
