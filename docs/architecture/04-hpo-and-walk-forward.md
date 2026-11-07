@@ -1,5 +1,7 @@
 # High-Performance Hyperparameter Optimization (HPO) & Walk-Forward Specification
 
+> **Status (2026-11-07):** two statements describe removed code. The start-up refusal in the deployment-gate subsection was applied by `paper_trading` and `live_trading`, which L3N removed (commit `940e4de`). The CUSUM strategies in section 4.2 were removed earlier (see `docs/archive/strategy/`).
+
 ## 1. Objective & Quantitative Philosophy
 To establish a statistically rigorous, highly parallelized Hyperparameter Optimization (HPO) engine in Rust, capable of finding robust parameter configurations without succumbing to the **Backtest Overfitting Problem** (Marcos López de Prado, *AFML* Chapters 11 & 14).
 
@@ -87,10 +89,10 @@ Only **eligible** trials (section 2.4) get a p-value and enter $V[\widehat{\text
 
 $N$ still counts every candidate tried, because the selection bias comes from all of them.
 
-A candidate is significant at $p < 0.05$. Significance does not change the ranking. The winner's significance is printed, stored in the artifact scorecard and recorded in BigQuery.
+A candidate is significant at $p < 0.05$. Significance does not change the ranking. The winner's significance is printed, stored in the artifact scorecard.
 
 #### Deployment gate
-`paper_trading` and `live_trading` refuse at start-up an artifact whose scorecard shows no deployable edge (`HpoScorecard::deployment_blocker`):
+`paper_trading` and `live_trading` refused at start-up (until L3N) an artifact whose scorecard shows no deployable edge (`HpoScorecard::deployment_blocker`):
 - The scorecard records no eligible fold (`min_fold_trades` = 0): it predates the minimum-trades rule, or the search ran with `--min-trades-per-fold 0`. Re-run the HPO with the minimum.
 - `fitness` <= 0: no positive out-of-sample edge.
 - The Deflated Sharpe Ratio is not significant.

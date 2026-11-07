@@ -1,6 +1,6 @@
 # Market Data Adapters & Binance Ingestion Specification
 
-> **Status (2026-10-31):** describes the Binance ingestion. The Binance data path is replaced by the Kraken backfill (WP-09) and the Binance execution path by the Kraken gateway (WP-14). The tape store and the ports are current.
+> **Status (2026-11-07):** describes the Binance ingestion. The WebSocket stream in section 2.2 and the live trading mode in section 4 were removed in L3N (commit `940e4de`). The historical `fetch_data` path stays until the Kraken backfill replaces it (WP-09). The tape store and the ports are current.
 
 ## 1. Architectural Role
 In accordance with Hexagonal Architecture (Ports and Adapters), the contracts live in the `ports` crate (`crates/ports`, depending only on `domain`) and the adapters crate (`crates/adapters`) contains their concrete implementations. The dependency rule is enforced by `crates/backtest/tests/architecture_contract.rs`. The core trading engine and domain logic remain completely decoupled from network protocols, file formats, and broker-specific APIs.

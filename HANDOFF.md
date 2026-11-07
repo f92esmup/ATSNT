@@ -4,6 +4,8 @@ Fecha de cierre: 2026-10-31. Este documento es para la siguiente IA (o persona) 
 trabajo sin acceso al chat donde se tomaron las decisiones. Es autocontenido: el plan aprobado vive
 fuera del repositorio y aquí queda resumido.
 
+Actualizado el 2026-11-07: los estados de §1, §5.2, §7 y §11 reflejan la limpieza L3N (commit `940e4de`).
+
 ## 0. Cómo usar este documento
 
 - Si solo lees una sección, lee la **§5 (siguientes pasos)**.
@@ -41,11 +43,10 @@ fuera del repositorio y aquí queda resumido.
 
 - **No hay datos.** El repositorio no tiene `data/`. Los archivos mensuales de BTCUSDT los descarga
   el usuario con `fetch_data`. El 2026-10-31 el agente descargó feb–sep de 2026 en el worktree `claude/prueba-a`; esos archivos no están versionados.
-- **No hay cliente de Kraken en `main`.** Sí existe uno en la rama remota
-  `feat/kraken-eur-spot-portfolio`, que no fusiona limpio con el refactor (§3 y §11).
+- **No hay cliente de Kraken en `main`.** Sí existe uno en el tag `archive/kraken-eur-spot-portfolio`
+  (antes rama remota `feat/kraken-eur-spot-portfolio`), que no fusiona limpio con el refactor (§3 y §11).
 - **No hay claves** de ningún exchange en el repositorio, ni deben añadirse.
-- **No hay ejecución en Kraken.** `paper_trading` y `live_trading` hablan con Binance. `live_trading`
-  envía órdenes reales si recibe claves: no lo ejecutes con claves reales.
+- **No hay ejecución en ningún exchange.** `paper_trading`, `live_trading` y `parity_check`, con la ruta de ejecución de Binance, se borraron en L3N (commit `940e4de`).
 
 ### 1.4 Fases y compuertas
 
@@ -53,18 +54,18 @@ fuera del repositorio y aquí queda resumido.
 |---|---|---|
 | G0: plan aprobado | Hecho | — |
 | GA: prueba económica (refutación) | **NO PASA** (2026-10-31, `docs/plan/resultado-prueba-a.md`) | Ejecutada por el agente en `claude/prueba-a` |
-| GB: 12 meses de Kraken, walk-forward y DSR (WP-08 a WP-12) | No empezada | Usuario y agente, tras GA |
-| GP: paper de 4 semanas y dinero real por tramos (WP-13 a WP-17) | No empezada | Usuario y agente, tras GB |
+| GB: 12 meses de Kraken, walk-forward y DSR (WP-08 a WP-12) | Parada: GA no pasó | Usuario y agente, tras GA |
+| GP: paper de 4 semanas y dinero real por tramos (WP-13 a WP-17) | Parada: GA no pasó | Usuario y agente, tras GB |
 
 Fases de la v4 (`docs/plan/refactor-local-kraken.md` §4):
 
 - Fase 0 (higiene): pendiente del usuario (WP-00).
-- Fase 1 (prueba económica): GA ejecutada, NO PASA. Pendiente la decisión sobre L3N (§5.2).
-- Fase 2 (grabadora de Kraken): no empezada. Empieza en cuanto GA pase.
+- Fase 1 (prueba económica): GA ejecutada, NO PASA. L3N ejecutada en `refactor/cleanup-local-venues` (commit `940e4de`), pendiente de fusión en `main`.
+- Fase 2 (grabadora de Kraken): parada, porque GA no pasó.
 - Fase 3 (consolidación hexagonal): hecha, salvo 3.9 (Money y Currency, aplazado a WP-11), SimClock
   (no añadido) y `walk_forward.rs` (se queda en backtest).
-- Fase 4 (borrado): parte hecha. Pendiente: la ruta de ejecución de Binance, que se borra después de
-  GA (§5.2).
+- Fase 4 (borrado): la ruta de ejecución de Binance se borró en `refactor/cleanup-local-venues`
+  (commit `940e4de`). Sigue pendiente la decisión sobre el camino de perpetuos (§5.2).
 - Fases 5 a 9: no empezadas.
 
 ## 2. Historial de commits
@@ -192,7 +193,7 @@ cortacircuitos en 1):
 
 **Si NO PASA — L3N:**
 
-*Estado (2026-10-31): veredicto NO PASA. Pendiente la confirmación del usuario. No se ha borrado nada.*
+*Estado (2026-11-07): veredicto NO PASA. El usuario aprobó el plan de limpieza. Ejecutada en `refactor/cleanup-local-venues` (commit `940e4de`); pendiente de fusión en `main`.*
 
 - Borrar la ruta de ejecución y streaming de Binance: `crates/adapters/src/binance_gateway.rs` y
   `binance_gateway/`, `binance_auth.rs` (si solo lo usan el gateway y los streams),
@@ -203,8 +204,8 @@ cortacircuitos en 1):
 - **Conservar** el descargador: `fetch_data`, `binance_fetcher`, `fetch_plan`, `binance_csv`,
   `binance_funding` y `test_http.rs`. La investigación de estrategia necesita historia.
 - Quitar `--bnb-discount` de `backtest` y `run_hpo`. `--spot` se mantiene hasta WP-11.
-- Archivar `docs/architecture/06` y `08`.
-- Decidir con el usuario qué pasa con la rama de Kraken (§11).
+- Archivar `docs/architecture/06` y `08`: hecho, en `docs/archive/architecture/`.
+- Rama de Kraken: archivada como tag `archive/kraken-eur-spot-portfolio` (commit `b35e929`). Borrar la rama remota espera la confirmación del usuario (§11).
 - Pendiente de decisión: el camino de perpetuos (`crates/domain/src/futures.rs` y el motor de
   perpetuos).
 
@@ -303,9 +304,9 @@ cortacircuitos en 1):
 | `run_hpo` | backtest | Se queda. `--record <PATH>` |
 | `calibrate_feeds` | backtest | Se queda (la usa GB) |
 | `prune_swarm` | backtest | Se queda |
-| `parity_check` | backtest | Binance. Se reescribe en WP-15 (o se borra en L3N) |
-| `paper_trading` | backtest | Binance. Se reemplaza en WP-15 |
-| `live_trading` | backtest | Binance. Se reemplaza en WP-14. **No usar con claves reales** |
+| `parity_check` | backtest | Borrado en L3N (commit `940e4de`) |
+| `paper_trading` | backtest | Borrado en L3N (commit `940e4de`) |
+| `live_trading` | backtest | Borrado en L3N (commit `940e4de`). El gateway de Kraken llega en WP-14 |
 | `fetch_data` | adapters | Descargador de Binance. Se queda hasta WP-09 |
 
 ### 7.3 Configs (`configs/`)
@@ -338,8 +339,8 @@ cortacircuitos en 1):
 - Vigente: `README.md`, `docs/ROADMAP.md`, `docs/capital-scaling.md`,
   `docs/architecture/13-run-registry.md`, `docs/plan/*` (v4 e implementación),
   `docs/strategy/03-swarm-consensus.md`, `docs/research/01-swarm-consensus-optimization-logbook.md`.
-- Con banner de estado, porque su texto es histórico en parte: `docs/architecture/03`, `05`, `06`,
-  `08`. `04` conserva referencias históricas a CUSUM y BigQuery.
+- Con banner de estado, porque su texto es histórico en parte: `docs/architecture/03`, `04` y `05`.
+  `06` y `08` están en `docs/archive/architecture/` desde L3N.
 - Archivo (`docs/archive/`): estrategias retiradas, universo de portfolio, diseño de dashboard que no
   se implementó, unidades de systemd antiguas y el roadmap previo.
 - `odd/`: histórico de tareas, con un README que lo advierte.
@@ -377,7 +378,7 @@ cortacircuitos en 1):
 ### 8.3 Seguridad
 
 - Ningún secreto en el repositorio. `.env` está en `.gitignore`. `.env.example` solo lleva marcadores.
-- No ejecutar `live_trading` ni `paper_trading` con claves reales: siguen hablando con Binance.
+- No hay binarios que envíen órdenes: `live_trading` y `paper_trading` se borraron en L3N (commit `940e4de`).
 - Antes de publicar: escanear el contenido en busca de claves y tokens (patrones de AWS, claves PEM,
   tokens de Slack y asignaciones largas de `api_key`, `secret` o `token`).
 
@@ -444,15 +445,14 @@ cortacircuitos en 1):
   - Hasta resolverlo, `main` no tiene cliente de Kraken. Esa rama es la única fuente de ese código.
 - `AGENTS.md`: cambios propuestos (ejemplos de Binance a Kraken, listado de reglas R1 a R7, lint).
   Pendiente de aprobación (§12, U5).
-- Restos de CUSUM y BigQuery en `docs/architecture/04`, `05`, `06` y `08`. Tienen banner, pero conviene
-  reescribirlos en WP-14 a WP-16.
+- Restos de CUSUM en `docs/architecture/04` y `05`, con banner. `06` y `08` están archivados. Conviene
+  reescribir 04 y 05 en WP-14 a WP-16.
 - `docs/architecture/03`: pendiente de reescribir con Kraken (WP-09 para datos; WP-14 para ejecución).
 - `docs/architecture/02`: la caja del diagrama pasó de `[ Portfolio ]` a `[ Position  ]`. Falta revisar el
   resto del texto en la próxima pasada de documentación.
-- `live_trading.rs`: el mensaje de cortacircuitos mensual no lleva hora (solo lo lleva `main.rs`).
-- `--spot` y `--bnb-discount` en `backtest` y `run_hpo`: referencias a Binance. Se quitan en L3N (`--spot`
-  se mantiene hasta WP-11).
-- `parity_check` se autodescubre por Cargo porque no tiene bloque `[[bin]]`. Se reescribe en WP-15.
+- `live_trading.rs` se borró en L3N. Su mensaje de cortacircuitos mensual sin hora desaparece con él (solo lo lleva `main.rs`).
+- `--bnb-discount` se quitó de `backtest` y `run_hpo` en L3N (commit `940e4de`). `--spot` se mantiene hasta WP-11.
+- `parity_check` se borró en L3N (commit `940e4de`).
 - `SqliteRunRecorder::in_memory()` no tiene llamadores. Se mantiene como API pública para pruebas y
   ejecuciones efímeras.
 - `walk_forward.rs` usa f64 y se queda en backtest. Si algún día se mueve a domain, convertir a `Decimal`
@@ -464,7 +464,7 @@ cortacircuitos en 1):
 - Ventana del HPO del artefacto: confirmar con el historial del usuario (§10, punto 1).
 - `crates/adapters/src/binance_auth.rs`: el test contiene el vector oficial de prueba de firma HMAC de la
   documentación de Binance (valores de ejemplo públicos). Ya estaba en `main` antes de este trabajo. Un
-  escáner de secretos los marcará: es esperado. Se eliminan con el resto de la ruta de Binance (L3N).
+  escáner de secretos los marcará: es esperado. Se eliminaron con el resto de la ruta de Binance (L3N, commit `940e4de`).
 
 ## 12. Acciones pendientes del usuario
 
@@ -474,10 +474,9 @@ cortacircuitos en 1):
 - **U4:** cerrado. 50 operaciones aprobadas por el usuario el 2026-10-31.
 - **U5:** decidir sobre los cambios propuestos a `AGENTS.md`.
 - **U6:** nivel de verificación de Kraken (límites de tasa, WP-13).
-- **U7:** decidir cómo reconciliar la rama `feat/kraken-eur-spot-portfolio` con el refactor, o si se
-  descarta (§11).
+- **U7:** confirmar el push del tag `archive/kraken-eur-spot-portfolio` y el borrado de la rama remota `feat/kraken-eur-spot-portfolio` (§11). El usuario aprobó archivar y borrar; cada push a `main` y cada borrado remoto piden confirmación expresa (§3).
 
-**L3N (2026-10-31):** pendiente la confirmación del usuario para borrar la ruta de ejecución de Binance (§5.2). Veredicto NO PASA.
+**L3N (2026-11-07):** aprobada por el usuario y ejecutada en `refactor/cleanup-local-venues` (commit `940e4de`), pendiente de fusión en `main`. Veredicto NO PASA.
 
 Kraken Prop queda fuera del sistema: sus órdenes son manuales.
 

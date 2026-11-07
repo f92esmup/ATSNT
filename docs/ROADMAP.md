@@ -14,16 +14,19 @@ truth; this page summarises them.
   (`scripts/gate_a.sh`). Unused configs and dependencies are gone. The metrics moved to `domain`. Clippy denies `unwrap` and
   `expect` outside tests. The run recorder writes to SQLite with `--record`. The GCP scripts are
   retired and the history is in [`archive`](archive/README.md).
+- **Cleanup, ready to merge (`refactor/cleanup-local-venues`).** The Binance execution path, the paper, live and parity binaries, and `--bnb-discount` are removed (L3N, commit `940e4de`). The swarm sits under `usdm_perpetual/`, and the spot fees are the Kraken base tier.
 
 ## Gates
 
 | Gate | What it decides | Who runs it | Status |
 |---|---|---|---|
-| GA | The economics screen: spot costs on the Binance perpetual proxy, long only, February to September 2026. It is a refutation: a positive result does not pass. | The owner, with `scripts/gate_a.sh` | Pending |
-| GB | Whether the strategy survives twelve months of Kraken data under walk-forward and DSR (WP-08 to WP-12) | The owner and the agent | Not started; needs GA and the Kraken history depth |
-| GP | Four weeks of paper trading, then real money only in tranches (WP-13 to WP-17) | The owner and the agent | Not started |
+| GA | The economics screen: spot costs on the Binance perpetual proxy, long only, February to September 2026. It is a refutation: a positive result does not pass. | The owner, with `scripts/gate_a.sh` | **NO PASA** (2026-10-31, `docs/plan/resultado-prueba-a.md`) |
+| GB | Whether the strategy survives twelve months of Kraken data under walk-forward and DSR (WP-08 to WP-12) | The owner and the agent | Stopped: GA did not pass, so plan v4 stops the Kraken route |
+| GP | Four weeks of paper trading, then real money only in tranches (WP-13 to WP-17) | The owner and the agent | Stopped with GA |
 
-## Open work
+## Open work (on hold)
+
+GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until the owner decides otherwise.
 
 - **WP-00, owner setup.** A Kraken spot key with no withdrawal rights. `.env` with mode 600. Allow
   `docs.kraken.com` in the network policy: the signing and checksum vectors are read from it.
@@ -33,10 +36,11 @@ truth; this page summarises them.
 - **WP-13 to WP-17.** Request signing, the private REST and WebSocket clients, the spot gateway,
   simulation fidelity (WP-15), local operation, and paper and real trading in tranches.
 
-- **Kraken branch to reconcile.** `feat/kraken-eur-spot-portfolio` on the remote has five commits
-  with an earlier Kraken WebSocket client (`kraken_ws.rs`), six EUR pair configs and a sweep CLI.
-  They do not merge with the refactor: seven files conflict, all of them removed by it. Decide how
-  to reconcile them before WP-08. See [`HANDOFF.md`](../HANDOFF.md).
+- **Kraken branch, archived.** `feat/kraken-eur-spot-portfolio` is kept as the tag
+  `archive/kraken-eur-spot-portfolio` (commit `b35e929`). It has five commits with an earlier Kraken
+  WebSocket client (`kraken_ws.rs`), six EUR pair configs and a sweep CLI. It does not merge with the
+  refactor: seven files conflict, all of them removed by it. Deleting the remote branch waits for the
+  owner's confirmation. See [`HANDOFF.md`](../HANDOFF.md).
 
 ## Decisions
 
@@ -44,12 +48,14 @@ truth; this page summarises them.
 - Kraken Prop accounts take manual orders only, so they are outside the system.
 - GA is a refutation. Its Binance proxy and window are not clean out-of-sample data.
 - GB needs twelve months of Kraken tape, in line with the owner's requirement.
-- The Binance execution code goes after GA, whatever its outcome. The downloader stays until the
-  Kraken backfill replaces it.
+- The Binance execution code was removed after GA did not pass (L3N, commit `940e4de`). The
+  downloader stays until the Kraken backfill replaces it.
 
 ## Known gaps
 
 - Fees are the base tier of the owner's screenshot: 0.25 % maker and 0.40 % taker. `TradeVolume`
   replaces them when WP-13 lands.
 - Simulation fidelity (queue position, walking the book) is WP-15.
-- `parity_check`, `paper_trading` and `live_trading` speak Binance until WP-14 and WP-15.
+- Spot accounting is not modelled: one cash balance, no base or EUR balances, no fee tiers and no
+  minimum order size (WP-11). There is no spread, latency defaults to 0 ms, and maker fills ignore
+  queue priority.
