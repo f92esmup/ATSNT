@@ -22,7 +22,7 @@
 
 ## 0. Resumen
 
-**Objetivo.** Solo si la prueba económica pasa: un bot local que opera swarm en spot de Kraken con pares EUR, sin apalancamiento, sin Kraken Prop y sin GCP.
+**Objetivo.** Solo si la prueba económica pasa: un bot local que opera swarm en spot de Kraken con pares EUR, sin apalancamiento, sin Kraken Prop y sin nube.
 
 **Lo que este plan no hace.** No crea ventaja. La ida y vuelta en spot cuesta entre 1,20 % y 1,60 % del nocional, unas 16 a 17 veces la del clasificador en perpetuos (sección 2.6). La prueba probablemente fallará. Si falla, se para todo lo que es ejecución y el siguiente paso es investigar la estrategia.
 
@@ -121,7 +121,7 @@ crates/
 ├── adapters/    kraken_spot/  REST público (AssetPairs, Trades), REST privado (API-Sign), WebSocket v2
 │                              (trade, book con CRC32), WebSocket privado, gateway, grabadora
 │                storage/      Parquet de trades y libro; SQLite del registro y del ledger
-│                telegram/     (movido desde gcp/)
+│                telegram/
 │                simulated/    SimulatedVenue con libro y cola de limit
 └── backtest/    (se renombra a `app` al final) TradingSession, driver, simuladores y modos.
                  Solo `main.rs` y `wiring.rs` nombran adapters.
@@ -299,10 +299,8 @@ No depende del resultado de la prueba. El código sin uso sale igual.
 | `crates/adapters/src/binance_*.rs`, `binance_gateway/`, `binance_fetcher/`, `fetch_plan.rs` | Borrar tras la prueba. `binance_parquet.rs` se renombra antes (3.8) | 4 |
 | `crates/adapters/src/bin/{stream_trades,live_gateway}.rs` | Borrar; sustituidos por la grabadora y el gateway de Kraken | 4 |
 | `crates/adapters/tests/fixtures/binance_private_events/` | Borrar | 4 |
-| `crates/adapters/src/gcp/*` salvo `telegram.rs` | Borrar; mover `telegram.rs` a `adapters/src/telegram/` | 3 |
 | `configs/` salvo `hpo_btcusdt_2026.json`, `hpo_swarm.json` y `swarm_shared.json` | Borrar el resto. Añadir `kraken_spot_eur.json` en la fase 5 | 4 y 5 |
-| `Dockerfile`, `.dockerignore`, `scripts/gcp/`, `scripts/run_production_pipeline.sh`, `scripts/run_joint_portfolio_pipeline.sh`, `scripts/tests/` | Borrar | 8 |
-| `docs/architecture/10-gcp-cloud-architecture.md` | Borrar | 8 |
+| `Dockerfile`, `.dockerignore`, `scripts/run_production_pipeline.sh`, `scripts/run_joint_portfolio_pipeline.sh`, `scripts/tests/` | Borrar | 8 |
 | `docs/strategy/{01,02,04,05}*.md`, `docs/research/02-*`, `SWARM_OPTIMIZATION_ROADMAP.md` | Mover a `docs/archive/` | 4 |
 | `docs/architecture/{07,08,13}*.md`, `docs/capital-scaling.md`, `docs/deployment/atsnt.service`, `README.md`, `AGENTS.md`, `docs/ROADMAP.md`, `.env.example` | Reescribir | 3, 5 y 8 |
 | `odd/tasks/` | Conservar como historial | — |
@@ -341,6 +339,4 @@ En todas las fases: `cargo fmt --check`, `cargo clippy --all-targets -- -D warni
 - Datos históricos y Trades REST: https://docs.kraken.com/exchange/guides/general/historical-data · https://docs.kraken.com/api/docs/rest-api/get-recent-trades/
 - WebSocket v2 spot, canales trade y book: https://docs.kraken.com/api/docs/websocket-v2/trade · https://docs.kraken.com/api/docs/websocket-v2/book · https://docs.kraken.com/api/docs/guides/spot-ws-book-v2/
 - Autenticación spot: https://docs.kraken.com/api/docs/guides/spot-rest-auth/ · https://docs.kraken.com/exchange/guides/websockets/authentication
-- Restaurar proyectos de GCP: https://docs.cloud.google.com/resource-manager/docs/delete-restore-projects
-
 Las cifras de Kraken de este documento deben verificarse en tu cuenta y en la documentación vigente antes de usarse.

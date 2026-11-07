@@ -10,6 +10,9 @@ them name components that no longer exist in the code.
   swarm's specification stays in `docs/strategy/03-swarm-consensus.md`.
 - `research/02-dynamic-topk-universe-selection-logbook.md`: the logbook of the universe selection
   for the portfolio stack that was removed.
+- `research/01-swarm-consensus-optimization-logbook.md`: the logbook of the swarm optimization runs.
+  Those runs executed on a cloud batch service that the repository no longer uses. A banner at the
+  top of the file says so.
 - `architecture/06-paper-trading-and-realtime-execution.md`: the paper session and its real-time
   feed design, on Binance. Its binaries, `paper_trading` and `live_trading`, were removed in L3N
   (commit `940e4de`).

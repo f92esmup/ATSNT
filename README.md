@@ -107,8 +107,8 @@ tables are described in [`docs/architecture/13-run-registry.md`](docs/architectu
   packages and their gates.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): status against the gates.
 - [`docs/strategy/03-swarm-consensus.md`](docs/strategy/03-swarm-consensus.md) and
-  [`docs/research/01-swarm-consensus-optimization-logbook.md`](docs/research/01-swarm-consensus-optimization-logbook.md):
-  the strategy and its logbook.
+  [`docs/archive/research/01-swarm-consensus-optimization-logbook.md`](docs/archive/research/01-swarm-consensus-optimization-logbook.md):
+  the strategy and its archived logbook.
 - [`docs/architecture`](docs/architecture): the domain, the adapters, the optimizer, Monte Carlo,
   the run registry and how to add a strategy. The paper and live gateway designs are in the archive.
 - [`docs/capital-scaling.md`](docs/capital-scaling.md): sizing and caps for the spot account.

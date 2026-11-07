@@ -12,8 +12,8 @@ truth; this page summarises them.
   and the portfolio stack removed, and the Dockerfile and non-swarm configs retired.
 - **Batch 2, done** (commits `69c3312` to `e915cb7`). The economics screen is runnable
   (`scripts/gate_a.sh`). Unused configs and dependencies are gone. The metrics moved to `domain`. Clippy denies `unwrap` and
-  `expect` outside tests. The run recorder writes to SQLite with `--record`. The GCP scripts are
-  retired and the history is in [`archive`](archive/README.md).
+  `expect` outside tests. The run recorder writes to SQLite with `--record`. The cloud scripts are
+  retired and their history is in [`archive`](archive/README.md).
 - **Cleanup, ready to merge (`refactor/cleanup-local-venues`).** The Binance execution path, the paper, live and parity binaries, and `--bnb-discount` are removed (L3N, commit `940e4de`). The swarm sits under `usdm_perpetual/`, and the spot fees are the Kraken Pro entry tier.
 
 ## Gates

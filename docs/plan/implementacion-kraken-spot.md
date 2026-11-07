@@ -127,9 +127,9 @@ Cada paquete indica archivos y tipos, pruebas y fixtures, criterio de aceptació
 
 ### WP-06. Telegram (al aprobar)
 
-- **Archivos:** `crates/adapters/src/gcp/telegram.rs` pasa a `crates/adapters/src/telegram/`. Se borra `crates/adapters/src/gcp/` salvo ese archivo.
+- **Archivos:** `crates/adapters/src/telegram/` (hecho en `84ecf15`: Telegram salió del módulo de nube, que se retiró).
 - **Pruebas:** los tests de alertas existentes; el cliente de red no se usa en tests.
-- **Aceptación:** `adapters::telegram` compila; ninguna referencia a GCP.
+- **Aceptación:** `adapters::telegram` compila; ningún adaptador de nube queda en `adapters`.
 - **Dependencias:** WP-03.
 - **Espera:** G0.
 

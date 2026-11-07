@@ -338,11 +338,11 @@ cortacircuitos en 1):
 
 - Vigente: `README.md`, `docs/ROADMAP.md`, `docs/capital-scaling.md`,
   `docs/architecture/13-run-registry.md`, `docs/plan/*` (v4 e implementación),
-  `docs/strategy/03-swarm-consensus.md`, `docs/research/01-swarm-consensus-optimization-logbook.md`.
+  `docs/strategy/03-swarm-consensus.md`.
 - Con banner de estado, porque su texto es histórico en parte: `docs/architecture/03`, `04` y `05`.
   `06` y `08` están en `docs/archive/architecture/` desde L3N.
 - Archivo (`docs/archive/`): estrategias retiradas, universo de portfolio, diseño de dashboard que no
-  se implementó, unidades de systemd antiguas y el roadmap previo.
+  se implementó, unidades de systemd antiguas, la bitácora de investigación de las ejecuciones en la nube y el roadmap previo.
 - `odd/`: histórico de tareas, con un README que lo advierte.
 
 ## 8. Reglas de trabajo
