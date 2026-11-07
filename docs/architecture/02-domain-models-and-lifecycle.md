@@ -1,5 +1,7 @@
 # Domain Architecture & Execution Lifecycle Specification
 
+> **Status (2026-11-07):** section 3 describes `CusumFilter` and `RollingZScore`. Both still exist in `crates/domain/src/analytics/`, but no other crate uses them, because the CUSUM strategies were removed (see `docs/archive/strategy/`). The rest of this document is pending its documentation review.
+
 ## 1. Architectural Philosophy
 ATSNT follows Hexagonal Architecture (Ports and Adapters) with a Domain-First approach. The domain crate (`crates/domain`) contains pure, deterministic business logic with zero network, zero I/O, and zero asynchronous runtime dependencies.
 
