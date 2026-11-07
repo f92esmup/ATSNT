@@ -250,7 +250,7 @@ flowchart TD
     I --> A["Agents of feed f re-vote (strategies)"]
     A --> V["Vote table"]
     V -->|"after every feed closed by this trade"| S["ConsensusSample = Features"]
-    S --> P["ConsensusPolicy (FeaturePolicy)"]
+    S --> P["ConsensusPolicy"]
     P -->|"level changed"| D["Decision::Target"]
     D --> X["ExecutionCore (bar engine) or TradingSession + venue"]
 ```

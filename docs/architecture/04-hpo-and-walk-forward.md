@@ -152,12 +152,10 @@ pub trait HyperparameterSpace: Send + Sync + Clone {
 }
 
 pub trait OptimizableStrategy: Strategy + Sync + Sized {
-    type SharedConfig: Clone + Send + Sync + Serialize + DeserializeOwned + Debug + Display + 'static;
-    type Config: Clone + Send + Sync + Serialize + DeserializeOwned + Debug + Display + Default + 'static;
+    type SharedConfig: Clone + Send + Sync + Serialize + DeserializeOwned + Debug + Default + 'static;
+    type Config: Clone + Send + Sync + Serialize + DeserializeOwned + Debug + Display + 'static;
     type Space: HyperparameterSpace<Config = Self::Config>;
-    type Features: Clone + Send + Sync + 'static;
-    type Extractor: FeatureExtractor<Features = Self::Features>;
-    type Policy: FeaturePolicy<Features = Self::Features>;
+    type Extractor: FeatureExtractor;
 
     /// Canonical identifier for the strategy (e.g. "swarm_consensus").
     fn id() -> &'static str;
@@ -169,10 +167,10 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
     fn default_space() -> Self::Space;
 
     /// Constructs the feature extractor for two-stage optimization.
-    fn extractor(shared: &Self::SharedConfig) -> Self::Extractor;
+    fn extractor(shared: &Self::SharedConfig) -> Result<Self::Extractor, DomainError>;
 
-    /// Evaluates candidate policy against extracted features.
-    fn on_features(policy: &mut Self::Policy, features: &Self::Features) -> Option<Decision>;
+    /// Decides on features produced by `extractor`: the decision stage of the strategy.
+    fn on_features(&mut self, features: &<Self::Extractor as FeatureExtractor>::Features) -> Option<Decision>;
 }
 ```
 
@@ -193,16 +191,14 @@ impl OptimizableStrategy for MyNewStrategy {
     type SharedConfig = ();
     type Config = MyNewConfig;
     type Space = MyNewSpace;
-    type Features = DollarBar;
     type Extractor = BarPassThrough;
-    type Policy = Self;
 
     fn id() -> &'static str { "my_new_strategy" }
     fn from_config(_shared: &(), config: Self::Config) -> Result<Self, DomainError> { Self::new(config) }
     fn default_space() -> Self::Space { MyNewSpace::default() }
-    fn extractor(_shared: &()) -> Self::Extractor { BarPassThrough }
-    fn on_features(policy: &mut Self, features: &DollarBar) -> Option<Decision> {
-        policy.on_bar(features).map(Decision::Entry)
+    fn extractor(_shared: &()) -> Result<Self::Extractor, DomainError> { Ok(BarPassThrough) }
+    fn on_features(&mut self, features: &DollarBar) -> Option<Decision> {
+        self.on_bar(features).map(Decision::Entry)
     }
 }
 

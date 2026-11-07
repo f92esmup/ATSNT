@@ -1,6 +1,6 @@
 # Monte Carlo Stress-Testing & Web Telemetry Specification
 
-> **Status (2026-11-07):** section 2.1 names the CUSUM filter, which was removed with its strategies (see `docs/archive/strategy/`). Section 4 describes the web telemetry that Milestone 5 decommissioned; it is kept as history.
+> **Status (2026-11-07):** section 2.1 names the CUSUM filter. The filter still exists in `crates/domain/src/analytics/` and no other crate uses it, because its strategies were removed (see `docs/archive/strategy/`). Section 4 describes the web telemetry that Milestone 5 decommissioned; it is kept as history.
 
 ## 1. Quantitative Foundation: Why Monte Carlo?
 
