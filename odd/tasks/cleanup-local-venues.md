@@ -75,3 +75,8 @@ Inline for every task. The units run one after another and none has a Writer rea
   3. Not finished, and not the agent's to finish: the `.env.example` check (the permission settings deny reading the file, so S5's check stays open; the user can run `grep -n -i -E "gcp|google|bigquery|gcs" .env.example`); the trailer decision (HANDOFF.md:463); the HPO window (HANDOFF.md:464); and a gate A run at the account's fees, which is not in the record.
   4. Waiting for the user's approval: the push of the three new commits on `docs/agents-md-rules`, and the PR and merge of that branch into `main`.
   Risk: none (documentation only).
+- L20 (2026-11-07, user, verbatim: "Si, haz todo eso y cierra de una vez"). It answers the question "¿Subo los 3 commits, abro PR y fusiono en main?" with the option "Sí, todo". It covers the push, the pull request and the merge of `docs/agents-md-rules` into `main`. It does not cover deleting the branch, locally or on origin: that waits for its own explicit confirmation. Steps, in order:
+  1. HANDOFF §11 and §12 (U5) say the AGENTS.md change is merged into `main` through the pull request of `docs/agents-md-rules`. That sentence is accurate once the pull request lands; it is part of this same commit.
+  2. Push of `docs/agents-md-rules` to origin, fast-forward. The branch holds six commits against `main`: `3dbf0e8`, `ef65cf5` and `22678cf` were already on origin; `9cc47e0`, `993f630` and `3abd7e0` are pushed with this record.
+  3. Pull request into `main`, merged with a rebase as in L17 and guarded with `--match-head-commit`. The merge SHA is not written here, because it does not exist before the merge; the pull request holds it.
+  Risk: none (documentation only).
