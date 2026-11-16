@@ -6,6 +6,39 @@ fuera del repositorio y aquí queda resumido.
 
 Actualizado el 2026-11-07: los estados de §1, §5.2, §7 y §11 reflejan la limpieza L3N (commit `940e4de`).
 
+## Actualización del 2026-11-16: consolidación hexagonal
+
+Esta sección es posterior al resto del documento y manda sobre él donde se contradigan. Trabajo en
+la rama `claude/zen-mayer-keab4c` (PR en borrador f92esmup/ATSNT#8), sin fusionar en `main`.
+
+Qué cambió:
+
+- **Crate nuevo `application`**: sesión, driver, salidas, núcleo de ejecución, simulación tick,
+  paridad y alertas. Depende solo de `domain`, `ports` y `strategies`. `backtest` re-exporta sus
+  módulos y conserva el motor de barras, el optimizador, Monte Carlo, `wiring.rs` y los binarios.
+- **La librería no hace I/O ni usa `anyhow`**: la carga de artefactos recibe texto y devuelve
+  `LoadError`; `wiring.rs` lee los ficheros. Puertos nuevos: `Entropy`, `ProgressSink`, `FillLog`.
+- **Un solo gate de entrada**, `domain::EntryGate`, con `DailyBreaker`. Lo usan el motor de barras
+  y la sesión. El venue solo ejecuta: `ExecutionVenue::submit_entry` ya no existe.
+- **El swarm es solo clasificador** (entradas de triple barrera). Se borraron la máquina de niveles
+  y toda la ruta de posiciones objetivo (`Decision`, `TargetPosition`, re-arm, `bracket_priority`,
+  `emits_targets`). Una estrategia devuelve `Option<OrderIntent>` desde `on_event`.
+- **El swarm vive en `crates/strategies/src/swarm_consensus/`** y opera en spot (solo largo) y en
+  perpetuos. La analítica que solo él usa salió de `domain`.
+- **El enjambre se muestrea con ChaCha12**, fijado por tests. No cambió ningún agente.
+- **Contrato de arquitectura**: reglas R8 a R10 en `AGENTS.md`.
+
+Cifras al cierre de este trabajo: `cargo fmt --all -- --check` limpio, `cargo clippy --workspace
+--all-targets -- -D warnings` limpio, 620 pruebas, 0 fallos. Vuelve a medirlas antes de afirmarlas.
+
+Lo que queda abierto está en "Known gaps" de `docs/ROADMAP.md`: la diferencia de fills entre las
+rutas de barra y de tick, `InputKind` y el modo de barras de dólar sin estrategia que lo use, y
+`SimClock` sin bucle en vivo. `docs/strategy/03-swarm-consensus.md` lleva una nota de estado: sus
+secciones 10, 11 y 17.1 describen código borrado.
+
+Lo que este documento dice más abajo y ya no es cierto: que el swarm está bajo `usdm_perpetual/`,
+que los puertos y el venue dimensionan órdenes, y los recuentos de pruebas de la §1.
+
 ## 0. Cómo usar este documento
 
 - Si solo lees una sección, lee la **§5 (siguientes pasos)**.

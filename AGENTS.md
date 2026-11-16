@@ -22,30 +22,48 @@ The project enforces strict separation of concerns:
 
 2. **Ports (`ports`)**:
    - Abstract traits defining contracts for external interactions:
-     - `MarketDataStream`: Trait for receiving ticks, bars, or depth updates.
-     - `ExecutionGateway`: Trait for dispatching and canceling orders.
-     - `Clock`: Time abstraction to allow time-travel in backtests.
+     - `MarketDataStream`: Trait for receiving market trades.
+     - `ExecutionVenue` and `ExitGateway`: Traits for dispatching orders of an exact quantity and
+       managing exchange-held exits. A venue executes; it sizes nothing and applies no risk rule.
+     - `TapeVenue`: A venue replayed trade by trade, for simulations.
+     - `Clock`, `Entropy`: Time and randomness, so a replay is deterministic.
+     - `RunRecorder`, `AlertNotifier`, `FillLog`, `ProgressSink`: Outbound records and reports.
 
-3. **Adapters (`adapters`)**:
+3. **Strategies (`strategies`)**:
+   - Strategy traits that consume normalized market events and emit order intents.
+
+4. **Application (`application`)**:
+   - The session core that runs on any venue: the trading session and its driver, the exit
+     lifecycle, the execution core, the tick simulation and the parity measure.
+   - Depends only on `domain`, `ports` and `strategies`. It names no adapter and opens no file.
+
+5. **Adapters (`adapters`)**:
    - Concrete implementations of ports:
      - Live exchange adapter (e.g., Kraken WebSocket + REST).
      - Deterministic backtest simulator adapter (feeding historical data).
      - Storage and persistence adapters.
 
-4. **Strategies (`strategy`)**:
-   - Strategy traits that consume normalized market events and emit trading signals or order intents.
+6. **Composition (`backtest`)**:
+   - The bar engine, the optimizer, Monte Carlo and the binaries. `wiring.rs`, `main.rs` and
+     `bin/` build the adapters and pass them down as ports.
 
 ### Enforced Rules
 
 `crates/backtest/tests/architecture_contract.rs` checks these rules. The checks match source text, so they catch the usual violations, not every alias. A rule that blocks a change is discussed, never disabled silently.
 
 - **R1**: `domain` depends on no other workspace crate; `ports` and `strategies` depend only on `domain`.
-- **R2**: `adapters` depends only on `domain` and `ports`.
+- **R2**: `adapters` depends only on `domain` and `ports`; `application` depends only on `domain`, `ports` and `strategies`.
 - **R3**: the `backtest` library names no `adapters::` outside the wiring module, the binaries and `main.rs`.
 - **R4**: `ports` names no exchange or storage format (`Binance`, `Kraken`, `Parquet`, `BigQuery`).
 - **R5**: `domain` uses no `f32` or `f64`.
 - **R6**: `backtest` runners select strategies through the registry and never match on strategy names.
-- **R7**: `domain`, `ports`, `strategies` and the `backtest` library never read the wall clock; the binaries and `main.rs` may.
+- **R7**: `domain`, `ports`, `strategies`, `application` and the `backtest` library never read the wall clock; the binaries and `main.rs` may.
+- **R8**: `application` names no adapter and performs no file or network I/O.
+- **R9**: no library uses `anyhow`; the binaries and `main.rs` may.
+- **R10**: `domain` names no strategy.
+
+Sizing and the pre-trade risk rules live in `domain::EntryGate`, which every runner asks. Review, not
+a test, keeps them out of adapters.
 
 ---
 

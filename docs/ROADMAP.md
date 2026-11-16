@@ -16,6 +16,12 @@ truth; this page summarises them.
   retired and their history is in [`archive`](archive/README.md).
 - **Cleanup, merged into `main` (`refactor/cleanup-local-venues`, 2026-11-07).** The Binance execution path, the paper, live and parity binaries, and `--bnb-discount` are removed (L3N, commit `940e4de`). The swarm sits under `usdm_perpetual/`, and the spot fees are the Kraken Pro entry tier.
 
+- **Hexagonal consolidation (branch `claude/zen-mayer-keab4c`, 2026-11-16).** A new `application`
+  crate holds the session core. The library reads no file and uses no `anyhow`. One pre-trade
+  gate, `domain::EntryGate`, sizes and refuses entries for the bar engine and the session; the
+  venue only executes. The swarm is a classifier only: the level machine and the whole
+  target-position route are removed. It runs on spot, long only, and on perpetuals.
+
 ## Gates
 
 | Gate | What it decides | Who runs it | Status |
@@ -67,8 +73,17 @@ GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until
   The entry is dropped with no rejection count (`execution_core.rs:733-735`) and the report prints
   `Rejected Signals: none`. Until rejections are counted, a run with no trades under these defaults
   is a sizing artefact, not a strategy result.
-- Bar and tick fills disagree on breaker refusals. On the same synthetic tape at `--risk-per-trade`
-  0.001, the bar path refuses 346 signals on `DailyHalt` and makes 118 trades. The tick path refuses
-  none and makes 123 trades, with max drawdown 9.81 % against 9.88 %. The cause is not traced: either
-  the tick path does not count breaker refusals, or the breaker does not fire there. Check before
-  real money.
+- Bar and tick refusals agree by construction since both routes ask `domain::EntryGate` with the
+  same `DailyBreaker`, and `tests/gate_parity.rs` pins it. The tick route used to report no
+  refusals at all: it did not count them. The routes still fill differently. On the 90-day
+  synthetic tape of the goldens the per-trade bar route closes 53 trades long only and the tick
+  route 22. The cause is measured: the tick route sent 54 entries, 32 of them timed out and 22
+  opened. It fills a market order only against prints of the opposite aggressor and cancels an
+  entry that waited 30 s, and that tape has one print an hour. It is a property of the
+  synthetic tape, not of the gate. Check the two routes on real tick data before real money.
+- The strategy contract still has `input_kind`, `InputKind` and `BarPassThrough`, with no
+  strategy that consumes dollar bars. Removing them means removing the dollar-bar mode of
+  `backtest` and `run_hpo`, their flags and the `dollar_bar` sampling of artifacts: a decision
+  for the owner.
+- `SimClock` and the clock argument of `SessionDriver::on_idle` have no caller outside tests:
+  no binary runs a live loop.

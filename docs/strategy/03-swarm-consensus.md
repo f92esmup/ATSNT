@@ -1,5 +1,22 @@
 # Strategy Specification: Swarm Consensus (Multi-Agent Voting)
 
+> **Status (2026-11-16): parts of this specification describe code that was removed.** The
+> ensemble (Sections 4 to 9: feeds, indicators, genome, agents, rules, the consensus sample) is
+> current. The decision and execution model is not:
+>
+> - The policy is a **classifier** that emits triple-barrier entries (`OrderIntent`): a side enters
+>   when its net vote reaches `threshold_base` (plus `short_threshold_delta` for shorts) and the
+>   other side's does not, once per signal, with a stop, a take profit and a time barrier in ATR
+>   multiples and seconds. The code is the reference: `crates/strategies/src/swarm_consensus/policy.rs`.
+> - The **level machine** of Section 10 (`threshold_step`, `hysteresis`, levels 1 to 3) and the
+>   **target-position execution** of Sections 3.2, 11 and 17.1 (`Decision::Target`, scale-in,
+>   scale-out, flips, the re-arm rule, `emits_targets`, `bracket_priority`) no longer exist.
+>   Read them as history.
+> - `Strategy` has one decision method, `on_event`; `on_bar` is gone (Section 3.3).
+> - The venue does no sizing: `submit_entry` is gone and the session sizes with
+>   `domain::EntryGate` (Section 3.5).
+> - The swarm also runs on spot, long only.
+
 ## 1. Objective and Provenance
 
 This strategy ports, corrects, and extends the multi-agent Expert Advisor of the author's master's
