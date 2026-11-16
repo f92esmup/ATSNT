@@ -15,8 +15,8 @@ use crate::trade::Side;
 /// Why the gate did not turn a signal into an order.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EntryRefusal {
-    /// The daily drawdown breaker is tripped: no new entries until the next UTC day.
-    #[error("the daily drawdown breaker is tripped")]
+    /// The day's loss reached the daily drawdown limit: no new entries until the next UTC day.
+    #[error("the daily drawdown limit is reached")]
     DailyHalt,
     /// A spot account cannot open a short.
     #[error("a spot account cannot open a short position")]
@@ -65,7 +65,10 @@ impl EntryGate {
     ///
     /// `equity` is the marked equity of the account and `day_peak` the peak of its UTC day;
     /// `breaker_tripped` is the state of the daily breaker. The checks run in this order: the
-    /// breaker, the market's rules, then sizing at the signal price with the policy's limits.
+    /// daily limit, the market's rules, then sizing at the signal price with the policy's limits.
+    ///
+    /// The daily limit refuses under one name, [`EntryRefusal::DailyHalt`], whether the breaker
+    /// already latched or this signal is the first to find the day's loss at the limit.
     pub fn admit(
         &self,
         intent: &OrderIntent,
@@ -76,10 +79,13 @@ impl EntryGate {
         if breaker_tripped {
             return Err(EntryRefusal::DailyHalt);
         }
+        let drawdown = RiskPolicy::calculate_session_drawdown_pct(day_peak, equity)?;
+        if drawdown >= self.policy.max_daily_drawdown_pct {
+            return Err(EntryRefusal::DailyHalt);
+        }
         if self.market == MarketType::Spot && intent.side == Side::Sell {
             return Err(EntryRefusal::SpotShortingDisallowed);
         }
-        let drawdown = RiskPolicy::calculate_session_drawdown_pct(day_peak, equity)?;
         Ok(self.policy.size_order(
             intent,
             intent.price,
@@ -156,13 +162,13 @@ mod tests {
     }
 
     #[test]
-    fn a_loss_from_the_day_peak_at_the_policy_limit_is_refused_by_the_policy() {
+    fn a_loss_from_the_day_peak_at_the_limit_is_a_daily_halt_before_the_breaker_latches() {
         let policy = RiskPolicy::default();
         let limit = policy.max_daily_drawdown_pct;
         let equity = dec!(1000) * (Decimal::ONE - limit);
         let refusal = gate(MarketType::UsdMPerpetual)
             .admit(&long(), equity, dec!(1000), false)
             .unwrap_err();
-        assert_eq!(refusal.kind(), "CircuitBreakerTriggered");
+        assert_eq!(refusal, EntryRefusal::DailyHalt);
     }
 }
