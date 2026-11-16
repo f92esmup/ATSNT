@@ -1,18 +1,16 @@
 use std::collections::BTreeMap;
 
-use domain::OrderIntent;
 use domain::{DollarBar, Position, PositionSide, RiskPolicy, Side};
+use domain::{EntryGate, EntryRefusal, OrderIntent};
 use rust_decimal::Decimal;
-use strategies::{MarketEvent, MarketType, Strategy};
+use strategies::{MarketEvent, Strategy};
 
 use crate::config::BacktestConfig;
 use crate::execution_core::{market_fill_price, ExecutionCore, PendingEntry, PendingEntryOutcome};
-use crate::metrics::{
-    BacktestMetrics, ClosedTrade, TradeExcursion, DAILY_HALT_REJECTION, SPOT_SHORTING_DISALLOWED,
-};
+use crate::metrics::{BacktestMetrics, ClosedTrade, TradeExcursion};
 use crate::price_event::PriceEvent;
 use domain::accounting::utc_month_key;
-use domain::accounting::DailyWatermark;
+use domain::accounting::DailyBreaker;
 
 /// Deterministic, discrete-event backtesting simulator.
 ///
@@ -44,8 +42,7 @@ pub struct BacktestEngine {
     open_excursion: Option<TradeExcursion>,
     current_day_utc: Option<i64>,
     /// Per-UTC-day marked-equity peak, the same type the live session uses.
-    daily: DailyWatermark,
-    daily_circuit_breaker_tripped: bool,
+    daily: DailyBreaker,
     current_month_key: Option<i64>,
     /// Marked equity at the first bar of the current UTC month (monthly drawdown reference).
     monthly_open_equity: Decimal,
@@ -71,11 +68,10 @@ impl BacktestEngine {
             current_day_utc: None,
             daily: {
                 // Before the first bar the day's peak is the starting capital.
-                let mut watermark = DailyWatermark::new();
-                watermark.observe(0, initial);
-                watermark
+                let mut breaker = DailyBreaker::new(config.max_daily_drawdown_pct);
+                breaker.observe(0, initial);
+                breaker
             },
-            daily_circuit_breaker_tripped: false,
             current_month_key: None,
             monthly_open_equity: initial,
             monthly_trip_drawdown_pct: None,
@@ -247,7 +243,6 @@ impl BacktestEngine {
         if self.current_day_utc != Some(day_key) {
             self.current_day_utc = Some(day_key);
             self.daily.observe(bar.end_ms, mark_before);
-            self.daily_circuit_breaker_tripped = false;
         }
 
         // Monthly session rollover: the reference is the equity at the start of the UTC month.
@@ -345,11 +340,6 @@ impl BacktestEngine {
             self.max_drawdown_pct = dd_pct;
         }
 
-        let day_dd_pct = self.daily.drawdown_pct(total_val);
-        if day_dd_pct >= self.config.max_daily_drawdown_pct {
-            self.daily_circuit_breaker_tripped = true;
-        }
-
         // 4. Track the open trade's equity path, or attribute this bar's post-exit
         //    drawdown sample to the trade that just closed.
         if self.core.position().is_some() {
@@ -366,34 +356,27 @@ impl BacktestEngine {
         }
     }
 
-    /// Gates and sizes a signal exactly like the live gateway (at the signal price) and queues
+    /// Gates and sizes a signal with the shared [`EntryGate`] (at the signal price) and queues
     /// the market order; it fills at the open of the first event starting at or after `due_ms`.
     fn submit_entry(&mut self, intent: OrderIntent, mark_price: Decimal, due_ms: i64) {
-        // If daily circuit breaker is tripped, halt trading for the remainder of today
-        if self.daily_circuit_breaker_tripped {
-            self.count_rejection(DAILY_HALT_REJECTION);
-            return;
-        }
-
-        if self.config.market_type == MarketType::Spot && intent.side == Side::Sell {
-            self.count_rejection(SPOT_SHORTING_DISALLOWED);
-            return;
-        }
-
-        let sized = self
-            .current_daily_drawdown_pct_at(mark_price)
-            .and_then(|drawdown| {
-                let risk_policy = self.config.risk_policy()?;
-                risk_policy.size_order(
-                    &intent,
-                    intent.price,
-                    self.total_equity(mark_price),
+        let admitted = self
+            .config
+            .risk_policy()
+            .map_err(EntryRefusal::from)
+            .and_then(|policy| {
+                EntryGate::new(
+                    policy,
                     self.config.risk_per_trade_pct,
-                    Decimal::ZERO,
-                    drawdown,
+                    self.config.market_type,
+                )
+                .admit(
+                    &intent,
+                    self.total_equity(mark_price),
+                    self.daily.peak(),
+                    self.daily.is_tripped(),
                 )
             });
-        match sized {
+        match admitted {
             Ok(quantity) => self
                 .core
                 .submit_due(PendingEntry::new(intent, quantity), due_ms),
@@ -1074,7 +1057,7 @@ mod tests {
             &create_test_bar(day_1_ms + 5000, dec!(90), dec!(90), dec!(69), dec!(70)),
         );
         assert!(engine.active_position().is_none());
-        assert!(engine.daily_circuit_breaker_tripped);
+        assert!(engine.daily.is_tripped());
 
         // Day 1: Another plunge to 60 -> signal generated by strategy but REJECTED by daily circuit breaker
         engine.process_bar(
@@ -1091,10 +1074,7 @@ mod tests {
             &mut strategy,
             &create_test_bar(day_2_ms, dec!(60), dec!(60), dec!(60), dec!(60)),
         );
-        assert!(
-            !engine.daily_circuit_breaker_tripped,
-            "Breaker must reset on Day 2"
-        );
+        assert!(!engine.daily.is_tripped(), "Breaker must reset on Day 2");
 
         // Day 2: Baseline
         engine.process_bar(
@@ -1636,7 +1616,9 @@ mod tests {
 
         engine.submit_entry(sell_intent, dec!(100), 2_000);
         assert_eq!(
-            engine.rejected_orders.get(SPOT_SHORTING_DISALLOWED),
+            engine
+                .rejected_orders
+                .get(crate::metrics::SPOT_SHORTING_DISALLOWED),
             Some(&1)
         );
         assert!(engine.pending_intent().is_none());

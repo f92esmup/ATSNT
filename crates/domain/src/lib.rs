@@ -11,6 +11,7 @@ pub mod bar;
 pub mod decision;
 pub mod error;
 pub mod futures;
+pub mod gate;
 pub mod market;
 pub mod metrics;
 pub mod order;
@@ -27,6 +28,7 @@ pub use analytics::{
 pub use bar::DollarBar;
 pub use decision::{InputKind, MarketEvent, ProtectiveExits};
 pub use error::DomainError;
+pub use gate::{EntryGate, EntryRefusal};
 pub use market::MarketType;
 pub use order::{Order, OrderIntent, OrderStatus, OrderType, TimeInForce};
 pub use position::{Position, PositionSide};
