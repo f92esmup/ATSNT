@@ -2,8 +2,7 @@
 //!
 //! Every strategy returns a [`Decision`]. A triple-barrier [`Decision::Entry`] and a signed
 //! exposure [`Decision::Target`] are two forms of one execution model: an entry is a target of
-//! one level whose [`ProtectiveExits`] carry a take profit and a time limit (strategy spec
-//! `docs/strategy/03-swarm-consensus.md` §3.2).
+//! one level whose [`ProtectiveExits`] carry a take profit and a time limit.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
