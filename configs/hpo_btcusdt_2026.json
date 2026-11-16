@@ -9,8 +9,6 @@
   },
   "strategy_config": {
     "threshold_base": "0.525",
-    "threshold_step": "0.075",
-    "hysteresis": "0.55",
     "base_risk": "0.010",
     "risk_increment": "0.0",
     "stop_atr_multiplier": "1.50",
@@ -38,8 +36,6 @@
         "0.0375"
       ]
     },
-    "bracket_priority": true,
-    "classifier_mode": true,
     "macro_trend_filter": true,
     "macro_slope_min": "0.02",
     "short_threshold_delta": "0.0"

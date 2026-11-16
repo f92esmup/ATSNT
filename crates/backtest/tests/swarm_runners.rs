@@ -23,13 +23,18 @@ const EMBARGO_MS: i64 = 5_000;
 fn space() -> SwarmPolicySpace {
     SwarmPolicySpace {
         threshold_bases: vec![dec!(0.05), dec!(0.10)],
-        threshold_steps: vec![dec!(0.05)],
-        hysteresis_values: vec![dec!(0.02)],
-        base_risks: vec![dec!(0.01)],
-        risk_increments: vec![dec!(0.005)],
-        stop_atr_multipliers: vec![dec!(3.0)],
-        take_profit_atr_multipliers: vec![None],
-        ..SwarmPolicySpace::default()
+        base_risks: vec![dec!(0.002)],
+        risk_increments: vec![dec!(0.002)],
+        stop_atr_multipliers: vec![dec!(1.0)],
+        take_profit_atr_multipliers: vec![dec!(2.0)],
+        breakeven_atr_multipliers: vec![None],
+        trailing_atr_multipliers: vec![None],
+        feed_weights_options: vec![None],
+        macro_trend_filter_options: vec![false],
+        macro_slope_min_options: vec![dec!(0)],
+        short_threshold_delta_options: vec![dec!(0)],
+        decay_horizon_options: vec![14400],
+        max_risk: dec!(0.05),
     }
 }
 

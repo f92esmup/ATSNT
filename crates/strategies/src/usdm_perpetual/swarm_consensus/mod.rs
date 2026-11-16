@@ -1,5 +1,5 @@
-//! Swarm consensus strategy: 96 rule-based agents over 16 bar feeds vote, and the net vote
-//! drives a signed exposure level with hysteresis (strategy spec
+//! Swarm consensus strategy: 96 rule-based agents over 16 bar feeds vote, and a net vote that
+//! clears its threshold opens a triple-barrier entry (strategy spec
 //! `docs/strategy/03-swarm-consensus.md`).
 
 pub mod agent;
@@ -21,7 +21,7 @@ pub use genome::{
     SwarmPriorsConfig, GENE_COUNT, GENE_PRIORS,
 };
 pub use indicators::{FeedIndicators, IndicatorSnapshot};
-pub use policy::{axis_update, ConsensusPolicy, PolicyConfig, PolicyConfigError, SwarmPolicySpace};
+pub use policy::{ConsensusPolicy, PolicyConfig, PolicyConfigError, SwarmPolicySpace};
 pub use priors_calibration::{calibrate_empirical_priors, EmpiricalPriors};
 pub use rules::{AgentVote, ConflictKind};
 pub use sample::{ConsensusSample, FeedVote, FeedWeights, FeedWeightsError};
@@ -34,7 +34,7 @@ use crate::strategy::{
 
 /// The swarm consensus strategy: the [`SwarmEnsemble`] (frozen first stage) feeding the
 /// [`ConsensusPolicy`] (searched decision stage). It consumes raw trades and emits
-/// `Decision::Target`s.
+/// triple-barrier entries.
 #[derive(Debug, Clone)]
 pub struct SwarmConsensusStrategy {
     ensemble: SwarmEnsemble,
@@ -69,14 +69,6 @@ impl Strategy for SwarmConsensusStrategy {
     fn audit(&self) -> Option<serde_json::Value> {
         Some(self.ensemble.audit().to_json())
     }
-
-    fn emits_targets(&self) -> bool {
-        !self.policy.config().classifier_mode
-    }
-
-    fn bracket_priority(&self) -> bool {
-        self.policy.config().bracket_priority
-    }
 }
 
 impl OptimizableStrategy for SwarmConsensusStrategy {
@@ -104,11 +96,13 @@ impl OptimizableStrategy for SwarmConsensusStrategy {
     }
 
     fn on_features(&mut self, sample: &ConsensusSample) -> Option<Decision> {
-        self.policy.on_sample(sample, self.allow_short)
+        self.policy
+            .on_sample(sample, self.allow_short)
+            .map(Decision::Entry)
     }
 
     fn default_space() -> SwarmPolicySpace {
-        SwarmPolicySpace::classifier_space()
+        SwarmPolicySpace::default()
     }
 }
 
@@ -135,15 +129,13 @@ mod tests {
     }
 
     #[test]
-    fn the_swarm_declares_that_it_emits_targets_also_through_a_box() {
+    fn the_swarm_emits_entries_not_targets_also_through_a_box() {
         let strategy =
             SwarmConsensusStrategy::from_config(&SwarmConfig::default(), PolicyConfig::default())
                 .unwrap();
-        assert!(strategy.emits_targets());
-        assert!(strategy.bracket_priority());
+        assert!(!strategy.emits_targets());
         let boxed: Box<dyn Strategy> = Box::new(strategy);
-        assert!(boxed.emits_targets());
-        assert!(boxed.bracket_priority());
+        assert!(!boxed.emits_targets());
     }
 
     #[test]
@@ -153,26 +145,5 @@ mod tests {
             ..PolicyConfig::default()
         };
         assert!(SwarmConsensusStrategy::from_config(&SwarmConfig::default(), config).is_err());
-    }
-
-    #[test]
-    fn the_swarm_declares_emits_targets_false_in_classifier_mode() {
-        let strategy = SwarmConsensusStrategy::from_config(
-            &SwarmConfig::default(),
-            PolicyConfig::classifier_default(),
-        )
-        .unwrap();
-        assert!(!strategy.emits_targets());
-    }
-
-    #[test]
-    fn boxed_strategy_preserves_classifier_behavior() {
-        let strategy = SwarmConsensusStrategy::from_config(
-            &SwarmConfig::default(),
-            PolicyConfig::classifier_default(),
-        )
-        .unwrap();
-        let boxed: Box<dyn Strategy> = Box::new(strategy);
-        assert!(!boxed.emits_targets());
     }
 }

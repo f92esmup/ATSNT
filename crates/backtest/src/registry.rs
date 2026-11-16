@@ -547,20 +547,9 @@ mod tests {
     }
 
     #[test]
-    fn execution_refuses_a_strategy_that_emits_targets() {
-        let loaded = load_strategy("swarm", None).unwrap();
-        let err = loaded.ensure_accepts_decisions().unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "strategy 'swarm_consensus' emits target-position decisions, which no execution path \
-             accepts yet"
-        );
-    }
-
-    #[test]
-    fn execution_accepts_swarm_classifier() {
+    fn execution_accepts_the_swarm() {
         let classifier_config =
-            serde_json::to_string(&strategies::PolicyConfig::classifier_default()).unwrap();
+            serde_json::to_string(&strategies::PolicyConfig::default()).unwrap();
         let temp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(temp.path(), classifier_config).unwrap();
         let loaded = load_strategy("swarm", Some(temp.path())).unwrap();
