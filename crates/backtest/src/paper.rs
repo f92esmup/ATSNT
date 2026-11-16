@@ -350,7 +350,9 @@ impl PaperTradingSession {
                 .pending_intent
                 .take()
                 .map(PaperTradingEvent::SignalGenerated),
-            SessionEvent::SignalSkipped(_) | SessionEvent::EntryFailed(_) => {
+            SessionEvent::SignalSkipped(_)
+            | SessionEvent::EntryRefused(_)
+            | SessionEvent::EntryFailed(_) => {
                 self.pending_intent = None;
                 None
             }

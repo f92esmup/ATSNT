@@ -11,7 +11,7 @@
 //! and is not counted in the metrics, unlike the bar engine, which marks it out.
 
 use domain::futures::FundingSchedule;
-use domain::{DollarBar, DomainError, RiskError, Side, Trade};
+use domain::{DollarBar, DomainError, EntryGate, RiskError, Side, Trade};
 use ports::TapeVenue;
 use rust_decimal::Decimal;
 use strategies::Strategy;
@@ -67,6 +67,8 @@ pub struct TickStep {
 
 /// One strategy replayed trade by trade against the account of a tape venue.
 pub struct TickSimulation<S: Strategy, V: TapeVenue> {
+    /// Signals the gate refused, per reason (see `BacktestMetrics::rejected_orders`).
+    rejected_orders: std::collections::BTreeMap<String, usize>,
     initial_capital: Decimal,
     driver: SessionDriver<S>,
     venue: V,
@@ -81,6 +83,11 @@ impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
         venue: V,
     ) -> Result<Self, TickSimulationError> {
         let backtest = &config.backtest;
+        let gate = EntryGate::new(
+            backtest.risk_policy()?,
+            backtest.risk_per_trade_pct,
+            backtest.market_type,
+        );
         let session = TradingSession::new(
             SessionConfig {
                 symbol: config.symbol.clone(),
@@ -89,12 +96,13 @@ impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
                 max_monthly_drawdown_pct: backtest.max_monthly_drawdown_pct,
                 halt_retry_ms: HALT_RETRY_MS,
                 entry_timeout_ms: ENTRY_TIMEOUT_MS,
-                risk_policy: backtest.risk_policy().ok(),
+                gate,
             },
             strategy,
         );
         let driver = SessionDriver::new(session, config.dollar_bar_threshold)?;
         Ok(Self {
+            rejected_orders: std::collections::BTreeMap::new(),
             initial_capital: backtest.initial_capital,
             driver,
             venue,
@@ -124,6 +132,14 @@ impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
         let step = self.driver.on_market_trade(&self.venue, trade).await;
         let bar = step.bar.clone();
         events.extend(step.into_events());
+        for event in &events {
+            if let SessionEvent::EntryRefused(refusal) = event {
+                *self
+                    .rejected_orders
+                    .entry(refusal.kind().to_string())
+                    .or_insert(0) += 1;
+            }
+        }
         TickStep { bar, events }
     }
 
@@ -197,6 +213,7 @@ impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
             max_drawdown_pct,
         );
         metrics.halted = halted;
+        metrics.rejected_orders = self.rejected_orders;
         (metrics, trades)
     }
 }

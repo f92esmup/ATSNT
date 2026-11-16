@@ -10,11 +10,12 @@ use adapters::{
     SqliteRunRecorder, SystemClock,
 };
 use domain::futures::FundingSchedule;
-use domain::{MarketType, RiskError, RiskPolicy};
+use domain::{MarketType, RiskError};
 use ports::{
     Clock, ProgressSink, RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow,
     SeriesPointRow,
 };
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::de::DeserializeOwned;
@@ -170,8 +171,12 @@ pub fn simulated_venue(config: &TickSimulationConfig) -> Result<SimulatedVenue, 
         taker_fee_pct: backtest.taker_fee_pct,
         maker_fee_pct,
         latency_ms: config.latency_ms,
-        risk_per_trade_pct: backtest.risk_per_trade_pct,
-        risk_policy: backtest.risk_policy()?,
+        max_leverage: backtest
+            .risk_policy()?
+            .max_leverage
+            .trunc()
+            .to_u32()
+            .unwrap_or(1),
         funding: config.funding.clone(),
         maintenance_margin_rate: backtest.maintenance_margin_rate,
     }))
@@ -185,8 +190,7 @@ pub fn parity_venue(latency_ms: i64) -> SimulatedVenue {
         taker_fee_pct: Decimal::ZERO,
         maker_fee_pct: None,
         latency_ms,
-        risk_per_trade_pct: dec!(0.01),
-        risk_policy: RiskPolicy::default(),
+        max_leverage: 1,
         funding: FundingSchedule::constant(Decimal::ZERO),
         maintenance_margin_rate: Decimal::ZERO,
     })

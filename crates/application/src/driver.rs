@@ -204,26 +204,15 @@ mod tests {
     }
 
     impl ExecutionVenue for Venue {
-        async fn submit_entry(
-            &self,
-            _: &str,
-            _: &OrderIntent,
-            _: Decimal,
-            _: Decimal,
-        ) -> Result<EntryAck, String> {
+        async fn submit_order(&self, _: &str, request: &OrderRequest) -> Result<EntryAck, String> {
             self.calls.borrow_mut().push("entry".to_string());
             Ok(EntryAck {
                 order_id: "e1".to_string(),
-                status: "NEW".to_string(),
-                quantity: dec!(1),
+                status: ports::AckStatus::New,
+                quantity: request.quantity,
                 price: dec!(100),
                 sent_at_ms: 0,
             })
-        }
-
-        async fn submit_order(&self, _: &str, _: &OrderRequest) -> Result<EntryAck, String> {
-            self.calls.borrow_mut().push("order".to_string());
-            Err("explicit orders are not scripted".to_string())
         }
     }
 
@@ -261,7 +250,11 @@ mod tests {
                 max_monthly_drawdown_pct: dec!(0.15),
                 halt_retry_ms: 5_000,
                 entry_timeout_ms: 30_000,
-                risk_policy: None,
+                gate: domain::EntryGate::new(
+                    domain::RiskPolicy::default(),
+                    dec!(0.01),
+                    domain::MarketType::UsdMPerpetual,
+                ),
             },
             Scripted {
                 intents: intents.into(),
@@ -361,7 +354,11 @@ mod tests {
                 max_monthly_drawdown_pct: dec!(0.15),
                 halt_retry_ms: 5_000,
                 entry_timeout_ms: 30_000,
-                risk_policy: None,
+                gate: domain::EntryGate::new(
+                    domain::RiskPolicy::default(),
+                    dec!(0.01),
+                    domain::MarketType::UsdMPerpetual,
+                ),
             },
             Scripted {
                 intents: VecDeque::new(),

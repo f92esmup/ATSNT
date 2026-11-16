@@ -21,7 +21,7 @@ pub mod tape;
 pub use alerts::AlertNotifier;
 pub use clock::Clock;
 pub use entropy::Entropy;
-pub use execution::{EntryAck, ExecutionReport, ExecutionVenue, OrderRequest};
+pub use execution::{AckStatus, EntryAck, ExecutionReport, ExecutionVenue, OrderRequest};
 pub use exits::ExitGateway;
 pub use fill_log::FillLog;
 pub use market_data::{AsyncMarketDataStream, MarketDataStream};

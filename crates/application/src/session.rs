@@ -9,18 +9,17 @@
 use std::collections::VecDeque;
 
 use domain::{
-    DollarBar, DollarBarAggregator, DomainError, OrderIntent, PositionSide, RiskPolicy, Side, Trade,
+    DollarBar, DollarBarAggregator, DomainError, EntryGate, EntryRefusal, OrderIntent,
+    PositionSide, Side, Trade,
 };
-use ports::{EntryAck, ExecutionReport, ExecutionVenue};
+use ports::{EntryAck, ExecutionReport, ExecutionVenue, OrderRequest};
 use rust_decimal::Decimal;
 use strategies::{MarketEvent, Strategy};
 
 use crate::execution_core::{Campaign, CampaignClose, TradeLedger};
 use crate::live_exits::{ExitEvent, ExitManager, HaltState};
 use crate::metrics::{ClosedTrade, TradeExcursion};
-use domain::accounting::{
-    marked_equity, DailyWatermark, ExcursionTracker, FeeLedger, MonthlyGuard,
-};
+use domain::accounting::{marked_equity, DailyBreaker, ExcursionTracker, FeeLedger, MonthlyGuard};
 
 /// Static parameters of a session.
 #[derive(Debug, Clone)]
@@ -39,8 +38,8 @@ pub struct SessionConfig {
     /// (market-trade time). The wait is also the retry throttle's partner: failed attempts repeat
     /// every `halt_retry_ms`.
     pub entry_timeout_ms: i64,
-    /// Risk policy used to size `Target` decisions; `None` for sessions that do not trade targets.
-    pub risk_policy: Option<RiskPolicy>,
+    /// The pre-trade gate: sizes every entry and refuses those the account rules forbid.
+    pub gate: EntryGate,
 }
 
 /// Why a strategy signal was not turned into an order.
@@ -63,6 +62,9 @@ pub enum SessionEvent {
     Signal(OrderIntent),
     /// The intent was not dispatched.
     SignalSkipped(SkipReason),
+    /// The pre-trade gate refused the signal: the daily breaker, the market's rules or the risk
+    /// policy. Nothing was sent to the venue.
+    EntryRefused(EntryRefusal),
     /// The venue accepted the entry order.
     EntrySubmitted(EntryAck),
     /// The venue rejected the entry order; the session stays flat.
@@ -151,7 +153,7 @@ pub struct TradingSession<S: Strategy> {
     phase: Phase,
     fees: FeeLedger,
     excursion: ExcursionTracker,
-    daily: DailyWatermark,
+    daily: DailyBreaker,
     monthly: MonthlyGuard,
     wallet: Decimal,
     account_ok: bool,
@@ -177,6 +179,7 @@ struct Recovery {
 impl<S: Strategy> TradingSession<S> {
     /// Creates a flat session.
     pub fn new(config: SessionConfig, strategy: S) -> Self {
+        let daily = DailyBreaker::new(config.gate.policy().max_daily_drawdown_pct);
         Self {
             exits: ExitManager::new(config.symbol.clone()),
             monthly: MonthlyGuard::new(config.max_monthly_drawdown_pct),
@@ -186,7 +189,7 @@ impl<S: Strategy> TradingSession<S> {
             strategy,
             phase: Phase::Flat,
             fees: FeeLedger::new(),
-            daily: DailyWatermark::new(),
+            daily,
             account_ok: true,
             ledger: TradeLedger::default(),
             last_halt_attempt_ms: None,
@@ -576,10 +579,21 @@ impl<S: Strategy> TradingSession<S> {
             return vec![SessionEvent::SignalSkipped(reason)];
         }
 
-        match venue
-            .submit_entry(&self.config.symbol, &intent, self.wallet, day_peak)
-            .await
-        {
+        let quantity =
+            match self
+                .config
+                .gate
+                .admit(&intent, self.wallet, day_peak, self.daily.is_tripped())
+            {
+                Ok(quantity) => quantity,
+                Err(refusal) => return vec![SessionEvent::EntryRefused(refusal)],
+            };
+        let request = OrderRequest {
+            side: intent.side,
+            quantity,
+            reduce_only: false,
+        };
+        match venue.submit_order(&self.config.symbol, &request).await {
             Ok(ack) => {
                 self.phase = Phase::EntryPending {
                     intent,
@@ -899,7 +913,7 @@ fn trigger_slippage(
 mod tests {
     use super::*;
     use domain::{DollarBar, OrderIntent, Side};
-    use ports::{EntryAck, ExecutionReport, ExecutionVenue, ExitGateway, OrderRequest};
+    use ports::{AckStatus, EntryAck, ExecutionReport, ExecutionVenue, ExitGateway, OrderRequest};
     use rust_decimal_macros::dec;
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -911,7 +925,7 @@ mod tests {
     #[derive(Default)]
     struct FakeVenue {
         calls: RefCell<Vec<String>>,
-        entries: RefCell<Vec<(Decimal, Decimal)>>,
+        entries: RefCell<Vec<(Side, Decimal)>>,
         fail_entry: RefCell<bool>,
         /// What `close_position` answers: whether something was left to close.
         position_left: RefCell<bool>,
@@ -956,34 +970,30 @@ mod tests {
     }
 
     impl ExecutionVenue for FakeVenue {
-        async fn submit_entry(
-            &self,
-            _: &str,
-            _: &OrderIntent,
-            equity: Decimal,
-            session_peak: Decimal,
-        ) -> Result<EntryAck, String> {
-            self.entries.borrow_mut().push((equity, session_peak));
-            if *self.fail_entry.borrow() {
-                return Err("rejected".to_string());
-            }
-            Ok(EntryAck {
-                order_id: "entry-1".to_string(),
-                status: "NEW".to_string(),
-                quantity: dec!(1),
-                price: dec!(100),
-                sent_at_ms: 0,
-            })
-        }
-
         async fn submit_order(&self, _: &str, request: &OrderRequest) -> Result<EntryAck, String> {
+            if !request.reduce_only {
+                // An entry: recorded apart, so the exit calls of a test stay in `calls`.
+                self.entries
+                    .borrow_mut()
+                    .push((request.side, request.quantity));
+                if *self.fail_entry.borrow() {
+                    return Err("rejected".to_string());
+                }
+                return Ok(EntryAck {
+                    order_id: "entry-1".to_string(),
+                    status: AckStatus::New,
+                    quantity: request.quantity,
+                    price: dec!(100),
+                    sent_at_ms: 0,
+                });
+            }
             self.calls.borrow_mut().push(format!(
                 "order {:?} {} {}",
                 request.side, request.quantity, request.reduce_only
             ));
             Ok(EntryAck {
                 order_id: "order-1".to_string(),
-                status: "NEW".to_string(),
+                status: AckStatus::New,
                 quantity: request.quantity,
                 price: dec!(100),
                 sent_at_ms: 0,
@@ -1044,6 +1054,15 @@ mod tests {
         OrderIntent::new(JAN_1, Side::Buy, dec!(100), dec!(90), dec!(110), 3).unwrap()
     }
 
+    /// Default limits, 1 % risked per entry, on perpetuals.
+    fn gate() -> EntryGate {
+        EntryGate::new(
+            domain::RiskPolicy::default(),
+            dec!(0.01),
+            domain::MarketType::UsdMPerpetual,
+        )
+    }
+
     fn session(intents: Vec<OrderIntent>) -> TradingSession<Scripted> {
         TradingSession::new(
             SessionConfig {
@@ -1053,7 +1072,7 @@ mod tests {
                 max_monthly_drawdown_pct: dec!(0.15),
                 halt_retry_ms: 5_000,
                 entry_timeout_ms: 30_000,
-                risk_policy: None,
+                gate: gate(),
             },
             Scripted::with(intents),
         )
@@ -1112,7 +1131,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_signal_is_submitted_with_the_wallet_equity_and_the_day_peak() {
+    async fn a_signal_is_sized_by_the_gate_and_sent_as_an_order_of_that_quantity() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
         session.on_wallet_balance(dec!(1000));
@@ -1124,7 +1143,50 @@ mod tests {
             events.last(),
             Some(SessionEvent::EntrySubmitted(_))
         ));
-        assert_eq!(*venue.entries.borrow(), vec![(dec!(1000), dec!(1000))]);
+        // 1 % of 1000 risked over a stop 10 away: one unit.
+        assert_eq!(*venue.entries.borrow(), vec![(Side::Buy, dec!(1))]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_signal_never_reaches_the_venue_and_says_why() {
+        let venue = FakeVenue::default();
+        // A stop 0.001 away sizes far above the order cap.
+        let tight =
+            OrderIntent::new(JAN_1, Side::Buy, dec!(100), dec!(99.999), dec!(110), 3).unwrap();
+        let mut session = session(vec![tight]);
+
+        let events = session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+
+        assert!(venue.entries.borrow().is_empty());
+        match events.last() {
+            Some(SessionEvent::EntryRefused(refusal)) => {
+                assert_eq!(refusal.kind(), "OrderSizeExceeded")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(!session.is_exposed());
+    }
+
+    #[tokio::test]
+    async fn the_daily_breaker_refuses_entries_for_the_rest_of_the_utc_day() {
+        let venue = FakeVenue::default();
+        let mut session = session(vec![long_intent(), long_intent()]);
+        session.on_wallet_balance(dec!(1000));
+        // The day's peak is 1000; a balance 5 % lower trips the default breaker.
+        session.on_bar(&venue, &bar(JAN_1 + 5, dec!(100))).await;
+        assert_eq!(venue.entries.borrow().len(), 1);
+        session
+            .on_execution(&venue, &terminated(Side::Buy, JAN_1 + 6))
+            .await;
+        session.on_wallet_balance(dec!(950));
+
+        let events = session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+
+        assert_eq!(
+            events.last(),
+            Some(&SessionEvent::EntryRefused(EntryRefusal::DailyHalt))
+        );
+        assert_eq!(venue.entries.borrow().len(), 1);
     }
 
     #[tokio::test]
