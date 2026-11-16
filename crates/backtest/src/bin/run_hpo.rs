@@ -627,7 +627,10 @@ where
     let shared_json = Some(serde_json::to_value(&shared)?).filter(|value| !value.is_null());
     let optimizer = WalkForwardOptimizer::<S>::new(engine_config, param_space)
         .with_shared_config(shared)
-        .with_min_trades_per_fold(args.min_trades_per_fold);
+        .with_min_trades_per_fold(args.min_trades_per_fold)
+        .with_progress(std::sync::Arc::new(
+            backtest::wiring::TerminalProgress::default(),
+        ));
 
     let mut all_evaluations: Vec<(
         Decimal,
@@ -787,7 +790,12 @@ where
 
     if !all_evaluations.is_empty() {
         let recorder = backtest::wiring::recorder(args.record.as_deref())?;
-        let sweep_ctx = RunContext::new(RunType::Hpo, &sweep_spec, started_at_ms);
+        let sweep_ctx = RunContext::new(
+            RunType::Hpo,
+            &sweep_spec,
+            started_at_ms,
+            &backtest::wiring::entropy(),
+        );
         let eval_only: Vec<CandidateEvaluation<S::Config>> =
             all_evaluations.iter().map(|e| e.1.clone()).collect();
         let total_bars: usize = prepared.resolutions.iter().map(|r| r.tape.len()).sum();
@@ -815,9 +823,12 @@ where
             &sweep_ctx,
             &sweep_spec,
             &winner_window,
-            &eval_only,
-            settings,
+            backtest::HpoSearch {
+                evaluations: &eval_only,
+                settings,
+            },
             now_unix_ms(),
+            &backtest::wiring::entropy(),
         )
         .await?;
     }

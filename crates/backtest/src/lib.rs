@@ -23,11 +23,14 @@ pub mod tick_simulation;
 pub mod walk_forward;
 pub mod wiring;
 
-pub use wiring::now_unix_ms;
+pub use wiring::{
+    load_artifact_shared_config, load_strategy, load_strategy_config, load_strategy_with_shared,
+    now_unix_ms, resolve_strategy_id,
+};
 
 pub use alert_throttle::AlertThrottle;
 pub use artifact::{
-    load_artifact_shared_config, load_strategy_config, HpoDeploymentArtifact, HpoScorecard,
+    parse_artifact_shared_config, parse_strategy_config, HpoDeploymentArtifact, HpoScorecard,
     LoadedStrategyConfig, SamplingConfig, StrategyDeploymentArtifact,
 };
 pub use config::BacktestConfig;
@@ -37,7 +40,7 @@ pub use domain::accounting::{marked_equity, utc_month_key, MonthlyGuard};
 pub use domain::metrics;
 pub use driver::{DriverStep, SessionDriver};
 pub use engine::BacktestEngine;
-pub use error::BacktestError;
+pub use error::{BacktestError, ConfigText, LoadError};
 pub use execution_core::{
     barrier_exit, market_fill_price, BarrierExit, ExecutionCore, PendingEntry, PendingEntryOutcome,
     PendingTarget, TradeLedger,
@@ -62,14 +65,15 @@ pub use paper::{
     PaperSessionOwner, PaperSessionRuntime, PaperTradingConfig, PaperTradingEvent,
     PaperTradingSession, TelemetryConfig, TelemetryEnvelope,
 };
+pub use parity::FillRecordError;
 pub use price_event::{bucket_trades, PriceEvent};
 pub use recording::{
     record_backtest, record_backtest_with_audit, record_closed_trade, record_hpo,
-    record_monte_carlo, record_run_status, DataWindow, RunContext, RunStatus, GIT_SHA,
+    record_monte_carlo, record_run_status, DataWindow, HpoSearch, RunContext, RunStatus, GIT_SHA,
 };
 pub use registry::{
-    load_strategy, load_strategy_with_shared, resolve_strategy_id, ConfigSource, DeploymentPolicy,
-    LoadedStrategy, ALLOW_UNPROVEN_STRATEGY_HELP, DEFAULT_STRATEGY_ID,
+    build_strategy, strategy_id_of, ConfigSource, DeploymentPolicy, LoadedStrategy,
+    ALLOW_UNPROVEN_STRATEGY_HELP, DEFAULT_STRATEGY_ID,
 };
 pub use run::{FillModel, InvalidRunId, RunId, RunSpec, RunType};
 pub use tick_simulation::{TickSimulation, TickSimulationConfig, TickSimulationError, TickStep};

@@ -138,7 +138,7 @@ async fn a_backtest_records_the_strategy_audit_only_when_there_is_one() {
         strategy_config: busy_policy(),
         execution_context: account(),
     };
-    let ctx = RunContext::new(RunType::Backtest, &spec, 0);
+    let ctx = RunContext::new(RunType::Backtest, &spec, 0, &backtest::wiring::entropy());
     let metrics = BacktestMetrics::calculate(dec!(10_000), &[], dec!(0), dec!(0));
     let audit = serde_json::json!({"agents": 96});
 

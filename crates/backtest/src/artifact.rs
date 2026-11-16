@@ -1,13 +1,10 @@
-use std::fs;
-use std::path::Path;
-
-use anyhow::{Context, Result};
 use domain::MarketType;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::config::BacktestConfig;
+use crate::error::{ConfigText, LoadError};
 use crate::run::RunSpec;
 
 /// Data sampling specification required by the strategy (AFML Ch. 2).
@@ -143,12 +140,16 @@ pub struct HpoDeploymentArtifact<C> {
     pub shared_config: Option<serde_json::Value>,
 }
 
-/// The `shared_config` an artifact file stores, or `None` when it stores none (or `null`).
-pub fn load_artifact_shared_config(path: &Path) -> Result<Option<serde_json::Value>> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read configuration file: {}", path.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse configuration file: {}", path.display()))?;
+/// The `shared_config` an artifact stores, or `None` when it stores none (or `null`).
+pub fn parse_artifact_shared_config(
+    text: ConfigText<'_>,
+) -> Result<Option<serde_json::Value>, LoadError> {
+    let value: serde_json::Value =
+        serde_json::from_str(text.content).map_err(|error| LoadError::Parse {
+            what: "the configuration",
+            origin: text.origin.to_string(),
+            message: error.to_string(),
+        })?;
     Ok(value
         .get("shared_config")
         .filter(|shared| !shared.is_null())
@@ -231,23 +232,21 @@ impl<C> LoadedStrategyConfig<C> {
     }
 }
 
-/// Loads a strategy configuration from a file path, transparently handling both
-/// authoritative [`StrategyDeploymentArtifact`] files and legacy bare JSON files.
-pub fn load_strategy_config<C: DeserializeOwned>(path: &Path) -> Result<LoadedStrategyConfig<C>> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read configuration file: {}", path.display()))?;
-
+/// Parses a strategy configuration, transparently handling both authoritative
+/// [`StrategyDeploymentArtifact`]s and legacy bare JSON configurations.
+pub fn parse_strategy_config<C: DeserializeOwned>(
+    text: ConfigText<'_>,
+) -> Result<LoadedStrategyConfig<C>, LoadError> {
     // Try parsing as comprehensive StrategyDeploymentArtifact first
-    if let Ok(artifact) = serde_json::from_str::<StrategyDeploymentArtifact<C>>(&content) {
+    if let Ok(artifact) = serde_json::from_str::<StrategyDeploymentArtifact<C>>(text.content) {
         return Ok(LoadedStrategyConfig::Artifact(Box::new(artifact)));
     }
 
     // Fall back to legacy bare configuration
-    let bare = serde_json::from_str::<C>(&content).with_context(|| {
-        format!(
-            "Failed to parse configuration file as artifact or bare config: {}",
-            path.display()
-        )
+    let bare = serde_json::from_str::<C>(text.content).map_err(|error| LoadError::Parse {
+        what: "the configuration as an artifact or a bare configuration",
+        origin: text.origin.to_string(),
+        message: error.to_string(),
     })?;
     Ok(LoadedStrategyConfig::Bare(bare))
 }
@@ -255,8 +254,10 @@ pub fn load_strategy_config<C: DeserializeOwned>(path: &Path) -> Result<LoadedSt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wiring::{load_artifact_shared_config, load_strategy_config};
     use rust_decimal_macros::dec;
     use serde::{Deserialize, Serialize};
+    use std::fs;
 
     /// Stands in for a strategy's hyperparameters: the artifact types are generic over them.
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -523,12 +523,16 @@ async fn main() -> Result<()> {
         strategy_config: strat_config_val,
         execution_context: engine_config,
     };
-    let run_ctx = RunContext::new(RunType::Backtest, &run_spec, started_at_ms).with_fill_model(
-        match args.fill_model {
-            FillModelArg::Bar => backtest::FillModel::Bar,
-            FillModelArg::Tick => backtest::FillModel::Tick,
-        },
-    );
+    let run_ctx = RunContext::new(
+        RunType::Backtest,
+        &run_spec,
+        started_at_ms,
+        &backtest::wiring::entropy(),
+    )
+    .with_fill_model(match args.fill_model {
+        FillModelArg::Bar => backtest::FillModel::Bar,
+        FillModelArg::Tick => backtest::FillModel::Tick,
+    });
     let recorder = backtest::wiring::recorder(args.record.as_deref())?;
     record_backtest_with_audit(
         &recorder,
@@ -622,7 +626,11 @@ async fn main() -> Result<()> {
             );
             println!("============================================================");
 
-            let mc_ctx = run_ctx.child(RunType::MonteCarlo, now_unix_ms());
+            let mc_ctx = run_ctx.child(
+                RunType::MonteCarlo,
+                now_unix_ms(),
+                &backtest::wiring::entropy(),
+            );
             record_monte_carlo(
                 &recorder,
                 &mc_ctx,

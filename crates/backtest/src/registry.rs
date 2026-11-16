@@ -1,13 +1,10 @@
 //! Strategy selection and loading for the runners.
 //!
 //! Every runner (backtest, HPO, paper, live) turns a strategy name and an optional configuration
-//! file into a ready strategy through [`load_strategy`], which resolves the name in the
+//! file into a ready strategy through [`build_strategy`], which resolves the name in the
 //! [`strategies`] registry. No runner matches on strategy names itself, so registering a new
 //! strategy there makes it available everywhere.
 
-use std::path::Path;
-
-use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -17,9 +14,10 @@ use strategies::{
 };
 
 use crate::artifact::{
-    load_artifact_shared_config, load_strategy_config, HpoScorecard, LoadedStrategyConfig,
+    parse_artifact_shared_config, parse_strategy_config, HpoScorecard, LoadedStrategyConfig,
 };
 use crate::config::BacktestConfig;
+use crate::error::{ConfigText, LoadError};
 
 /// Strategy a runner uses when neither the artifact nor the command line names one.
 pub const DEFAULT_STRATEGY_ID: &str = "swarm_consensus";
@@ -107,14 +105,11 @@ impl LoadedStrategy {
     /// Applies the deployment gate at start-up. A refused configuration is an error under
     /// [`DeploymentPolicy::Enforce`]. The returned notice, when there is one, is for the
     /// operator: the warning of an overridden refusal, or that the override changed nothing.
-    pub fn ensure_deployable(&self, policy: DeploymentPolicy) -> Result<Option<String>> {
+    pub fn ensure_deployable(&self, policy: DeploymentPolicy) -> Result<Option<String>, LoadError> {
         let blocker = self.deployment_blocker();
         match (policy, blocker) {
             (DeploymentPolicy::Enforce, None) => Ok(None),
-            (DeploymentPolicy::Enforce, Some(reason)) => anyhow::bail!(
-                "the deployment artifact is not deployable: {reason}. Pass \
-                 --allow-unproven-strategy to run it anyway (e.g. to test the mechanics on testnet)"
-            ),
+            (DeploymentPolicy::Enforce, Some(reason)) => Err(LoadError::NotDeployable(reason)),
             (DeploymentPolicy::AllowUnproven, Some(reason)) => Ok(Some(format!(
                 "[WARNING] Running an unproven strategy (--allow-unproven-strategy): {reason}"
             ))),
@@ -133,12 +128,9 @@ impl LoadedStrategy {
     }
 
     /// Execution gate: refuses a strategy that can emit `Decision::Target` (spec §17.1).
-    pub fn ensure_accepts_decisions(&self) -> Result<()> {
+    pub fn ensure_accepts_decisions(&self) -> Result<(), LoadError> {
         if self.strategy.emits_targets() {
-            anyhow::bail!(
-                "strategy '{}' emits target-position decisions, which no execution path accepts yet",
-                self.strategy_id
-            );
+            return Err(LoadError::EmitsTargets(self.strategy_id.clone()));
         }
         Ok(())
     }
@@ -185,13 +177,18 @@ impl LoadedStrategy {
 /// resolve to the canonical id; an unregistered name is an error listing the registered ones.
 /// A command-line strategy that disagrees with the artifact's is an error too, never silently
 /// ignored.
-pub fn resolve_strategy_id(requested: Option<&str>, config_path: Option<&Path>) -> Result<String> {
-    let from_artifact = match config_path {
-        Some(path) => {
-            let content = std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read {}", path.display()))?;
-            let value: serde_json::Value = serde_json::from_str(&content)
-                .with_context(|| "Failed to parse configuration JSON")?;
+pub fn strategy_id_of(
+    requested: Option<&str>,
+    config: Option<ConfigText<'_>>,
+) -> Result<String, LoadError> {
+    let from_artifact = match config {
+        Some(text) => {
+            let value: serde_json::Value =
+                serde_json::from_str(text.content).map_err(|error| LoadError::Parse {
+                    what: "the configuration",
+                    origin: text.origin.to_string(),
+                    message: error.to_string(),
+                })?;
             value
                 .get("strategy_id")
                 .and_then(|v| v.as_str())
@@ -202,15 +199,16 @@ pub fn resolve_strategy_id(requested: Option<&str>, config_path: Option<&Path>) 
     let resolve = |name: &str| {
         canonical_id(name)
             .map(str::to_string)
-            .ok_or_else(|| anyhow::anyhow!(unknown_strategy_message(name)))
+            .ok_or_else(|| LoadError::UnknownStrategy(unknown_strategy_message(name)))
     };
     match (from_artifact, requested) {
         (Some(declared), Some(asked)) => {
             let (declared, asked) = (resolve(&declared)?, resolve(asked)?);
             if declared != asked {
-                anyhow::bail!(
-                    "--strategy {asked} conflicts with the {declared} strategy declared by the configuration file; drop the option or use a matching file"
-                );
+                return Err(LoadError::Conflict(format!(
+                    "--strategy {asked} conflicts with the {declared} strategy declared by the \
+                     configuration file; drop the option or use a matching file"
+                )));
             }
             Ok(declared)
         }
@@ -221,47 +219,51 @@ pub fn resolve_strategy_id(requested: Option<&str>, config_path: Option<&Path>) 
 }
 
 struct Loader<'a> {
-    config_path: Option<&'a Path>,
-    shared_path: Option<&'a Path>,
+    config: Option<ConfigText<'a>>,
+    shared: Option<ConfigText<'a>>,
 }
 
-/// The shared configuration of a load: the artifact's, else the `--shared-config` file's, else
-/// the strategy's default. A file that contradicts the artifact's is refused.
+/// The shared configuration of a load: the artifact's, else the `--shared-config` text's, else
+/// the strategy's default. A text that contradicts the artifact's is refused.
 fn resolve_shared_config<T: DeserializeOwned + Default>(
     artifact_shared: Option<serde_json::Value>,
-    shared_path: Option<&Path>,
-) -> Result<T> {
-    let from_file = match shared_path {
-        Some(path) => {
-            let content = std::fs::read_to_string(path).with_context(|| {
-                format!(
-                    "Failed to read shared configuration file: {}",
-                    path.display()
-                )
-            })?;
-            let value: serde_json::Value = serde_json::from_str(&content)
-                .with_context(|| "Failed to parse shared configuration JSON")?;
-            Some(value)
+    shared: Option<ConfigText<'_>>,
+) -> Result<T, LoadError> {
+    let (given, origin) = match shared {
+        Some(text) => {
+            let value: serde_json::Value =
+                serde_json::from_str(text.content).map_err(|error| LoadError::Parse {
+                    what: "the shared configuration",
+                    origin: text.origin.to_string(),
+                    message: error.to_string(),
+                })?;
+            (Some(value), text.origin)
         }
-        None => None,
+        None => (None, "the deployment artifact"),
     };
-    let chosen = match (artifact_shared, from_file) {
-        (Some(declared), Some(given)) if declared != given => anyhow::bail!(
-            "--shared-config conflicts with the shared configuration stored in the deployment \
-             artifact; drop the option or use a matching file"
-        ),
+    let chosen = match (artifact_shared, given) {
+        (Some(declared), Some(given)) if declared != given => {
+            return Err(LoadError::Conflict(
+                "--shared-config conflicts with the shared configuration stored in the \
+                 deployment artifact; drop the option or use a matching file"
+                    .to_string(),
+            ))
+        }
         (Some(declared), _) => Some(declared),
         (None, given) => given,
     };
     match chosen {
-        Some(value) => serde_json::from_value(value)
-            .with_context(|| "Failed to parse the strategy's shared configuration"),
+        Some(value) => serde_json::from_value(value).map_err(|error| LoadError::Parse {
+            what: "the strategy's shared configuration",
+            origin: origin.to_string(),
+            message: error.to_string(),
+        }),
         None => Ok(T::default()),
     }
 }
 
 impl StrategyVisitor for Loader<'_> {
-    type Output = Result<LoadedStrategy>;
+    type Output = Result<LoadedStrategy, LoadError>;
 
     fn visit<S>(self) -> Self::Output
     where
@@ -270,11 +272,11 @@ impl StrategyVisitor for Loader<'_> {
         S::Space: Serialize + DeserializeOwned,
     {
         let mut artifact_shared = None;
-        let (config, source, threshold, symbol, market_type, context) = match self.config_path {
-            Some(path) => {
-                let loaded = load_strategy_config::<S::Config>(path)?;
+        let (config, source, threshold, symbol, market_type, context) = match self.config {
+            Some(text) => {
+                let loaded = parse_strategy_config::<S::Config>(text)?;
                 if matches!(loaded, LoadedStrategyConfig::Artifact(_)) {
-                    artifact_shared = load_artifact_shared_config(path)?;
+                    artifact_shared = parse_artifact_shared_config(text)?;
                 }
                 let source = match &loaded {
                     LoadedStrategyConfig::Artifact(artifact) => ConfigSource::Artifact {
@@ -305,13 +307,22 @@ impl StrategyVisitor for Loader<'_> {
                 None,
             ),
         };
-        let config_json = serde_json::to_value(&config)?;
+        let serialize = |what: &'static str| {
+            move |error: serde_json::Error| LoadError::Serialize {
+                what,
+                message: error.to_string(),
+            }
+        };
+        let config_json =
+            serde_json::to_value(&config).map_err(serialize("the strategy configuration"))?;
         let config_display = config.to_string();
-        let shared: S::SharedConfig = resolve_shared_config(artifact_shared, self.shared_path)?;
+        let shared: S::SharedConfig = resolve_shared_config(artifact_shared, self.shared)?;
         // `()` (a dollar-bar strategy) serializes to `null`: there is nothing to report.
-        let shared_config_json = Some(serde_json::to_value(&shared)?).filter(|v| !v.is_null());
+        let shared_config_json =
+            Some(serde_json::to_value(&shared).map_err(serialize("the shared configuration"))?)
+                .filter(|v| !v.is_null());
         let strategy = S::from_config(&shared, config)
-            .map_err(|error| anyhow::anyhow!("Failed to initialize strategy: {error}"))?;
+            .map_err(|error| LoadError::Initialize(error.to_string()))?;
         Ok(LoadedStrategy {
             strategy: Box::new(strategy),
             strategy_id: S::id().to_string(),
@@ -327,35 +338,24 @@ impl StrategyVisitor for Loader<'_> {
     }
 }
 
-/// Builds the strategy registered under `name` (id or alias) from `config_path`, or from its
-/// default hyperparameters when no file is given, with the shared configuration the artifact
-/// stores or else the strategy's default (see [`load_strategy_with_shared`]).
-pub fn load_strategy(name: &str, config_path: Option<&Path>) -> Result<LoadedStrategy> {
-    load_strategy_with_shared(name, config_path, None)
-}
-
-/// [`load_strategy`] with an optional shared-configuration file (`--shared-config`).
+/// Builds the strategy registered under `name` (id or alias) from the text of its configuration,
+/// or from its default hyperparameters when none is given.
 ///
-/// The shared configuration is the one the deployment artifact stores, else the file's, else
-/// the strategy's default; a file that contradicts the artifact's is an error.
-pub fn load_strategy_with_shared(
+/// The shared configuration is the one the deployment artifact stores, else `shared`, else the
+/// strategy's default; a `shared` that contradicts the artifact's is an error.
+pub fn build_strategy(
     name: &str,
-    config_path: Option<&Path>,
-    shared_path: Option<&Path>,
-) -> Result<LoadedStrategy> {
-    dispatch(
-        name,
-        Loader {
-            config_path,
-            shared_path,
-        },
-    )
-    .unwrap_or_else(|| Err(anyhow::anyhow!(unknown_strategy_message(name))))
+    config: Option<ConfigText<'_>>,
+    shared: Option<ConfigText<'_>>,
+) -> Result<LoadedStrategy, LoadError> {
+    dispatch(name, Loader { config, shared })
+        .unwrap_or_else(|| Err(LoadError::UnknownStrategy(unknown_strategy_message(name))))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wiring::{load_strategy, load_strategy_with_shared, resolve_strategy_id};
 
     fn temp_file(name: &str, content: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("atsnt-{}-{name}", std::process::id()));

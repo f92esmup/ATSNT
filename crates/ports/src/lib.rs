@@ -9,17 +9,23 @@
 
 pub mod alerts;
 pub mod clock;
+pub mod entropy;
 pub mod execution;
 pub mod exits;
+pub mod fill_log;
 pub mod market_data;
+pub mod progress;
 pub mod run_recorder;
 pub mod tape;
 
 pub use alerts::AlertNotifier;
 pub use clock::Clock;
+pub use entropy::Entropy;
 pub use execution::{EntryAck, ExecutionReport, ExecutionVenue, OrderRequest};
 pub use exits::ExitGateway;
+pub use fill_log::FillLog;
 pub use market_data::{AsyncMarketDataStream, MarketDataStream};
+pub use progress::ProgressSink;
 pub use run_recorder::{
     RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow,
 };

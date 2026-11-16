@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use domain::{DollarBar, Trade};
-use indicatif::{ProgressBar, ProgressStyle};
+use ports::ProgressSink;
 use rayon::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -583,6 +583,7 @@ pub struct WalkForwardOptimizer<S: OptimizableStrategy> {
     parameter_space: S::Space,
     min_trades_per_fold: usize,
     shared: S::SharedConfig,
+    progress: Option<std::sync::Arc<dyn ProgressSink>>,
 }
 
 impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
@@ -593,6 +594,7 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
             parameter_space,
             min_trades_per_fold: DEFAULT_MIN_TRADES_PER_FOLD,
             shared: S::SharedConfig::default(),
+            progress: None,
         }
     }
 
@@ -611,6 +613,12 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
     /// it defaults to `S::SharedConfig::default()`, the only one of a dollar-bar strategy.
     pub fn with_shared_config(mut self, shared: S::SharedConfig) -> Self {
         self.shared = shared;
+        self
+    }
+
+    /// Reports every evaluated candidate to `progress`; nothing is reported by default.
+    pub fn with_progress(mut self, progress: std::sync::Arc<dyn ProgressSink>) -> Self {
+        self.progress = Some(progress);
         self
     }
 
@@ -661,14 +669,10 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
             engine_config: config,
         };
 
-        let pb = ProgressBar::new(total_candidates as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) | ETA: {eta_precise} | {msg}")
-                .unwrap_or_else(|_| ProgressStyle::default_bar())
-                .progress_chars("#>-"),
-        );
-        pb.set_message("Evaluating HPO parameter space");
+        let progress = self.progress.as_deref();
+        if let Some(progress) = progress {
+            progress.start(total_candidates as u64);
+        }
 
         let evaluated: Vec<(CandidateEvaluation<S::Config>, Option<ReturnMoments>)> = candidates
             .par_iter()
@@ -741,7 +745,9 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
                 };
                 let moments = ReturnMoments::of(&oos_returns);
 
-                pb.inc(1);
+                if let Some(progress) = progress {
+                    progress.advance();
+                }
 
                 Some((
                     CandidateEvaluation {
@@ -767,7 +773,9 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
             })
             .collect();
 
-        pb.finish_with_message("HPO parameter evaluation complete");
+        if let Some(progress) = progress {
+            progress.finish();
+        }
 
         let mut evaluations = assign_deflated_p_values(evaluated, total_candidates);
 

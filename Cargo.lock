@@ -15,6 +15,7 @@ dependencies = [
  "indicatif",
  "parquet",
  "ports",
+ "rand 0.8.8",
  "rayon",
  "reqwest",
  "ring",

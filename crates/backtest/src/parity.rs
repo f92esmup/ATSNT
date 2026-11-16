@@ -11,7 +11,7 @@
 //! shifts the time error one-to-one; the price error is what the latency sweep is scored on.
 
 use domain::{Side, Trade};
-use ports::TapeVenue;
+use ports::{FillLog, TapeVenue};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -85,20 +85,31 @@ pub fn tape_window(fills: &[ObservedFill]) -> Option<(i64, i64)> {
     Some((start - 1_000, end + 60_000))
 }
 
-/// Appends the entry fills of a live run to a JSON-lines file for [`compare_fills`].
+/// Appends the entry fills of a live run to a [`FillLog`], as JSON, for [`compare_fills`].
 ///
 /// The caller reports the local wall-clock time an entry order is sent and, once the position
 /// opened, its average fill; the recorder pairs them.
-pub struct FillRecorder {
-    path: std::path::PathBuf,
+pub struct FillRecorder<L: FillLog> {
+    log: L,
     submitted_ms: std::sync::Mutex<Option<i64>>,
 }
 
-impl FillRecorder {
-    /// A recorder that appends to `path`, creating it on the first fill.
-    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+/// Why a fill could not be recorded.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum FillRecordError {
+    /// The fill could not be turned into JSON.
+    #[error("cannot serialize the fill: {0}")]
+    Serialize(String),
+    /// The log refused the record.
+    #[error("cannot append the fill: {0}")]
+    Log(String),
+}
+
+impl<L: FillLog> FillRecorder<L> {
+    /// A recorder that appends to `log`.
+    pub fn new(log: L) -> Self {
         Self {
-            path: path.into(),
+            log,
             submitted_ms: std::sync::Mutex::new(None),
         }
     }
@@ -127,7 +138,7 @@ impl FillRecorder {
         quantity: Decimal,
         avg_price: Decimal,
         filled_ms: i64,
-    ) -> std::io::Result<Option<ObservedFill>> {
+    ) -> Result<Option<ObservedFill>, FillRecordError> {
         let submitted = self
             .submitted_ms
             .lock()
@@ -143,14 +154,11 @@ impl FillRecorder {
             quantity,
             avg_price,
         };
-        let mut line = serde_json::to_string(&fill).map_err(std::io::Error::other)?;
-        line.push('\n');
-        use std::io::Write;
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?
-            .write_all(line.as_bytes())?;
+        let record = serde_json::to_string(&fill)
+            .map_err(|error| FillRecordError::Serialize(error.to_string()))?;
+        self.log
+            .append(&record)
+            .map_err(|error| FillRecordError::Log(error.to_string()))?;
         Ok(Some(fill))
     }
 }
@@ -436,11 +444,31 @@ mod tests {
         assert_eq!(tape_window(&[]), None);
     }
 
+    /// A fill log kept in memory, one record per line.
+    #[derive(Default)]
+    struct MemoryLog(std::sync::Mutex<String>);
+
+    impl MemoryLog {
+        fn text(&self) -> String {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl FillLog for &MemoryLog {
+        type Error = String;
+
+        fn append(&self, record: &str) -> Result<(), String> {
+            let mut text = self.0.lock().unwrap();
+            text.push_str(record);
+            text.push('\n');
+            Ok(())
+        }
+    }
+
     #[test]
     fn a_discarded_submission_is_never_paired_with_a_later_fill() {
-        let path = std::env::temp_dir().join(format!("atsnt-discard-{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let recorder = FillRecorder::new(&path);
+        let log = MemoryLog::default();
+        let recorder = FillRecorder::new(&log);
         recorder.on_entry_submitted(1_000);
 
         // The next order's send time is unknown: nothing may be recorded for it.
@@ -450,14 +478,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(fill, None);
-        assert!(!path.exists());
+        assert!(log.text().is_empty());
     }
 
     #[test]
     fn the_recorder_pairs_a_submission_with_its_fill_and_appends_json_lines() {
-        let path = std::env::temp_dir().join(format!("atsnt-fills-{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let recorder = FillRecorder::new(&path);
+        let log = MemoryLog::default();
+        let recorder = FillRecorder::new(&log);
 
         // A fill with no noted submission records nothing.
         assert_eq!(
@@ -476,8 +503,7 @@ mod tests {
             .on_entry_filled(Side::Sell, dec!(0.25), dec!(99.5), 2_090)
             .unwrap();
 
-        let fills = parse_fills_jsonl(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        std::fs::remove_file(&path).unwrap();
+        let fills = parse_fills_jsonl(&log.text()).unwrap();
         assert_eq!(fills.len(), 2);
         assert_eq!(fills[0], first);
         assert_eq!(fills[0].submitted_ms, 1_000);

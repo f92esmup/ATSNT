@@ -27,6 +27,7 @@ ring.workspace = true
 chrono.workspace = true
 rayon.workspace = true
 rusqlite.workspace = true
+rand.workspace = true
 
 
 

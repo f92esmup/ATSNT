@@ -2,7 +2,9 @@
 //! ([`ports::RunRecorder`]).
 
 use domain::PositionSide;
-use ports::{RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow};
+use ports::{
+    Entropy, RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow,
+};
 use serde::Serialize;
 
 use crate::metrics::{BacktestMetrics, ClosedTrade};
@@ -66,9 +68,14 @@ pub struct RunContext {
 
 impl RunContext {
     /// Starts a new top-level run for `spec`.
-    pub fn new<C>(run_type: RunType, spec: &RunSpec<C>, started_at_ms: i64) -> Self {
+    pub fn new<C>(
+        run_type: RunType,
+        spec: &RunSpec<C>,
+        started_at_ms: i64,
+        entropy: &impl Entropy,
+    ) -> Self {
         Self {
-            run_id: RunId::generate(started_at_ms.max(0) as u64),
+            run_id: RunId::generate(started_at_ms.max(0) as u64, entropy),
             parent_run_id: None,
             baseline_run_id: None,
             run_type,
@@ -93,9 +100,9 @@ impl RunContext {
     }
 
     /// Starts a run nested under this one (HPO trial, Monte Carlo of a backtest).
-    pub fn child(&self, run_type: RunType, started_at_ms: i64) -> Self {
+    pub fn child(&self, run_type: RunType, started_at_ms: i64, entropy: &impl Entropy) -> Self {
         Self {
-            run_id: RunId::generate(started_at_ms.max(0) as u64),
+            run_id: RunId::generate(started_at_ms.max(0) as u64, entropy),
             parent_run_id: Some(self.run_id.clone()),
             baseline_run_id: None,
             run_type,
@@ -400,6 +407,14 @@ pub async fn record_monte_carlo<R: RunRecorder, C: Serialize>(
     Ok(())
 }
 
+/// What a hyper-parameter search produced, as [`record_hpo`] stores it.
+pub struct HpoSearch<'a, C> {
+    /// The ranked candidates, best first.
+    pub evaluations: &'a [CandidateEvaluation<C>],
+    /// Settings of the search (folds, ratios, timings), merged into the parent's extras.
+    pub settings: serde_json::Value,
+}
+
 /// Persists a Walk-Forward HPO sweep: one `hpo` parent run (its `params` are
 /// the search space) and one `hpo_trial` child run per evaluated candidate.
 ///
@@ -412,10 +427,14 @@ pub async fn record_hpo<R: RunRecorder, S: Serialize, C: Serialize + Clone>(
     parent: &RunContext,
     parent_spec: &RunSpec<S>,
     data: &DataWindow,
-    evaluations: &[CandidateEvaluation<C>],
-    settings: serde_json::Value,
+    search: HpoSearch<'_, C>,
     now_ms: i64,
+    entropy: &impl Entropy,
 ) -> Result<Option<RunId>, RecorderError> {
+    let HpoSearch {
+        evaluations,
+        settings,
+    } = search;
     let finished = now_ms;
     let mut runs = vec![parent
         .run_row(
@@ -430,7 +449,7 @@ pub async fn record_hpo<R: RunRecorder, S: Serialize, C: Serialize + Clone>(
     let mut winner = None;
 
     for (rank, eval) in evaluations.iter().enumerate() {
-        let trial = parent.child(RunType::HpoTrial, parent.started_at_ms);
+        let trial = parent.child(RunType::HpoTrial, parent.started_at_ms, entropy);
         let trial_spec = parent_spec.with_config(eval.config.clone());
         runs.push(
             trial
