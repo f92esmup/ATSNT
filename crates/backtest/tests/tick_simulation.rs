@@ -5,12 +5,12 @@ use backtest::tick_simulation::{TickSimulationConfig, TickSimulationError};
 use backtest::BacktestConfig;
 use domain::futures::FundingSchedule;
 use domain::OrderIntent;
-use domain::{DollarBar, Side, Trade};
+use domain::{Side, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::VecDeque;
-use strategies::MarketType;
 use strategies::Strategy;
+use strategies::{MarketEvent, MarketType};
 
 /// Emits one scripted decision per bar.
 struct Scripted {
@@ -26,7 +26,10 @@ impl Strategy for Scripted {
         &[MarketType::UsdMPerpetual]
     }
 
-    fn on_bar(&mut self, _: &DollarBar) -> Option<OrderIntent> {
+    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+        let MarketEvent::DollarBar(_) = event else {
+            return None;
+        };
         self.decisions.pop_front().flatten()
     }
 

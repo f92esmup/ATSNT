@@ -20,9 +20,9 @@ pub mod trade;
 
 // Re-exports of core domain and analytical types
 pub use analytics::{
-    AlmaSlope, AtrRatio, BarAggregator, BarInput, CusumEvent, CusumFilter, DollarBarAggregator,
-    FeedBar, RangeBarAggregator, RollingZScore, TickBarAggregator, TimeBarAggregator,
-    VolumeBarAggregator, VwapDeviation, WilderAtr, WilderRsi, ZScoreResult,
+    AlmaSlope, AtrRatio, BarAggregator, BarInput, DollarBarAggregator, FeedBar, RangeBarAggregator,
+    RollingZScore, TickBarAggregator, TimeBarAggregator, VolumeBarAggregator, VwapDeviation,
+    WilderAtr, WilderRsi, ZScoreResult,
 };
 pub use bar::DollarBar;
 pub use decision::{InputKind, MarketEvent, ProtectiveExits};

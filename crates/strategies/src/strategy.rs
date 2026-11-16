@@ -26,24 +26,11 @@ pub trait Strategy: Send {
         InputKind::DollarBars
     }
 
-    /// Ingests a completed DollarBar and optionally emits an OrderIntent.
-    ///
-    /// The convenience form of [`Strategy::on_event`] for dollar-bar strategies; strategies
-    /// that override `on_event` leave it at its default, which decides nothing.
-    fn on_bar(&mut self, _bar: &DollarBar) -> Option<OrderIntent> {
-        None
-    }
-
     /// Reacts to one market event and optionally decides a triple-barrier entry.
     ///
-    /// Every runner calls this method. By default a dollar bar goes to [`Strategy::on_bar`];
-    /// raw trades are ignored.
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-        match event {
-            MarketEvent::DollarBar(bar) => self.on_bar(bar),
-            MarketEvent::Trade(_) => None,
-        }
-    }
+    /// Every runner calls this method, with the events of the kind [`Strategy::input_kind`]
+    /// declares.
+    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent>;
 
     /// Clears internal state buffers to allow clean replay or backtest isolation.
     fn reset(&mut self);
@@ -170,10 +157,6 @@ impl<S: ?Sized + Strategy> Strategy for Box<S> {
         (**self).input_kind()
     }
 
-    fn on_bar(&mut self, bar: &DollarBar) -> Option<OrderIntent> {
-        (**self).on_bar(bar)
-    }
-
     fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
         (**self).on_event(event)
     }
@@ -211,7 +194,7 @@ mod tests {
         }
     }
 
-    /// A bar strategy written against the original contract: it only implements `on_bar`.
+    /// A bar strategy: it decides on dollar bars and ignores raw trades.
     struct BarOnly;
 
     impl Strategy for BarOnly {
@@ -223,7 +206,10 @@ mod tests {
             &[MarketType::UsdMPerpetual]
         }
 
-        fn on_bar(&mut self, bar: &DollarBar) -> Option<OrderIntent> {
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+            let MarketEvent::DollarBar(bar) = event else {
+                return None;
+            };
             OrderIntent::new(bar.end_time, Side::Buy, bar.close, dec!(90), dec!(110), 3).ok()
         }
 
@@ -231,21 +217,12 @@ mod tests {
     }
 
     #[test]
-    fn a_bar_strategy_consumes_dollar_bars_and_decides_entries() {
+    fn a_bar_strategy_declares_dollar_bars_and_decides_on_them() {
         let mut strategy = BarOnly;
         assert_eq!(strategy.input_kind(), InputKind::DollarBars);
         let b = bar(dec!(100));
-        assert_eq!(
-            strategy.on_event(&MarketEvent::DollarBar(&b)),
-            strategy.on_bar(&b)
-        );
-        assert!(strategy.on_event(&MarketEvent::DollarBar(&b)).is_some());
-    }
-
-    #[test]
-    fn a_bar_strategy_ignores_raw_trades() {
-        let trade = Trade::new(1, dec!(100), dec!(1), Side::Buy).unwrap();
-        assert_eq!(BarOnly.on_event(&MarketEvent::Trade(&trade)), None);
+        let intent = strategy.on_event(&MarketEvent::DollarBar(&b)).unwrap();
+        assert_eq!(intent.price, dec!(100));
     }
 
     #[test]
@@ -254,8 +231,16 @@ mod tests {
         let b = bar(dec!(100));
         assert_eq!(boxed.input_kind(), InputKind::DollarBars);
         assert!(boxed.on_event(&MarketEvent::DollarBar(&b)).is_some());
-        assert!(boxed.on_bar(&b).is_some());
         assert_eq!(boxed.name(), "bar_only");
+        assert!(boxed.supports_market_type(MarketType::UsdMPerpetual));
+        assert_eq!(boxed.audit(), None);
+        boxed.reset();
+    }
+
+    #[test]
+    fn a_bar_strategy_ignores_raw_trades() {
+        let trade = Trade::new(1, dec!(100), dec!(1), Side::Buy).unwrap();
+        assert_eq!(BarOnly.on_event(&MarketEvent::Trade(&trade)), None);
     }
 
     #[test]

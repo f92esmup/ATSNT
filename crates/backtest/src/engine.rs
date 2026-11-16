@@ -486,7 +486,10 @@ mod tests {
             &[MarketType::UsdMPerpetual]
         }
 
-        fn on_bar(&mut self, _: &DollarBar) -> Option<OrderIntent> {
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+            let MarketEvent::DollarBar(_) = event else {
+                return None;
+            };
             self.bars_seen += 1;
             self.decisions.pop_front().flatten()
         }
@@ -1136,7 +1139,10 @@ mod tests {
             &[strategies::MarketType::UsdMPerpetual]
         }
 
-        fn on_bar(&mut self, bar: &DollarBar) -> Option<OrderIntent> {
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+            let MarketEvent::DollarBar(bar) = event else {
+                return None;
+            };
             OrderIntent::new(
                 bar.end_time,
                 Side::Buy,

@@ -369,7 +369,10 @@ mod tests {
             &[MarketType::UsdMPerpetual]
         }
 
-        fn on_bar(&mut self, bar: &DollarBar) -> Option<OrderIntent> {
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+            let MarketEvent::DollarBar(bar) = event else {
+                return None;
+            };
             self.seen += 1;
             if self.seen % 7 != 0 {
                 return None;
@@ -416,7 +419,7 @@ mod tests {
         }
 
         fn on_features(&mut self, bar: &DollarBar) -> Option<OrderIntent> {
-            let decision = self.on_bar(bar);
+            let decision = self.on_event(&MarketEvent::DollarBar(bar));
             if MODE == 3 {
                 None
             } else {

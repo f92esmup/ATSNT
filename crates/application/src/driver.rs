@@ -170,6 +170,7 @@ mod tests {
     use rust_decimal_macros::dec;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use strategies::MarketEvent;
     use strategies::MarketType;
 
     #[derive(Default)]
@@ -240,7 +241,10 @@ mod tests {
             &[MarketType::UsdMPerpetual]
         }
 
-        fn on_bar(&mut self, _: &DollarBar) -> Option<OrderIntent> {
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+            let MarketEvent::DollarBar(_) = event else {
+                return None;
+            };
             self.bars_seen += 1;
             self.intents.pop_front()
         }

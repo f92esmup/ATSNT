@@ -1183,7 +1183,10 @@ mod tests {
             &[strategies::MarketType::UsdMPerpetual]
         }
 
-        fn on_bar(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<domain::OrderIntent> {
+            let MarketEvent::DollarBar(bar) = event else {
+                return None;
+            };
             self.counter += 1;
             if self.counter >= self.config.window {
                 self.counter = 0;
@@ -1225,7 +1228,7 @@ mod tests {
         }
 
         fn on_features(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
-            strategies::Strategy::on_bar(self, bar)
+            strategies::Strategy::on_event(self, &strategies::MarketEvent::DollarBar(bar))
         }
 
         fn default_space() -> Self::Space {
@@ -1270,8 +1273,11 @@ mod tests {
             &[strategies::MarketType::UsdMPerpetual]
         }
 
-        fn on_bar(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
-            self.0.on_bar(bar)
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<domain::OrderIntent> {
+            let MarketEvent::DollarBar(bar) = event else {
+                return None;
+            };
+            self.0.on_event(&strategies::MarketEvent::DollarBar(bar))
         }
 
         fn reset(&mut self) {
@@ -1299,7 +1305,7 @@ mod tests {
         }
 
         fn on_features(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
-            strategies::Strategy::on_bar(self, bar)
+            strategies::Strategy::on_event(self, &strategies::MarketEvent::DollarBar(bar))
         }
 
         fn default_space() -> Self::Space {

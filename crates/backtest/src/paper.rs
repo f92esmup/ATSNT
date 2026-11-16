@@ -536,8 +536,8 @@ impl PaperSessionOwner {
 mod tests {
     use std::collections::VecDeque;
 
-    use domain::{DollarBar, OrderIntent, Side};
-    use strategies::MarketType;
+    use domain::{OrderIntent, Side};
+    use strategies::{MarketEvent, MarketType};
 
     use super::*;
     use rust_decimal_macros::dec;
@@ -569,7 +569,10 @@ mod tests {
             &[MarketType::UsdMPerpetual]
         }
 
-        fn on_bar(&mut self, _bar: &DollarBar) -> Option<OrderIntent> {
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+            let MarketEvent::DollarBar(_bar) = event else {
+                return None;
+            };
             self.decisions.pop_front().flatten()
         }
 
