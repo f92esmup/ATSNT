@@ -3,12 +3,14 @@
 //! Decimal arithmetic only: no I/O, no clock and no runtime, so every rule is deterministic and
 //! unit-testable.
 
+pub mod daily_breaker;
 pub mod daily_watermark;
 pub mod excursion;
 pub mod fee_ledger;
 pub mod fills;
 pub mod monthly_guard;
 
+pub use daily_breaker::DailyBreaker;
 pub use daily_watermark::DailyWatermark;
 pub use excursion::{ExcursionTracker, TradeExcursion};
 pub use fee_ledger::FeeLedger;

@@ -2,7 +2,7 @@ use backtest::{BacktestConfig, BacktestEngine};
 use domain::{DollarBar, OrderIntent, Side};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use strategies::{MarketType, Strategy};
+use strategies::{MarketEvent, MarketType, Strategy};
 
 /// Emits a long intent on the scripted bar end times.
 struct ScriptedLong {
@@ -18,7 +18,10 @@ impl Strategy for ScriptedLong {
         &[MarketType::UsdMPerpetual]
     }
 
-    fn on_bar(&mut self, bar: &DollarBar) -> Option<OrderIntent> {
+    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+        let MarketEvent::DollarBar(bar) = event else {
+            return None;
+        };
         self.entries.contains(&bar.end_time).then(|| OrderIntent {
             timestamp: bar.end_time,
             side: Side::Buy,

@@ -68,8 +68,17 @@ fn closed_trade() -> ClosedTrade {
 
 #[test]
 fn run_row_records_full_spec_and_lineage() {
-    let parent = RunContext::new(RunType::Backtest, &spec(), 1_700_000_000_000);
-    let child = parent.child(RunType::MonteCarlo, 1_700_000_100_000);
+    let parent = RunContext::new(
+        RunType::Backtest,
+        &spec(),
+        1_700_000_000_000,
+        &backtest::wiring::entropy(),
+    );
+    let child = parent.child(
+        RunType::MonteCarlo,
+        1_700_000_100_000,
+        &backtest::wiring::entropy(),
+    );
     let window = DataWindow {
         source: Some("data/historical_2026/BTCUSDT".to_string()),
         start_ms: Some(1_700_000_000_000),
@@ -106,7 +115,7 @@ fn run_row_records_full_spec_and_lineage() {
 
 #[test]
 fn metrics_row_maps_every_metric_and_scope() {
-    let ctx = RunContext::new(RunType::Backtest, &spec(), 0);
+    let ctx = RunContext::new(RunType::Backtest, &spec(), 0, &backtest::wiring::entropy());
     let metrics =
         BacktestMetrics::calculate(dec!(10_000), &[closed_trade()], dec!(10), dec!(0.001));
 
@@ -130,7 +139,7 @@ fn halted_runs_flag_the_metrics_row_and_others_omit_the_column() {
     let mut halted = normal.clone();
     halted.halted = true;
 
-    let ctx = RunContext::new(RunType::Backtest, &spec(), 0);
+    let ctx = RunContext::new(RunType::Backtest, &spec(), 0, &backtest::wiring::entropy());
     let normal_row = ctx.metrics_row("full", &normal, None, NOW_MS);
     let halted_row = ctx.metrics_row("full", &halted, None, NOW_MS);
 
@@ -150,7 +159,7 @@ fn metrics_fee_drag(m: &BacktestMetrics) -> Option<rust_decimal::Decimal> {
 
 #[test]
 fn trade_rows_carry_run_identity_and_excursion() {
-    let ctx = RunContext::new(RunType::Paper, &spec(), 0);
+    let ctx = RunContext::new(RunType::Paper, &spec(), 0, &backtest::wiring::entropy());
     let rows = ctx.trade_rows(&[closed_trade(), closed_trade()], 7);
 
     assert_eq!(rows.len(), 2);
@@ -165,7 +174,7 @@ fn trade_rows_carry_run_identity_and_excursion() {
 
 #[test]
 fn equity_points_are_four_events_per_trade_in_time_order() {
-    let ctx = RunContext::new(RunType::Backtest, &spec(), 0);
+    let ctx = RunContext::new(RunType::Backtest, &spec(), 0, &backtest::wiring::entropy());
     let points = ctx.equity_points(&[closed_trade()], 1);
 
     let events: Vec<(&str, rust_decimal::Decimal)> =
@@ -212,7 +221,7 @@ mod persistence {
     #[tokio::test]
     async fn backtest_records_run_metrics_trades_and_equity_events() {
         let recorder = InMemoryRunRecorder::new();
-        let ctx = RunContext::new(RunType::Backtest, &spec(), 0);
+        let ctx = RunContext::new(RunType::Backtest, &spec(), 0, &backtest::wiring::entropy());
         let closed = trades(3);
         let metrics = BacktestMetrics::calculate(dec!(10_000), &closed, dec!(10), dec!(0.001));
 
@@ -241,8 +250,8 @@ mod persistence {
     #[tokio::test]
     async fn monte_carlo_is_a_child_run_with_extras_and_bounded_fan_chart() {
         let recorder = InMemoryRunRecorder::new();
-        let parent = RunContext::new(RunType::Backtest, &spec(), 0);
-        let mc_ctx = parent.child(RunType::MonteCarlo, 0);
+        let parent = RunContext::new(RunType::Backtest, &spec(), 0, &backtest::wiring::entropy());
+        let mc_ctx = parent.child(RunType::MonteCarlo, 0, &backtest::wiring::entropy());
         let closed = trades(12);
         let config = MonteCarloConfig {
             iterations: 200,
@@ -301,7 +310,7 @@ mod persistence {
             strategy_config: TestConfig::default(),
             ..spec_without_config()
         };
-        let parent = RunContext::new(RunType::Hpo, &parent_spec, 0);
+        let parent = RunContext::new(RunType::Hpo, &parent_spec, 0, &backtest::wiring::entropy());
         let fold = |idx| FoldMetrics {
             fold_idx: idx,
             in_sample: BacktestMetrics::calculate(dec!(10_000), &trades(4), dec!(5), dec!(0.0005)),
@@ -336,9 +345,12 @@ mod persistence {
             &parent,
             &parent_spec,
             &DataWindow::default(),
-            &evaluations,
-            serde_json::json!({"folds": 2}),
+            backtest::HpoSearch {
+                evaluations: &evaluations,
+                settings: serde_json::json!({"folds": 2}),
+            },
             NOW_MS,
+            &backtest::wiring::entropy(),
         )
         .await
         .unwrap();
@@ -436,19 +448,39 @@ fn every_run_type_records_how_its_orders_were_filled() {
     // The optimizer and plain backtests fill at bar level, paper trades the tick-level venue and
     // live fills come from the exchange.
     assert_eq!(
-        fill_model_of(&RunContext::new(RunType::Backtest, &spec(), at)),
+        fill_model_of(&RunContext::new(
+            RunType::Backtest,
+            &spec(),
+            at,
+            &backtest::wiring::entropy()
+        )),
         "bar"
     );
     assert_eq!(
-        fill_model_of(&RunContext::new(RunType::Hpo, &spec(), at)),
+        fill_model_of(&RunContext::new(
+            RunType::Hpo,
+            &spec(),
+            at,
+            &backtest::wiring::entropy()
+        )),
         "bar"
     );
     assert_eq!(
-        fill_model_of(&RunContext::new(RunType::Paper, &spec(), at)),
+        fill_model_of(&RunContext::new(
+            RunType::Paper,
+            &spec(),
+            at,
+            &backtest::wiring::entropy()
+        )),
         "tick"
     );
     assert_eq!(
-        fill_model_of(&RunContext::new(RunType::Live, &spec(), at)),
+        fill_model_of(&RunContext::new(
+            RunType::Live,
+            &spec(),
+            at,
+            &backtest::wiring::entropy()
+        )),
         "exchange"
     );
 }
@@ -456,9 +488,10 @@ fn every_run_type_records_how_its_orders_were_filled() {
 #[test]
 fn a_tick_backtest_and_its_children_are_tagged_as_tick() {
     let at = 1_700_000_000_000;
-    let tick = RunContext::new(RunType::Backtest, &spec(), at).with_fill_model(FillModel::Tick);
+    let tick = RunContext::new(RunType::Backtest, &spec(), at, &backtest::wiring::entropy())
+        .with_fill_model(FillModel::Tick);
 
-    let monte_carlo = tick.child(RunType::MonteCarlo, at + 1);
+    let monte_carlo = tick.child(RunType::MonteCarlo, at + 1, &backtest::wiring::entropy());
 
     assert_eq!(fill_model_of(&tick), "tick");
     assert_eq!(fill_model_of(&monte_carlo), "tick");
@@ -466,7 +499,12 @@ fn a_tick_backtest_and_its_children_are_tagged_as_tick() {
 
 #[test]
 fn trade_rows_carry_the_funding_paid_while_the_trade_was_open() {
-    let context = RunContext::new(RunType::Backtest, &spec(), 1_700_000_000_000);
+    let context = RunContext::new(
+        RunType::Backtest,
+        &spec(),
+        1_700_000_000_000,
+        &backtest::wiring::entropy(),
+    );
     let mut trade = closed_trade();
     trade.funding_paid = dec!(0.3);
 
@@ -477,9 +515,19 @@ fn trade_rows_carry_the_funding_paid_while_the_trade_was_open() {
 
 #[test]
 fn paper_run_records_the_baseline_it_was_started_from() {
-    let backtest = RunContext::new(RunType::Backtest, &spec(), 1_700_000_000_000);
-    let paper = RunContext::new(RunType::Paper, &spec(), 1_700_001_000_000)
-        .with_baseline(Some(backtest.run_id.clone()));
+    let backtest = RunContext::new(
+        RunType::Backtest,
+        &spec(),
+        1_700_000_000_000,
+        &backtest::wiring::entropy(),
+    );
+    let paper = RunContext::new(
+        RunType::Paper,
+        &spec(),
+        1_700_001_000_000,
+        &backtest::wiring::entropy(),
+    )
+    .with_baseline(Some(backtest.run_id.clone()));
     let window = DataWindow {
         source: None,
         start_ms: None,
@@ -507,8 +555,17 @@ fn runs_without_a_baseline_omit_the_column() {
         start_ms: None,
         end_ms: None,
     };
-    let backtest = RunContext::new(RunType::Backtest, &spec(), 1_700_000_000_000);
-    let child = backtest.child(RunType::MonteCarlo, 1_700_000_100_000);
+    let backtest = RunContext::new(
+        RunType::Backtest,
+        &spec(),
+        1_700_000_000_000,
+        &backtest::wiring::entropy(),
+    );
+    let child = backtest.child(
+        RunType::MonteCarlo,
+        1_700_000_100_000,
+        &backtest::wiring::entropy(),
+    );
 
     for ctx in [&backtest, &child] {
         let row = ctx
@@ -522,7 +579,7 @@ fn runs_without_a_baseline_omit_the_column() {
 
 #[test]
 fn run_id_parse_accepts_generated_ids_and_rejects_typos() {
-    let id = RunId::generate(NOW_MS.unsigned_abs());
+    let id = RunId::generate(NOW_MS.unsigned_abs(), &backtest::wiring::entropy());
     assert_eq!(RunId::parse(id.as_str()).unwrap(), id);
     for bad in [
         "",

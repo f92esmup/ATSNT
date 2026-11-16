@@ -197,8 +197,8 @@ impl OptimizableStrategy for MyNewStrategy {
     fn from_config(_shared: &(), config: Self::Config) -> Result<Self, DomainError> { Self::new(config) }
     fn default_space() -> Self::Space { MyNewSpace::default() }
     fn extractor(_shared: &()) -> Result<Self::Extractor, DomainError> { Ok(BarPassThrough) }
-    fn on_features(&mut self, features: &DollarBar) -> Option<Decision> {
-        self.on_bar(features).map(Decision::Entry)
+    fn on_features(&mut self, features: &DollarBar) -> Option<OrderIntent> {
+        self.on_event(&MarketEvent::DollarBar(features))
     }
 }
 

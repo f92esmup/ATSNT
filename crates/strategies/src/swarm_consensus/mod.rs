@@ -1,34 +1,40 @@
-//! Swarm consensus strategy: 96 rule-based agents over 16 bar feeds vote, and the net vote
-//! drives a signed exposure level with hysteresis (strategy spec
+//! Swarm consensus strategy: 96 rule-based agents over 16 bar feeds vote, and a net vote that
+//! clears its threshold opens a triple-barrier entry (strategy spec
 //! `docs/strategy/03-swarm-consensus.md`).
 
 pub mod agent;
 pub mod audit;
+pub mod calibration;
 pub mod ensemble;
 pub mod genome;
+pub mod indicators;
 pub mod policy;
+pub mod priors_calibration;
 pub mod rules;
 pub mod sample;
 
 pub use audit::SwarmAudit;
+pub use calibration::{calibrate, FeedThresholds};
 pub use ensemble::{SwarmConfig, SwarmEnsemble};
 pub use genome::{
     sample_swarm, sample_swarm_with_priors, Agent, GenePrior, Genome, PriorParam, Swarm,
     SwarmPriorsConfig, GENE_COUNT, GENE_PRIORS,
 };
-pub use policy::{axis_update, ConsensusPolicy, PolicyConfig, PolicyConfigError, SwarmPolicySpace};
+pub use indicators::{FeedIndicators, IndicatorSnapshot};
+pub use policy::{ConsensusPolicy, PolicyConfig, PolicyConfigError, SwarmPolicySpace};
+pub use priors_calibration::{calibrate_empirical_priors, EmpiricalPriors};
 pub use rules::{AgentVote, ConflictKind};
 pub use sample::{ConsensusSample, FeedVote, FeedWeights, FeedWeightsError};
 
-use domain::DomainError;
+use domain::{DomainError, OrderIntent};
 
 use crate::strategy::{
-    Decision, FeatureExtractor, InputKind, MarketEvent, MarketType, OptimizableStrategy, Strategy,
+    FeatureExtractor, InputKind, MarketEvent, MarketType, OptimizableStrategy, Strategy,
 };
 
 /// The swarm consensus strategy: the [`SwarmEnsemble`] (frozen first stage) feeding the
 /// [`ConsensusPolicy`] (searched decision stage). It consumes raw trades and emits
-/// `Decision::Target`s.
+/// triple-barrier entries.
 #[derive(Debug, Clone)]
 pub struct SwarmConsensusStrategy {
     ensemble: SwarmEnsemble,
@@ -42,7 +48,7 @@ impl Strategy for SwarmConsensusStrategy {
     }
 
     fn compatible_market_types(&self) -> &'static [MarketType] {
-        &[MarketType::UsdMPerpetual]
+        &[MarketType::Spot, MarketType::UsdMPerpetual]
     }
 
     fn input_kind(&self) -> InputKind {
@@ -50,7 +56,7 @@ impl Strategy for SwarmConsensusStrategy {
     }
 
     /// The two stages in one call, so the live path and the optimizer cannot drift apart.
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<Decision> {
+    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
         let sample = self.ensemble.on_event(event)?;
         self.on_features(&sample)
     }
@@ -62,14 +68,6 @@ impl Strategy for SwarmConsensusStrategy {
 
     fn audit(&self) -> Option<serde_json::Value> {
         Some(self.ensemble.audit().to_json())
-    }
-
-    fn emits_targets(&self) -> bool {
-        !self.policy.config().classifier_mode
-    }
-
-    fn bracket_priority(&self) -> bool {
-        self.policy.config().bracket_priority
     }
 }
 
@@ -97,12 +95,23 @@ impl OptimizableStrategy for SwarmConsensusStrategy {
         SwarmEnsemble::new(shared)
     }
 
-    fn on_features(&mut self, sample: &ConsensusSample) -> Option<Decision> {
+    fn on_features(&mut self, sample: &ConsensusSample) -> Option<OrderIntent> {
         self.policy.on_sample(sample, self.allow_short)
     }
 
     fn default_space() -> SwarmPolicySpace {
-        SwarmPolicySpace::classifier_space()
+        SwarmPolicySpace::default()
+    }
+
+    /// A spot account cannot sell what it does not hold, so on spot the swarm is long only.
+    fn shared_for_market(shared: SwarmConfig, market: MarketType) -> SwarmConfig {
+        match market {
+            MarketType::Spot => SwarmConfig {
+                allow_short: false,
+                ..shared
+            },
+            MarketType::UsdMPerpetual => shared,
+        }
     }
 }
 
@@ -129,18 +138,6 @@ mod tests {
     }
 
     #[test]
-    fn the_swarm_declares_that_it_emits_targets_also_through_a_box() {
-        let strategy =
-            SwarmConsensusStrategy::from_config(&SwarmConfig::default(), PolicyConfig::default())
-                .unwrap();
-        assert!(strategy.emits_targets());
-        assert!(strategy.bracket_priority());
-        let boxed: Box<dyn Strategy> = Box::new(strategy);
-        assert!(boxed.emits_targets());
-        assert!(boxed.bracket_priority());
-    }
-
-    #[test]
     fn an_invalid_policy_configuration_is_rejected() {
         let config = PolicyConfig {
             threshold_base: rust_decimal::Decimal::ZERO,
@@ -150,23 +147,20 @@ mod tests {
     }
 
     #[test]
-    fn the_swarm_declares_emits_targets_false_in_classifier_mode() {
-        let strategy = SwarmConsensusStrategy::from_config(
-            &SwarmConfig::default(),
-            PolicyConfig::classifier_default(),
-        )
-        .unwrap();
-        assert!(!strategy.emits_targets());
-    }
+    fn the_swarm_trades_both_markets_and_is_long_only_on_spot() {
+        let strategy =
+            SwarmConsensusStrategy::from_config(&SwarmConfig::default(), PolicyConfig::default())
+                .unwrap();
+        assert!(strategy.supports_market_type(MarketType::Spot));
+        assert!(strategy.supports_market_type(MarketType::UsdMPerpetual));
 
-    #[test]
-    fn boxed_strategy_preserves_classifier_behavior() {
-        let strategy = SwarmConsensusStrategy::from_config(
-            &SwarmConfig::default(),
-            PolicyConfig::classifier_default(),
-        )
-        .unwrap();
-        let boxed: Box<dyn Strategy> = Box::new(strategy);
-        assert!(!boxed.emits_targets());
+        let shorting = SwarmConfig::default();
+        assert!(shorting.allow_short);
+        let on_spot = SwarmConsensusStrategy::shared_for_market(shorting.clone(), MarketType::Spot);
+        assert!(!on_spot.allow_short);
+        assert_eq!(
+            SwarmConsensusStrategy::shared_for_market(shorting.clone(), MarketType::UsdMPerpetual),
+            shorting
+        );
     }
 }

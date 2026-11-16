@@ -73,9 +73,7 @@ pub struct BacktestMetrics {
     pub halted: bool,
     /// Signals the engine did not turn into orders, per reason: a [`domain::RiskError::kind`]
     /// such as "OrderSizeExceeded", or [`DAILY_HALT_REJECTION`] while the daily circuit
-    /// breaker is tripped. Target decisions add [`REARM_IGNORED_REJECTION`] and two
-    /// adjustment counters, [`POSITION_CAP_CLIP`] and [`STOP_BEYOND_LIQUIDATION_CLIP`], which
-    /// count orders that were reduced and still traded, not rejections.
+    /// breaker is tripped.
     #[serde(default)]
     pub rejected_orders: BTreeMap<String, usize>,
 }
@@ -228,26 +226,6 @@ pub const DAILY_HALT_REJECTION: &str = "DailyHalt";
 /// Rejection reason counted when opening a short position is attempted in Spot mode.
 /// Same namespace as [`DAILY_HALT_REJECTION`].
 pub const SPOT_SHORTING_DISALLOWED: &str = "SpotShortingDisallowed";
-
-/// Rejection reason counted when a runner receives a decision kind it cannot execute yet
-/// (`Decision::Target` before the target-position execution exists). Same namespace as
-/// [`DAILY_HALT_REJECTION`].
-pub const UNSUPPORTED_DECISION_REJECTION: &str = "UnsupportedDecision";
-
-/// Target ignored by the re-arm rule (strategy spec §11.7): after a stop, a liquidation or a
-/// kill-switch flatten on one side, a target on that side is ignored until a flat or opposite
-/// target arrives. Same namespace as [`DAILY_HALT_REJECTION`].
-pub const REARM_IGNORED_REJECTION: &str = "RearmIgnored";
-
-/// Target order reduced because its liquidation price lay between the entry and the stop
-/// (strategy spec §11.6). An **adjustment counter**, not a rejection: the reduced order still
-/// trades (unless nothing is left). Same namespace as [`DAILY_HALT_REJECTION`].
-pub const STOP_BEYOND_LIQUIDATION_CLIP: &str = "StopBeyondLiquidation";
-
-/// Target clipped at `max_position_notional` when it was sized (strategy spec §11.3). An
-/// **adjustment counter**, not a rejection: the clipped target still trades. Same namespace as
-/// [`DAILY_HALT_REJECTION`].
-pub const POSITION_CAP_CLIP: &str = "PositionCapClip";
 
 /// Two-decimal rendering of a ratio for reports, `n/a` where it is undefined.
 pub fn format_ratio(ratio: Option<Decimal>) -> String {

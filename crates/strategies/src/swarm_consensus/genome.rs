@@ -1,16 +1,18 @@
 //! The genome of every agent and the deterministic sampling of the swarm (strategy spec §7).
 //!
 //! Each agent samples 11 thresholds once, in the fixed table order of §7.1, from one
-//! `StdRng` seeded with `genome_seed`. Normals come from Box–Muller computed in `Decimal`
+//! [`SwarmRng`] seeded with `genome_seed`. Normals come from Box–Muller computed in `Decimal`
 //! (§7.2), so a seed fully determines the swarm on every platform. Agent `i` watches feed
 //! `i / agents_per_feed` (stratified assignment, §7.3).
 
-use domain::{DomainError, EmpiricalPriors};
-use rand::rngs::StdRng;
+use domain::DomainError;
 use rand::{RngCore, SeedableRng};
+use rand_chacha::ChaCha12Rng;
 use rust_decimal::{Decimal, MathematicalOps};
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
+
+use super::priors_calibration::EmpiricalPriors;
 
 /// Number of bar feeds the swarm watches (§5.1).
 pub const FEED_COUNT: usize = 16;
@@ -26,6 +28,11 @@ pub const ATR_GAP: Decimal = dec!(0.05);
 pub const GENE_DECIMALS: u32 = 8;
 
 /// `2^32`, the divisor that maps `next_u32() + 1` into `(0, 1]` (§7.2).
+/// The generator every random choice of the swarm draws from. It names its algorithm: `StdRng`
+/// may change algorithm between `rand` releases, which would change the swarm under an unchanged
+/// seed.
+pub(crate) type SwarmRng = ChaCha12Rng;
+
 const TWO_POW_32: Decimal = dec!(4294967296);
 
 /// The prior and clamp of one gene.
@@ -432,7 +439,7 @@ impl Swarm {
 }
 
 /// Samples the whole swarm: `16 · agents_per_feed` agents, in id order, genes in table order,
-/// from one `StdRng::seed_from_u64(seed)` using default [`GENE_PRIORS`] (§7.2–7.3).
+/// from one `SwarmRng` seeded with `seed` using default [`GENE_PRIORS`] (§7.2–7.3).
 ///
 /// Errors when `agents_per_feed` is 0.
 pub fn sample_swarm(seed: u64, agents_per_feed: u32) -> Result<Swarm, DomainError> {
@@ -457,7 +464,7 @@ pub fn sample_swarm_with_priors(
         .ok_or_else(|| {
             DomainError::InvalidThreshold(format!("agents_per_feed {agents_per_feed}"))
         })?;
-    let mut rng = StdRng::seed_from_u64(seed);
+    let mut rng = SwarmRng::seed_from_u64(seed);
     let mut clamp_hits = [0u32; GENE_COUNT];
     let mut agents = Vec::with_capacity(total as usize);
     for id in 0..total {
@@ -490,7 +497,7 @@ pub fn sample_swarm_with_priors(
 /// Draws one gene: `mean + std · z`, rounded to 8 dp, then clamped to `[prior.min, max]`.
 /// Returns the value and whether the clamp changed it.
 pub(crate) fn draw_gene(
-    rng: &mut StdRng,
+    rng: &mut SwarmRng,
     prior: &GenePrior,
     max: Decimal,
 ) -> Result<(Decimal, bool), DomainError> {
@@ -506,13 +513,13 @@ pub(crate) fn draw_gene(
 }
 
 /// A uniform in `(0, 1]`: `(next_u32 + 1) / 2^32` (§7.2).
-fn uniform(rng: &mut StdRng) -> Decimal {
+fn uniform(rng: &mut SwarmRng) -> Decimal {
     (Decimal::from(rng.next_u32()) + Decimal::ONE) / TWO_POW_32
 }
 
 /// A standard normal by Box–Muller in `Decimal`: `sqrt(-2·ln u1) · cos(2π·u2)`; the sine branch
 /// is discarded (§7.2).
-fn standard_normal(rng: &mut StdRng) -> Result<Decimal, DomainError> {
+fn standard_normal(rng: &mut SwarmRng) -> Result<Decimal, DomainError> {
     let u1 = uniform(rng);
     let u2 = uniform(rng);
     let undefined = || DomainError::InvalidThreshold("Box-Muller step undefined".to_string());
@@ -598,7 +605,7 @@ mod tests {
 
     #[test]
     fn the_sample_mean_is_within_four_standard_errors_over_20000_draws() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = SwarmRng::seed_from_u64(42);
         let prior = GENE_PRIORS[0];
         let draws = 20_000u32;
         let mut sum = Decimal::ZERO;
@@ -615,7 +622,7 @@ mod tests {
 
     #[test]
     fn uniforms_are_in_the_half_open_unit_interval() {
-        let mut rng = StdRng::seed_from_u64(7);
+        let mut rng = SwarmRng::seed_from_u64(7);
         for _ in 0..1000 {
             let u = uniform(&mut rng);
             assert!(u > Decimal::ZERO && u <= Decimal::ONE);
@@ -706,8 +713,7 @@ mod tests {
     #[test]
     fn the_swarm_module_has_no_floating_point_tokens() {
         let forbidden = [concat!("f", "32"), concat!("f", "64")];
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/usdm_perpetual/swarm_consensus");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/swarm_consensus");
         let mut scanned = 0;
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
@@ -726,5 +732,36 @@ mod tests {
             scanned += 1;
         }
         assert!(scanned >= 7);
+    }
+}
+/// Pins the sampling: the same seed must give the same swarm after any dependency update.
+#[cfg(test)]
+mod pinned_sampling {
+    use super::*;
+
+    fn genes(swarm: &Swarm, id: usize) -> String {
+        let genes: Vec<String> = swarm.agents()[id]
+            .genome
+            .genes()
+            .iter()
+            .map(|gene| gene.to_string())
+            .collect();
+        genes.join(",")
+    }
+
+    #[test]
+    fn seed_1_samples_the_recorded_swarm() {
+        let swarm = sample_swarm(1, 6).unwrap();
+        assert_eq!(
+            genes(&swarm, 0),
+            "72.14292591,29.14928075,0.67549207,0.57886093,0.99318531,0.08561874,2.59108688,\
+             0.29907330,1.04625383,-0.10152267,0.72640455"
+        );
+        assert_eq!(
+            genes(&swarm, 95),
+            "64.88204401,35.17994616,1.09451286,0.54903513,1.22595223,0.06797791,2.16955988,\
+             0.27292593,1.18528557,0.00561135,0.54724376"
+        );
+        assert_eq!(swarm.clamp_hits(), &[0, 0, 0, 2, 1, 0, 0, 0, 1, 0, 0]);
     }
 }

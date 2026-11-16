@@ -4,6 +4,7 @@ members = [
     "crates/domain",
     "crates/ports",
     "crates/strategies",
+    "crates/application",
     "crates/adapters",
     "crates/backtest",
 ]
@@ -19,6 +20,7 @@ rust-version = "1.80"
 domain = { path = "crates/domain" }
 ports = { path = "crates/ports" }
 strategies = { path = "crates/strategies" }
+application = { path = "crates/application" }
 adapters = { path = "crates/adapters" }
 backtest = { path = "crates/backtest" }
 
@@ -42,8 +44,8 @@ clap = { version = "4.5", features = ["derive"] }
 indicatif = "0.17"
 rayon = "1.10"
 rand = "0.8"
+rand_chacha = "0.3"
 ring = { version = "0.17", default-features = false }
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 chrono ={ version = "0.4", default-features = false, features = ["std", "clock"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 

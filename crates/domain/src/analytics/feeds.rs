@@ -1,8 +1,7 @@
 //! Trade-driven bar feeds: time, tick, volume, and range bars.
 //!
 //! Every aggregator consumes a stream of [`Trade`]s and emits a completed
-//! [`FeedBar`] when its closing rule fires. The rules follow the swarm
-//! consensus strategy specification (§5.3):
+//! [`FeedBar`] when its closing rule fires. The rules:
 //!
 //! - **Time bars** are aligned to UTC epoch multiples of the interval `Δ`.
 //!   Bucket `b` covers `[b·Δ, (b+1)·Δ)`. The bar of bucket `b` is emitted when

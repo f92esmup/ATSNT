@@ -23,11 +23,11 @@ reqwest.workspace = true
 clap.workspace = true
 indicatif.workspace = true
 tempfile = "3"
-tokio-tungstenite.workspace = true
 ring.workspace = true
 chrono.workspace = true
 rayon.workspace = true
 rusqlite.workspace = true
+rand.workspace = true
 
 
 

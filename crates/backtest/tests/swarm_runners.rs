@@ -23,13 +23,18 @@ const EMBARGO_MS: i64 = 5_000;
 fn space() -> SwarmPolicySpace {
     SwarmPolicySpace {
         threshold_bases: vec![dec!(0.05), dec!(0.10)],
-        threshold_steps: vec![dec!(0.05)],
-        hysteresis_values: vec![dec!(0.02)],
-        base_risks: vec![dec!(0.01)],
-        risk_increments: vec![dec!(0.005)],
-        stop_atr_multipliers: vec![dec!(3.0)],
-        take_profit_atr_multipliers: vec![None],
-        ..SwarmPolicySpace::default()
+        base_risks: vec![dec!(0.002)],
+        risk_increments: vec![dec!(0.002)],
+        stop_atr_multipliers: vec![dec!(1.0)],
+        take_profit_atr_multipliers: vec![dec!(2.0)],
+        breakeven_atr_multipliers: vec![None],
+        trailing_atr_multipliers: vec![None],
+        feed_weights_options: vec![None],
+        macro_trend_filter_options: vec![false],
+        macro_slope_min_options: vec![dec!(0)],
+        short_threshold_delta_options: vec![dec!(0)],
+        decay_horizon_options: vec![14400],
+        max_risk: dec!(0.05),
     }
 }
 
@@ -138,7 +143,7 @@ async fn a_backtest_records_the_strategy_audit_only_when_there_is_one() {
         strategy_config: busy_policy(),
         execution_context: account(),
     };
-    let ctx = RunContext::new(RunType::Backtest, &spec, 0);
+    let ctx = RunContext::new(RunType::Backtest, &spec, 0, &backtest::wiring::entropy());
     let metrics = BacktestMetrics::calculate(dec!(10_000), &[], dec!(0), dec!(0));
     let audit = serde_json::json!({"agents": 96});
 
@@ -378,6 +383,34 @@ fn the_backtest_runs_the_swarm_at_trade_resolution_and_reports_its_audit() {
     assert!(campaigns > 0, "{stdout}");
     assert!(stdout.contains("STRATEGY AUDIT"), "{stdout}");
     assert!(stdout.contains("\"rule_firings\""), "{stdout}");
+}
+
+#[test]
+fn the_spot_flag_runs_the_swarm_long_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = write_trades(dir.path(), &swarm_trades(30));
+    // The shared configuration allows shorts; the spot market must take that away.
+    assert!(shared().allow_short);
+    let shared_path = write_json(dir.path(), "shared.json", &shared());
+    let policy_path = write_json(dir.path(), "policy.json", &busy_policy());
+
+    let out = run_backtest(
+        &data,
+        &[
+            "--spot",
+            "--strategy-config",
+            policy_path.to_str().unwrap(),
+            "--shared-config",
+            shared_path.to_str().unwrap(),
+        ],
+    );
+    let stdout = text(&out);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("Shared configuration narrowed for the Spot market"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("SpotShortingDisallowed"), "{stdout}");
 }
 
 #[test]

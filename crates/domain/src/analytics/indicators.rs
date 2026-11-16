@@ -1,13 +1,12 @@
-//! Per-feed technical indicators of the swarm consensus strategy (strategy spec §6).
+//! Technical indicators updated once per closed bar.
 //!
 //! Every indicator is updated once per closed bar of its feed, incrementally where the math
 //! allows it, and entirely in fixed-point [`Decimal`] arithmetic:
-//! - [`WilderRsi`]: Wilder's relative strength index (§6.1).
-//! - [`WilderAtr`]: Wilder's average true range (§6.2), in price units.
-//! - [`AtrRatio`]: the current ATR over the mean of its recent values (§6.2), adimensional.
-//! - [`AlmaSlope`]: the Arnaud Legoux moving-average slope in ATR units per bar (§6.3).
-//! - [`VwapDeviation`]: the distance of the close from the rolling VWAP in ATR units (§6.4).
-//! - [`FeedIndicators`]: the bundle of all five with the strategy periods, warm at bar 64 (§6.5).
+//! - [`WilderRsi`]: Wilder's relative strength index.
+//! - [`WilderAtr`]: Wilder's average true range, in price units.
+//! - [`AtrRatio`]: the current ATR over the mean of its recent values, adimensional.
+//! - [`AlmaSlope`]: the Arnaud Legoux moving-average slope in ATR units per bar.
+//! - [`VwapDeviation`]: the distance of the close from the rolling VWAP in ATR units.
 //!
 //! Every rolling window is a fixed-capacity [`VecDeque`] ring buffer allocated once at
 //! construction, so an update allocates nothing.
@@ -16,30 +15,8 @@ use std::collections::VecDeque;
 
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
-use serde::{Deserialize, Serialize};
 
 use crate::error::DomainError;
-
-/// RSI period of the strategy (§6.1).
-pub const RSI_PERIOD: usize = 14;
-/// ATR period of the strategy (§6.2).
-pub const ATR_PERIOD: usize = 14;
-/// Number of ATR values averaged by the ATR ratio of the strategy (§6.2).
-pub const ATR_RATIO_WINDOW: usize = 50;
-/// ALMA period of the strategy (§6.3).
-pub const ALMA_PERIOD: usize = 9;
-/// VWAP window of the strategy, in bars (§6.4).
-pub const VWAP_WINDOW: usize = 50;
-
-/// ALMA offset of the strategy (§6.3): 0.85.
-fn alma_offset() -> Decimal {
-    Decimal::new(85, 2)
-}
-
-/// ALMA sigma of the strategy (§6.3): 6.
-fn alma_sigma() -> Decimal {
-    Decimal::from(6)
-}
 
 const HUNDRED: Decimal = Decimal::ONE_HUNDRED;
 
@@ -115,7 +92,7 @@ impl WilderAverage {
     }
 }
 
-/// Wilder's relative strength index over close-to-close changes (§6.1).
+/// Wilder's relative strength index over close-to-close changes.
 ///
 /// Ready after `period + 1` closes; the range is 0 to 100, and it is 100 whenever the average
 /// loss is 0 (a flat series included).
@@ -172,7 +149,7 @@ fn true_range(bar: &BarInput, prev_close: Decimal) -> Decimal {
         .max((bar.low - prev_close).abs())
 }
 
-/// Wilder's average true range, in price units (§6.2).
+/// Wilder's average true range, in price units.
 ///
 /// The first bar has no previous close and yields no true range, so the ATR is ready after
 /// `period + 1` bars. The seed is the simple mean of the first `period` true ranges.
@@ -216,7 +193,7 @@ impl WilderAtr {
 }
 
 /// The current ATR divided by the mean of the last `window` ATR values, the current one
-/// included (§6.2). 1 means "typical volatility for this feed".
+/// included. 1 means "typical volatility for this feed".
 ///
 /// It consumes ATR values (from [`WilderAtr`]) rather than bars, so it composes with one ATR
 /// instead of duplicating it. It is undefined until `window` ATR values exist, and when the
@@ -267,7 +244,7 @@ impl AtrRatio {
     }
 }
 
-/// Slope of the Arnaud Legoux moving average in ATR units per bar (§6.3):
+/// Slope of the Arnaud Legoux moving average in ATR units per bar:
 /// `(ALMA_t - ALMA_{t-1}) / ATR_t`.
 ///
 /// With `m = offset · (period - 1)` and `s = period / sigma`, the weights are
@@ -370,7 +347,7 @@ impl AlmaSlope {
     }
 }
 
-/// Distance of the close from the rolling VWAP in ATR units (§6.4): `|C_t - VWAP| / ATR_t`, with
+/// Distance of the close from the rolling VWAP in ATR units: `|C_t - VWAP| / ATR_t`, with
 /// `VWAP = Σ P_i · volume_i / Σ volume_i` over the last `window` bars and the typical price
 /// `P_i = (H_i + L_i + C_i) / 3`.
 ///
@@ -429,82 +406,6 @@ impl VwapDeviation {
     }
 }
 
-/// The five indicator values of one feed after a closed bar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IndicatorSnapshot {
-    /// Wilder RSI, 0 to 100.
-    pub rsi: Decimal,
-    /// Wilder ATR, in price units.
-    pub atr: Decimal,
-    /// ATR over its recent mean, adimensional.
-    pub atr_ratio: Decimal,
-    /// ALMA slope, in ATR units per bar.
-    pub alma_slope: Decimal,
-    /// Distance of the close from the VWAP, in ATR units.
-    pub vwap_dev: Decimal,
-}
-
-/// The indicators of one feed with the strategy periods: RSI 14, ATR 14, ATR ratio 50,
-/// ALMA (9, 0.85, 6), and VWAP 50 (§6.5).
-///
-/// The feed is warm after 64 closed bars (15 for the ATR plus 49 more for the ATR ratio).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FeedIndicators {
-    rsi: WilderRsi,
-    atr: WilderAtr,
-    atr_ratio: AtrRatio,
-    alma: AlmaSlope,
-    vwap: VwapDeviation,
-}
-
-impl FeedIndicators {
-    /// Creates the bundle with the strategy periods.
-    pub fn new() -> Result<Self, DomainError> {
-        Ok(Self {
-            rsi: WilderRsi::new(RSI_PERIOD)?,
-            atr: WilderAtr::new(ATR_PERIOD)?,
-            atr_ratio: AtrRatio::new(ATR_RATIO_WINDOW)?,
-            alma: AlmaSlope::new(ALMA_PERIOD, alma_offset(), alma_sigma())?,
-            vwap: VwapDeviation::new(VWAP_WINDOW)?,
-        })
-    }
-
-    /// True once every indicator has enough bars. A warm feed can still yield no snapshot on a
-    /// bar whose ATR, mean ATR, or window volume is 0.
-    pub fn is_warm(&self) -> bool {
-        self.rsi.is_ready()
-            && self.atr_ratio.is_ready()
-            && self.alma.is_ready()
-            && self.vwap.is_ready()
-    }
-
-    /// Ingests a closed bar into every indicator and returns the snapshot only when every value
-    /// is defined.
-    pub fn update(&mut self, bar: &BarInput) -> Option<IndicatorSnapshot> {
-        let atr = self.atr.update(bar);
-        let rsi = self.rsi.update(bar.close);
-        let atr_ratio = atr.and_then(|value| self.atr_ratio.update(value));
-        let alma_slope = self.alma.update(bar.close, atr);
-        let vwap_dev = self.vwap.update(bar, atr);
-        Some(IndicatorSnapshot {
-            rsi: rsi?,
-            atr: atr?,
-            atr_ratio: atr_ratio?,
-            alma_slope: alma_slope?,
-            vwap_dev: vwap_dev?,
-        })
-    }
-
-    /// Restores the fresh state.
-    pub fn reset(&mut self) {
-        self.rsi.reset();
-        self.atr.reset();
-        self.atr_ratio.reset();
-        self.alma.reset();
-        self.vwap.reset();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,17 +435,6 @@ mod tests {
             .collect()
     }
 
-    fn scaled(bars: &[BarInput], k: Decimal) -> Vec<BarInput> {
-        bars.iter()
-            .map(|b| BarInput {
-                high: b.high * k,
-                low: b.low * k,
-                close: b.close * k,
-                volume: b.volume,
-            })
-            .collect()
-    }
-
     #[test]
     fn constructors_reject_degenerate_periods() {
         for p in [0, 1] {
@@ -568,7 +458,6 @@ mod tests {
             AlmaSlope::new(9, dec!(0.85), Decimal::ZERO),
             Err(DomainError::InvalidThreshold(_))
         ));
-        assert!(FeedIndicators::new().is_ok());
     }
 
     #[test]
@@ -597,7 +486,7 @@ mod tests {
         //   G = 21/14 = 1.5, L = 7/14 = 0.5, RSI = 100 - 100 / (1 + 3) = 75 at close 15.
         // Close 16 (+3): G = (1.5·13 + 3)/14 = 22.5/14, L = (0.5·13 + 0)/14 = 6.5/14,
         //   RSI = 100·G/(G+L) = 100·22.5/29 = 2250/29 = 77.58620689655172413793...
-        let mut rsi = WilderRsi::new(RSI_PERIOD).unwrap();
+        let mut rsi = WilderRsi::new(14).unwrap();
         let mut close = dec!(100);
         let mut out = vec![rsi.update(close)];
         for i in 0..15 {
@@ -614,7 +503,7 @@ mod tests {
 
     #[test]
     fn rsi_is_100_without_losses() {
-        let mut rsi = WilderRsi::new(RSI_PERIOD).unwrap();
+        let mut rsi = WilderRsi::new(14).unwrap();
         let out: Vec<_> = (0..30)
             .map(|i| rsi.update(Decimal::from(100 + i)))
             .collect();
@@ -681,8 +570,8 @@ mod tests {
 
     #[test]
     fn atr_ratio_is_one_on_a_constant_range_series() {
-        let mut atr = WilderAtr::new(ATR_PERIOD).unwrap();
-        let mut ratio = AtrRatio::new(ATR_RATIO_WINDOW).unwrap();
+        let mut atr = WilderAtr::new(14).unwrap();
+        let mut ratio = AtrRatio::new(50).unwrap();
         let out: Vec<_> = constant_range(80)
             .iter()
             .map(|b| atr.update(b).and_then(|a| ratio.update(a)))
@@ -709,7 +598,7 @@ mod tests {
         //   i=3: exp(-14.44/4.5), i=4: exp(-7.84/4.5),  i=5: exp(-3.24/4.5),
         //   i=6: exp(-0.64/4.5),  i=7: exp(-0.04/4.5),  i=8: exp(-1.44/4.5).
         // Reference values evaluated at 60 significant digits, rounded to 12 decimal places.
-        let alma = AlmaSlope::new(ALMA_PERIOD, dec!(0.85), dec!(6)).unwrap();
+        let alma = AlmaSlope::new(9, dec!(0.85), dec!(6)).unwrap();
         let expected = [
             dec!(0.000034465368),
             dec!(0.000566770807),
@@ -730,7 +619,7 @@ mod tests {
         // Closes 0..=8 give ALMA = Σ w_i·i / Σ w_i = 6.442764782256 (12 dp, same reference).
         // Each further close shifts every C_i by 1, so ALMA rises by exactly 1 per bar and the
         // slope is 1 / ATR = 1/2 = 0.5.
-        let mut alma = AlmaSlope::new(ALMA_PERIOD, dec!(0.85), dec!(6)).unwrap();
+        let mut alma = AlmaSlope::new(9, dec!(0.85), dec!(6)).unwrap();
         for c in 0..9 {
             assert_eq!(alma.update(Decimal::from(c), Some(dec!(2))), None);
         }
@@ -777,57 +666,14 @@ mod tests {
     }
 
     #[test]
-    fn bundle_is_warm_exactly_at_bar_64() {
-        let mut ind = FeedIndicators::new().unwrap();
-        for (i, b) in series(80).iter().enumerate() {
-            let snapshot = ind.update(b);
-            if i < 63 {
-                assert_eq!(snapshot, None, "bar {}", i + 1);
-                assert!(!ind.is_warm(), "bar {}", i + 1);
-            } else {
-                assert!(snapshot.is_some(), "bar {}", i + 1);
-                assert!(ind.is_warm(), "bar {}", i + 1);
-            }
-        }
-    }
-
-    #[test]
-    fn adimensional_values_are_invariant_to_a_price_scaling() {
-        let bars = series(80);
-        let mut base = FeedIndicators::new().unwrap();
-        let mut tenfold = FeedIndicators::new().unwrap();
-        let mut compared = 0;
-        for (a, b) in bars.iter().zip(scaled(&bars, dec!(10)).iter()) {
-            match (base.update(a), tenfold.update(b)) {
-                (Some(x), Some(y)) => {
-                    // Exact equality is not guaranteed: `Decimal` divisions round at 28
-                    // significant digits, so values are compared at 18 decimal places.
-                    let r = |v: Decimal| v.round_dp(18);
-                    assert_eq!(r(x.rsi), r(y.rsi));
-                    assert_eq!(r(x.atr_ratio), r(y.atr_ratio));
-                    assert_eq!(r(x.alma_slope), r(y.alma_slope));
-                    assert_eq!(r(x.vwap_dev), r(y.vwap_dev));
-                    assert_eq!(r(x.atr * dec!(10)), r(y.atr));
-                    compared += 1;
-                }
-                (None, None) => {}
-                other => panic!("readiness differs: {other:?}"),
-            }
-        }
-        assert_eq!(compared, 80 - 63);
-    }
-
-    #[test]
     fn reset_equals_fresh() {
         let bars = series(70);
-        let mut ind = FeedIndicators::new().unwrap();
         let mut rsi = WilderRsi::new(3).unwrap();
         let mut atr = WilderAtr::new(3).unwrap();
         let mut ratio = AtrRatio::new(3).unwrap();
         let mut alma = AlmaSlope::new(3, dec!(0.85), dec!(6)).unwrap();
         let mut vwap = VwapDeviation::new(3).unwrap();
         for b in &bars {
-            ind.update(b);
             rsi.update(b.close);
             let a = atr.update(b);
             if let Some(a) = a {
@@ -836,22 +682,15 @@ mod tests {
             alma.update(b.close, a);
             vwap.update(b, a);
         }
-        ind.reset();
         rsi.reset();
         atr.reset();
         ratio.reset();
         alma.reset();
         vwap.reset();
-        assert_eq!(ind, FeedIndicators::new().unwrap());
         assert_eq!(rsi, WilderRsi::new(3).unwrap());
         assert_eq!(atr, WilderAtr::new(3).unwrap());
         assert_eq!(ratio, AtrRatio::new(3).unwrap());
         assert_eq!(alma, AlmaSlope::new(3, dec!(0.85), dec!(6)).unwrap());
         assert_eq!(vwap, VwapDeviation::new(3).unwrap());
-        // After a reset the bundle reproduces the fresh output bar for bar.
-        let mut fresh = FeedIndicators::new().unwrap();
-        for b in &bars {
-            assert_eq!(ind.update(b), fresh.update(b));
-        }
     }
 }

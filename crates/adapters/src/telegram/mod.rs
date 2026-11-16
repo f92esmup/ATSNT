@@ -8,7 +8,7 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::error::AdapterError;
-use crate::traits::AlertNotifier;
+use ports::AlertNotifier;
 
 /// Telegram bot alert notifier.
 ///

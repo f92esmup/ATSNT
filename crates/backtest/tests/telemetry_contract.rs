@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 
 use backtest::{PaperTradingConfig, PaperTradingEvent, PaperTradingSession, TelemetryConfig};
-use domain::{DollarBar, OrderIntent, Side, Trade};
+use domain::{OrderIntent, Side, Trade};
 use rust_decimal_macros::dec;
-use strategies::{MarketType, Strategy};
+use strategies::{MarketEvent, MarketType, Strategy};
 
 /// Four warm-up bars pass; the fifth, the plunge to 90, signals a long with a stop at 85 and a
 /// target at 95, so the tape below fills, crosses the target and exits.
@@ -20,7 +20,10 @@ impl Strategy for PlungeLong {
         &[MarketType::UsdMPerpetual]
     }
 
-    fn on_bar(&mut self, _bar: &DollarBar) -> Option<OrderIntent> {
+    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+        let MarketEvent::DollarBar(_bar) = event else {
+            return None;
+        };
         self.decisions.pop_front().flatten()
     }
 

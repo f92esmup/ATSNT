@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use domain::{DollarBar, Trade};
-use indicatif::{ProgressBar, ProgressStyle};
+use ports::ProgressSink;
 use rayon::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -269,7 +269,6 @@ pub fn run_tape_slice<S: OptimizableStrategy>(
     let mut strategy = S::from_config(shared, strat_config.clone())
         .map_err(|e| BacktestError::Strategy(e.to_string()))?;
     let mut engine = BacktestEngine::new(config);
-    engine.set_bracket_priority(strategy.bracket_priority());
 
     for (index, event) in range.zip(prices) {
         let features = tape.features_at(index);
@@ -583,6 +582,7 @@ pub struct WalkForwardOptimizer<S: OptimizableStrategy> {
     parameter_space: S::Space,
     min_trades_per_fold: usize,
     shared: S::SharedConfig,
+    progress: Option<std::sync::Arc<dyn ProgressSink>>,
 }
 
 impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
@@ -593,6 +593,7 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
             parameter_space,
             min_trades_per_fold: DEFAULT_MIN_TRADES_PER_FOLD,
             shared: S::SharedConfig::default(),
+            progress: None,
         }
     }
 
@@ -611,6 +612,12 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
     /// it defaults to `S::SharedConfig::default()`, the only one of a dollar-bar strategy.
     pub fn with_shared_config(mut self, shared: S::SharedConfig) -> Self {
         self.shared = shared;
+        self
+    }
+
+    /// Reports every evaluated candidate to `progress`; nothing is reported by default.
+    pub fn with_progress(mut self, progress: std::sync::Arc<dyn ProgressSink>) -> Self {
+        self.progress = Some(progress);
         self
     }
 
@@ -661,14 +668,10 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
             engine_config: config,
         };
 
-        let pb = ProgressBar::new(total_candidates as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) | ETA: {eta_precise} | {msg}")
-                .unwrap_or_else(|_| ProgressStyle::default_bar())
-                .progress_chars("#>-"),
-        );
-        pb.set_message("Evaluating HPO parameter space");
+        let progress = self.progress.as_deref();
+        if let Some(progress) = progress {
+            progress.start(total_candidates as u64);
+        }
 
         let evaluated: Vec<(CandidateEvaluation<S::Config>, Option<ReturnMoments>)> = candidates
             .par_iter()
@@ -741,7 +744,9 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
                 };
                 let moments = ReturnMoments::of(&oos_returns);
 
-                pb.inc(1);
+                if let Some(progress) = progress {
+                    progress.advance();
+                }
 
                 Some((
                     CandidateEvaluation {
@@ -767,7 +772,9 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
             })
             .collect();
 
-        pb.finish_with_message("HPO parameter evaluation complete");
+        if let Some(progress) = progress {
+            progress.finish();
+        }
 
         let mut evaluations = assign_deflated_p_values(evaluated, total_candidates);
 
@@ -1176,7 +1183,10 @@ mod tests {
             &[strategies::MarketType::UsdMPerpetual]
         }
 
-        fn on_bar(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<domain::OrderIntent> {
+            let MarketEvent::DollarBar(bar) = event else {
+                return None;
+            };
             self.counter += 1;
             if self.counter >= self.config.window {
                 self.counter = 0;
@@ -1217,8 +1227,8 @@ mod tests {
             Ok(strategies::BarPassThrough)
         }
 
-        fn on_features(&mut self, bar: &DollarBar) -> Option<strategies::Decision> {
-            strategies::Strategy::on_bar(self, bar).map(strategies::Decision::Entry)
+        fn on_features(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
+            strategies::Strategy::on_event(self, &strategies::MarketEvent::DollarBar(bar))
         }
 
         fn default_space() -> Self::Space {
@@ -1263,8 +1273,11 @@ mod tests {
             &[strategies::MarketType::UsdMPerpetual]
         }
 
-        fn on_bar(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
-            self.0.on_bar(bar)
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<domain::OrderIntent> {
+            let MarketEvent::DollarBar(bar) = event else {
+                return None;
+            };
+            self.0.on_event(&strategies::MarketEvent::DollarBar(bar))
         }
 
         fn reset(&mut self) {
@@ -1291,8 +1304,8 @@ mod tests {
             Ok(CountingExtractor)
         }
 
-        fn on_features(&mut self, bar: &DollarBar) -> Option<strategies::Decision> {
-            strategies::Strategy::on_bar(self, bar).map(strategies::Decision::Entry)
+        fn on_features(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
+            strategies::Strategy::on_event(self, &strategies::MarketEvent::DollarBar(bar))
         }
 
         fn default_space() -> Self::Space {

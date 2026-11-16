@@ -93,7 +93,6 @@ fn per_trade_run(allow_short: bool) -> (BacktestMetrics, Vec<ClosedTrade>) {
         SwarmConsensusStrategy::from_config(&swarm_config(allow_short), busy_policy())
             .expect("swarm builds");
     let mut engine = BacktestEngine::new(account_at_capital());
-    engine.set_bracket_priority(strategy.bracket_priority());
     let mut last_price = Decimal::ZERO;
     for trade in &trades {
         last_price = trade.price;

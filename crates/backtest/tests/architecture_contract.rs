@@ -1,12 +1,14 @@
 //! Hexagonal dependency rule between the workspace crates.
 //!
-//! The domain knows nothing; contracts (`ports`) and strategies know only the domain; adapters
-//! implement contracts; the application crate (`backtest`) wires everything together.
+//! The domain knows nothing; contracts (`ports`) and strategies know only the domain; the
+//! application core (`application`) knows those three; adapters implement contracts; the
+//! composition crate (`backtest`) wires everything together.
 //!
 //! Checked here: the dependency direction between workspace crates; no I/O crate and no I/O
 //! API in the core (`domain`, `strategies`, `ports`); ports hold only traits and plain data;
-//! network clients stay in adapters (one documented exception); the library names adapters and
-//! reads the wall clock only in composition; runners resolve strategies through the registry.
+//! network clients stay in adapters; the application core names no adapter, file or clock; the
+//! `backtest` library names adapters and reads the wall clock only in composition; no library
+//! uses `anyhow`; the domain names no strategy; runners resolve strategies through the registry.
 //! Not checked: determinism beyond the clock, and business logic placed in adapters or binaries,
 //! which need review.
 
@@ -14,7 +16,14 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const WORKSPACE_CRATES: [&str; 5] = ["domain", "ports", "strategies", "adapters", "backtest"];
+const WORKSPACE_CRATES: [&str; 6] = [
+    "domain",
+    "ports",
+    "strategies",
+    "application",
+    "adapters",
+    "backtest",
+];
 
 /// Crates of the pure core: no I/O, no network, no runtime.
 const CORE_CRATES: [&str; 3] = ["domain", "strategies", "ports"];
@@ -127,13 +136,21 @@ fn strategies_depend_only_on_the_domain() {
 }
 
 #[test]
+fn the_application_core_depends_only_on_the_domain_the_ports_and_the_strategies() {
+    assert_depends_only_on("application", &["domain", "ports", "strategies"]);
+}
+
+#[test]
 fn adapters_depend_only_on_the_domain_and_the_ports() {
     assert_depends_only_on("adapters", &["domain", "ports"]);
 }
 
 #[test]
-fn the_application_crate_may_wire_every_other_crate() {
-    assert_depends_only_on("backtest", &["domain", "ports", "strategies", "adapters"]);
+fn the_composition_crate_may_wire_every_other_crate() {
+    assert_depends_only_on(
+        "backtest",
+        &["domain", "ports", "strategies", "application", "adapters"],
+    );
 }
 
 /// The core never pulls in an async runtime, a network client or a storage format.
@@ -166,23 +183,88 @@ fn the_core_crates_depend_on_no_io_crate() {
     );
 }
 
-/// The application crate reaches the network through adapters only: it names no HTTP or socket
-/// client, so an exchange call cannot bypass the gateway the adapters provide.
-#[test]
-fn the_application_crate_names_no_network_client() {
-    let network = ["reqwest", "tokio_tungstenite", "futures_util"];
+/// Lines of production code of `name` (comments excluded) that contain one of `words`, as
+/// `path:line: word`. `skip` leaves files out.
+fn lines_naming(name: &str, words: &[&str], skip: impl Fn(&Path) -> bool) -> Vec<String> {
     let mut offenders = Vec::new();
-    for (path, production) in production_sources("backtest") {
+    for (path, production) in production_sources(name) {
+        if skip(&path) {
+            continue;
+        }
         for (number, line) in production.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.starts_with("//") {
                 continue;
             }
-            if let Some(api) = network.iter().find(|api| trimmed.contains(*api)) {
-                offenders.push(format!("{}:{}: {api}", path.display(), number + 1));
+            if let Some(word) = words.iter().find(|word| trimmed.contains(*word)) {
+                offenders.push(format!("{}:{}: {word}", path.display(), number + 1));
             }
         }
     }
+    offenders
+}
+
+/// The application core is written against the ports: it names no adapter, opens no file or
+/// socket and calls no HTTP client. It may use the async runtime's channels and tasks.
+#[test]
+fn the_application_core_names_no_adapter_and_performs_no_io() {
+    let offenders = lines_naming(
+        "application",
+        &["adapters::", "wiring::", "std::fs", "std::net", "reqwest"],
+        |_| false,
+    );
+    assert!(
+        offenders.is_empty(),
+        "the application core reaches the outside world through ports only:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// `anyhow` erases what failed. Libraries return typed errors; only entry points (the binaries
+/// and `main.rs`) may use it.
+#[test]
+fn no_library_uses_anyhow() {
+    let mut offenders = Vec::new();
+    for name in WORKSPACE_CRATES {
+        offenders.extend(lines_naming(name, &["anyhow"], is_composition_root));
+    }
+    assert!(
+        offenders.is_empty(),
+        "anyhow belongs to the entry points:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The domain serves every strategy, so it names none.
+#[test]
+fn the_domain_names_no_strategy() {
+    let names = strategies::registry::strategy_names();
+    let mut offenders = Vec::new();
+    for (path, production) in production_sources("domain") {
+        for (number, line) in production.lines().enumerate() {
+            let lower = line.to_lowercase();
+            if let Some(name) = names
+                .iter()
+                .find(|name| lower.contains(&name.to_lowercase()))
+            {
+                offenders.push(format!("{}:{}: {name}", path.display(), number + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the domain must not name a strategy:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The composition and application crates reach the network through adapters only: they name no
+/// HTTP or socket client, so an exchange call cannot bypass the gateway the adapters provide.
+#[test]
+fn only_adapters_name_a_network_client() {
+    let network = ["reqwest", "tokio_tungstenite", "futures_util"];
+    let mut offenders = lines_naming("backtest", &network, |_| false);
+    offenders.extend(lines_naming("application", &network, |_| false));
     assert!(
         offenders.is_empty(),
         "network clients belong in adapters:\n{}",
@@ -303,7 +385,7 @@ fn the_domain_has_no_floating_point_types() {
 fn only_adapters_and_composition_read_the_wall_clock() {
     let wall_clock = ["SystemTime::now", "Utc::now", "Local::now"];
     let mut offenders = Vec::new();
-    for name in ["domain", "ports", "strategies", "backtest"] {
+    for name in ["domain", "ports", "strategies", "application", "backtest"] {
         for (path, production) in production_sources(name) {
             if is_composition_root(&path) {
                 continue;

@@ -6,8 +6,8 @@
 //! [`RunSpec`] it executed so results can always be joined back to the
 //! strategy parameters and friction schedule that produced them.
 
+use domain::MarketType;
 use serde::{Deserialize, Serialize};
-use strategies::MarketType;
 
 use crate::artifact::SamplingConfig;
 use crate::config::BacktestConfig;
@@ -138,9 +138,10 @@ pub enum InvalidRunId {
 pub struct RunId(String);
 
 impl RunId {
-    /// Generates a new identifier whose time component is `unix_ms`, with a random tail.
-    pub fn generate(unix_ms: u64) -> Self {
-        Self::from_parts(unix_ms, rand::random::<u128>())
+    /// Generates a new identifier whose time component is `unix_ms`, with a random tail drawn
+    /// from `entropy`.
+    pub fn generate(unix_ms: u64, entropy: &impl ports::Entropy) -> Self {
+        Self::from_parts(unix_ms, entropy.random_u128())
     }
 
     /// Builds a UUID v7 from a millisecond timestamp and random bits

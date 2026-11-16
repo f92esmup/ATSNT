@@ -7,7 +7,7 @@
 //! the other methods.
 
 use domain::{DollarBar, DollarBarAggregator, DomainError, Trade};
-use ports::{ExecutionReport, ExecutionVenue};
+use ports::{Clock, ExecutionReport, ExecutionVenue};
 use rust_decimal::Decimal;
 use strategies::Strategy;
 
@@ -88,14 +88,15 @@ impl<S: Strategy> SessionDriver<S> {
         }
     }
 
-    /// Advances the session's clock when no market trade arrives; see
-    /// [`TradingSession::on_idle`].
-    pub async fn on_idle<V: ExecutionVenue>(
+    /// Advances the session's time when no market trade arrives; see
+    /// [`TradingSession::on_idle`]. The instant is read from `clock`: the wall clock in a live
+    /// run, a simulated one in a replay, so both take the same path.
+    pub async fn on_idle<V: ExecutionVenue, C: Clock>(
         &mut self,
         venue: &V,
-        now_ms: i64,
+        clock: &C,
     ) -> Vec<SessionEvent> {
-        self.session.on_idle(venue, now_ms).await
+        self.session.on_idle(venue, clock.now_ms()).await
     }
 
     /// Feeds one execution report from the venue.
@@ -154,12 +155,22 @@ impl<S: Strategy> SessionDriver<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clock stopped at one instant.
+    struct At(i64);
+
+    impl Clock for At {
+        fn now_ms(&self) -> i64 {
+            self.0
+        }
+    }
     use crate::session::SessionConfig;
     use domain::{OrderIntent, Side};
     use ports::{EntryAck, ExitGateway, OrderRequest};
     use rust_decimal_macros::dec;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use strategies::MarketEvent;
     use strategies::MarketType;
 
     #[derive(Default)]
@@ -193,26 +204,15 @@ mod tests {
     }
 
     impl ExecutionVenue for Venue {
-        async fn submit_entry(
-            &self,
-            _: &str,
-            _: &OrderIntent,
-            _: Decimal,
-            _: Decimal,
-        ) -> Result<EntryAck, String> {
+        async fn submit_order(&self, _: &str, request: &OrderRequest) -> Result<EntryAck, String> {
             self.calls.borrow_mut().push("entry".to_string());
             Ok(EntryAck {
                 order_id: "e1".to_string(),
-                status: "NEW".to_string(),
-                quantity: dec!(1),
+                status: ports::AckStatus::New,
+                quantity: request.quantity,
                 price: dec!(100),
                 sent_at_ms: 0,
             })
-        }
-
-        async fn submit_order(&self, _: &str, _: &OrderRequest) -> Result<EntryAck, String> {
-            self.calls.borrow_mut().push("order".to_string());
-            Err("explicit orders are not scripted".to_string())
         }
     }
 
@@ -230,7 +230,10 @@ mod tests {
             &[MarketType::UsdMPerpetual]
         }
 
-        fn on_bar(&mut self, _: &DollarBar) -> Option<OrderIntent> {
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+            let MarketEvent::DollarBar(_) = event else {
+                return None;
+            };
             self.bars_seen += 1;
             self.intents.pop_front()
         }
@@ -247,7 +250,11 @@ mod tests {
                 max_monthly_drawdown_pct: dec!(0.15),
                 halt_retry_ms: 5_000,
                 entry_timeout_ms: 30_000,
-                risk_policy: None,
+                gate: domain::EntryGate::new(
+                    domain::RiskPolicy::default(),
+                    dec!(0.01),
+                    domain::MarketType::UsdMPerpetual,
+                ),
             },
             Scripted {
                 intents: intents.into(),
@@ -347,7 +354,11 @@ mod tests {
                 max_monthly_drawdown_pct: dec!(0.15),
                 halt_retry_ms: 5_000,
                 entry_timeout_ms: 30_000,
-                risk_policy: None,
+                gate: domain::EntryGate::new(
+                    domain::RiskPolicy::default(),
+                    dec!(0.01),
+                    domain::MarketType::UsdMPerpetual,
+                ),
             },
             Scripted {
                 intents: VecDeque::new(),
@@ -367,7 +378,7 @@ mod tests {
         assert!(driver.session().is_exposed());
 
         // The entry never reaches a terminal status and no trade arrives.
-        let events = driver.on_idle(&venue, 1_001 + 30_000).await;
+        let events = driver.on_idle(&venue, &At(1_001 + 30_000)).await;
 
         assert!(events
             .iter()

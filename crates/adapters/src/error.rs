@@ -28,9 +28,6 @@ pub enum AdapterError {
     #[error("ZIP archive error: {0}")]
     Zip(#[from] zip::result::ZipError),
 
-    #[error("WebSocket error: {0}")]
-    WebSocket(Box<tokio_tungstenite::tungstenite::Error>),
-
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -51,10 +48,4 @@ pub enum AdapterError {
 
     #[error("{0}")]
     General(String),
-}
-
-impl From<tokio_tungstenite::tungstenite::Error> for AdapterError {
-    fn from(err: tokio_tungstenite::tungstenite::Error) -> Self {
-        Self::WebSocket(Box::new(err))
-    }
 }

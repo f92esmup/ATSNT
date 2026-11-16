@@ -141,7 +141,12 @@ fn run_context(run_type: RunType) -> RunContext {
         strategy_config: PolicyConfig::default(),
         execution_context: BacktestConfig::default(),
     };
-    let mut ctx = RunContext::new(run_type, &spec, support::TAPE_START_MS);
+    let mut ctx = RunContext::new(
+        run_type,
+        &spec,
+        support::TAPE_START_MS,
+        &backtest::wiring::entropy(),
+    );
     ctx.run_id = RunId::parse(FIXED_RUN_ID).expect("fixed run id");
     ctx
 }

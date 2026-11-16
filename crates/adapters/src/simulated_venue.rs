@@ -2,6 +2,9 @@
 //!
 //! Replays the exchange mechanics a live session meets, from a stream of aggregated trades:
 //!
+//! The venue executes; it sizes nothing and applies no risk rule. The session sends orders of an
+//! exact quantity and the venue only checks that the balance can margin them.
+//!
 //! * every order reaches the market after a fixed latency;
 //! * a market order walks the tape: it only consumes prints whose aggressor is on its own side
 //!   (a buy lifts offers, which print as buyer-initiated trades), at each print's price, so the
@@ -20,11 +23,11 @@
 use std::sync::{Mutex, MutexGuard};
 
 use domain::futures::{self, FundingSchedule};
-use domain::{OrderIntent, RiskError, RiskPolicy, Side, Trade};
+use domain::{Side, Trade};
 use ports::{
-    EntryAck, ExecutionReport, ExecutionVenue, ExitGateway, FundingPayment, OrderRequest, TapeVenue,
+    AckStatus, EntryAck, ExecutionReport, ExecutionVenue, ExitGateway, FundingPayment,
+    OrderRequest, TapeVenue,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use thiserror::Error;
 
@@ -43,10 +46,8 @@ pub struct SimulatedVenueConfig {
     pub maker_fee_pct: Option<Decimal>,
     /// Milliseconds between sending an order and it reaching the market.
     pub latency_ms: i64,
-    /// Fraction of equity risked per entry.
-    pub risk_per_trade_pct: Decimal,
-    /// Sizing and pre-trade limits shared with the live gateway.
-    pub risk_policy: RiskPolicy,
+    /// Highest leverage the venue lets the account run at.
+    pub max_leverage: u32,
     /// Funding rates charged at each settlement.
     pub funding: FundingSchedule,
     /// Maintenance margin as a fraction of notional (a flat stand-in for the exchange's
@@ -67,24 +68,16 @@ pub enum SimulatedVenueError {
     /// The venue has not seen a trade yet, so it has no market to trade in.
     #[error("no market data yet")]
     NoMarketData,
-    /// Sizing or the pre-trade risk gate refused the entry.
-    #[error("risk gate rejected the entry: {0}")]
+    /// The venue cannot take the order: its quantity is not positive, or the balance cannot
+    /// margin it at any leverage the venue supports.
+    #[error("the venue refused the order: {0}")]
     Risk(String),
-    /// A position or an entry is already working.
-    #[error("a position or an entry order already exists")]
-    PositionExists,
     /// There is no position to protect.
     #[error("no open position to protect")]
     NoPosition,
     /// A trigger price sits on the wrong side of the market and would fire immediately.
     #[error("order would immediately trigger")]
     WouldTriggerImmediately,
-}
-
-impl From<RiskError> for SimulatedVenueError {
-    fn from(error: RiskError) -> Self {
-        Self::Risk(error.to_string())
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -216,12 +209,7 @@ impl SimulatedVenue {
             notional * self.config.maintenance_margin_rate,
             notional * self.config.taker_fee_pct,
             wallet,
-            self.config
-                .risk_policy
-                .max_leverage
-                .trunc()
-                .to_u32()
-                .unwrap_or(1),
+            self.config.max_leverage,
         )
         .ok_or_else(|| {
             SimulatedVenueError::Risk(
@@ -590,41 +578,6 @@ impl ExitGateway for SimulatedVenue {
 }
 
 impl ExecutionVenue for SimulatedVenue {
-    async fn submit_entry(
-        &self,
-        _symbol: &str,
-        intent: &OrderIntent,
-        equity: Decimal,
-        session_peak: Decimal,
-    ) -> Result<EntryAck, Self::Error> {
-        let mut state = self.lock();
-        state.last_price.ok_or(SimulatedVenueError::NoMarketData)?;
-        let working_entry = state.orders.iter().any(|order| !order.reduce_only);
-        if state.position.is_some() || working_entry {
-            return Err(SimulatedVenueError::PositionExists);
-        }
-        let drawdown = RiskPolicy::calculate_session_drawdown_pct(session_peak, equity)?;
-        let quantity = self.config.risk_policy.size_order(
-            intent,
-            intent.price,
-            equity,
-            self.config.risk_per_trade_pct,
-            Decimal::ZERO,
-            drawdown,
-        )?;
-        let leverage = self.leverage_for(quantity * intent.price, equity)?;
-        let clock_ms = state.clock_ms;
-        let order_id =
-            self.queue_order(&mut state, intent.side, quantity, clock_ms, false, leverage);
-        Ok(EntryAck {
-            order_id,
-            status: "NEW".to_string(),
-            quantity,
-            price: intent.price,
-            sent_at_ms: state.clock_ms,
-        })
-    }
-
     /// Queues a market order of the exact requested quantity with the configured latency.
     ///
     /// A `reduce_only` order is clipped to the open opposite position when it fills, so it
@@ -669,7 +622,7 @@ impl ExecutionVenue for SimulatedVenue {
         );
         Ok(EntryAck {
             order_id,
-            status: "NEW".to_string(),
+            status: AckStatus::New,
             quantity: request.quantity,
             price: last,
             sent_at_ms: clock_ms,
@@ -680,6 +633,7 @@ impl ExecutionVenue for SimulatedVenue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use domain::{OrderIntent, RiskPolicy};
     use rust_decimal_macros::dec;
 
     fn venue(latency_ms: i64) -> SimulatedVenue {
@@ -688,8 +642,7 @@ mod tests {
             taker_fee_pct: dec!(0.001),
             maker_fee_pct: None,
             latency_ms,
-            risk_per_trade_pct: dec!(0.01),
-            risk_policy: RiskPolicy::default(),
+            max_leverage: 20,
             funding: FundingSchedule::constant(dec!(0.0001)),
             maintenance_margin_rate: dec!(0.004),
         })
@@ -697,6 +650,24 @@ mod tests {
 
     fn print(timestamp: i64, price: Decimal, quantity: Decimal, side: Side) -> Trade {
         Trade::new(timestamp, price, quantity, side).unwrap()
+    }
+
+    /// Sends the market entry a session would send for `intent` with `equity`: sized by the
+    /// default risk policy at 1 % of equity.
+    async fn enter(
+        venue: &SimulatedVenue,
+        intent: &OrderIntent,
+        equity: Decimal,
+    ) -> Result<EntryAck, SimulatedVenueError> {
+        let quantity = RiskPolicy::default()
+            .size_order(intent, intent.price, equity, dec!(0.01), dec!(0), dec!(0))
+            .map_err(|error| SimulatedVenueError::Risk(error.to_string()))?;
+        let request = OrderRequest {
+            side: intent.side,
+            quantity,
+            reduce_only: false,
+        };
+        venue.submit_order("BTCUSDT", &request).await
     }
 
     fn long_intent() -> OrderIntent {
@@ -707,10 +678,7 @@ mod tests {
     async fn long_venue(latency_ms: i64) -> SimulatedVenue {
         let venue = venue(latency_ms);
         venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
-        venue
-            .submit_entry("BTCUSDT", &long_intent(), dec!(1000), dec!(1000))
-            .await
-            .unwrap();
+        enter(&venue, &long_intent(), dec!(1000)).await.unwrap();
         venue.on_trade(&print(1_000 + latency_ms, dec!(100), dec!(10), Side::Buy));
         venue
     }
@@ -719,9 +687,7 @@ mod tests {
     async fn an_entry_needs_a_market_before_it_can_be_sized() {
         let venue = venue(50);
 
-        let result = venue
-            .submit_entry("BTCUSDT", &long_intent(), dec!(1000), dec!(1000))
-            .await;
+        let result = enter(&venue, &long_intent(), dec!(1000)).await;
 
         assert_eq!(result, Err(SimulatedVenueError::NoMarketData));
     }
@@ -731,42 +697,19 @@ mod tests {
         let venue = venue(50);
         venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
 
-        let ack = venue
-            .submit_entry("BTCUSDT", &long_intent(), dec!(1000), dec!(1000))
-            .await
-            .unwrap();
+        let ack = enter(&venue, &long_intent(), dec!(1000)).await.unwrap();
 
         // 1% of 1000 is 10 at risk over a 2 stop distance.
         assert_eq!(ack.quantity, dec!(5));
         assert_eq!(ack.price, dec!(100));
-        assert_eq!(ack.status, "NEW");
-    }
-
-    #[tokio::test]
-    async fn a_second_entry_is_refused_while_one_is_working() {
-        let venue = venue(50);
-        venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
-        let intent = long_intent();
-        venue
-            .submit_entry("BTCUSDT", &intent, dec!(1000), dec!(1000))
-            .await
-            .unwrap();
-
-        let second = venue
-            .submit_entry("BTCUSDT", &intent, dec!(1000), dec!(1000))
-            .await;
-
-        assert_eq!(second, Err(SimulatedVenueError::PositionExists));
+        assert_eq!(ack.status, AckStatus::New);
     }
 
     #[tokio::test]
     async fn an_order_waits_for_its_latency_before_it_trades() {
         let venue = venue(100);
         venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
-        venue
-            .submit_entry("BTCUSDT", &long_intent(), dec!(1000), dec!(1000))
-            .await
-            .unwrap();
+        enter(&venue, &long_intent(), dec!(1000)).await.unwrap();
 
         let early = venue.on_trade(&print(1_050, dec!(100), dec!(10), Side::Buy));
         let on_time = venue.on_trade(&print(1_100, dec!(100.5), dec!(10), Side::Buy));
@@ -782,10 +725,7 @@ mod tests {
     async fn a_market_buy_walks_the_tape_and_ignores_opposite_aggressor_prints() {
         let venue = venue(0);
         venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
-        venue
-            .submit_entry("BTCUSDT", &long_intent(), dec!(1000), dec!(1000))
-            .await
-            .unwrap();
+        enter(&venue, &long_intent(), dec!(1000)).await.unwrap();
 
         let first = venue.on_trade(&print(1_001, dec!(100.1), dec!(2), Side::Buy));
         let ignored = venue.on_trade(&print(1_002, dec!(99), dec!(50), Side::Sell));
@@ -808,10 +748,7 @@ mod tests {
     async fn fills_pay_the_taker_commission() {
         let venue = venue(0);
         venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
-        venue
-            .submit_entry("BTCUSDT", &long_intent(), dec!(1000), dec!(1000))
-            .await
-            .unwrap();
+        enter(&venue, &long_intent(), dec!(1000)).await.unwrap();
 
         let reports = venue.on_trade(&print(1_001, dec!(100), dec!(10), Side::Buy));
 
@@ -828,16 +765,12 @@ mod tests {
             taker_fee_pct: dec!(0.001),
             maker_fee_pct: Some(dec!(0.0002)),
             latency_ms: 0,
-            risk_per_trade_pct: dec!(0.01),
-            risk_policy: RiskPolicy::default(),
+            max_leverage: 20,
             funding: FundingSchedule::constant(dec!(0.0001)),
             maintenance_margin_rate: dec!(0.004),
         });
         venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
-        venue
-            .submit_entry("BTCUSDT", &long_intent(), dec!(1000), dec!(1000))
-            .await
-            .unwrap();
+        enter(&venue, &long_intent(), dec!(1000)).await.unwrap();
         venue.on_trade(&print(1_001, dec!(100), dec!(10), Side::Buy));
         venue
             .place_exits("BTCUSDT", Side::Buy, dec!(98), Some(dec!(104)))
@@ -949,10 +882,7 @@ mod tests {
         let venue = venue(0);
         venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Buy));
         let intent = OrderIntent::new(0, Side::Sell, dec!(100), dec!(102), dec!(96), 10).unwrap();
-        venue
-            .submit_entry("BTCUSDT", &intent, dec!(1000), dec!(1000))
-            .await
-            .unwrap();
+        enter(&venue, &intent, dec!(1000)).await.unwrap();
         venue.on_trade(&print(1_001, dec!(100), dec!(10), Side::Sell));
         venue
             .place_exits("BTCUSDT", Side::Sell, dec!(102), Some(dec!(96)))
@@ -987,10 +917,7 @@ mod tests {
     async fn an_in_flight_entry_is_cancelled_with_the_other_orders() {
         let venue = venue(100);
         venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
-        venue
-            .submit_entry("BTCUSDT", &long_intent(), dec!(1000), dec!(1000))
-            .await
-            .unwrap();
+        enter(&venue, &long_intent(), dec!(1000)).await.unwrap();
 
         venue.cancel_orders("BTCUSDT").await.unwrap();
         let reports = venue.on_trade(&print(1_200, dec!(100), dec!(10), Side::Buy));
@@ -1038,10 +965,7 @@ mod tests {
     async fn long_before_settlement() -> SimulatedVenue {
         let venue = venue(0);
         venue.on_trade(&print(SETTLEMENT - 5_000, dec!(100), dec!(1), Side::Sell));
-        venue
-            .submit_entry("BTCUSDT", &long_intent(), dec!(1000), dec!(1000))
-            .await
-            .unwrap();
+        enter(&venue, &long_intent(), dec!(1000)).await.unwrap();
         venue.on_trade(&print(SETTLEMENT - 4_000, dec!(100), dec!(10), Side::Buy));
         venue
     }
@@ -1071,10 +995,7 @@ mod tests {
         let venue = venue(0);
         venue.on_trade(&print(SETTLEMENT - 5_000, dec!(100), dec!(1), Side::Buy));
         let intent = OrderIntent::new(0, Side::Sell, dec!(100), dec!(102), dec!(96), 10).unwrap();
-        venue
-            .submit_entry("BTCUSDT", &intent, dec!(1000), dec!(1000))
-            .await
-            .unwrap();
+        enter(&venue, &intent, dec!(1000)).await.unwrap();
         venue.on_trade(&print(SETTLEMENT - 4_000, dec!(100), dec!(10), Side::Sell));
 
         venue.on_trade(&print(SETTLEMENT + 1_000, dec!(100), dec!(1), Side::Buy));
@@ -1102,10 +1023,7 @@ mod tests {
         let venue = venue(0);
         venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
         let intent = OrderIntent::new(0, Side::Buy, dec!(100), dec!(99.9), dec!(104), 10).unwrap();
-        let ack = venue
-            .submit_entry("BTCUSDT", &intent, dec!(1000), dec!(1000))
-            .await
-            .unwrap();
+        let ack = enter(&venue, &intent, dec!(1000)).await.unwrap();
         assert_eq!(ack.quantity, dec!(100));
         venue.on_trade(&print(1_001, dec!(100), dec!(500), Side::Buy));
         venue
@@ -1157,21 +1075,6 @@ mod tests {
 
         assert!(reports.is_empty());
         assert!(venue.position().is_some());
-    }
-
-    #[tokio::test]
-    async fn an_entry_the_balance_cannot_margin_is_refused() {
-        let venue = venue(0);
-        venue.on_trade(&print(1_000, dec!(100), dec!(1), Side::Sell));
-        let intent = OrderIntent::new(0, Side::Buy, dec!(100), dec!(99.99), dec!(104), 10).unwrap();
-
-        // The leverage cap limits the order to 8000 of notional, which needs 400 of margin at
-        // 20x plus the entry commission: more than the balance holds.
-        let result = venue
-            .submit_entry("BTCUSDT", &intent, dec!(400), dec!(400))
-            .await;
-
-        assert!(matches!(result, Err(SimulatedVenueError::Risk(_))));
     }
 
     #[tokio::test]

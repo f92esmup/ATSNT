@@ -6,7 +6,7 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use adapters::{BinanceCsvReader, MarketDataStream, TapeReader};
+use adapters::{BinanceCsvReader, TapeReader};
 use anyhow::{Context, Result};
 use backtest::{
     calibration_end_ms, check_calibration, now_unix_ms, record_backtest_with_audit,
@@ -17,6 +17,7 @@ use backtest::{
 use clap::Parser;
 use domain::futures::FundingSchedule;
 use domain::DollarBarAggregator;
+use ports::MarketDataStream;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategies::{InputKind, MarketEvent, MarketType, Strategy};
@@ -161,10 +162,11 @@ async fn main() -> Result<()> {
             config_path.display()
         );
     }
-    let loaded = backtest::load_strategy_with_shared(
+    let loaded = backtest::load_strategy_for_market(
         &strategy_id,
         args.config.as_deref(),
         args.shared_config.as_deref(),
+        args.spot.then_some(MarketType::Spot),
     )?;
     for line in loaded.report_lines() {
         println!("{line}");
@@ -327,7 +329,6 @@ async fn main() -> Result<()> {
     let (metrics, closed_trades) = match args.fill_model {
         FillModelArg::Bar if input_kind == InputKind::Trades => {
             let mut engine = BacktestEngine::new(engine_config);
-            engine.set_bracket_priority(strategy.bracket_priority());
             let mut last_price = Decimal::ZERO;
             while let Some(trade) = stream.next_trade()? {
                 total_trades_processed += 1;
@@ -354,7 +355,6 @@ async fn main() -> Result<()> {
         }
         FillModelArg::Bar => {
             let mut engine = BacktestEngine::new(engine_config);
-            engine.set_bracket_priority(strategy.bracket_priority());
             let mut last_price = Decimal::ZERO;
             while let Some(trade) = stream.next_trade()? {
                 total_trades_processed += 1;
@@ -522,12 +522,16 @@ async fn main() -> Result<()> {
         strategy_config: strat_config_val,
         execution_context: engine_config,
     };
-    let run_ctx = RunContext::new(RunType::Backtest, &run_spec, started_at_ms).with_fill_model(
-        match args.fill_model {
-            FillModelArg::Bar => backtest::FillModel::Bar,
-            FillModelArg::Tick => backtest::FillModel::Tick,
-        },
-    );
+    let run_ctx = RunContext::new(
+        RunType::Backtest,
+        &run_spec,
+        started_at_ms,
+        &backtest::wiring::entropy(),
+    )
+    .with_fill_model(match args.fill_model {
+        FillModelArg::Bar => backtest::FillModel::Bar,
+        FillModelArg::Tick => backtest::FillModel::Tick,
+    });
     let recorder = backtest::wiring::recorder(args.record.as_deref())?;
     record_backtest_with_audit(
         &recorder,
@@ -621,7 +625,11 @@ async fn main() -> Result<()> {
             );
             println!("============================================================");
 
-            let mc_ctx = run_ctx.child(RunType::MonteCarlo, now_unix_ms());
+            let mc_ctx = run_ctx.child(
+                RunType::MonteCarlo,
+                now_unix_ms(),
+                &backtest::wiring::entropy(),
+            );
             record_monte_carlo(
                 &recorder,
                 &mc_ctx,

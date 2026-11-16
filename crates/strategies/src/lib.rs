@@ -7,17 +7,15 @@
 mod contract;
 pub mod registry;
 pub mod strategy;
-pub mod usdm_perpetual;
-// The strategy keeps its public path: `strategies::swarm_consensus` is the stable name.
-pub use usdm_perpetual::swarm_consensus;
+pub mod swarm_consensus;
 
 pub use registry::{
     canonical_id, dispatch, dispatch_all, strategy_ids, strategy_names, unknown_strategy_message,
     StrategyVisitor,
 };
 pub use strategy::{
-    BarPassThrough, Decision, FeatureExtractor, HyperparameterSpace, InputKind, MarketEvent,
-    MarketType, OptimizableStrategy, Strategy,
+    BarPassThrough, FeatureExtractor, HyperparameterSpace, InputKind, MarketEvent, MarketType,
+    OptimizableStrategy, Strategy,
 };
 pub use swarm_consensus::{
     Agent, FeedVote, FeedWeights, FeedWeightsError, PolicyConfig, PriorParam, SwarmConfig,

@@ -58,12 +58,13 @@ pub fn shared() -> SwarmConfig {
     }
 }
 
-/// A policy that trades often on a 96-agent swarm.
+/// A policy that trades often on a 96-agent swarm. The synthetic tape has a small ATR, so the
+/// risk is low enough for the sized orders to fit the default notional cap.
 pub fn busy_policy() -> PolicyConfig {
     PolicyConfig {
         threshold_base: dec!(0.05),
-        threshold_step: dec!(0.05),
-        hysteresis: dec!(0.02),
+        base_risk: dec!(0.002),
+        risk_increment: dec!(0.002),
         ..PolicyConfig::default()
     }
 }

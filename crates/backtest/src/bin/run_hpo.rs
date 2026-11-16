@@ -6,7 +6,7 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use adapters::{BinanceCsvReader, MarketDataStream, TapeReader};
+use adapters::{BinanceCsvReader, TapeReader};
 use anyhow::{Context, Result};
 use backtest::{
     bar_tape, calibration_end_ms, check_calibration, embargo_buckets, now_unix_ms, record_hpo,
@@ -17,6 +17,7 @@ use backtest::{
 };
 use clap::Parser;
 use domain::DollarBarAggregator;
+use ports::MarketDataStream;
 use rust_decimal::Decimal;
 use serde_json::json;
 use strategies::{InputKind, OptimizableStrategy};
@@ -458,13 +459,14 @@ where
         }
         None => S::SharedConfig::default(),
     };
-    let strategy_instance = S::from_config(&shared, S::Config::default())
-        .map_err(|error| anyhow::anyhow!("Failed to initialize strategy: {error}"))?;
     let target_market = if args.spot {
         strategies::MarketType::Spot
     } else {
         strategies::MarketType::UsdMPerpetual
     };
+    let shared = S::shared_for_market(shared, target_market);
+    let strategy_instance = S::from_config(&shared, S::Config::default())
+        .map_err(|error| anyhow::anyhow!("Failed to initialize strategy: {error}"))?;
     if !strategy_instance.supports_market_type(target_market) {
         anyhow::bail!(
             "Strategy '{}' does not support {} (supported: {:?})",
@@ -626,7 +628,10 @@ where
     let shared_json = Some(serde_json::to_value(&shared)?).filter(|value| !value.is_null());
     let optimizer = WalkForwardOptimizer::<S>::new(engine_config, param_space)
         .with_shared_config(shared)
-        .with_min_trades_per_fold(args.min_trades_per_fold);
+        .with_min_trades_per_fold(args.min_trades_per_fold)
+        .with_progress(std::sync::Arc::new(
+            backtest::wiring::TerminalProgress::default(),
+        ));
 
     let mut all_evaluations: Vec<(
         Decimal,
@@ -786,7 +791,12 @@ where
 
     if !all_evaluations.is_empty() {
         let recorder = backtest::wiring::recorder(args.record.as_deref())?;
-        let sweep_ctx = RunContext::new(RunType::Hpo, &sweep_spec, started_at_ms);
+        let sweep_ctx = RunContext::new(
+            RunType::Hpo,
+            &sweep_spec,
+            started_at_ms,
+            &backtest::wiring::entropy(),
+        );
         let eval_only: Vec<CandidateEvaluation<S::Config>> =
             all_evaluations.iter().map(|e| e.1.clone()).collect();
         let total_bars: usize = prepared.resolutions.iter().map(|r| r.tape.len()).sum();
@@ -814,9 +824,12 @@ where
             &sweep_ctx,
             &sweep_spec,
             &winner_window,
-            &eval_only,
-            settings,
+            backtest::HpoSearch {
+                evaluations: &eval_only,
+                settings,
+            },
             now_unix_ms(),
+            &backtest::wiring::entropy(),
         )
         .await?;
     }

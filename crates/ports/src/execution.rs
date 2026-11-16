@@ -1,18 +1,27 @@
-use domain::{OrderIntent, Side};
+use domain::Side;
 use rust_decimal::Decimal;
 
 use crate::exits::ExitGateway;
 
-/// Acknowledgement that the venue accepted an entry order.
+/// State of an order when the venue acknowledged it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckStatus {
+    /// Accepted and working; its executions follow as reports.
+    New,
+    /// Already executed in full when it was acknowledged.
+    Filled,
+}
+
+/// Acknowledgement that the venue accepted an order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryAck {
     /// Venue-assigned identifier of the order (client order id of the venue).
     pub order_id: String,
-    /// Venue status at acknowledgement time (e.g. `NEW`, `FILLED`).
-    pub status: String,
-    /// Quantity the venue accepted after sizing and exchange rounding.
+    /// State of the order at acknowledgement time.
+    pub status: AckStatus,
+    /// Quantity the venue accepted.
     pub quantity: Decimal,
-    /// Reference price of the order: the signal price the entry was sized at.
+    /// Reference price of the order: the venue's last trade when it was sent.
     pub price: Decimal,
     /// Local wall-clock time, in Unix milliseconds, at which the order request left for the
     /// venue (0 when the venue cannot tell). Parity calibration needs it: stamping the
@@ -22,8 +31,8 @@ pub struct EntryAck {
 
 /// A market order of an explicit quantity, sized by the caller.
 ///
-/// It carries no sizing inputs: the session sizes a target position with the shared domain
-/// planner and sends the difference with the current position. A `reduce_only` order may only
+/// It carries no sizing inputs: the session sizes the entry with the shared domain gate and
+/// sends the quantity. A `reduce_only` order may only
 /// shrink the open position: the venue never lets it flip the position or close more than is
 /// open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,25 +78,14 @@ pub struct ExecutionReport {
 
 /// Everything a trading session needs from an execution venue.
 ///
-/// A venue accepts entries and manages exchange-held exits; it reports what happened through
-/// [`ExecutionReport`]s that the driver feeds back to the session. A live exchange adapter implements it for
-/// live trading and the simulator implements it for backtests, so one session core runs on
-/// both.
+/// A venue executes orders and manages exchange-held exits; it reports what happened through
+/// [`ExecutionReport`]s that the driver feeds back to the session. It decides nothing: sizing and
+/// the pre-trade risk rules belong to the session, so they are the same on every venue. A live
+/// exchange adapter implements it for live trading and the simulator implements it for
+/// backtests, so one session core runs on both.
 #[allow(async_fn_in_trait)]
 pub trait ExecutionVenue: ExitGateway {
-    /// Sizes, gates and dispatches a market entry for a strategy intent.
-    ///
-    /// `equity` is the wallet balance and `session_peak` the reference peak of the drawdown
-    /// breaker (the current UTC day's marked-equity peak).
-    async fn submit_entry(
-        &self,
-        symbol: &str,
-        intent: &OrderIntent,
-        equity: Decimal,
-        session_peak: Decimal,
-    ) -> Result<EntryAck, Self::Error>;
-
-    /// Dispatches a market order of the request's exact quantity, with no sizing in the venue.
+    /// Dispatches a market order of the request's exact quantity.
     ///
     /// The acknowledgement's `quantity` is the requested quantity and its `price` the venue's
     /// reference price at send time (the last trade, or 0 when the venue cannot tell).

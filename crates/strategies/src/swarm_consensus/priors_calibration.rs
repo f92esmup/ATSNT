@@ -7,9 +7,9 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::feeds::FeedBar;
-use super::indicators::{BarInput, FeedIndicators};
-use crate::error::DomainError;
+use domain::{BarInput, DomainError, FeedBar};
+
+use super::indicators::FeedIndicators;
 
 /// The empirical means derived from calibrating against historical bars.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

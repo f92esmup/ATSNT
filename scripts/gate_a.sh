@@ -114,6 +114,9 @@ def write(name, allow_short, spot_costs, resting_maker_exits, gate_breakers):
     d["shared_config"]["allow_short"] = allow_short
     ec = d["execution_context"]
     if spot_costs:
+        # The spot market: the strategy and the engine both refuse shorts on it.
+        d["market_type"] = "spot"
+        ec["market_type"] = "spot"
         # Spot costs of the prueba A run (0.25 % maker, 0.40 % taker). The account's entry tier is
         # 0.40 % / 0.80 % (2026-11-07); a run at those costs needs a new record.
         ec.update(

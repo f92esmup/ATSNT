@@ -11,30 +11,26 @@ pub mod bar;
 pub mod decision;
 pub mod error;
 pub mod futures;
+pub mod gate;
+pub mod market;
 pub mod metrics;
 pub mod order;
 pub mod position;
 pub mod risk;
 pub mod trade;
 
-// Backward-compatibility module aliases
-pub use analytics::filters as cusum;
-pub use analytics::sampling as aggregator;
-pub use analytics::stats;
-
 // Re-exports of core domain and analytical types
 pub use analytics::{
-    calibrate, calibrate_empirical_priors, AlmaSlope, AtrRatio, BarAggregator, BarInput,
-    CusumEvent, CusumFilter, DollarBarAggregator, EmpiricalPriors, FeedBar, FeedIndicators,
-    FeedThresholds, IndicatorSnapshot, RangeBarAggregator, RollingZScore, TickBarAggregator,
-    TimeBarAggregator, VolumeBarAggregator, VwapDeviation, WilderAtr, WilderRsi, ZScoreResult,
+    AlmaSlope, AtrRatio, BarAggregator, BarInput, DollarBarAggregator, FeedBar, RangeBarAggregator,
+    RollingZScore, TickBarAggregator, TimeBarAggregator, VolumeBarAggregator, VwapDeviation,
+    WilderAtr, WilderRsi, ZScoreResult,
 };
 pub use bar::DollarBar;
-pub use decision::{
-    Decision, InputKind, MarketEvent, ProtectiveExits, TargetPosition, MAX_TARGET_LEVEL,
-};
+pub use decision::{InputKind, MarketEvent, ProtectiveExits};
 pub use error::DomainError;
+pub use gate::{EntryGate, EntryRefusal};
+pub use market::MarketType;
 pub use order::{Order, OrderIntent, OrderStatus, OrderType, TimeInForce};
 pub use position::{Position, PositionSide};
-pub use risk::{RiskError, RiskPolicy, TargetSizing};
+pub use risk::{RiskError, RiskPolicy};
 pub use trade::{Side, Trade};
