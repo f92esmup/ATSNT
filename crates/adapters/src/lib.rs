@@ -19,7 +19,7 @@ pub use analytics::{InMemoryRunRecorder, NullRunRecorder, RecordedRuns};
 pub use binance_csv::BinanceCsvReader;
 pub use binance_fetcher::{BinanceDataFetcher, FetchParams, FetchSummary};
 pub use binance_funding::{funding_schedule_from_history, parse_funding_history};
-pub use clock::SystemClock;
+pub use clock::{SimClock, SystemClock};
 pub use entropy::OsEntropy;
 pub use error::AdapterError;
 pub use fetch_plan::{is_not_archived, plan_fetch_tasks, run_bounded, FetchTask};

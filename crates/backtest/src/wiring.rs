@@ -6,8 +6,8 @@
 use std::path::Path;
 
 use adapters::{
-    read_text, NullRunRecorder, OsEntropy, SimulatedVenue, SimulatedVenueConfig, SqliteRunRecorder,
-    SystemClock,
+    read_text, NullRunRecorder, OsEntropy, SimClock, SimulatedVenue, SimulatedVenueConfig,
+    SqliteRunRecorder, SystemClock,
 };
 use domain::futures::FundingSchedule;
 use domain::{RiskError, RiskPolicy};
@@ -33,6 +33,11 @@ pub fn now_unix_ms() -> i64 {
 /// The clock of the binaries: the machine's wall clock.
 pub fn system_clock() -> SystemClock {
     SystemClock
+}
+
+/// The clock of a replay, stopped at `now_ms` until the replay advances it.
+pub fn sim_clock(now_ms: i64) -> SimClock {
+    SimClock::at(now_ms)
 }
 
 /// The random source of the binaries: the operating system's generator.

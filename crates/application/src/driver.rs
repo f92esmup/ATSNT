@@ -7,7 +7,7 @@
 //! the other methods.
 
 use domain::{DollarBar, DollarBarAggregator, DomainError, Trade};
-use ports::{ExecutionReport, ExecutionVenue};
+use ports::{Clock, ExecutionReport, ExecutionVenue};
 use rust_decimal::Decimal;
 use strategies::Strategy;
 
@@ -88,14 +88,15 @@ impl<S: Strategy> SessionDriver<S> {
         }
     }
 
-    /// Advances the session's clock when no market trade arrives; see
-    /// [`TradingSession::on_idle`].
-    pub async fn on_idle<V: ExecutionVenue>(
+    /// Advances the session's time when no market trade arrives; see
+    /// [`TradingSession::on_idle`]. The instant is read from `clock`: the wall clock in a live
+    /// run, a simulated one in a replay, so both take the same path.
+    pub async fn on_idle<V: ExecutionVenue, C: Clock>(
         &mut self,
         venue: &V,
-        now_ms: i64,
+        clock: &C,
     ) -> Vec<SessionEvent> {
-        self.session.on_idle(venue, now_ms).await
+        self.session.on_idle(venue, clock.now_ms()).await
     }
 
     /// Feeds one execution report from the venue.
@@ -154,6 +155,15 @@ impl<S: Strategy> SessionDriver<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clock stopped at one instant.
+    struct At(i64);
+
+    impl Clock for At {
+        fn now_ms(&self) -> i64 {
+            self.0
+        }
+    }
     use crate::session::SessionConfig;
     use domain::{OrderIntent, Side};
     use ports::{EntryAck, ExitGateway, OrderRequest};
@@ -367,7 +377,7 @@ mod tests {
         assert!(driver.session().is_exposed());
 
         // The entry never reaches a terminal status and no trade arrives.
-        let events = driver.on_idle(&venue, 1_001 + 30_000).await;
+        let events = driver.on_idle(&venue, &At(1_001 + 30_000)).await;
 
         assert!(events
             .iter()
