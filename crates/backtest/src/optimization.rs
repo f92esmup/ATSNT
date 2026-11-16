@@ -269,7 +269,6 @@ pub fn run_tape_slice<S: OptimizableStrategy>(
     let mut strategy = S::from_config(shared, strat_config.clone())
         .map_err(|e| BacktestError::Strategy(e.to_string()))?;
     let mut engine = BacktestEngine::new(config);
-    engine.set_bracket_priority(strategy.bracket_priority());
 
     for (index, event) in range.zip(prices) {
         let features = tape.features_at(index);
@@ -1225,8 +1224,8 @@ mod tests {
             Ok(strategies::BarPassThrough)
         }
 
-        fn on_features(&mut self, bar: &DollarBar) -> Option<strategies::Decision> {
-            strategies::Strategy::on_bar(self, bar).map(strategies::Decision::Entry)
+        fn on_features(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
+            strategies::Strategy::on_bar(self, bar)
         }
 
         fn default_space() -> Self::Space {
@@ -1299,8 +1298,8 @@ mod tests {
             Ok(CountingExtractor)
         }
 
-        fn on_features(&mut self, bar: &DollarBar) -> Option<strategies::Decision> {
-            strategies::Strategy::on_bar(self, bar).map(strategies::Decision::Entry)
+        fn on_features(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
+            strategies::Strategy::on_bar(self, bar)
         }
 
         fn default_space() -> Self::Space {

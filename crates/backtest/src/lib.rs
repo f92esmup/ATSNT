@@ -38,13 +38,12 @@ pub use engine::BacktestEngine;
 pub use error::{BacktestError, ConfigText, LoadError};
 pub use execution_core::{
     barrier_exit, market_fill_price, BarrierExit, ExecutionCore, PendingEntry, PendingEntryOutcome,
-    PendingTarget, TradeLedger,
+    TradeLedger,
 };
 pub use live_exits::{ExitEvent, ExitGateway, ExitManager, HaltState};
 pub use metrics::{
     format_ratio, format_rejections, sortino_ratio, trade_returns, BacktestMetrics, ClosedTrade,
-    TradeExcursion, DAILY_HALT_REJECTION, POSITION_CAP_CLIP, REARM_IGNORED_REJECTION,
-    STOP_BEYOND_LIQUIDATION_CLIP, UNSUPPORTED_DECISION_REJECTION,
+    TradeExcursion, DAILY_HALT_REJECTION,
 };
 pub use monte_carlo::{
     FanChartTrajectory, MonteCarloConfig, MonteCarloMetrics, MonteCarloReport, MonteCarloSimulator,

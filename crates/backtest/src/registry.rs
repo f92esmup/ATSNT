@@ -127,14 +127,6 @@ impl LoadedStrategy {
         }
     }
 
-    /// Execution gate: refuses a strategy that can emit `Decision::Target` (spec §17.1).
-    pub fn ensure_accepts_decisions(&self) -> Result<(), LoadError> {
-        if self.strategy.emits_targets() {
-            return Err(LoadError::EmitsTargets(self.strategy_id.clone()));
-        }
-        Ok(())
-    }
-
     /// Human-readable lines describing the configuration source, for runner start-up output.
     pub fn report_lines(&self) -> Vec<String> {
         match &self.source {
@@ -544,16 +536,6 @@ mod tests {
             assert!(message.contains("Unknown strategy 'nope'"));
             assert!(message.contains("swarm_consensus"));
         }
-    }
-
-    #[test]
-    fn execution_accepts_the_swarm() {
-        let classifier_config =
-            serde_json::to_string(&strategies::PolicyConfig::default()).unwrap();
-        let temp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(temp.path(), classifier_config).unwrap();
-        let loaded = load_strategy("swarm", Some(temp.path())).unwrap();
-        assert!(loaded.ensure_accepts_decisions().is_ok());
     }
 
     #[test]

@@ -16,8 +16,8 @@ pub use registry::{
     StrategyVisitor,
 };
 pub use strategy::{
-    BarPassThrough, Decision, FeatureExtractor, HyperparameterSpace, InputKind, MarketEvent,
-    MarketType, OptimizableStrategy, Strategy,
+    BarPassThrough, FeatureExtractor, HyperparameterSpace, InputKind, MarketEvent, MarketType,
+    OptimizableStrategy, Strategy,
 };
 pub use swarm_consensus::{
     Agent, FeedVote, FeedWeights, FeedWeightsError, PolicyConfig, PriorParam, SwarmConfig,

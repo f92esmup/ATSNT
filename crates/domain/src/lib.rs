@@ -25,12 +25,10 @@ pub use analytics::{
     VolumeBarAggregator, VwapDeviation, WilderAtr, WilderRsi, ZScoreResult,
 };
 pub use bar::DollarBar;
-pub use decision::{
-    Decision, InputKind, MarketEvent, ProtectiveExits, TargetPosition, MAX_TARGET_LEVEL,
-};
+pub use decision::{InputKind, MarketEvent, ProtectiveExits};
 pub use error::DomainError;
 pub use market::MarketType;
 pub use order::{Order, OrderIntent, OrderStatus, OrderType, TimeInForce};
 pub use position::{Position, PositionSide};
-pub use risk::{RiskError, RiskPolicy, TargetSizing};
+pub use risk::{RiskError, RiskPolicy};
 pub use trade::{Side, Trade};

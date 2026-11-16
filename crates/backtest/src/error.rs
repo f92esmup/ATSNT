@@ -52,9 +52,6 @@ pub enum LoadError {
          it anyway (e.g. to test the mechanics on testnet)"
     )]
     NotDeployable(String),
-    /// The strategy emits a kind of decision no execution path accepts.
-    #[error("strategy '{0}' emits target-position decisions, which no execution path accepts yet")]
-    EmitsTargets(String),
     /// The strategy refused its configuration.
     #[error("Failed to initialize strategy: {0}")]
     Initialize(String),

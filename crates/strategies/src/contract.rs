@@ -12,8 +12,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 use crate::strategy::{
-    Decision, FeatureExtractor, HyperparameterSpace, InputKind, MarketEvent, OptimizableStrategy,
-    Strategy,
+    FeatureExtractor, HyperparameterSpace, InputKind, MarketEvent, OptimizableStrategy, Strategy,
 };
 
 /// Candidates requested from the search space when checking it.
@@ -143,7 +142,7 @@ impl Input {
     }
 }
 
-fn replay<T: Strategy>(strategy: &mut T, input: &Input) -> Vec<Option<Decision>> {
+fn replay<T: Strategy>(strategy: &mut T, input: &Input) -> Vec<Option<OrderIntent>> {
     input
         .events()
         .iter()
@@ -157,7 +156,7 @@ fn replay_in_two_stages<S: OptimizableStrategy>(
     extractor: &mut S::Extractor,
     strategy: &mut S,
     input: &Input,
-) -> Vec<Decision> {
+) -> Vec<OrderIntent> {
     input
         .events()
         .iter()
@@ -166,27 +165,14 @@ fn replay_in_two_stages<S: OptimizableStrategy>(
         .collect()
 }
 
-fn assert_valid_decision(id: &str, decision: &Decision) {
-    match decision {
-        Decision::Entry(intent) => assert_valid_intent(id, intent),
-        // TargetPosition::new already enforces the level, risk and stop invariants; the side
-        // must agree with the level.
-        Decision::Target(target) => assert_eq!(
-            target.side().is_some(),
-            target.level() != 0,
-            "{id}: a target's side must follow its level"
-        ),
-    }
-}
-
 fn assert_valid_intent(id: &str, intent: &OrderIntent) {
     assert!(
         intent.price > Decimal::ZERO,
         "{id}: intent price must be positive"
     );
     assert!(
-        intent.max_bars_hold >= 1,
-        "{id}: the time barrier must hold at least one bar"
+        intent.max_bars_hold >= 1 || intent.deadline_ms.is_some_and(|at| at > intent.timestamp),
+        "{id}: the time barrier must hold at least one bar or end after the decision"
     );
     match intent.side {
         Side::Buy => assert!(
@@ -301,14 +287,14 @@ where
     );
 
     for decision in first.iter().flatten() {
-        assert_valid_decision(id, decision);
+        assert_valid_intent(id, decision);
     }
 
     // The optimizer decides in two stages; they must agree with the one-stage run.
     let mut extractor = S::extractor(&shared)
         .unwrap_or_else(|error| panic!("{id}: the extractor must build: {error}"));
     let staged = replay_in_two_stages(&mut extractor, &mut build(), &input);
-    let direct: Vec<Decision> = first.iter().flatten().cloned().collect();
+    let direct: Vec<OrderIntent> = first.iter().flatten().cloned().collect();
     assert_eq!(
         staged, direct,
         "{id}: extractor + on_features must decide exactly what on_event decides"
@@ -317,7 +303,7 @@ where
     // Quiet markets must not break it.
     let mut quiet = build();
     for decision in replay(&mut quiet, &Input::flat(kind, 200)).iter().flatten() {
-        assert_valid_decision(id, decision);
+        assert_valid_intent(id, decision);
     }
 }
 
@@ -429,8 +415,8 @@ mod tests {
             Ok(crate::strategy::BarPassThrough)
         }
 
-        fn on_features(&mut self, bar: &DollarBar) -> Option<Decision> {
-            let decision = self.on_bar(bar).map(Decision::Entry);
+        fn on_features(&mut self, bar: &DollarBar) -> Option<OrderIntent> {
+            let decision = self.on_bar(bar);
             if MODE == 3 {
                 None
             } else {

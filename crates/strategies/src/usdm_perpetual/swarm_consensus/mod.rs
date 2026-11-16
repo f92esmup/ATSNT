@@ -26,10 +26,10 @@ pub use priors_calibration::{calibrate_empirical_priors, EmpiricalPriors};
 pub use rules::{AgentVote, ConflictKind};
 pub use sample::{ConsensusSample, FeedVote, FeedWeights, FeedWeightsError};
 
-use domain::DomainError;
+use domain::{DomainError, OrderIntent};
 
 use crate::strategy::{
-    Decision, FeatureExtractor, InputKind, MarketEvent, MarketType, OptimizableStrategy, Strategy,
+    FeatureExtractor, InputKind, MarketEvent, MarketType, OptimizableStrategy, Strategy,
 };
 
 /// The swarm consensus strategy: the [`SwarmEnsemble`] (frozen first stage) feeding the
@@ -56,7 +56,7 @@ impl Strategy for SwarmConsensusStrategy {
     }
 
     /// The two stages in one call, so the live path and the optimizer cannot drift apart.
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<Decision> {
+    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
         let sample = self.ensemble.on_event(event)?;
         self.on_features(&sample)
     }
@@ -95,10 +95,8 @@ impl OptimizableStrategy for SwarmConsensusStrategy {
         SwarmEnsemble::new(shared)
     }
 
-    fn on_features(&mut self, sample: &ConsensusSample) -> Option<Decision> {
-        self.policy
-            .on_sample(sample, self.allow_short)
-            .map(Decision::Entry)
+    fn on_features(&mut self, sample: &ConsensusSample) -> Option<OrderIntent> {
+        self.policy.on_sample(sample, self.allow_short)
     }
 
     fn default_space() -> SwarmPolicySpace {
@@ -126,16 +124,6 @@ mod tests {
         assert_eq!(strategy.input_kind(), InputKind::Trades);
         let audit = strategy.audit().expect("the swarm reports an audit");
         assert!(audit.is_object());
-    }
-
-    #[test]
-    fn the_swarm_emits_entries_not_targets_also_through_a_box() {
-        let strategy =
-            SwarmConsensusStrategy::from_config(&SwarmConfig::default(), PolicyConfig::default())
-                .unwrap();
-        assert!(!strategy.emits_targets());
-        let boxed: Box<dyn Strategy> = Box::new(strategy);
-        assert!(!boxed.emits_targets());
     }
 
     #[test]

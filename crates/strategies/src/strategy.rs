@@ -1,6 +1,6 @@
 use domain::{DollarBar, DomainError, OrderIntent};
 
-pub use domain::{Decision, InputKind, MarketEvent, MarketType};
+pub use domain::{InputKind, MarketEvent, MarketType};
 
 /// Universal contract for all quantitative trading strategies in ATSNT.
 ///
@@ -34,30 +34,19 @@ pub trait Strategy: Send {
         None
     }
 
-    /// Reacts to one market event and optionally decides.
+    /// Reacts to one market event and optionally decides a triple-barrier entry.
     ///
-    /// Every runner calls this method. By default a dollar bar goes to [`Strategy::on_bar`]
-    /// and its intent becomes a [`Decision::Entry`]; raw trades are ignored.
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<Decision> {
+    /// Every runner calls this method. By default a dollar bar goes to [`Strategy::on_bar`];
+    /// raw trades are ignored.
+    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
         match event {
-            MarketEvent::DollarBar(bar) => self.on_bar(bar).map(Decision::Entry),
+            MarketEvent::DollarBar(bar) => self.on_bar(bar),
             MarketEvent::Trade(_) => None,
         }
     }
 
     /// Clears internal state buffers to allow clean replay or backtest isolation.
     fn reset(&mut self);
-
-    /// Capability used by the paper/live product gate (Section 17.1). Default: false.
-    fn emits_targets(&self) -> bool {
-        false
-    }
-
-    /// Whether open positions with active bracket exits (TP/SL) prioritize holding until TP/SL or
-    /// opposite-side flip, rather than market-closing on neutral consensus decay (k = 0).
-    fn bracket_priority(&self) -> bool {
-        false
-    }
 
     /// Strategy-specific audit written into reports as `strategy_audit`; `None` by default.
     fn audit(&self) -> Option<serde_json::Value> {
@@ -158,7 +147,7 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
     fn on_features(
         &mut self,
         features: &<Self::Extractor as FeatureExtractor>::Features,
-    ) -> Option<Decision>;
+    ) -> Option<OrderIntent>;
 
     /// Default search space defining hyperparameter candidate domains and ranges.
     fn default_space() -> Self::Space;
@@ -185,7 +174,7 @@ impl<S: ?Sized + Strategy> Strategy for Box<S> {
         (**self).on_bar(bar)
     }
 
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<Decision> {
+    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
         (**self).on_event(event)
     }
 
@@ -195,14 +184,6 @@ impl<S: ?Sized + Strategy> Strategy for Box<S> {
 
     fn audit(&self) -> Option<serde_json::Value> {
         (**self).audit()
-    }
-
-    fn emits_targets(&self) -> bool {
-        (**self).emits_targets()
-    }
-
-    fn bracket_priority(&self) -> bool {
-        (**self).bracket_priority()
     }
 }
 
@@ -228,13 +209,6 @@ mod tests {
             buy_dollar_volume: close,
             sell_dollar_volume: dec!(0),
         }
-    }
-
-    #[test]
-    fn a_strategy_emits_no_targets_by_default_and_a_box_forwards_the_capability() {
-        assert!(!BarOnly.emits_targets());
-        let boxed: Box<dyn Strategy> = Box::new(BarOnly);
-        assert!(!boxed.emits_targets());
     }
 
     /// A bar strategy written against the original contract: it only implements `on_bar`.
@@ -263,7 +237,7 @@ mod tests {
         let b = bar(dec!(100));
         assert_eq!(
             strategy.on_event(&MarketEvent::DollarBar(&b)),
-            strategy.on_bar(&b).map(Decision::Entry)
+            strategy.on_bar(&b)
         );
         assert!(strategy.on_event(&MarketEvent::DollarBar(&b)).is_some());
     }
@@ -279,10 +253,7 @@ mod tests {
         let mut boxed: Box<dyn Strategy> = Box::new(BarOnly);
         let b = bar(dec!(100));
         assert_eq!(boxed.input_kind(), InputKind::DollarBars);
-        assert!(matches!(
-            boxed.on_event(&MarketEvent::DollarBar(&b)),
-            Some(Decision::Entry(_))
-        ));
+        assert!(boxed.on_event(&MarketEvent::DollarBar(&b)).is_some());
         assert!(boxed.on_bar(&b).is_some());
         assert_eq!(boxed.name(), "bar_only");
     }
