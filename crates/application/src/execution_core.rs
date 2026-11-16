@@ -1,6 +1,6 @@
 //! Position accounting shared by every runner that simulates fills.
 //!
-//! [`ExecutionCore`] was extracted from [`crate::BacktestEngine`] (odd swarm-consensus T5.1,
+//! [`ExecutionCore`] was extracted from the bar engine (odd swarm-consensus T5.1,
 //! strategy spec `docs/strategy/03-swarm-consensus.md` §3.5). It owns the open position, the
 //! pending market order, the [`ProtectiveExits`], isolated margin and liquidation, funding, the
 //! fill price, slippage and fee math, and the [`TradeLedger`] that turns a closed position into a
@@ -660,8 +660,8 @@ impl ExecutionCore {
     }
 
     /// Puts `position` on the books without a fill, for tests of the owner's equity math.
-    #[cfg(test)]
-    pub(crate) fn set_position_for_test(&mut self, position: Position) {
+    #[doc(hidden)]
+    pub fn set_position_for_test(&mut self, position: Position) {
         self.position = Some(position);
     }
 

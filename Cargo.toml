@@ -4,6 +4,7 @@ members = [
     "crates/domain",
     "crates/ports",
     "crates/strategies",
+    "crates/application",
     "crates/adapters",
     "crates/backtest",
 ]
@@ -19,6 +20,7 @@ rust-version = "1.80"
 domain = { path = "crates/domain" }
 ports = { path = "crates/ports" }
 strategies = { path = "crates/strategies" }
+application = { path = "crates/application" }
 adapters = { path = "crates/adapters" }
 backtest = { path = "crates/backtest" }
 

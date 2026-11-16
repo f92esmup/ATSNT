@@ -1,25 +1,20 @@
 // AGENTS.md: no unwrap or expect in production code; test builds keep them.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-pub mod alert_throttle;
+pub use application::{
+    alert_throttle, config, driver, execution_core, live_exits, operator_alerts, parity,
+    price_event, session, tick_simulation,
+};
+
 pub mod artifact;
-pub mod config;
-pub mod driver;
 pub mod engine;
 pub mod error;
-pub mod execution_core;
-pub mod live_exits;
 pub mod monte_carlo;
-pub mod operator_alerts;
 pub mod optimization;
 pub mod paper;
-pub mod parity;
-pub mod price_event;
 pub mod recording;
 pub mod registry;
 pub mod run;
-pub mod session;
-pub mod tick_simulation;
 pub mod walk_forward;
 pub mod wiring;
 
