@@ -981,7 +981,7 @@ impl HyperparameterSpace for SwarmPolicySpace {
         if configs.len() > max_candidates {
             use rand::seq::SliceRandom;
             use rand::SeedableRng;
-            let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+            let mut rng = super::genome::SwarmRng::seed_from_u64(42);
             configs.shuffle(&mut rng);
             configs.truncate(max_candidates);
         }
@@ -2232,6 +2232,31 @@ mod tests {
         let d_short = policy.on_sample(&s_short_ok, true);
         assert!(
             matches!(d_short, Some(Decision::Entry(ref intent)) if intent.side == domain::Side::Sell)
+        );
+    }
+}
+/// Pins the candidate draw: a budget below the grid size must pick the same candidates after any
+/// dependency update.
+#[cfg(test)]
+mod pinned_candidates {
+    use super::*;
+
+    #[test]
+    fn a_budget_of_25_draws_the_recorded_candidates_of_the_classifier_space() {
+        let space = SwarmPolicySpace::classifier_space();
+        let grid = space.generate_candidates(usize::MAX);
+        assert_eq!(grid.len(), 5832);
+        let drawn: Vec<usize> = space
+            .generate_candidates(25)
+            .iter()
+            .filter_map(|candidate| grid.iter().position(|config| config == candidate))
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                4037, 3713, 715, 1483, 3659, 3606, 501, 1273, 4726, 5204, 2767, 2026, 1773, 2544,
+                5755, 893, 567, 243, 2428, 4727, 2721, 20, 1750, 4693, 4674
+            ]
         );
     }
 }
