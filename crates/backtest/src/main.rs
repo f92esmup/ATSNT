@@ -6,7 +6,7 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use adapters::{BinanceCsvReader, MarketDataStream, TapeReader};
+use adapters::{BinanceCsvReader, TapeReader};
 use anyhow::{Context, Result};
 use backtest::{
     calibration_end_ms, check_calibration, now_unix_ms, record_backtest_with_audit,
@@ -17,6 +17,7 @@ use backtest::{
 use clap::Parser;
 use domain::futures::FundingSchedule;
 use domain::DollarBarAggregator;
+use ports::MarketDataStream;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategies::{InputKind, MarketEvent, MarketType, Strategy};

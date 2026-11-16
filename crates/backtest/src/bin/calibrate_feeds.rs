@@ -12,13 +12,14 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use adapters::{BinanceCsvReader, MarketDataStream, TapeReader};
+use adapters::{BinanceCsvReader, TapeReader};
 use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
 use clap::Parser;
 use domain::{
     calibrate, calibrate_empirical_priors, BarAggregator, FeedThresholds, TimeBarAggregator, Trade,
 };
+use ports::MarketDataStream;
 use strategies::swarm_consensus::ensemble::TIME_HORIZONS_MS;
 use strategies::{SwarmConfig, SwarmPriorsConfig};
 

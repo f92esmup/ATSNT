@@ -6,7 +6,7 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use adapters::{BinanceCsvReader, MarketDataStream, TapeReader};
+use adapters::{BinanceCsvReader, TapeReader};
 use anyhow::{Context, Result};
 use backtest::{
     bar_tape, calibration_end_ms, check_calibration, embargo_buckets, now_unix_ms, record_hpo,
@@ -17,6 +17,7 @@ use backtest::{
 };
 use clap::Parser;
 use domain::DollarBarAggregator;
+use ports::MarketDataStream;
 use rust_decimal::Decimal;
 use serde_json::json;
 use strategies::{InputKind, OptimizableStrategy};

@@ -5,7 +5,7 @@ use domain::{Side, Trade};
 use rust_decimal::Decimal;
 
 use crate::error::AdapterError;
-use crate::traits::MarketDataStream;
+use ports::MarketDataStream;
 
 /// Streaming parser for Binance `aggTrades` CSV dumps (`data.binance.vision`).
 ///

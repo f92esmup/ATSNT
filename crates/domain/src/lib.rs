@@ -17,11 +17,6 @@ pub mod position;
 pub mod risk;
 pub mod trade;
 
-// Backward-compatibility module aliases
-pub use analytics::filters as cusum;
-pub use analytics::sampling as aggregator;
-pub use analytics::stats;
-
 // Re-exports of core domain and analytical types
 pub use analytics::{
     calibrate, calibrate_empirical_priors, AlmaSlope, AtrRatio, BarAggregator, BarInput,

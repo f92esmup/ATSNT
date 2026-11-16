@@ -12,11 +12,12 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use adapters::{BinanceCsvReader, MarketDataStream, TapeReader};
+use adapters::{BinanceCsvReader, TapeReader};
 use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
 use clap::Parser;
 use domain::Trade;
+use ports::MarketDataStream;
 use rust_decimal::Decimal;
 use strategies::swarm_consensus::genome::FEED_COUNT;
 use strategies::{Agent, SwarmConfig, SwarmEnsemble};

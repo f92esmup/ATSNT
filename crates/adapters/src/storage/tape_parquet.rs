@@ -14,7 +14,7 @@ use parquet::file::properties::WriterProperties;
 use rust_decimal::Decimal;
 
 use crate::error::AdapterError;
-use crate::traits::MarketDataStream;
+use ports::MarketDataStream;
 
 /// Default row group / batch size for Parquet streaming
 const BATCH_SIZE: usize = 65_536;
