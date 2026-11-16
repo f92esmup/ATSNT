@@ -386,6 +386,34 @@ fn the_backtest_runs_the_swarm_at_trade_resolution_and_reports_its_audit() {
 }
 
 #[test]
+fn the_spot_flag_runs_the_swarm_long_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = write_trades(dir.path(), &swarm_trades(30));
+    // The shared configuration allows shorts; the spot market must take that away.
+    assert!(shared().allow_short);
+    let shared_path = write_json(dir.path(), "shared.json", &shared());
+    let policy_path = write_json(dir.path(), "policy.json", &busy_policy());
+
+    let out = run_backtest(
+        &data,
+        &[
+            "--spot",
+            "--strategy-config",
+            policy_path.to_str().unwrap(),
+            "--shared-config",
+            shared_path.to_str().unwrap(),
+        ],
+    );
+    let stdout = text(&out);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("Shared configuration narrowed for the Spot market"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("SpotShortingDisallowed"), "{stdout}");
+}
+
+#[test]
 fn the_backtest_refuses_a_calibration_that_overlaps_the_data() {
     let dir = tempfile::tempdir().unwrap();
     let data = write_trades(dir.path(), &swarm_trades(3));

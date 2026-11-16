@@ -86,6 +86,9 @@ pub struct LoadedStrategy {
     /// The shared configuration the strategy was built with, as JSON; `None` for a strategy
     /// without one (its shared configuration is `()`).
     pub shared_config_json: Option<serde_json::Value>,
+    /// The market the strategy narrowed its shared configuration for, when that changed it
+    /// (the swarm drops short selling on spot).
+    pub narrowed_for_market: Option<MarketType>,
 }
 
 impl LoadedStrategy {
@@ -129,6 +132,17 @@ impl LoadedStrategy {
 
     /// Human-readable lines describing the configuration source, for runner start-up output.
     pub fn report_lines(&self) -> Vec<String> {
+        let mut lines = self.source_lines();
+        if let Some(market) = self.narrowed_for_market {
+            lines.push(format!(
+                "[*] Shared configuration narrowed for the {market:?} market"
+            ));
+        }
+        lines
+    }
+
+    /// Lines describing where the configuration came from.
+    fn source_lines(&self) -> Vec<String> {
         match &self.source {
             ConfigSource::Default => vec![format!(
                 "[*] Using default {} hyperparameters: {}",
@@ -213,6 +227,7 @@ pub fn strategy_id_of(
 struct Loader<'a> {
     config: Option<ConfigText<'a>>,
     shared: Option<ConfigText<'a>>,
+    market: Option<MarketType>,
 }
 
 /// The shared configuration of a load: the artifact's, else the `--shared-config` text's, else
@@ -308,11 +323,20 @@ impl StrategyVisitor for Loader<'_> {
         let config_json =
             serde_json::to_value(&config).map_err(serialize("the strategy configuration"))?;
         let config_display = config.to_string();
-        let shared: S::SharedConfig = resolve_shared_config(artifact_shared, self.shared)?;
+        let given: S::SharedConfig = resolve_shared_config(artifact_shared, self.shared)?;
+        // The requested market wins over the artifact's; with neither, nothing is narrowed.
+        let market = self.market.or(market_type);
+        let given_json =
+            serde_json::to_value(&given).map_err(serialize("the shared configuration"))?;
+        let shared = match market {
+            Some(market) => S::shared_for_market(given, market),
+            None => given,
+        };
         // `()` (a dollar-bar strategy) serializes to `null`: there is nothing to report.
-        let shared_config_json =
-            Some(serde_json::to_value(&shared).map_err(serialize("the shared configuration"))?)
-                .filter(|v| !v.is_null());
+        let shared_json =
+            serde_json::to_value(&shared).map_err(serialize("the shared configuration"))?;
+        let narrowed_for_market = market.filter(|_| shared_json != given_json);
+        let shared_config_json = Some(shared_json).filter(|v| !v.is_null());
         let strategy = S::from_config(&shared, config)
             .map_err(|error| LoadError::Initialize(error.to_string()))?;
         Ok(LoadedStrategy {
@@ -326,6 +350,7 @@ impl StrategyVisitor for Loader<'_> {
             market_type,
             execution_context: context,
             shared_config_json,
+            narrowed_for_market,
         })
     }
 }
@@ -334,14 +359,23 @@ impl StrategyVisitor for Loader<'_> {
 /// or from its default hyperparameters when none is given.
 ///
 /// The shared configuration is the one the deployment artifact stores, else `shared`, else the
-/// strategy's default; a `shared` that contradicts the artifact's is an error.
+/// strategy's default; a `shared` that contradicts the artifact's is an error. The strategy then
+/// narrows it for `market`, or for the artifact's market when `market` is `None`.
 pub fn build_strategy(
     name: &str,
     config: Option<ConfigText<'_>>,
     shared: Option<ConfigText<'_>>,
+    market: Option<MarketType>,
 ) -> Result<LoadedStrategy, LoadError> {
-    dispatch(name, Loader { config, shared })
-        .unwrap_or_else(|| Err(LoadError::UnknownStrategy(unknown_strategy_message(name))))
+    dispatch(
+        name,
+        Loader {
+            config,
+            shared,
+            market,
+        },
+    )
+    .unwrap_or_else(|| Err(LoadError::UnknownStrategy(unknown_strategy_message(name))))
 }
 
 #[cfg(test)]
@@ -612,5 +646,41 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_spot_run_narrows_the_shared_configuration_and_says_so() {
+        let shared = temp_file(
+            "spot-shared.json",
+            &serde_json::to_string(&swarm_shared(7)).unwrap(),
+        );
+        assert!(swarm_shared(7).allow_short);
+
+        let perpetual = crate::wiring::load_strategy_for_market(
+            "swarm",
+            None,
+            Some(&shared),
+            Some(MarketType::UsdMPerpetual),
+        )
+        .unwrap();
+        assert_eq!(perpetual.narrowed_for_market, None);
+
+        let spot = crate::wiring::load_strategy_for_market(
+            "swarm",
+            None,
+            Some(&shared),
+            Some(MarketType::Spot),
+        )
+        .unwrap();
+        std::fs::remove_file(&shared).unwrap();
+        assert_eq!(spot.narrowed_for_market, Some(MarketType::Spot));
+        assert_eq!(
+            spot.shared_config_json.as_ref().unwrap()["allow_short"],
+            serde_json::json!(false)
+        );
+        assert!(spot
+            .report_lines()
+            .iter()
+            .any(|line| line.contains("narrowed for the Spot market")));
     }
 }

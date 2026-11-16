@@ -48,7 +48,7 @@ impl Strategy for SwarmConsensusStrategy {
     }
 
     fn compatible_market_types(&self) -> &'static [MarketType] {
-        &[MarketType::UsdMPerpetual]
+        &[MarketType::Spot, MarketType::UsdMPerpetual]
     }
 
     fn input_kind(&self) -> InputKind {
@@ -102,6 +102,17 @@ impl OptimizableStrategy for SwarmConsensusStrategy {
     fn default_space() -> SwarmPolicySpace {
         SwarmPolicySpace::default()
     }
+
+    /// A spot account cannot sell what it does not hold, so on spot the swarm is long only.
+    fn shared_for_market(shared: SwarmConfig, market: MarketType) -> SwarmConfig {
+        match market {
+            MarketType::Spot => SwarmConfig {
+                allow_short: false,
+                ..shared
+            },
+            MarketType::UsdMPerpetual => shared,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -133,5 +144,23 @@ mod tests {
             ..PolicyConfig::default()
         };
         assert!(SwarmConsensusStrategy::from_config(&SwarmConfig::default(), config).is_err());
+    }
+
+    #[test]
+    fn the_swarm_trades_both_markets_and_is_long_only_on_spot() {
+        let strategy =
+            SwarmConsensusStrategy::from_config(&SwarmConfig::default(), PolicyConfig::default())
+                .unwrap();
+        assert!(strategy.supports_market_type(MarketType::Spot));
+        assert!(strategy.supports_market_type(MarketType::UsdMPerpetual));
+
+        let shorting = SwarmConfig::default();
+        assert!(shorting.allow_short);
+        let on_spot = SwarmConsensusStrategy::shared_for_market(shorting.clone(), MarketType::Spot);
+        assert!(!on_spot.allow_short);
+        assert_eq!(
+            SwarmConsensusStrategy::shared_for_market(shorting.clone(), MarketType::UsdMPerpetual),
+            shorting
+        );
     }
 }

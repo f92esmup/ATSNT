@@ -19,8 +19,8 @@ pub mod walk_forward;
 pub mod wiring;
 
 pub use wiring::{
-    load_artifact_shared_config, load_strategy, load_strategy_config, load_strategy_with_shared,
-    now_unix_ms, resolve_strategy_id,
+    load_artifact_shared_config, load_strategy, load_strategy_config, load_strategy_for_market,
+    load_strategy_with_shared, now_unix_ms, resolve_strategy_id,
 };
 
 pub use alert_throttle::AlertThrottle;

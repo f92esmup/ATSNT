@@ -162,10 +162,11 @@ async fn main() -> Result<()> {
             config_path.display()
         );
     }
-    let loaded = backtest::load_strategy_with_shared(
+    let loaded = backtest::load_strategy_for_market(
         &strategy_id,
         args.config.as_deref(),
         args.shared_config.as_deref(),
+        args.spot.then_some(MarketType::Spot),
     )?;
     for line in loaded.report_lines() {
         println!("{line}");

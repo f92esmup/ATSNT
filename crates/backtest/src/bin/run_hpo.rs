@@ -459,13 +459,14 @@ where
         }
         None => S::SharedConfig::default(),
     };
-    let strategy_instance = S::from_config(&shared, S::Config::default())
-        .map_err(|error| anyhow::anyhow!("Failed to initialize strategy: {error}"))?;
     let target_market = if args.spot {
         strategies::MarketType::Spot
     } else {
         strategies::MarketType::UsdMPerpetual
     };
+    let shared = S::shared_for_market(shared, target_market);
+    let strategy_instance = S::from_config(&shared, S::Config::default())
+        .map_err(|error| anyhow::anyhow!("Failed to initialize strategy: {error}"))?;
     if !strategy_instance.supports_market_type(target_market) {
         anyhow::bail!(
             "Strategy '{}' does not support {} (supported: {:?})",

@@ -138,6 +138,13 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
 
     /// Default search space defining hyperparameter candidate domains and ranges.
     fn default_space() -> Self::Space;
+
+    /// The shared configuration this strategy runs with on `market`. A strategy that trades
+    /// several markets narrows itself here to what the market allows; by default the
+    /// configuration is used as given.
+    fn shared_for_market(shared: Self::SharedConfig, _market: MarketType) -> Self::SharedConfig {
+        shared
+    }
 }
 
 impl<S: ?Sized + Strategy> Strategy for Box<S> {

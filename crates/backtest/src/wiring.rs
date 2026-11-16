@@ -10,7 +10,7 @@ use adapters::{
     SqliteRunRecorder, SystemClock,
 };
 use domain::futures::FundingSchedule;
-use domain::{RiskError, RiskPolicy};
+use domain::{MarketType, RiskError, RiskPolicy};
 use ports::{
     Clock, ProgressSink, RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow,
     SeriesPointRow,
@@ -239,8 +239,21 @@ pub fn load_strategy_with_shared(
     config_path: Option<&Path>,
     shared_path: Option<&Path>,
 ) -> Result<LoadedStrategy, LoadError> {
+    load_strategy_for_market(name, config_path, shared_path, None)
+}
+
+/// [`load_strategy_with_shared`] for a run on `market`: the strategy narrows its shared
+/// configuration to what that market allows. With `None`, the artifact's market decides.
+pub fn load_strategy_for_market(
+    name: &str,
+    config_path: Option<&Path>,
+    shared_path: Option<&Path>,
+    market: Option<MarketType>,
+) -> Result<LoadedStrategy, LoadError> {
     with_config_file(config_path, |config| {
-        with_config_file(shared_path, |shared| build_strategy(name, config, shared))
+        with_config_file(shared_path, |shared| {
+            build_strategy(name, config, shared, market)
+        })
     })
 }
 
