@@ -11,6 +11,7 @@ pub mod bar;
 pub mod decision;
 pub mod error;
 pub mod futures;
+pub mod market;
 pub mod metrics;
 pub mod order;
 pub mod position;
@@ -29,6 +30,7 @@ pub use decision::{
     Decision, InputKind, MarketEvent, ProtectiveExits, TargetPosition, MAX_TARGET_LEVEL,
 };
 pub use error::DomainError;
+pub use market::MarketType;
 pub use order::{Order, OrderIntent, OrderStatus, OrderType, TimeInForce};
 pub use position::{Position, PositionSide};
 pub use risk::{RiskError, RiskPolicy, TargetSizing};

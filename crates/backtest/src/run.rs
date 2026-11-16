@@ -6,8 +6,8 @@
 //! [`RunSpec`] it executed so results can always be joined back to the
 //! strategy parameters and friction schedule that produced them.
 
+use domain::MarketType;
 use serde::{Deserialize, Serialize};
-use strategies::MarketType;
 
 use crate::artifact::SamplingConfig;
 use crate::config::BacktestConfig;

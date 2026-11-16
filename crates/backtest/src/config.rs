@@ -1,7 +1,7 @@
+use domain::MarketType;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use strategies::MarketType;
 
 fn default_market_type() -> MarketType {
     MarketType::UsdMPerpetual

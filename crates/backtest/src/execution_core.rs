@@ -13,12 +13,12 @@
 use domain::futures;
 #[cfg(test)]
 use domain::DollarBar;
+use domain::MarketType;
 use domain::{
     OrderIntent, Position, PositionSide, ProtectiveExits, RiskError, Side, TargetPosition,
 };
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use strategies::MarketType;
 
 use crate::config::BacktestConfig;
 use crate::metrics::{

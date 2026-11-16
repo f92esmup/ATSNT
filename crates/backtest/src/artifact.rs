@@ -2,10 +2,10 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use domain::MarketType;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use strategies::MarketType;
 
 use crate::config::BacktestConfig;
 use crate::run::RunSpec;
