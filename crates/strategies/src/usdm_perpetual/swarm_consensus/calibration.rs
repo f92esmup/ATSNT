@@ -18,9 +18,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::{Deserialize, Serialize};
 
-use crate::analytics::feeds::{BarAggregator, RangeBarAggregator};
-use crate::error::DomainError;
-use crate::trade::Trade;
+use domain::{BarAggregator, DomainError, RangeBarAggregator, Trade};
 
 /// Calibrated thresholds for the four horizons of the tick, volume, and range feeds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,7 +159,7 @@ fn count_range_bars(trades: &[Trade], threshold: Decimal) -> Result<u64, DomainE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trade::Side;
+    use domain::Side;
     use rust_decimal_macros::dec;
 
     const HORIZONS: [i64; 4] = [300_000, 3_600_000, 900_000, 60_000];

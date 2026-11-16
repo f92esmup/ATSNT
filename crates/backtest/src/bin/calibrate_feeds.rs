@@ -2,7 +2,7 @@
 //!
 //! It reads Binance aggTrades (`.parquet` file or directory, or `.csv`), keeps the trades of the
 //! UTC period `[--from, --to)`, and writes a swarm `SharedConfig` ([`SwarmConfig`], spec §14.1)
-//! whose thresholds and `calibration_end_ms` come from [`domain::calibrate`]. The evaluated data
+//! whose thresholds and `calibration_end_ms` come from [`strategies::swarm_consensus::calibrate`]. The evaluated data
 //! of a later run must start strictly after `calibration_end_ms` (no look-ahead).
 
 // AGENTS.md: no unwrap or expect in production code; test builds keep them.
@@ -16,11 +16,10 @@ use adapters::{BinanceCsvReader, TapeReader};
 use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
 use clap::Parser;
-use domain::{
-    calibrate, calibrate_empirical_priors, BarAggregator, FeedThresholds, TimeBarAggregator, Trade,
-};
+use domain::{BarAggregator, TimeBarAggregator, Trade};
 use ports::MarketDataStream;
 use strategies::swarm_consensus::ensemble::TIME_HORIZONS_MS;
+use strategies::swarm_consensus::{calibrate, calibrate_empirical_priors, FeedThresholds};
 use strategies::{SwarmConfig, SwarmPriorsConfig};
 
 #[derive(Parser, Debug)]

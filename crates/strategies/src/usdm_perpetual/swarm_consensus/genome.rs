@@ -5,12 +5,14 @@
 //! (§7.2), so a seed fully determines the swarm on every platform. Agent `i` watches feed
 //! `i / agents_per_feed` (stratified assignment, §7.3).
 
-use domain::{DomainError, EmpiricalPriors};
+use domain::DomainError;
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use rust_decimal::{Decimal, MathematicalOps};
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
+
+use super::priors_calibration::EmpiricalPriors;
 
 /// Number of bar feeds the swarm watches (§5.1).
 pub const FEED_COUNT: usize = 16;

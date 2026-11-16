@@ -7,13 +7,14 @@
 
 use std::fmt;
 
-use domain::{FeedBar, IndicatorSnapshot};
+use domain::FeedBar;
 use serde::{Deserialize, Serialize};
 
 use super::agent::{
     macro_states, micro_patterns, Direction, MacroSet, MacroState, MicroSet, Pattern,
 };
 use super::genome::Genome;
+use super::indicators::IndicatorSnapshot;
 
 /// A rule condition, built from a small combinator type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

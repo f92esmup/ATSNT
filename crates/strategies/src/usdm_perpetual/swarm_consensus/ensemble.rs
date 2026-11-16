@@ -9,18 +9,19 @@
 use std::collections::VecDeque;
 
 use domain::{
-    BarAggregator, BarInput, DomainError, FeedBar, FeedIndicators, FeedThresholds,
-    IndicatorSnapshot, RangeBarAggregator, TickBarAggregator, TimeBarAggregator, Trade,
-    VolumeBarAggregator,
+    BarAggregator, BarInput, DomainError, FeedBar, RangeBarAggregator, TickBarAggregator,
+    TimeBarAggregator, Trade, VolumeBarAggregator,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
 use super::audit::SwarmAudit;
+use super::calibration::FeedThresholds;
 use super::genome::{
     sample_swarm, sample_swarm_with_priors, Agent, Swarm, SwarmPriorsConfig, FEED_COUNT,
 };
+use super::indicators::{FeedIndicators, IndicatorSnapshot};
 use super::rules::{evaluate_agent, rule_book, AgentVote, ConflictKind, Rule};
 use super::sample::{ConsensusSample, FeedVote};
 use crate::strategy::{FeatureExtractor, MarketEvent};
@@ -35,7 +36,7 @@ pub const STOP_REFERENCE_FEED: usize = 2;
 ///
 /// The default thresholds of the tick, volume, and range feeds are **placeholders** of the right
 /// order of magnitude for BTCUSDT aggTrades; a real run replaces them with the output of
-/// [`domain::calibrate`] (see [`SwarmConfig::with_thresholds`]) on a period that ends before the
+/// [`super::calibration::calibrate`] (see [`SwarmConfig::with_thresholds`]) on a period that ends before the
 /// evaluated data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmConfig {

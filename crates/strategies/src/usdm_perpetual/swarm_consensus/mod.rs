@@ -4,19 +4,25 @@
 
 pub mod agent;
 pub mod audit;
+pub mod calibration;
 pub mod ensemble;
 pub mod genome;
+pub mod indicators;
 pub mod policy;
+pub mod priors_calibration;
 pub mod rules;
 pub mod sample;
 
 pub use audit::SwarmAudit;
+pub use calibration::{calibrate, FeedThresholds};
 pub use ensemble::{SwarmConfig, SwarmEnsemble};
 pub use genome::{
     sample_swarm, sample_swarm_with_priors, Agent, GenePrior, Genome, PriorParam, Swarm,
     SwarmPriorsConfig, GENE_COUNT, GENE_PRIORS,
 };
+pub use indicators::{FeedIndicators, IndicatorSnapshot};
 pub use policy::{axis_update, ConsensusPolicy, PolicyConfig, PolicyConfigError, SwarmPolicySpace};
+pub use priors_calibration::{calibrate_empirical_priors, EmpiricalPriors};
 pub use rules::{AgentVote, ConflictKind};
 pub use sample::{ConsensusSample, FeedVote, FeedWeights, FeedWeightsError};
 

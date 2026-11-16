@@ -4,11 +4,12 @@
 //! micro stage reads the feed's closed-bar window and produces a set of `(pattern, direction)`.
 //! Every detector runs and none short-circuits another: both stages return **sets**.
 
-use domain::{FeedBar, IndicatorSnapshot};
+use domain::FeedBar;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::genome::Genome;
+use super::indicators::IndicatorSnapshot;
 
 /// A market-regime state of the macro stage (§8.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
