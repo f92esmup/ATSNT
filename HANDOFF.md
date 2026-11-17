@@ -40,10 +40,11 @@ warnings` limpio, 569 pruebas, 0 fallos, goldens sin cambios. Vuelve a medirlas 
 
 Lo que queda abierto está en "Known gaps" de `docs/ROADMAP.md`:
 
-- La medición de las rutas de barra y de tick sobre una cinta real. En la cinta sintética de los
-  goldens, la de barra cierra 53 operaciones (solo largo) y la de tick 22. Hace falta
-  `data/historical/BTCUSDT/` de mayo a septiembre de 2026 (`fetch_data`); el swarm necesita 70 días de
-  calentamiento y `configs/swarm_shared.json` está calibrado hasta el 2026-04-30.
+- La medición de las rutas de barra y de tick sobre cinta real está hecha (BTCUSDT, mayo a septiembre
+  de 2026, 197,6 M de trades): 47 operaciones en barra y 48 en tick, con resultado de signo contrario
+  (-3,42 y +4,11 USDT en perpetuos), dentro del ruido de una muestra tan corta. La tabla está en
+  `docs/ROADMAP.md`. Los 70 días de calentamiento salen del propio fichero: las primeras operaciones
+  caen a mediados de julio.
 - `scripts/gate_a.sh`: solo se verificó su sintaxis.
 - La barrera temporal por `max_bars_hold` solo la cuenta el motor de barras; la ruta de tick aplica
   `deadline_ms`. El swarm fija un plazo, así que no le afecta.
