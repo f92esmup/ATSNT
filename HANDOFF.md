@@ -6,16 +6,55 @@ fuera del repositorio y aquí queda resumido.
 
 Actualizado el 2026-11-07: los estados de §1, §5.2, §7 y §11 reflejan la limpieza L3N (commit `940e4de`).
 
-## Actualización del 2026-11-16: consolidación hexagonal
+## Actualización del 2026-11-17: cierre de lo pendiente
 
-Esta sección es posterior al resto del documento y manda sobre él donde se contradigan. Trabajo en
-la rama `claude/zen-mayer-keab4c` (PR en borrador f92esmup/ATSNT#8), sin fusionar en `main`.
+Esta sección y la siguiente son posteriores al resto del documento y mandan sobre él donde se
+contradigan. La consolidación hexagonal está en `main` (merge `7e6b633`, PR f92esmup/ATSNT#8). El
+trabajo que sigue está en la rama `claude/zen-mayer-keab4c`, con un PR en borrador nuevo.
 
 Qué cambió:
 
-- **Crate nuevo `application`**: sesión, driver, salidas, núcleo de ejecución, simulación tick,
-  paridad y alertas. Depende solo de `domain`, `ports` y `strategies`. `backtest` re-exporta sus
-  módulos y conserva el motor de barras, el optimizador, Monte Carlo, `wiring.rs` y los binarios.
+- **Se borró el código sin llamador**: el runtime de paper trading (`paper.rs`), el puerto `Clock`
+  con `SimClock` y `SystemClock`, `SessionDriver::on_idle`, las alertas (`operator_alerts`,
+  `alert_throttle`, el puerto `AlertNotifier`) y el adaptador de Telegram. Ningún binario ejecuta
+  un bucle en vivo. La hora de pared la lee `adapters::wall_time::now_unix_ms`.
+- **Se borró el modo de barras de dólar**: `InputKind`, `BarPassThrough`, `MarketEvent::DollarBar`,
+  `DollarBarAggregator`, la rama de barras de la sesión, `--dollar-bar`, `--dollar-bars`,
+  `--embargo-bars` y `SamplingConfig::DollarBar`. El swarm no las usaba: sus 16 feeds son de tiempo,
+  ticks, volumen y rango, y los construye él a partir de trades. Un artefacto con muestreo
+  `dollar_bar` ya no carga.
+- **`ExitManager::on_bar_closed` es ahora `retry_pending`** y se llama en cada trade: era el único
+  reintento de un cierre fallido o de una limpieza pendiente, y las estrategias de trades nunca lo
+  llamaban.
+- **Una entrada que el saldo no financia se recorta**: `EntryGate` recibe una `MarginRule` y dimensiona
+  hasta lo que el saldo margina con la comisión y el deslizamiento; por debajo del lote o del
+  nocional mínimos devuelve `InsufficientMargin`. Antes se descartaba sin contarla, y con los valores
+  por defecto de spot (1 % de riesgo, 1x) un stop de 1 % o menos no operaba nunca. Los resultados de
+  spot anteriores a esta fecha no son comparables.
+- **`docs/strategy/03-swarm-consensus.md` describe solo el clasificador.** El texto de la máquina de
+  niveles y de la ejecución por objetivo está en
+  `docs/archive/strategy/03-swarm-consensus-niveles.md`.
+
+Cifras al cierre: `cargo fmt --all -- --check` limpio, `cargo clippy --workspace --all-targets -- -D
+warnings` limpio, 569 pruebas, 0 fallos, goldens sin cambios. Vuelve a medirlas antes de afirmarlas.
+
+Lo que queda abierto está en "Known gaps" de `docs/ROADMAP.md`:
+
+- La medición de las rutas de barra y de tick sobre una cinta real. En la cinta sintética de los
+  goldens, la de barra cierra 53 operaciones (solo largo) y la de tick 22. Hace falta
+  `data/historical/BTCUSDT/` de mayo a septiembre de 2026 (`fetch_data`); el swarm necesita 70 días de
+  calentamiento y `configs/swarm_shared.json` está calibrado hasta el 2026-04-30.
+- `scripts/gate_a.sh`: solo se verificó su sintaxis.
+- La barrera temporal por `max_bars_hold` solo la cuenta el motor de barras; la ruta de tick aplica
+  `deadline_ms`. El swarm fija un plazo, así que no le afecta.
+
+## Actualización del 2026-11-16: consolidación hexagonal
+
+Qué cambió en el trabajo del PR #8:
+
+- **Crate nuevo `application`**: sesión, driver, salidas, núcleo de ejecución, simulación tick y
+  paridad. Depende solo de `domain`, `ports` y `strategies`. `backtest` re-exporta sus módulos y
+  conserva el motor de barras, el optimizador, Monte Carlo, `wiring.rs` y los binarios.
 - **La librería no hace I/O ni usa `anyhow`**: la carga de artefactos recibe texto y devuelve
   `LoadError`; `wiring.rs` lee los ficheros. Puertos nuevos: `Entropy`, `ProgressSink`, `FillLog`.
 - **Un solo gate de entrada**, `domain::EntryGate`, con `DailyBreaker`. Lo usan el motor de barras
@@ -28,16 +67,9 @@ Qué cambió:
 - **El enjambre se muestrea con ChaCha12**, fijado por tests. No cambió ningún agente.
 - **Contrato de arquitectura**: reglas R8 a R10 en `AGENTS.md`.
 
-Cifras al cierre de este trabajo: `cargo fmt --all -- --check` limpio, `cargo clippy --workspace
---all-targets -- -D warnings` limpio, 620 pruebas, 0 fallos. Vuelve a medirlas antes de afirmarlas.
-
-Lo que queda abierto está en "Known gaps" de `docs/ROADMAP.md`: la diferencia de fills entre las
-rutas de barra y de tick, `InputKind` y el modo de barras de dólar sin estrategia que lo use, y
-`SimClock` sin bucle en vivo. `docs/strategy/03-swarm-consensus.md` lleva una nota de estado: sus
-secciones 10, 11 y 17.1 describen código borrado.
-
 Lo que este documento dice más abajo y ya no es cierto: que el swarm está bajo `usdm_perpetual/`,
-que los puertos y el venue dimensionan órdenes, y los recuentos de pruebas de la §1.
+que los puertos y el venue dimensionan órdenes, que existen paper trading, Telegram, `SimClock` y las
+barras de dólar, y los recuentos de pruebas de la §1.
 
 ## 0. Cómo usar este documento
 

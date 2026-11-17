@@ -1,6 +1,6 @@
 # Domain Architecture & Execution Lifecycle Specification
 
-> **Status (2026-11-16):** section 3.2 describes `CusumFilter`, which was removed with the last code that could use it (the CUSUM strategies are in `docs/archive/strategy/`); the section is kept as history. `RollingZScore` still exists in `crates/domain/src/analytics/`, with no user outside the domain. Sizing and the pre-trade rules of section 4 now live in `domain::EntryGate` (`crates/domain/src/gate.rs`), which every runner asks. The rest of this document is pending its documentation review.
+> **Status (2026-11-17):** sizing and the pre-trade rules of section 4 live in `domain::EntryGate` (`crates/domain/src/gate.rs`), which every runner asks. The `CusumFilter` and the dollar bars were removed. `RollingZScore` still exists in `crates/domain/src/analytics/`, with no user outside the domain. The rest of this document is pending its documentation review.
 
 ## 1. Architectural Philosophy
 ATSNT follows Hexagonal Architecture (Ports and Adapters) with a Domain-First approach. The domain crate (`crates/domain`) contains pure, deterministic business logic with zero network, zero I/O, and zero asynchronous runtime dependencies.
@@ -9,44 +9,36 @@ All monetary, volume, and pricing figures strictly utilize fixed-point decimal a
 
 ---
 
-## 2. Market Data Pipeline: Information-Driven Sampling
+## 2. Market Data Pipeline: Trades and Bar Feeds
 
 ```mermaid
 flowchart LR
-    A["Raw Trade Stream (Price, Qty)"] --> B["DollarBarAggregator"]
-    B -->|"Threshold Breached"| C["DollarBar (OHLCV + DollarVol)"]
-    B -.->|"Excess Notional"| D["Rollover Accumulator"]
+    A["Raw Trade Stream (Price, Qty)"] --> B["Strategy"]
+    B --> C["Bar feeds: time, tick, volume, range"]
 ```
 
 ### 2.1 Atomic Market Events (`Trade`)
 - Represents an executed market transaction.
 - Invariants: `price > 0`, `quantity > 0`.
-- Provides notional dollar value calculation: $\text{Notional} = \text{Price} \times \text{Quantity}$.
+- Every strategy reacts to one `MarketEvent::Trade` per trade. There is no shared bar sampler: a
+  strategy that needs bars builds them itself.
 
-### 2.2 Streaming Aggregator (`DollarBarAggregator`)
-- Rather than sampling over arbitrary calendar intervals ($1m, 5m$), transactions are accumulated into **Dollar Bars** based on total exchanged value:
-  $$\sum (p_t \cdot v_t) \ge \theta_{\text{dollar}}$$
-- **Rollover Principle**: If an incoming trade pushes accumulated volume past $\theta_{\text{dollar}}$, the excess notional value is transferred to the subsequent bar. This prevents sample truncation and statistical distortion.
+### 2.2 Streaming bar aggregators (`BarAggregator`)
+- `domain::analytics::feeds` has four aggregators that turn trades into `FeedBar`s when their closing
+  rule fires: `TimeBarAggregator` (UTC-aligned buckets), `TickBarAggregator` (trade count),
+  `VolumeBarAggregator` (base volume) and `RangeBarAggregator` (relative high-low range). The swarm
+  runs 16 of them; see `docs/strategy/03-swarm-consensus.md` Section 5.
 
 ---
 
-## 3. Mathematical Foundations: CUSUM & Rolling Z-Score
+## 3. Mathematical Foundations: Rolling Z-Score
 
 ### 3.1 Dynamic Z-Score Window (`RollingZScore`)
-- Maintains an in-memory sliding window of $N$ dollar bar close prices using a double-ended queue (`VecDeque<Decimal>`).
+- Maintains an in-memory sliding window of $N$ close prices using a double-ended queue (`VecDeque<Decimal>`).
 - Features $O(1)$ mean update via running sum maintenance.
 - Computes population standard deviation:
   $$\mu = \frac{1}{N}\sum_{i=0}^{N-1} x_i, \quad \sigma = \sqrt{\frac{1}{N}\sum_{i=0}^{N-1} (x_i - \mu)^2}, \quad Z = \frac{x_t - \mu}{\sigma}$$
 - **Edge-case Protection**: If $\sigma = 0$ (flat price line), $Z$ resolves cleanly to $0$ without zero-division panics. While window length is less than $N$, queries return `None` (warm-up phase).
-
-### 3.2 Symmetric CUSUM Filter (`CusumFilter`)
-- Detects structural shifts in price momentum while discarding microstructural Gaussian noise (AFML Ch. 2.5).
-- Operates on logarithmic returns:
-  $$r_t = \ln\left(\frac{P_t}{P_{t-1}}\right)$$
-- Maintains two bounded recursive accumulators:
-  $$S_t^+ = \max(0, S_{t-1}^+ + r_t)$$
-  $$S_t^- = \min(0, S_{t-1}^- + r_t)$$
-- When $S^+ \ge h$ or $S^- \le -h$, a `CusumEvent` is emitted and that accumulator resets to zero.
 
 ---
 
@@ -73,7 +65,7 @@ To prevent state desynchronization between trading logic and exchange state, exe
 - Contains directional intent (`Side`), target price, and the three barrier thresholds:
   - **Stop Loss Barrier**: Price invalidating the statistical hypothesis ($Z = \pm 3.5$).
   - **Take Profit Barrier**: Price reverting to equilibrium ($Z = 0$).
-  - **Time Barrier**: Maximum holding duration in completed Dollar Bars.
+  - **Time Barrier**: Maximum holding duration, as a deadline timestamp or a count of price events.
 
 ### 4.2 Stage 2: Managed Order Finite State Machine (`Order`)
 - Governs the exact order lifecycle on the broker/exchange.

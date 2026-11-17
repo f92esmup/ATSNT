@@ -44,8 +44,8 @@ Historical Backtest
 ### 2.1 Why Not Resample Price Bars?
 Resampling raw price bars (e.g., shuffling candlestick closes) destroys:
 1. Autocorrelation and volatility clustering ($ARCH$ effects).
-2. Microstructure features and Dollar Bar liquidity boundaries.
-3. CUSUM filter state continuity (the filter remains in `crates/domain/src/analytics/`; no strategy uses it).
+2. Microstructure features and the liquidity boundaries of the bars a strategy builds.
+3. The state continuity of any filter a strategy keeps.
 
 ### 2.2 Resampled Trade Sequence (Discrete Event Bootstrap)
 Once a strategy completes an In-Sample (IS) or Out-of-Sample (OOS) backtest, it yields a discrete sequence of realized trade returns:

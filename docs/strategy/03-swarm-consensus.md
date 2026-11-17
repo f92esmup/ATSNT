@@ -1,21 +1,10 @@
 # Strategy Specification: Swarm Consensus (Multi-Agent Voting)
 
-> **Status (2026-11-16): parts of this specification describe code that was removed.** The
-> ensemble (Sections 4 to 9: feeds, indicators, genome, agents, rules, the consensus sample) is
-> current. The decision and execution model is not:
->
-> - The policy is a **classifier** that emits triple-barrier entries (`OrderIntent`): a side enters
->   when its net vote reaches `threshold_base` (plus `short_threshold_delta` for shorts) and the
->   other side's does not, once per signal, with a stop, a take profit and a time barrier in ATR
->   multiples and seconds. The code is the reference: `crates/strategies/src/swarm_consensus/policy.rs`.
-> - The **level machine** of Section 10 (`threshold_step`, `hysteresis`, levels 1 to 3) and the
->   **target-position execution** of Sections 3.2, 11 and 17.1 (`Decision::Target`, scale-in,
->   scale-out, flips, the re-arm rule, `emits_targets`, `bracket_priority`) no longer exist.
->   Read them as history.
-> - `Strategy` has one decision method, `on_event`; `on_bar` is gone (Section 3.3).
-> - The venue does no sizing: `submit_entry` is gone and the session sizes with
->   `domain::EntryGate` (Section 3.5).
-> - The swarm also runs on spot, long only.
+> **Status (2026-11-17).** The swarm is a **classifier**: its policy reads one `ConsensusSample` and
+> emits a triple-barrier entry (`OrderIntent`). The earlier two-mode design (a level machine with
+> target positions) was removed and is kept as history in
+> [`../archive/strategy/03-swarm-consensus-niveles.md`](../archive/strategy/03-swarm-consensus-niveles.md).
+> The code is the reference: `crates/strategies/src/swarm_consensus/`.
 
 ## 1. Objective and Provenance
 
@@ -29,22 +18,20 @@ original, and adds:
 
 - **short selling**, through mirrored rules generated from one definition;
 - **all 16 bar feeds** (time, tick, volume, range), calibrated for BTCUSDT;
-- a **target-position execution model**: scale-in, scale-out, flip, and exit by consensus, with no
-  take profit and no time barrier.
+- **triple-barrier entries**: each signal enters one side with a stop, a take profit and a time
+  barrier, sized by the account's risk rules, and it runs on spot (long only) as well as on perpetuals.
 
 The whole port is 100% Rust: no FFI, no rule-engine runtime, no strings between layers.
 
 Scope of this specification: backtest (bar and tick fill models) and HPO. The strategy runs on the
-repository's **single** execution model, generalised so that triple-barrier entries and target
-positions share one engine, one venue contract, one registry, and one optimiser (Section 3).
-Paper and live trading refuse it through a product gate until results justify lifting it
-(Section 17).
+repository's **single** execution model: one engine, one venue contract, one registry and one
+optimiser (Section 3). There is no paper or live loop (Section 17).
 
 The idea in one paragraph: the market is the result of many independent participants, so the
 strategy models it with many independent agents. Each agent watches one bar feed. It reads
 the market through its own randomly sampled thresholds (its *genome*) and votes. No agent decides
-alone. The net vote of the swarm moves a discrete exposure level with hysteresis, and the engine
-holds the position that level asks for.
+alone. When the net vote of one side clears a threshold, the policy enters that side with a stop, a
+take profit and a time barrier, and the engine holds the position until a barrier closes it.
 
 ---
 
@@ -62,12 +49,9 @@ holds the position that level asks for.
 | Action | One of `LongEntry`, `LongExit`, `ShortEntry`, `ShortExit`. |
 | Vote | Per agent, a pair `(long_vote, short_vote)`, each in `{-1, 0, +1}`. |
 | Net vote | Per axis, the sum of the agents' votes divided by the number of agents (range -1 to +1). |
-| Level | Signed exposure step `k ∈ {-3,…,+3}`. Positive is long, negative is short, 0 is flat. |
-| Target | The level the policy asks for, with its risk fraction and stop distance. |
-| Campaign | Everything from leaving flat to returning to flat (or flipping). It counts as one closed trade. |
-| Decision | What any strategy returns: `Entry(OrderIntent)` (triple barrier) or `Target(TargetPosition)`. |
-| Features | The output of a strategy's first, frozen stage. For the swarm, a `ConsensusSample`; for the removed CUSUM and OFI, the dollar bar itself. |
-| Price event | An OHLC bucket of trades (one trade, one dollar bar, or 1 s of trades) that the execution core fills against. |
+| Entry | What a strategy returns: an `OrderIntent` with a side, a signal price, a stop, a take profit and a time barrier. |
+| Features | The output of a strategy's first, frozen stage. For the swarm, a `ConsensusSample`. |
+| Price event | An OHLC bucket of trades (one trade, or a bucket of trades such as 1 s) that the execution core fills against. |
 
 ---
 
@@ -76,99 +60,75 @@ holds the position that level asks for.
 ### 3.1 Principle
 
 This strategy gets **no private copy** of any mechanism the repository already has. It adds new
-pieces only where none exists: bar feeds, indicators, calibration, and target positions. Each new
-piece is general-purpose, so any future strategy can use it.
-
-The target-position model is not a second execution path. It is the **general case** of the
-existing one. A triple-barrier trade is "go to ±q now; go to 0 when the stop, the take profit, or
-the time limit is hit". Every runner therefore keeps exactly one of each:
+pieces only where none exists: bar feeds, indicators and calibration. Each new piece is
+general-purpose, so any future strategy can use it. Every runner keeps exactly one of each:
 
 | Concern | The single component | Used by |
 | :--- | :--- | :--- |
-| What a strategy decides | `domain::Decision` | every strategy |
-| How a strategy is called | `strategies::Strategy` | engine, session, contract tests |
+| What a strategy decides | `domain::OrderIntent`, a triple-barrier entry | every strategy |
+| How a strategy is called | `strategies::Strategy::on_event` | engine, session, contract tests |
 | How a strategy is optimised | `strategies::OptimizableStrategy` (two stages) | `run_hpo`, registry |
-| How a decision becomes a quantity | `domain::RiskPolicy` (`size_order`, `size_target`, one shared core) | engine, simulated venue, session |
+| How an intent becomes a quantity or a refusal | `domain::EntryGate` (`RiskPolicy::size_order`, the margin rule, the daily breaker) | engine, session |
 | How fills become position and trades | `ExecutionCore` with its `TradeLedger` | bar engine, session |
-| How orders reach a venue | `ports::ExecutionVenue` + `ports::ExitGateway` | session (simulated and live venues) |
+| How orders reach a venue | `ports::ExecutionVenue` + `ports::ExitGateway` | session (simulated venue) |
 | Which strategies exist | `register_strategies!` | every runner |
-
-**Mapping found duplication that predates this work** (Section 17.2): the monthly breaker, excursion
-tracking, and equity marking each exist once in the bar engine and once in the session path.
-Closed-trade accounting is also duplicated, and it is unified here, because the target model needs
-partial fills on both paths, and writing them twice would create new duplication. The rest is
-listed as follow-up work and left untouched, to keep the change minimal.
 
 ### 3.2 One decision type
 
 ```rust
 // crates/domain
-pub enum Decision {
-    /// Triple-barrier entry: accepted only when flat with nothing pending.
-    Entry(OrderIntent),
-    /// Signed exposure level: accepted at any time; replaces a pending target.
-    Target(TargetPosition),
+pub struct OrderIntent {
+    pub timestamp: i64,
+    pub side: Side,
+    pub price: Decimal,                 // the signal price: sizing reference
+    pub stop_loss: Decimal,
+    pub take_profit: Decimal,
+    pub max_bars_hold: usize,           // time barrier in price events; 0 when a deadline is set
+    pub deadline_ms: Option<i64>,       // time barrier as a timestamp
+    pub risk_fraction: Option<Decimal>, // overrides the account's risk per trade
+    pub trailing_atr: Option<Decimal>,  // trailing step distance
+    pub breakeven_atr: Option<Decimal>, // favourable excursion that moves the stop to entry
+    // ...order type and time in force
 }
 
 pub struct ProtectiveExits {
-    pub stop: Decimal,                // always present (disaster or regular stop)
-    pub take_profit: Option<Decimal>, // Some for Entry, None for Target
-    pub max_bars: Option<usize>,      // Some for Entry, None for Target
+    pub stop: Decimal,
+    pub take_profit: Option<Decimal>,
+    pub max_bars: Option<usize>,
+    pub deadline_ms: Option<i64>,
+    // ...trailing and breakeven distances
 }
 ```
 
-Both variants become one `ExecutionPlan { target_quantity (signed), exits: ProtectiveExits }`
-through one domain planner:
-
-- **Entry(intent)**: quantity from `size_order`, which is unchanged. Sign from `intent.side`.
-  Exits are `{intent.stop_loss, Some(intent.take_profit), Some(intent.max_bars_hold)}`.
-- **Target(t)**: quantity from `size_target`. Sign from `t.level`. Exits are
-  `{fill ∓ t.stop_distance, None, None}`.
-
-The two kinds are not mixed in one position. A `Target` that arrives while a triple-barrier
-`Entry` position is open or pending is ignored and counted `UnsupportedDecision`; an `Entry` that
-arrives while a target is open or pending is ignored, as any entry is when not flat (Section 11.2).
-
-`size_order` and `size_target` share one private quantity core. That core keeps the operation
-order of today's `size_order` (`risk.rs:254-259`):
-
-1. `(equity·risk) / stop_distance`;
-2. the minimum with `(equity·max_leverage) / price`;
-3. floor to the step.
-
-So every existing sizing result stays identical.
+A strategy returns `Option<OrderIntent>`. The gate turns it into a quantity (Section 11.3), and the
+execution core carries `ProtectiveExits::from_intent` with the position until a barrier closes it.
+Only one position is open at a time: an intent that arrives while the account is not flat is
+ignored.
 
 ### 3.3 One strategy contract
 
 ```rust
 // crates/domain
-pub enum MarketEvent<'a> { Trade(&'a Trade), DollarBar(&'a DollarBar) }
-pub enum InputKind { DollarBars, Trades }
+#[non_exhaustive]
+pub enum MarketEvent<'a> { Trade(&'a Trade) }
 
 // crates/strategies
 pub trait Strategy: Send {
     fn name(&self) -> &str;
     fn compatible_market_types(&self) -> &'static [MarketType];
-    fn input_kind(&self) -> InputKind;
-    fn on_event(&mut self, event: &MarketEvent) -> Option<Decision>;
+    fn on_event(&mut self, event: &MarketEvent) -> Option<OrderIntent>;
     fn reset(&mut self);
-    /// Capability used by the paper/live product gate (Section 17.1). Default: false.
-    fn emits_targets(&self) -> bool { false }
     /// Strategy-specific audit written into reports as `strategy_audit`. Default: None.
     fn audit(&self) -> Option<serde_json::Value> { None }
 }
 ```
 
-- Runners prepare the input the strategy declares. `DollarBars` keeps today's
-  `DollarBarAggregator` path, byte for byte. `Trades` passes raw trades.
-- `Strategy::on_bar` stays, with a default that decides nothing. The default `on_event` sends a
-  dollar bar to `on_bar` and wraps its intent in `Decision::Entry`, and ignores raw trades. The
-  default `input_kind` is `DollarBars`.
-- The removed `dollar_bars_cusum` and `order_flow_imbalance` kept their `on_bar` code
-  **unedited**, as any bar-based strategy does under this contract. Only a strategy that consumes
-  trades or emits targets overrides `input_kind` and `on_event`.
-- Runners select behaviour by `input_kind()` and by the `Decision` variant, never by strategy name
-  (`architecture_contract.rs` keeps enforcing this).
+- Every runner feeds the strategy one `MarketEvent::Trade` per aggTrade. The strategy builds its own
+  bars (Section 5).
+- Runners never match on a strategy name (`architecture_contract.rs` enforces it); they ask the
+  registry and call the trait.
+- The swarm is compatible with `Spot` and `UsdMPerpetual`. On spot the registry narrows the shared
+  configuration to `allow_short = false` and reports it.
 
 ### 3.4 One optimisation contract: two stages for every strategy
 
@@ -180,7 +140,7 @@ pub trait FeatureExtractor: Send {
 }
 
 pub trait OptimizableStrategy: Strategy + Sync + Sized {
-    type SharedConfig; // frozen for a whole HPO run (config bounds + Default); () when none
+    type SharedConfig; // frozen for a whole HPO run (config bounds + Default)
     type Config;       // searched (config bounds)
     type Space: HyperparameterSpace<Config = Self::Config>;
     type Extractor: FeatureExtractor;
@@ -188,8 +148,9 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
     fn from_config(shared: &Self::SharedConfig, config: Self::Config) -> Result<Self, DomainError>;
     fn extractor(shared: &Self::SharedConfig) -> Result<Self::Extractor, DomainError>;
     fn on_features(&mut self, features: &<Self::Extractor as FeatureExtractor>::Features)
-        -> Option<Decision>;
+        -> Option<OrderIntent>;
     fn default_space() -> Self::Space;
+    fn shared_for_market(shared: Self::SharedConfig, market: MarketType) -> Self::SharedConfig;
 }
 ```
 
@@ -200,26 +161,22 @@ uses:
 - **The HPO** builds the extractor once and calls `on_features` on fresh instances, one per
   candidate.
 
-Concretely:
+For the swarm:
 
-- **CUSUM and OFI** (removed; see `docs/archive/strategy/`): `SharedConfig = ()`,
-  `Extractor = BarPassThrough` (returns the bar it receives), and `on_features(bar) = on_bar(bar)`
-  wrapped in `Decision::Entry`. Their HPO tape was the bar vector, which is what `run_hpo` built
-  for them.
-- **Swarm**:
-  - `SharedConfig` is the structural configuration (Section 14.1);
-  - `Extractor` is `SwarmEnsemble`;
-  - `on_features` runs the `ConsensusPolicy` on a `ConsensusSample`;
-  - `on_event` is the extractor followed by `on_features`, so the two stages cannot drift.
-- **The contract suite enforces it.** It checks that extractor + `on_features` decide exactly what
-  `on_event` decides on the same synthetic input (`crates/strategies/src/contract.rs`).
-- **The HPO** runs the extractor **once per run** and replays only `on_features` per candidate
-  (Section 15). A future machine-learning strategy fits the same shape: a frozen model as the
-  extractor, thresholds as the decision stage.
+- `SharedConfig` is the structural configuration (Section 14.1);
+- `Extractor` is `SwarmEnsemble`;
+- `on_features` runs the `ConsensusPolicy` on a `ConsensusSample`;
+- `on_event` is the extractor followed by `on_features`, so the two stages cannot drift.
+
+The contract suite enforces it: extractor + `on_features` must decide exactly what `on_event`
+decides on the same synthetic input (`crates/strategies/src/contract.rs`). The HPO runs the
+extractor **once per run** and replays only `on_features` per candidate (Section 15). A future
+machine-learning strategy fits the same shape: a frozen model as the extractor, thresholds as the
+decision stage.
 
 ### 3.5 One execution core
 
-`ExecutionCore` (crate `backtest`) is **extracted** from `BacktestEngine`, not written next to it:
+`ExecutionCore` (crate `application`) holds:
 
 - position state (`domain::Position`);
 - the pending order and its due time;
@@ -229,48 +186,41 @@ Concretely:
 - fill price, slippage, and fee math;
 - the `TradeLedger`, which turns fills into `ClosedTrade`s.
 
-`BacktestEngine` keeps its loop (rollovers, breakers, kill switch, mark to market, excursion) and
-delegates the rest to the core, in the same order as today.
+`BacktestEngine` (crate `backtest`) keeps its loop (rollovers, breakers, kill switch, mark to
+market, excursion) and delegates the rest to the core.
 
 A **price event** is what the core trades against:
 
-- with the bar fill model it is a dollar bar, as today;
-- at trade resolution it is one trade;
-- in HPO it is a 1 s bucket of trades.
+- at trade resolution (`--fill-model bar`) it is one trade;
+- in HPO it is a bucket of trades, 1 s by default (`--price-bucket-ms`).
 
 ### 3.6 One venue contract
 
-The session path (`--fill-model tick`, paper, live) executes the same `Decision`s through the
-ports. The ports gain the minimum needed:
+The session path (`--fill-model tick`) executes the same intents through the ports:
 
-- `ExecutionVenue::submit_order(symbol, OrderRequest { side, quantity, reduce_only }) -> EntryAck`.
-  It sends a market order of an explicit quantity and does no sizing in the venue. `submit_entry`
-  stays, unchanged, for `Decision::Entry`.
-- `ExitGateway::place_exits(symbol, entry_side, stop_loss, take_profit: Option<Decimal>)`. With
-  `None`, only the stop leg is placed.
+- `ExecutionVenue::submit_order(symbol, OrderRequest { side, quantity, reduce_only }) -> EntryAck`
+  sends a market order of an explicit quantity. The venue sizes nothing and applies no risk rule;
+  it only refuses what the balance cannot margin.
+- `ExitGateway::place_exits(symbol, entry_side, stop_loss, take_profit: Option<Decimal>)` places the
+  stop and the take profit the venue holds for the position.
 
-The implementations generalise code that already exists:
-
-- `SimulatedVenue::submit_order` generalises `submit_market_order_at` (`simulated_venue.rs:187`)
-  with the existing `WorkingOrder.reduce_only`.
-- The Binance gateway generalises its private `submit_futures_order` (a `MARKET` order with a
-  `reduceOnly` flag) and skips the take-profit algo order when it is `None`.
-- `TradingSession` sizes targets with the same domain planner and sends delta orders. After each
-  fill it re-places the stop (`cancel_orders` + `place_exits(.., None)`), and it closes trades
-  through the same `TradeLedger` as the core.
+`TradingSession` asks the same `EntryGate` as the bar engine, sends the admitted quantity with
+`submit_order`, installs the exits when the entry fills, and books the closed trade through the
+same `TradeLedger`.
 
 ### 3.7 Data flow of this strategy
 
 ```mermaid
 flowchart TD
     T["Raw aggTrades (Trade)"] --> F["16 feed aggregators (domain)"]
-    F -->|"closed bar of feed f"| I["Indicators of feed f (domain)"]
+    F -->|"closed bar of feed f"| I["Indicators of feed f (strategies)"]
     I --> A["Agents of feed f re-vote (strategies)"]
     A --> V["Vote table"]
     V -->|"after every feed closed by this trade"| S["ConsensusSample = Features"]
     S --> P["ConsensusPolicy"]
-    P -->|"level changed"| D["Decision::Target"]
-    D --> X["ExecutionCore (bar engine) or TradingSession + venue"]
+    P -->|"a side's signal starts"| D["OrderIntent"]
+    D --> G["EntryGate: quantity or refusal"]
+    G --> X["ExecutionCore (bar engine) or TradingSession + venue"]
 ```
 
 - **Stage A**, the extractor: expensive, frozen during HPO.
@@ -280,7 +230,7 @@ flowchart TD
 
 ## 4. Market and Data
 
-- Instrument: BTCUSDT USD-M perpetual (`MarketType::UsdMPerpetual`). Spot is not supported.
+- Instrument: BTCUSDT, on the USD-M perpetual (`MarketType::UsdMPerpetual`) or on spot, where the swarm is long only (`allow_short = false`).
 - Input: Binance futures aggTrades loaded through the existing readers (`BinanceParquetReader`,
   `BinanceCsvReader`) as `domain::Trade { timestamp, price, quantity, side }`.
 - A "tick" in this document is one aggTrade. The domain has no raw trade ids, so tick bars count
@@ -343,12 +293,11 @@ previous one):
 
 **Tick, volume, and range bars**:
 
-- The trade that reaches the threshold **belongs** to the bar it closes, as in the existing
-  `DollarBarAggregator`. The next trade opens a new bar.
+- The trade that reaches the threshold **belongs** to the bar it closes. The next trade opens a
+  new bar.
 - Tick: close when `trade_count ≥ threshold`.
-- Volume: close when `volume ≥ threshold`. Excess volume is **not** carried into the next bar.
-  The existing dollar aggregator's carry-over double counts volume across bars, and that pattern
-  is deliberately not copied.
+- Volume: close when `volume ≥ threshold`. Excess volume is **not** carried into the next bar:
+  carrying it over would count the same volume in two bars.
 - Range: close when `(high - low) / open ≥ threshold`. A single trade that jumps far past the
   threshold still closes the bar on that trade; the bar keeps its true high and low.
 
@@ -483,7 +432,7 @@ Clamping puts a small probability mass at the bounds. That is accepted and audit
 
 ### 7.2 Deterministic sampling without floats
 
-- RNG: `rand::rngs::StdRng::seed_from_u64(genome_seed)`, with `genome_seed = 123456` by default (the
+- RNG: `rand_chacha::ChaCha12Rng::seed_from_u64(genome_seed)` (the generator behind `StdRng` in `rand` 0.8, named so a `rand` upgrade cannot change a swarm; tests pin the first genomes), with `genome_seed = 123456` by default (the
   thesis seed). One RNG serves the whole swarm. Agents are sampled in id order and genes in table
   order, so a seed fully determines the swarm.
 - Uniforms: `u = (next_u32() as Decimal + 1) / 2^32`, giving `u ∈ (0, 1]` (never 0, so `ln` is
@@ -706,240 +655,182 @@ ConsensusSample {
 
 From it:
 - Unweighted (pure democracy): `long_net = (long_up - long_down) / N` and `short_net = (short_up - short_down) / N`, both in [-1, 1].
-- Weighted / Pruned: when `PolicyConfig.feed_weights` is set, `weighted_net = (1 / agents_per_feed) · Σ w_f · (up_f - down_f)`. Feeds with weight 0 are pruned. Normalization ensures the active weights sum to 1, preserving the [-1, 1] bounds for the level machine.
+- Weighted / Pruned: when `PolicyConfig.feed_weights` is set, `weighted_net = (1 / agents_per_feed) · Σ w_f · (up_f - down_f)`. Feeds with weight 0 are pruned. Normalization ensures the active weights sum to 1, preserving the [-1, 1] bounds.
 
 ---
 
 ## 10. The Consensus Policy (Stage B)
 
-### 10.1 Thresholds
+The policy is a **classifier**: it reads one `ConsensusSample` and either enters one side or does
+nothing. It holds no position state beyond the signal it already acted on. The code is the
+reference: `crates/strategies/src/swarm_consensus/policy.rs`.
 
-Configured as fractions of `N` (the original used absolute votes out of 100; fractions keep the
-meaning when `agents_per_feed` changes):
+### 10.1 Configuration rules
 
-- `L1 = threshold_base`;
-- `L2 = threshold_base + threshold_step`;
-- `L3 = threshold_base + 2·threshold_step`;
-- hysteresis `H`.
+Thresholds are fractions of `N` (the original used absolute votes out of 100; fractions keep the
+meaning when `agents_per_feed` changes). A configuration is valid when:
 
-Validation: `0 < threshold_base`, `0 < threshold_step`, `L3 ≤ 1`, and `0 ≤ H`. `H > L1` is allowed,
-as in the original: a level-1 position then survives until the net vote turns clearly against it.
+- `0 < threshold_base ≤ 1`;
+- `base_risk > 0`, `risk_increment ≥ 0` and `base_risk + risk_increment ≤ 1`;
+- `0 < stop_atr_multiplier ≤ 2.0`, and `take_profit_atr_multiplier ≥ 1.5 · stop_atr_multiplier`;
+- a breakeven multiplier, when set, is positive and below the take profit; a trailing multiplier,
+  when set, is positive;
+- `decay_horizon_seconds` is between 7,200 and 86,400;
+- `macro_slope_min ≥ 0` and `short_threshold_delta ≥ 0`.
 
-### 10.2 One axis: the original level machine
+A file written for the removed target-level policy (`classifier_mode: false`) is refused with a clear
+error; its `threshold_step`, `hysteresis` and `bracket_priority` are ignored on load.
 
-`axis_update(current ∈ {0,1,2,3}, net) -> {0,1,2,3}`, reproduced from `CRiskManager::GetTradeParams`:
+### 10.2 Which side
 
-```text
-t = current
-if net >= L3                 { t = 3 }
-else if net >= L2 && t < 2   { t = 2 }
-else if net >= L1 && t < 1   { t = 1 }
-if t == 3 && net < L3 - H    { t = 2 }
-if t == 2 && net < L2 - H    { t = 1 }
-if t == 1 && net < L1 - H    { t = 0 }
-return t
-```
+With `long_net` and `short_net` from Section 9.3 (weighted when `feed_weights` is set):
 
-Moving up is immediate, and a jump from 0 to 3 is allowed. Moving down needs `H` extra votes
-against, and may cascade over several levels in one update. This asymmetry limits overtrading.
+- `θ_long = threshold_base` and `θ_short = threshold_base + short_threshold_delta`;
+- the **long** side is selected when `long_net ≥ θ_long` and `short_net < θ_long`;
+- the **short** side, only when `allow_short`, when `short_net ≥ θ_short` and `long_net < θ_short`;
+- when both sides clear their threshold the swarm contradicts itself and no side is selected,
+  consistent with "conflict means wait".
 
-### 10.3 Two axes and the signed target
+With `macro_trend_filter`, a long also needs `macro_trend_slope ≥ macro_slope_min` and a
+non-negative two-hour slope; a short needs the mirror. A swarm that is trending against the entry
+withholds it.
 
-- `long_level = axis_update(long_level, long_net)`.
-- `short_level = axis_update(short_level, short_net)` if `allow_short`, otherwise 0.
-- Target level `k`:
-  - if `long_level > 0` and `short_level > 0`, then `k = 0` (the swarm contradicts itself: stand
-    aside, consistent with "conflict means wait");
-  - otherwise `k = long_level - short_level`.
+### 10.3 One entry per signal
 
-Both axes keep their own state across samples, including during a conflict.
+A signal is acted on once. While the same side keeps clearing its threshold, nothing more is
+emitted; the signal ends when no side is selected, and the next one may enter again.
 
-### 10.4 Risk per level
+### 10.4 Risk per entry
 
-`risk_fraction(|k|) = base_risk + (|k| - 1) · risk_increment` for `|k| ≥ 1`, and `0` for `k = 0`.
-This is the original rule. With the thesis-selected 1% and 2%, level 3 risks 5% of equity, so the
-search space bounds keep the user's account policy in mind (Section 14.2).
+`risk_fraction = base_risk + share · risk_increment`, where
+`share = clamp((conviction − θ) / (1 − θ), 0, 1)` and `conviction` is the selected side's net vote:
+the entry risks `base_risk` when it just reaches the threshold and `base_risk + risk_increment`
+under a unanimous swarm. The search space bounds the largest risk by `max_risk` (default 0.05).
 
-### 10.5 Protective exits: Stop loss, Take Profit, and Temporal Decay
+### 10.5 Protective exits
 
-- **Stop distance**: `stop_distance = stop_atr_multiplier · atr_stop_reference`. In HPO, `stop_atr_multiplier` is searched in `[1.5, 2.0, 2.5, 3.0, 4.0]` (anchored on feed 1 H1 ATR).
-- **Take-Profit (TP)**: `take_profit_distance = take_profit_atr_multiplier · atr_stop_reference` (optional). When configured (e.g. `[None, 2.0, 3.0, 4.0, 5.0]`), the engine arms a protective take-profit barrier on the winning side (`fill + tp` for long, `fill - tp` for short).
-- **Anti-whipsaw protection (`rearm_blocked`)**: When a target position exits on `TakeProfit` (or `StopLoss`), the execution core blocks re-entering on that same side until the consensus returns to flat (`k = 0`) or flips. This prevents buying at the absolute top immediately after collecting profits while the swarm vote remains momentarily high.
-- **Temporal decay (`decay_horizon_seconds`)**: If configured, once a level has been held past `decay_horizon_seconds`, the policy forces a flat target exit (`k = 0`) to prevent holding stagnant positions across market regimes.
+All distances are multiples of `atr_stop_reference`, the ATR of feed 1 (time 1h):
+
+- **Stop**: `stop_atr_multiplier · ATR` on the losing side.
+- **Take profit**: `take_profit_atr_multiplier · ATR` on the winning side.
+- **Breakeven** (optional): once the favourable excursion reaches `breakeven_atr_multiplier · ATR`,
+  the stop moves to the entry price.
+- **Trailing** (optional): the stop ratchets in steps of `trailing_atr_multiplier · ATR` of favourable
+  excursion.
+- **Time barrier**: `deadline_ms = sample timestamp + decay_horizon_seconds · 1000`. A position still
+  open at the deadline closes at market as `TimeBarrier`.
 
 ### 10.6 Emission
 
-The policy emits `Decision::Target(TargetPosition::with_exits(timestamp, level: k, risk_fraction, stop_distance, take_profit_distance))` **only when `k` changes**, including a return to 0. The original recomputed the target lot on every
-update, so changes in balance or ATR alone triggered small rebalancing orders that paid fees for
-nothing (correction C6). ATSNT sizes once per level change.
+The policy returns an `OrderIntent` at the sample's price, with the barriers above and the risk
+fraction of Section 10.4, when a side's signal starts. A sample whose ATR or price is not positive
+carries no valid distances and is skipped. What the account then does with the intent (sizing,
+refusals, fills) is Section 11.
 
 ---
 
-## 11. Execution of a Target Decision
+## 11. Execution of an Entry
 
-These rules are part of the single execution model (Section 3). They are written for
+These rules are those of the single execution model (Section 3). They are written for
 `ExecutionCore`, and `TradingSession` applies the same rules through the venue ports
-(Section 11.10). Nothing here changes how `Decision::Entry` is executed.
+(Section 11.8).
 
 ### 11.1 Price events
 
 The core consumes **price events**: OHLC buckets of trades, with the timestamps of their first
-(`start_ms`) and last (`end_ms`) trade; a dollar bar maps to its own start and end times.
+(`start_ms`) and last (`end_ms`) trade.
 
 | Run | Price event | Source |
 | :--- | :--- | :--- |
-| Backtest, `--fill-model bar` | one trade (trade resolution) for `Trades` strategies; one dollar bar for `DollarBars` strategies | the runner |
-| HPO | a `price_bucket_ms` bucket (default 1,000 ms) for `Trades` strategies; one dollar bar for `DollarBars` strategies | the tape (Section 15) |
+| Backtest, `--fill-model bar` | one trade (trade resolution) | the runner |
+| HPO | a `price_bucket_ms` bucket (default 1,000 ms) | the tape (Section 15) |
 | Backtest, `--fill-model tick` | none: the `SimulatedVenue` matches orders against the tape | the venue |
 
 ### 11.2 Ordering per price event
 
-The order is that of `BacktestEngine::process_bar` (`engine.rs:228-351`). It is unchanged and shared
-by both decision kinds:
+The order is that of `BacktestEngine::process_event`:
 
 1. Day and month rollover.
 2. Funding settlement.
 3. Fill the pending order if it is due (`due_ms ≤ event start`).
-4. Liquidation, then protective exits (stop, then take profit and time limit when present).
+4. Liquidation, then protective exits (stop, then take profit and time limit).
 5. Monthly kill switch.
-6. The strategy step: the strategy sees the event (trade or bar) and may return a `Decision`.
+6. The strategy step: the strategy sees the event and may return an `OrderIntent`.
 7. Mark to market, peak and drawdown, daily breaker.
 8. Excursion.
 
-A decision is **scheduled**, never filled on the event that produced it:
+An intent is **scheduled**, never filled on the event that produced it: `due_ms = timestamp +
+latency_ms`, and it fills at the first event that starts at or after `due_ms`. `latency_ms` defaults
+to 0, so the entry fills at the next event's open. An intent is ignored unless the account is flat
+with nothing pending.
 
-- `due_ms = decision timestamp + latency_ms`.
-- `latency_ms` is a new optional field of `BacktestConfig`. It defaults to 0, so existing
-  execution contexts keep filling at the next bar open as today. The swarm's execution context
-  sets 100, the paper-session default (`paper.rs:147`).
-- A newer `Target` replaces a pending `Target`.
-- An `Entry` is still ignored unless the strategy is flat with nothing pending (today's rule at
-  `engine.rs:302-306`).
-- A `Target` that arrives while a triple-barrier `Entry` position is open or pending is ignored
-  and counted `UnsupportedDecision` in `rejected_orders`: mixing decision kinds in one position is
-  not supported.
+### 11.3 The gate: sizing and refusals
 
-### 11.3 Sizing at decision time
+`domain::EntryGate::admit` turns an intent into a quantity or a named refusal, in this order:
 
-Both kinds are sized **when the decision is made**, as the engine does for entries today: the
-reference price is the decision price, and the equity is `total_equity(decision price)`, which is
-what `submit_entry` uses at `engine.rs:516`. For a `Target`:
+1. **Daily halt.** The loss from the day's peak reached `max_daily_drawdown_pct`, or the breaker
+   already latched: `DailyHalt`, until the next UTC day.
+2. **Spot shorting.** A sell on a spot account: `SpotShortingDisallowed`.
+3. **Sizing.** `RiskPolicy::size_order` at the signal price:
+   `(equity · risk) / stop_distance`, clamped to `equity · max_leverage / price`, floored to the lot
+   step. Below the minimum lot or notional, or above a notional cap, it refuses with the
+   `RiskError` kind (`OrderBelowMinLotSize`, `OrderBelowMinNotional`, `OrderSizeExceeded`).
+4. **Margin.** When the balance cannot margin that quantity, with the entry fee and the
+   configured slippage, the quantity is **sized down** to what it can fund, floored to the lot.
+   When even that is below the minimum lot or notional: `InsufficientMargin`.
 
-- `q_raw = equity · risk_fraction / stop_distance`;
-- the leverage cap is `equity · max_leverage / price`;
-- the result is floored to `quantity_step_size`. All three steps share the core of `size_order`.
-- `max_position_notional`, when set, **clips** `q_raw` instead of rejecting it, and counts a
-  `position_cap_clip`.
-- The signed target is `q* = sign(k) · q_raw`. The order is `Δ = q* - q_current`, evaluated when the
-  order is filled, so earlier fills are taken into account.
+Every refusal is counted by name in `rejected_orders`, so a run that does not trade shows why.
 
 ### 11.4 Orders and fills
 
-- All orders are market orders (taker), as in the original.
-- Fill price: event open `± open · slippage_pct`, against the order side. The operation shapes are
-  the engine's (`open + open·pct` on a buy, `ref - ref·pct` on a sell), so the shared code gives
-  identical numbers on entries.
+- Entries are market orders (taker).
+- Fill price: event open `± open · slippage_pct`, against the order side.
 - Fee: `(fill_px · |q|) · taker_fee_pct`.
 - Reported slippage (`slippage_paid`, informative only: the fill price already includes it, so
-  cash and PnL never deduct it again) uses the entry convention. An increasing fill reports
-  `open · slippage_pct` plus the adverse part of the gap from the decision price (the deciding
-  event's close the target was sized at), per unit; a gap in favour does not cancel the slippage.
-  A reducing fill, the close of a flip, and a flat target are market exits and report
-  `open · slippage_pct` per unit, as an entry's market exit does.
-- **Dust**: if `|Δ| < min_order_quantity` or `|Δ| · price < min_order_notional`, no order is sent
-  and the decision is counted in `rejected_orders` under the existing `RiskError` kinds. A target of
-  0 always closes the whole position, whatever its size.
-- **Flip** (`q*` and `q_current` non-zero with opposite signs): two fills on the same event. The
-  first is a close of `q_current`, which ends the campaign. The second opens `q*`, which starts a
-  new one. Each pays its own fee and slippage.
-- **Scale-in** and **scale-out** go through `domain::Position::apply_fill`. Scale-in averages the
-  entry price; scale-out realises PnL on the reduced quantity. A full close uses the engine's
-  existing close arithmetic, so entry-and-exit trades stay identical.
-- Margin is recomputed after every fill with the engine's rule (`minimum_leverage` on the new
-  notional; margin `= notional / leverage`).
+  cash and PnL never deduct it again) is `open · slippage_pct` plus the adverse part of the gap from
+  the signal price, per unit.
+- The exchange runs the position at the lowest leverage the balance can margin. A fill that gaps
+  past the slippage allowed and can no longer be margined does not open and is counted
+  `InsufficientMargin`.
 
-### 11.5 Protective exits for targets
+### 11.5 Protective exits
 
-- `ProtectiveExits { stop, take_profit: None, max_bars: None }`. There is one stop for the whole
-  position (correction C7).
-- After **every** fill that leaves a position open, the stop is recomputed:
-  `stop = last_fill_price ∓ stop_distance`. The `stop_distance` is the one carried by the target
-  being executed.
-- Sizing (11.3) and the stop use the same distance. A stop-out therefore loses about
-  `risk_fraction` of the equity at decision time, plus the unrealised PnL carried from earlier
-  fills, plus costs.
-
-### 11.6 Stop and liquidation execution
-
-These are the engine's existing exit evaluation (`engine.rs:439-501`), extracted into one pure
-function with optional take profit and time limit:
-
+- The stop is checked first, then the take profit, then the time limit.
 - Long: if `event.low ≤ stop`, the fill is `min(event.open, stop)` minus slippage. Short: if
   `event.high ≥ stop`, the fill is `max(event.open, stop)` plus slippage. The `open` term models a
   gap through the stop.
-- Liquidation comes first. It is evaluated with the existing rule (`liquidate_if_due`,
-  `engine.rs:396-437`), whose stop-before-liquidation check now reads `exits.stop` instead of
-  `intent.stop_loss`. The value is the same for entries.
-- If an increasing target fill would leave the liquidation price between the entry and the stop,
-  the order is reduced, in whole lot steps, to the largest quantity whose stop trades first, and a
-  `stop_beyond_liquidation` clip is counted. The clip is applied **before** the fill: the reduced
-  order is the one that fills, so no oversized position ever exists. A clip to less than one lot
-  places nothing.
-- Exit reason strings reuse the existing ones: `StopLoss`, `Liquidation`, `MonthlyCircuitBreaker`,
-  `EndOfSimulation`. Two strings are added (Section 11.9).
+- Liquidation comes first, with the same rule.
+- Breakeven and trailing move the stop up (down for a short), never back.
+- Exit reasons: `StopLoss`, `TakeProfit`, `TimeBarrier`, `Liquidation`, `MonthlyCircuitBreaker`,
+  `EndOfSimulation`.
 
-### 11.7 Re-arm after a forced exit
+### 11.6 Breakers
 
-After a stop, a liquidation, or a kill-switch flatten on side `s`, the policy still holds its
-level. Without a rule, the next same-sign target would re-enter at once.
+- **Daily breaker** (`domain::DailyBreaker`): latches when the day's loss reaches the limit and
+  re-arms at the next UTC day. Both routes ask the same gate with the same breaker.
+- **Monthly kill switch**: flattens the position and halts the run for good.
 
-**Rule**: after a forced exit, every target with the sign of `s` is ignored, and counted, until a
-target of 0 or of the opposite sign arrives (correction C12). With hysteresis, this means the net
-vote has to fall below `L1 - H` on that axis first.
+### 11.7 The trade ledger
 
-### 11.8 Breakers
+One entry is one closed trade: one opening fill, one closing fill. The `TradeLedger` builds a
+`ClosedTrade` with the VWAP entry and exit, gross and net PnL, fees, slippage, funding, holding time
+and excursion. The metrics pipeline (Sortino, profit factor, DSR, minimum trades per fold) works on
+those trades.
 
-The existing breakers apply unchanged. Only their effect on a target is defined:
+### 11.8 The same rules on the session path
 
-- **Daily breaker** (the gate today at `engine.rs:518`): while it is tripped, a target may only
-  reduce `|q|`. An increase is counted under `DAILY_HALT_REJECTION`, as an entry is today.
-- **Monthly kill switch** (`engine.rs:271-289`): the existing flatten and halt.
+`TradingSession` (tick simulation) executes an intent like this:
 
-### 11.9 Campaigns and the trade ledger
+1. Ask the same `EntryGate`. Equity is the venue wallet. A refusal is counted under its name.
+2. Send the admitted quantity with `submit_order`. A venue refusal the gate did not foresee is counted
+   `VenueRejected`.
+3. When the entry fills, install the stop and the take profit with `place_exits`; an entry that is not
+   filled within 30 s is cancelled.
+4. Book the closed trade through the same `TradeLedger`.
 
-The metrics pipeline (Sortino, profit factor, DSR, minimum trades per fold) works on
-`ClosedTrade`s (`metrics.rs:10`). The `TradeLedger` builds them, for both decision kinds:
-
-- A **campaign** opens when the position leaves 0 and closes when it returns to 0 or flips. For an
-  `Entry`, the campaign is exactly today's trade, with one opening and one closing fill.
-- `entry_price`: VWAP of the increasing fills. `exit_price`: VWAP of the reducing fills.
-- `quantity`: the peak absolute quantity.
-- `pnl_gross`: the sum of realised PnL. Fees, slippage, and funding: the campaign sums.
-- `return_pct`, holding time, and equity fields: today's formulas.
-- New `exit_reason` strings:
-  - `TargetExit`: the position returned to 0. This includes a target whose level sizes to a
-    quantity of 0 (it closes the position), and a flip whose opening leg is not placed (dust,
-    `OrderSizeExceeded`, unmarginable, or clipped to nothing): the position ended flat;
-  - `TargetFlip`: the campaign ended in a flip whose opening leg filled on the same event.
-  Both are additive to the run registry's string domain and are documented in
-  `docs/architecture/13-run-registry.md`.
-- A level change inside a campaign is **not** a trade. Counting each one would multiply the trade
-  count and inflate significance. The fill count and the peak level per campaign go to the
-  strategy audit (Section 16), not to `ClosedTrade`, whose schema does not change.
-
-### 11.10 The same rules on the session path
-
-`TradingSession` (tick simulation, and later paper and live) executes a `Target` like this:
-
-1. Size it with the same planner. Equity is the venue wallet, as for entries today.
-2. Send `Δ` with `submit_order`. A reduction uses `reduce_only = true`. A flip sends the reduce-only
-   close first, then the opening order once the close is filled.
-3. After each fill, re-place the stop with `cancel_orders` + `place_exits(symbol, side, stop, None)`.
-4. Feed every fill to the shared `TradeLedger`.
-
-Reports carry no order id. The session attributes each fill by its phase, as it does today. A new
-phase, `Adjusting { delta }`, covers an open position with an order in flight. A fill on the
-position side is an increase, and a fill on the opposite side is a reduction.
+The tick route fills a market order only against prints of the opposite aggressor, so on a sparse
+tape it opens fewer positions than the trade-resolution route. Compare the two on real tick data
+before trusting either (`docs/ROADMAP.md`, Known gaps).
 
 ---
 
@@ -956,7 +847,7 @@ position side is an increase, and a fill on the opposite side is a reduction.
 | Cold-start bias | Partial swarm voting | No sample until all feeds are warm (9.2) | Readiness test |
 | Unit bias | Price-unit thresholds per asset or feed | Adimensional indicators and genes (6, 7) | Scale test: prices × 10 give identical votes |
 | Selection / multiple testing | Searching 11·96 genes | Genome frozen; only 5 policy parameters searched; DSR and stability (15) | HPO scorecard |
-| Trade-count inflation | Each level change as a trade | Campaigns (11.9) | Engine accounting test |
+| Trade-count inflation | Counting scale-ins as trades | One entry is one trade (11.7) | Engine accounting test |
 | Sampling bias | Clamps | Documented; clamp hit rates audited (16) | Audit output |
 
 ---
@@ -970,16 +861,16 @@ position side is an increase, and a fill on the opposite side is a reduction.
 | C3 | Contradictory rules resolved by `do-for-fact` order (`03_decision.clp` `obtener-voto`) | Explicit resolution; conflict gives wait (8.4) |
 | C4 | `feed = i % 16` overweights feeds 0–3 (`Ensamble.mqh`) | Stratified assignment (7.3) |
 | C5 | Thresholds in EUR/USD price units (`base_atr`, `base_alma`, `bos_margen`, VWAP %) | ATR-normalised (6, 7) |
-| C6 | Rebalance on every update, as balance and ATR drift (`TFM_Multiagente.mq5`) | Trade only on level change (10.6) |
-| C7 | One stop per ticket at each scale-in | One aggregate stop (11.5) |
+| C6 | Rebalance on every update, as balance and ATR drift (`TFM_Multiagente.mq5`) | Enter once per signal (10.3) |
+| C7 | One stop per ticket at each scale-in | One entry, one stop (11.5) |
 | C8 | Warm-up checked only on M5 | All feeds warm (9.2) |
 | C9 | Time-sliced queue, three agents per tick, drop on full | Synchronous evaluation (9.1) |
 | C10 | A flat bar counts as a bullish pin bar | Positive range and positive rejection wick (8.2) |
 | C11 | ATR seeded with one TR | Simple-mean seed (6.2) |
-| C12 | Immediate re-entry after a stop | Re-arm rule (11.7) |
+| C12 | Immediate re-entry after a stop | One entry per signal: the next needs the signal to end first (10.3) |
 | C13 | VWAP weighted by tick volume (forex) | Real base volume (6.4) |
-| C14 | `MathRand` cannot be reproduced; genes sampled in `double` | `StdRng` and Box–Muller in `Decimal` (7.2) |
-| C15 | Long-only | Mirrored short axis (8.3, 10.3) |
+| C14 | `MathRand` cannot be reproduced; genes sampled in `double` | `ChaCha12Rng` and Box–Muller in `Decimal` (7.2) |
+| C15 | Long-only | Mirrored short axis (8.3, 10.2) |
 | C16 | Absolute vote thresholds out of 100 | Fractions of `N` (10.1) |
 
 ---
@@ -1006,19 +897,22 @@ written in its source and in this document. Baseline genome priors are defined i
 
 ### 14.2 Policy configuration (`Config`, searched by HPO; Stage B)
 
-| Parameter | Type | Default | Search grid |
+| Parameter | Type | Default | Default search grid |
 | :--- | :--- | :--- | :--- |
-| `threshold_base` | `Decimal` | `0.50` | 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55 |
-| `threshold_step` | `Decimal` | `0.05` | 0.05, 0.10, 0.15 |
-| `hysteresis` | `Decimal` | `0.25` | 0.10, 0.15, 0.20, 0.25, 0.30 |
-| `base_risk` | `Decimal` | `0.010` | 0.005, 0.010, 0.015, 0.020 |
-| `risk_increment` | `Decimal` | `0.005` | 0.005, 0.010, 0.015, 0.020 |
-| `stop_atr_multiplier` | `Decimal` | `3.0` | 1.5, 2.0, 2.5, 3.0, 4.0 (Bloque A) |
-| `take_profit_atr_multiplier` | `Option<Decimal>` | `None` | None, Some(1.5), Some(2.5), Some(4.0) (Bloque B) |
-| `decay_horizon_seconds` | `Option<u64>` | `None` | Optional max stall time before level 0 exit |
-| `feed_weights` | `Option<FeedWeights>` | `None` (equal 1/16) | Standard macro profiles or pruned feeds (Bloque C) |
+| `threshold_base` | `Decimal` | `0.45` | 0.475, 0.50, 0.525, 0.55 |
+| `base_risk` | `Decimal` | `0.010` | 0.010 |
+| `risk_increment` | `Decimal` | `0.010` | 0.0 |
+| `stop_atr_multiplier` | `Decimal` | `1.0` | 1.0, 1.25, 1.50 |
+| `take_profit_atr_multiplier` | `Decimal` | `2.0` | 3.5, 4.0, 4.5 |
+| `breakeven_atr_multiplier` | `Option<Decimal>` | `0.75` | 1.0, 1.25, 1.50 |
+| `trailing_atr_multiplier` | `Option<Decimal>` | `0.50` | 1.0, 1.25, 1.50 |
+| `decay_horizon_seconds` | `u64` | `14400` | 86400 |
+| `feed_weights` | `Option<FeedWeights>` | `None` (equal 1/16) | none, plus the standard macro profiles |
+| `macro_trend_filter` | `bool` | `false` | true |
+| `macro_slope_min` | `Decimal` | `0` | 0.02, 0.04, 0.06 |
+| `short_threshold_delta` | `Decimal` | `0` | 0.0 |
 
-Candidates whose level-3 risk `base_risk + 2·risk_increment` exceeds `max_level_risk = 0.05` are not generated.
+Candidates whose largest risk `base_risk + risk_increment` exceeds `max_risk = 0.05` are not generated.
 
 `perturb_neighbors` returns the adjacent grid values of each searched parameter dimension across the multi-dimensional grid.
 
@@ -1030,17 +924,12 @@ Candidates whose level-3 risk `base_risk + 2·risk_increment` exceeds `max_level
 
 `run_hpo` keeps a single path. For any strategy `S`:
 
-1. **Build the tape once.** Read the input the strategy declares (`S::input_kind()`), run
-   `S::extractor(shared)` over it, and keep:
+1. **Build the tape once.** Read the trades, run `S::extractor(shared)` over them, and keep:
    - the features with their timestamps;
    - the price events (Section 11.1).
 2. **Evaluate the candidates.** For each candidate and fold, take a fresh `S::policy(shared,
    config)` and a fresh engine. Replay the fold's features and price events, merged by timestamp,
    then score. Candidates run in parallel (rayon), as today.
-
-For the removed CUSUM and OFI, the features **were** the dollar bars, and the price events were
-the same bars. That was their `Vec<DollarBar>`, so their HPO results stayed identical, and a golden
-test checked it (ODD T1.2).
 
 For the swarm, the extractor is the ensemble and the price events are 1 s buckets. At that
 resolution, ten months of BTCUSDT is about 26M events, roughly 2 GB in memory. Rebuilding the
@@ -1056,11 +945,10 @@ ensemble per candidate would repeat the same work 1,680 times.
 - **Calibration check.** `calibration_end_ms` must be earlier than the first trade of the data.
   The run fails otherwise.
 - **Folds.** They stay index-based over the price events, with today's splitter code. For
-  `Trades` strategies, `--embargo-ms` (default 86,400,000) is converted to buckets as
-  `embargo_ms / price_bucket_ms`. For `DollarBars` strategies, `--embargo-bars` keeps its meaning.
+  the embargo, `--embargo-ms` (default 86,400,000), is converted to buckets as
+  `embargo_ms / price_bucket_ms`.
 - **Continuity.** The extractor state runs continuously across folds (it was built once, causally),
-  so no swarm fold starts cold. The removed CUSUM and OFI kept the fresh-per-slice behaviour, because their
-  "extractor" was the bars themselves.
+  so no swarm fold starts cold.
 - **Slice edges.** Each slice starts flat. A position still open at the end of a slice closes as
   `EndOfSimulation`.
 
@@ -1097,14 +985,13 @@ audit and extending it:
 - **Mean absolute net vote** per axis (the thesis "consenso medio").
 - **Polarisation**: % of samples where both `long_up` and `long_down` exceed 10% of `N` (and the
   same for short).
-- **Activation**: % of time each level `k ∈ {-3..3}` is held.
 - **Conflict rate**: % of agent evaluations that ended in a conflict, split by within-axis and
   directional.
 - **Noise rate**: % of evaluations with an empty micro set.
 - **Rule firing counts**: per rule id (E1…X4′).
 - **Clamp hit rate**: per gene.
-- **Execution counters**: dust skips, clips (position cap, liquidation), breaker-ignored targets,
-  re-arm-ignored targets.
+- **Rejected signals**: counted by name in the run's metrics (`rejected_orders`): `DailyHalt`,
+  `SpotShortingDisallowed`, `InsufficientMargin`, `VenueRejected` and the `RiskError` kinds.
 
 ---
 
@@ -1112,52 +999,44 @@ audit and extending it:
 
 ### 17.1 Scope
 
-- **Paper and live trading.** After the unification, the execution path supports `Target`
-  decisions on every venue. Running this strategy in `paper_trading` or `live_trading` is still
-  refused, by a single **product gate** in the shared strategy loader. Its message is:
-  `strategy '<id>' emits target-position decisions, which paper_trading and live_trading do not
-  accept yet`.
-  Lifting the gate is a later, separate decision, taken after walk-forward and tick-level results
-  justify it. The Binance implementations of `submit_order` and of the optional take profit are
-  built and unit-tested against the scripted test server, but no live run exercises them.
+- **Paper and live trading.** There is no paper or live loop: no binary trades with real or
+  simulated money against a live feed. The simulations replay recorded tapes. The Kraken route that
+  would have added one was stopped (`docs/ROADMAP.md`).
 - **Order book.** aggTrades carry no depth. The bar engine pays the configured `slippage_pct`; the
   tick path walks the trade tape.
 - **Tick size.** The backtest configuration has no tick size, so bar-engine stops are not aligned to
   the exchange tick. The error is at most 0.1 USDT on BTCUSDT.
 - **Quantity granularity on small accounts.** With 500 EUR, 1% risk, and a stop of about 1,500
-  USDT, one level is about 0.003 BTC against a step of 0.001 BTC. Level increments are coarse, and
-  many may be counted as dust.
+  USDT, an entry is about 0.003 BTC against a step of 0.001 BTC, so the lot rounding is coarse, and
+  an entry under the minimum lot or notional is refused.
 - **Funding.** The bar engine uses the flat configured rate. The tick path uses `FundingSchedule`.
   Both behave as today.
 
-### 17.2 Pre-existing duplication left as follow-up
+### 17.2 Differences between the two fill routes
 
-Mapping the execution code found these mechanisms implemented twice before this work. They are
-**not** touched, to keep the change minimal. Unifying each is its own refactor, with its own
-golden tests:
-
-| Mechanism | Bar engine | Session path |
-| :--- | :--- | :--- |
-| Monthly breaker | inline `monthly_open_equity` (`engine.rs:244-289`) | `MonthlyGuard` (`monthly_guard.rs:63`); semantics differ (rollover key and comparison) |
-| Excursion | inline `open_excursion` (`engine.rs:339-350`) | `ExcursionTracker` (`excursion.rs:11-66`) |
-| Equity marking and peak | `total_equity` (`engine.rs:135`, `:312-330`) | `marked_equity` (`monthly_guard.rs:10`) and the venue wallet |
-| Leverage check input | fill price (`engine.rs:564`) | signal price (`simulated_venue.rs:525`) |
+Both routes ask the same `EntryGate` with the same `DailyBreaker`, so they refuse the same signals
+for the same reasons (`crates/backtest/tests/gate_parity.rs`). They still fill differently: the bar
+route fills at the next event's open, and the tick route walks the tape with latency. The measured
+difference and what is open are in `docs/ROADMAP.md`, Known gaps.
 
 ---
 
-## 18. Worked Example of the Level Machine
+## 18. Worked Example of the Policy
 
-Settings: `L1 = 0.50`, `L2 = 0.55`, `L3 = 0.60`, `H = 0.25`, `allow_short = true`.
+Settings: `threshold_base = 0.50`, `base_risk = 0.01`, `risk_increment = 0.01`,
+`short_threshold_delta = 0`, `allow_short = true`, no macro filter.
 
-| Sample | long_net | short_net | long_level | short_level | k | Emitted |
-| :-: | :-: | :-: | :-: | :-: | :-: | :--- |
-| 1 | 0.20 | 0.00 | 0 | 0 | 0 | none (unchanged) |
-| 2 | 0.52 | 0.00 | 1 | 0 | +1 | target +1 |
-| 3 | 0.61 | 0.00 | 3 | 0 | +3 | target +3 (jump) |
-| 4 | 0.40 | 0.00 | 3 | 0 | +3 | none: 0.40 is not below `L3 - H` = 0.35 |
-| 5 | 0.20 | 0.10 | 0 | 0 | 0 | target 0: cascade 3→2→1→0 (0.20 < 0.35, < 0.30, < 0.25) |
-| 6 | −0.10 | 0.52 | 0 | 1 | −1 | target −1 |
-| 7 | 0.55 | 0.55 | 2 | 2 | 0 | target 0 (contradiction) |
+| Sample | long_net | short_net | Side selected | Emitted | Risk fraction |
+| :-: | :-: | :-: | :-: | :--- | :-: |
+| 1 | 0.20 | 0.00 | none | none | |
+| 2 | 0.52 | 0.00 | long | long entry | 0.0104 |
+| 3 | 0.61 | 0.00 | long | none: the signal was already acted on | |
+| 4 | 0.40 | 0.00 | none | none; the signal ends | |
+| 5 | 0.00 | 0.60 | short | short entry | 0.0120 |
+| 6 | 0.55 | 0.55 | none | none: both sides clear (contradiction); the signal ends | |
+| 7 | 0.70 | 0.10 | long | long entry | 0.0140 |
 
-Sample 4 shows the hysteresis: the long net vote fell from 0.61 to 0.40, but the level stays at 3
-until it falls below 0.35. Sample 5 drops all three levels in one update.
+Risk is `0.01 + share · 0.01` with `share = (net − 0.50) / 0.50`: 0.04 at sample 2, 0.2 at sample 5
+and 0.4 at sample 7. Sample 3 shows the single entry per signal: the long net vote stays above the
+threshold, and nothing more is emitted until the signal ends at sample 4. An entry emitted while the
+account holds a position is ignored by the account, not by the policy.

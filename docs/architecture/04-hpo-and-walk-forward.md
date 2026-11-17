@@ -1,6 +1,6 @@
 # High-Performance Hyperparameter Optimization (HPO) & Walk-Forward Specification
 
-> **Status (2026-11-07):** two statements describe removed code. The start-up refusal in the deployment-gate subsection was applied by `paper_trading` and `live_trading`, which L3N removed (commit `940e4de`). The CUSUM strategies in section 4.2 were removed earlier (see `docs/archive/strategy/`).
+> **Status (2026-11-07):** two statements describe removed code. The start-up refusal in the deployment-gate subsection was applied by `paper_trading` and `live_trading`, which L3N removed (commit `940e4de`). The dollar-bar input and the CUSUM strategies were removed (see `docs/archive/strategy/`); the optimizer takes trades only.
 
 ## 1. Objective & Quantitative Philosophy
 To establish a statistically rigorous, highly parallelized Hyperparameter Optimization (HPO) engine in Rust, capable of finding robust parameter configurations without succumbing to the **Backtest Overfitting Problem** (Marcos López de Prado, *AFML* Chapters 11 & 14).
@@ -170,15 +170,14 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
     fn extractor(shared: &Self::SharedConfig) -> Result<Self::Extractor, DomainError>;
 
     /// Decides on features produced by `extractor`: the decision stage of the strategy.
-    fn on_features(&mut self, features: &<Self::Extractor as FeatureExtractor>::Features) -> Option<Decision>;
+    fn on_features(&mut self, features: &<Self::Extractor as FeatureExtractor>::Features) -> Option<OrderIntent>;
 }
 ```
 
 ### 4.2 Decoupled Engine Execution & The Feature Tape (`Tape<F>`)
 The `WalkForwardOptimizer<S: OptimizableStrategy>` operates agnostically across Rayon worker threads:
 - **Feature Tape (`Tape<F>`)**: Evaluates computationally intensive indicators or multi-feed ensemble models **once** across the dataset into a `Tape<F> { features: Vec<(i64, F)>, prices: Vec<PriceEvent> }`.
-  - For single-stage dollar bar strategies (the removed CUSUM and order-flow strategies), the tape wraps dollar bars (`Tape<DollarBar>`) with zero-copy price events.
-  - For two-stage strategies (`SwarmConsensus`), trades pass through `FeatureExtractor` once into `Tape<ConsensusSample>`, while market prices are downsampled into uniform buckets (e.g. 1 s `--price-bucket-ms`).
+  - Trades pass through the `FeatureExtractor` once (`trade_tape`): for `SwarmConsensus` into `Tape<ConsensusSample>`, while market prices are downsampled into uniform buckets (1 s by default, `--price-bucket-ms`).
 - **Candidate Generation**: Delegated to `parameter_space.generate_candidates(max_candidates)`.
 - **Plateau Stability**: Evaluated mathematically via `calculate_parameter_stability::<S>()`, delegating local coordinate perturbation to `space.perturb_neighbors(base)`.
 - **Simulation**: Executed in isolation across folds via `run_tape_slice::<S>(engine_config, policy, tape, slice)` through `BacktestEngine::process_event`.
@@ -188,17 +187,17 @@ To enable automated hyperparameter optimization for any new strategy, implement 
 
 ```rust
 impl OptimizableStrategy for MyNewStrategy {
-    type SharedConfig = ();
+    type SharedConfig = MyNewShared;
     type Config = MyNewConfig;
     type Space = MyNewSpace;
-    type Extractor = BarPassThrough;
+    type Extractor = MyNewExtractor;
 
     fn id() -> &'static str { "my_new_strategy" }
-    fn from_config(_shared: &(), config: Self::Config) -> Result<Self, DomainError> { Self::new(config) }
+    fn from_config(_shared: &MyNewShared, config: Self::Config) -> Result<Self, DomainError> { Self::new(config) }
     fn default_space() -> Self::Space { MyNewSpace::default() }
-    fn extractor(_shared: &()) -> Result<Self::Extractor, DomainError> { Ok(BarPassThrough) }
-    fn on_features(&mut self, features: &DollarBar) -> Option<OrderIntent> {
-        self.on_event(&MarketEvent::DollarBar(features))
+    fn extractor(shared: &MyNewShared) -> Result<Self::Extractor, DomainError> { MyNewExtractor::new(shared) }
+    fn on_features(&mut self, features: &MyNewFeatures) -> Option<OrderIntent> {
+        self.decide(features)
     }
 }
 
