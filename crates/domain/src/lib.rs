@@ -7,7 +7,6 @@
 
 pub mod accounting;
 pub mod analytics;
-pub mod bar;
 pub mod decision;
 pub mod error;
 pub mod futures;
@@ -21,12 +20,11 @@ pub mod trade;
 
 // Re-exports of core domain and analytical types
 pub use analytics::{
-    AlmaSlope, AtrRatio, BarAggregator, BarInput, DollarBarAggregator, FeedBar, RangeBarAggregator,
-    RollingZScore, TickBarAggregator, TimeBarAggregator, VolumeBarAggregator, VwapDeviation,
-    WilderAtr, WilderRsi, ZScoreResult,
+    AlmaSlope, AtrRatio, BarAggregator, BarInput, FeedBar, RangeBarAggregator, RollingZScore,
+    TickBarAggregator, TimeBarAggregator, VolumeBarAggregator, VwapDeviation, WilderAtr, WilderRsi,
+    ZScoreResult,
 };
-pub use bar::DollarBar;
-pub use decision::{InputKind, MarketEvent, ProtectiveExits};
+pub use decision::{MarketEvent, ProtectiveExits};
 pub use error::DomainError;
 pub use gate::{EntryGate, EntryRefusal};
 pub use market::MarketType;

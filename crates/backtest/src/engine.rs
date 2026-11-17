@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 
-use domain::{DollarBar, Position, PositionSide, RiskPolicy, Side};
 use domain::{EntryGate, EntryRefusal, OrderIntent};
+use domain::{Position, PositionSide, RiskPolicy, Side};
 use rust_decimal::Decimal;
-use strategies::{MarketEvent, Strategy};
 
 use crate::config::BacktestConfig;
 use crate::execution_core::{market_fill_price, ExecutionCore, PendingEntry, PendingEntryOutcome};
@@ -205,16 +204,6 @@ impl BacktestEngine {
     #[inline]
     pub fn config(&self) -> &BacktestConfig {
         &self.config
-    }
-
-    /// Ingests a closed DollarBar, updates position barriers, and steps the strategy.
-    ///
-    /// A thin wrapper over [`BacktestEngine::process_event`]: the bar is the price event and the
-    /// strategy's decision on it is the decision step.
-    pub fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &DollarBar) {
-        self.process_event(&PriceEvent::from(bar), &mut || {
-            strategy.on_event(&MarketEvent::DollarBar(bar))
-        });
     }
 
     /// Processes one price event in the order of strategy spec §11.2: day and month rollover,
@@ -443,7 +432,20 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use std::collections::VecDeque;
-    use strategies::MarketType;
+    use strategies::{MarketEvent, MarketType, Strategy};
+
+    /// Feeds the engine one price event; the strategy decides on a print at its close.
+    trait Feed {
+        fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &PriceEvent);
+    }
+
+    impl Feed for BacktestEngine {
+        fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &PriceEvent) {
+            let print = domain::Trade::new(bar.end_ms, bar.close, dec!(1), Side::Buy)
+                .expect("a positive close");
+            self.process_event(bar, &mut || strategy.on_event(&MarketEvent::Trade(&print)));
+        }
+    }
 
     /// Emits one scripted decision per bar and counts how many bars it was shown.
     struct Scripted {
@@ -470,7 +472,7 @@ mod tests {
         }
 
         fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::DollarBar(_) = event else {
+            let MarketEvent::Trade(_) = event else {
                 return None;
             };
             self.bars_seen += 1;
@@ -511,7 +513,7 @@ mod tests {
         high: Decimal,
         low: Decimal,
         close: Decimal,
-    ) -> DollarBar {
+    ) -> PriceEvent {
         create_test_bar(time, open, high, low, close)
     }
 
@@ -702,21 +704,18 @@ mod tests {
         high: Decimal,
         low: Decimal,
         close: Decimal,
-    ) -> DollarBar {
-        DollarBar {
-            start_time: time - 50,
-            end_time: time,
+    ) -> PriceEvent {
+        PriceEvent {
+            start_ms: time - 50,
+            end_ms: time,
             open,
             high,
             low,
             close,
             volume: dec!(1.0),
             dollar_volume: close,
-            buy_volume: dec!(0.5),
-            sell_volume: dec!(0.5),
             buy_dollar_volume: close / dec!(2),
             sell_dollar_volume: close / dec!(2),
-            trade_count: 5,
         }
     }
 
@@ -1120,15 +1119,15 @@ mod tests {
         }
 
         fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::DollarBar(bar) = event else {
+            let MarketEvent::Trade(trade) = event else {
                 return None;
             };
             OrderIntent::new(
-                bar.end_time,
+                trade.timestamp,
                 Side::Buy,
-                bar.close,
+                trade.price,
                 self.stop,
-                bar.close * dec!(2),
+                trade.price * dec!(2),
                 1_000,
             )
             .ok()
@@ -1140,7 +1139,7 @@ mod tests {
     const JAN_1: i64 = 1_704_067_200_000;
     const DAY: i64 = 86_400_000;
 
-    fn flat_bar(time: i64, close: Decimal) -> DollarBar {
+    fn flat_bar(time: i64, close: Decimal) -> PriceEvent {
         create_test_bar(time, close, close, close, close)
     }
 

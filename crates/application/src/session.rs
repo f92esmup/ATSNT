@@ -8,10 +8,7 @@
 
 use std::collections::VecDeque;
 
-use domain::{
-    DollarBar, DollarBarAggregator, DomainError, EntryGate, EntryRefusal, OrderIntent,
-    PositionSide, Side, Trade,
-};
+use domain::{EntryGate, EntryRefusal, OrderIntent, PositionSide, Side, Trade};
 use ports::{EntryAck, ExecutionReport, ExecutionVenue, OrderRequest};
 use rust_decimal::Decimal;
 use strategies::{MarketEvent, Strategy};
@@ -233,29 +230,16 @@ impl<S: Strategy> TradingSession<S> {
         !matches!(self.phase, Phase::Flat) || !self.exits.can_open()
     }
 
-    /// Feeds one historical dollar bar to the strategy so its rolling windows are as warm as in
-    /// a backtest. Nothing trades: a signal raised on history is discarded.
-    pub fn warm_up(&mut self, bar: &DollarBar) {
-        let _ = self.strategy.on_event(&MarketEvent::DollarBar(bar));
-    }
-
-    /// Warms the strategy up from historical trades, aggregated with a dedicated aggregator of
-    /// the live `threshold` so the live stream starts on a fresh bar. Returns how many bars the
-    /// strategy saw; the trailing partial bar is dropped.
-    pub fn warm_up_trades(
-        &mut self,
-        threshold: Decimal,
-        trades: impl IntoIterator<Item = Trade>,
-    ) -> Result<usize, DomainError> {
-        let mut aggregator = DollarBarAggregator::new(threshold)?;
-        let mut bars = 0;
+    /// Feeds historical trades to the strategy so its rolling windows are as warm as in a
+    /// backtest. Nothing trades: a signal raised on history is discarded. Returns how many
+    /// trades the strategy saw.
+    pub fn warm_up_trades(&mut self, trades: impl IntoIterator<Item = Trade>) -> usize {
+        let mut seen = 0;
         for trade in trades {
-            if let Some(bar) = aggregator.process_trade(&trade) {
-                self.warm_up(&bar);
-                bars += 1;
-            }
+            let _ = self.strategy.on_event(&MarketEvent::Trade(&trade));
+            seen += 1;
         }
-        Ok(bars)
+        seen
     }
 
     /// Records the latest wallet balance reported by the venue.
@@ -304,6 +288,10 @@ impl<S: Strategy> TradingSession<S> {
             events.push(SessionEvent::Exit(event));
         }
 
+        if let Some(event) = self.exits.retry_pending(venue).await {
+            events.push(SessionEvent::Exit(event));
+        }
+
         let retry_due = self
             .last_halt_attempt_ms
             .map_or(true, |at| time_ms - at >= self.config.halt_retry_ms);
@@ -316,50 +304,7 @@ impl<S: Strategy> TradingSession<S> {
         events
     }
 
-    /// Feeds one closed bar: enforces the time barrier, then lets the strategy signal.
-    pub async fn on_bar<V: ExecutionVenue>(
-        &mut self,
-        venue: &V,
-        bar: &DollarBar,
-    ) -> Vec<SessionEvent> {
-        let mut events = Vec::new();
-        if let Some(event) = self.exits.on_bar_closed(venue).await {
-            if event == ExitEvent::TimeBarrierClosed {
-                self.exit_hint = Some("TimeBarrier");
-            }
-            events.push(SessionEvent::Exit(event));
-        }
-
-        if let Some((side, entry_price, quantity)) = self.open_position() {
-            self.excursion.mark(
-                bar.end_time,
-                self.wallet,
-                side,
-                entry_price,
-                quantity,
-                bar.close,
-            );
-        }
-
-        // Daily breaker reference: the engine's per-UTC-day peak, marked at open then close.
-        let open_position = self.open_position();
-        self.daily.observe(
-            bar.end_time,
-            marked_equity(self.wallet, open_position, bar.open),
-        );
-        let day_peak = self.daily.observe(
-            bar.end_time,
-            marked_equity(self.wallet, open_position, bar.close),
-        );
-
-        if let Some(intent) = self.strategy.on_event(&MarketEvent::DollarBar(bar)) {
-            events.push(SessionEvent::Signal(intent.clone()));
-            events.extend(self.dispatch(venue, intent, day_peak, bar.end_time).await);
-        }
-        events
-    }
-
-    /// Feeds one raw market trade for trade-consuming strategies.
+    /// Feeds one market trade to the strategy, which may signal an entry.
     pub async fn on_trade_event<V: ExecutionVenue>(
         &mut self,
         venue: &V,
@@ -719,7 +664,6 @@ impl<S: Strategy> TradingSession<S> {
                 price,
                 intent.stop_loss,
                 intent.take_profit,
-                intent.max_bars_hold,
                 intent.trailing_atr,
                 intent.breakeven_atr,
                 intent.deadline_ms,
@@ -901,7 +845,7 @@ fn trigger_slippage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::{DollarBar, OrderIntent, Side};
+    use domain::{OrderIntent, Side};
     use ports::{AckStatus, EntryAck, ExecutionReport, ExecutionVenue, ExitGateway, OrderRequest};
     use rust_decimal_macros::dec;
     use std::cell::RefCell;
@@ -1012,7 +956,7 @@ mod tests {
         }
 
         fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::DollarBar(_) = event else {
+            let MarketEvent::Trade(_) = event else {
                 return None;
             };
             self.intents.pop_front()
@@ -1021,22 +965,8 @@ mod tests {
         fn reset(&mut self) {}
     }
 
-    fn bar(end_time: i64, price: Decimal) -> DollarBar {
-        DollarBar {
-            start_time: end_time - 50,
-            end_time,
-            open: price,
-            high: price,
-            low: price,
-            close: price,
-            volume: dec!(1),
-            dollar_volume: price,
-            buy_volume: dec!(0.5),
-            sell_volume: dec!(0.5),
-            buy_dollar_volume: price / dec!(2),
-            sell_dollar_volume: price / dec!(2),
-            trade_count: 5,
-        }
+    fn print(time_ms: i64, price: Decimal) -> Trade {
+        Trade::new(time_ms, price, dec!(1), Side::Buy).unwrap()
     }
 
     fn long_intent() -> OrderIntent {
@@ -1107,7 +1037,9 @@ mod tests {
 
     /// Submits the long intent and fills the entry at 100 (quantity 1, 0.05 USDT commission).
     async fn open_long(session: &mut TradingSession<Scripted>, venue: &FakeVenue) {
-        session.on_bar(venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
         let events = session
             .on_execution(
                 venue,
@@ -1125,7 +1057,9 @@ mod tests {
         let mut session = session(vec![long_intent()]);
         session.on_wallet_balance(dec!(1000));
 
-        let events = session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        let events = session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
 
         assert!(events.contains(&SessionEvent::Signal(long_intent())));
         assert!(matches!(
@@ -1144,7 +1078,9 @@ mod tests {
             OrderIntent::new(JAN_1, Side::Buy, dec!(100), dec!(99.999), dec!(110), 3).unwrap();
         let mut session = session(vec![tight]);
 
-        let events = session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        let events = session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
 
         assert!(venue.entries.borrow().is_empty());
         match events.last() {
@@ -1162,14 +1098,18 @@ mod tests {
         let mut session = session(vec![long_intent(), long_intent()]);
         session.on_wallet_balance(dec!(1000));
         // The day's peak is 1000; a balance 5 % lower trips the default breaker.
-        session.on_bar(&venue, &bar(JAN_1 + 5, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 5, dec!(100)))
+            .await;
         assert_eq!(venue.entries.borrow().len(), 1);
         session
             .on_execution(&venue, &terminated(Side::Buy, JAN_1 + 6))
             .await;
         session.on_wallet_balance(dec!(950));
 
-        let events = session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        let events = session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
 
         assert_eq!(
             events.last(),
@@ -1184,7 +1124,9 @@ mod tests {
         let mut session = session(vec![long_intent()]);
         session.set_account_ok(false);
 
-        let events = session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        let events = session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
 
         assert!(events.contains(&SessionEvent::SignalSkipped(SkipReason::AccountMismatch)));
         assert!(venue.entries.borrow().is_empty());
@@ -1195,8 +1137,12 @@ mod tests {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent(), long_intent()]);
 
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
-        let events = session.on_bar(&venue, &bar(JAN_1 + 20, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
+        let events = session
+            .on_trade_event(&venue, &print(JAN_1 + 20, dec!(100)))
+            .await;
 
         assert!(events.contains(&SessionEvent::SignalSkipped(SkipReason::PositionOpen)));
         assert_eq!(venue.entries.borrow().len(), 1);
@@ -1208,8 +1154,12 @@ mod tests {
         *venue.fail_entry.borrow_mut() = true;
         let mut session = session(vec![long_intent(), long_intent()]);
 
-        let first = session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
-        let second = session.on_bar(&venue, &bar(JAN_1 + 20, dec!(100))).await;
+        let first = session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
+        let second = session
+            .on_trade_event(&venue, &print(JAN_1 + 20, dec!(100)))
+            .await;
 
         assert!(first
             .iter()
@@ -1222,13 +1172,17 @@ mod tests {
     async fn an_entry_cancelled_without_fills_returns_the_session_to_flat() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent(), long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
 
         let events = session
             .on_execution(&venue, &terminated(Side::Buy, JAN_1 + 20))
             .await;
         let exposed_after_cancel = session.is_exposed();
-        let next = session.on_bar(&venue, &bar(JAN_1 + 30, dec!(100))).await;
+        let next = session
+            .on_trade_event(&venue, &print(JAN_1 + 30, dec!(100)))
+            .await;
 
         assert!(events.contains(&SessionEvent::EntryCancelled));
         assert!(!exposed_after_cancel);
@@ -1240,7 +1194,9 @@ mod tests {
     async fn an_entry_that_expires_after_a_partial_fill_is_opened_and_protected() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
         session
             .on_execution(
                 &venue,
@@ -1268,7 +1224,9 @@ mod tests {
     async fn the_entry_fill_installs_the_exchange_held_exits_from_the_intent() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
 
         let events = session
             .on_execution(
@@ -1293,7 +1251,9 @@ mod tests {
     async fn partial_entry_fills_open_the_position_at_the_volume_weighted_price() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
 
         let partial = session
             .on_execution(
@@ -1360,7 +1320,9 @@ mod tests {
     async fn slippage_is_measured_against_the_signal_and_trigger_prices() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
         // Bought 0.5 above the signal price (100), stopped out 0.2 below the trigger (90).
         session
             .on_execution(
@@ -1425,12 +1387,13 @@ mod tests {
     #[tokio::test]
     async fn the_time_barrier_closes_the_position_and_labels_the_trade() {
         let venue = FakeVenue::default();
-        let mut session = session(vec![long_intent()]);
+        let mut intent = long_intent();
+        intent.deadline_ms = Some(JAN_1 + 250);
+        let mut session = session(vec![intent]);
         open_long(&mut session, &venue).await;
 
-        session.on_bar(&venue, &bar(JAN_1 + 100, dec!(101))).await;
-        session.on_bar(&venue, &bar(JAN_1 + 200, dec!(102))).await;
-        let third = session.on_bar(&venue, &bar(JAN_1 + 300, dec!(103))).await;
+        let early = session.on_trade(&venue, JAN_1 + 200, dec!(102)).await;
+        let third = session.on_trade(&venue, JAN_1 + 300, dec!(103)).await;
         let closed = session
             .on_execution(
                 &venue,
@@ -1445,6 +1408,7 @@ mod tests {
             )
             .await;
 
+        assert!(!early.contains(&SessionEvent::Exit(ExitEvent::TimeBarrierClosed)));
         assert!(third.contains(&SessionEvent::Exit(ExitEvent::TimeBarrierClosed)));
         assert!(venue.calls().contains(&"close".to_string()));
         assert!(closed.iter().any(|e| matches!(
@@ -1473,7 +1437,7 @@ mod tests {
             .await;
 
         let events = session
-            .on_bar(&venue, &bar(JAN_1 + 70_000, dec!(100)))
+            .on_trade_event(&venue, &print(JAN_1 + 70_000, dec!(100)))
             .await;
 
         assert!(events.contains(&SessionEvent::Signal(long_intent())));
@@ -1490,7 +1454,7 @@ mod tests {
         session.on_wallet_balance(dec!(800));
         let events = session.on_trade(&venue, JAN_1 + DAY, dec!(100)).await;
         let skipped = session
-            .on_bar(&venue, &bar(JAN_1 + DAY + 10, dec!(100)))
+            .on_trade_event(&venue, &print(JAN_1 + DAY + 10, dec!(100)))
             .await;
 
         assert!(events.contains(&SessionEvent::MonthlyBreakerTripped {
@@ -1643,33 +1607,16 @@ mod tests {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
 
-        // The scripted strategy would signal on the first bar it sees.
-        session.warm_up(&bar(JAN_1 + 10, dec!(100)));
-        let events = session.on_bar(&venue, &bar(JAN_1 + 20, dec!(100))).await;
+        // The scripted strategy would signal on the first trade it sees.
+        let seen = session.warm_up_trades([print(JAN_1 + 10, dec!(100))]);
+        let events = session
+            .on_trade_event(&venue, &print(JAN_1 + 20, dec!(100)))
+            .await;
 
+        assert_eq!(seen, 1);
         assert!(venue.entries.borrow().is_empty());
         assert!(!events.iter().any(|e| matches!(e, SessionEvent::Signal(_))));
         assert!(!session.is_exposed());
-    }
-
-    #[test]
-    fn warming_up_from_trades_forms_bars_and_drops_the_partial_one() {
-        let mut session = session(Vec::new());
-        let trades: Vec<Trade> = (0..5)
-            .map(|i| Trade::new(JAN_1 + i, dec!(100), dec!(1), Side::Buy).unwrap())
-            .collect();
-
-        // $100 trades with a $200 threshold: two bars, and one trade left over.
-        let bars = session.warm_up_trades(dec!(200), trades).unwrap();
-
-        assert_eq!(bars, 2);
-    }
-
-    #[test]
-    fn warming_up_rejects_an_invalid_threshold() {
-        let mut session = session(Vec::new());
-
-        assert!(session.warm_up_trades(Decimal::ZERO, Vec::new()).is_err());
     }
 
     const TIMEOUT: i64 = 30_000;
@@ -1678,7 +1625,9 @@ mod tests {
     async fn an_entry_still_working_before_the_timeout_is_left_alone() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
 
         let events = session
             .on_trade(&venue, JAN_1 + 10 + TIMEOUT - 1, dec!(100))
@@ -1693,7 +1642,9 @@ mod tests {
     async fn an_entry_that_never_terminates_is_cancelled_and_the_session_returns_to_flat() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent(), long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
 
         let events = session
             .on_trade(&venue, JAN_1 + 10 + TIMEOUT, dec!(100))
@@ -1706,7 +1657,7 @@ mod tests {
         assert!(!session.is_exposed());
         // Ready for the next signal.
         let next = session
-            .on_bar(&venue, &bar(JAN_1 + 20_000_000, dec!(100)))
+            .on_trade_event(&venue, &print(JAN_1 + 20_000_000, dec!(100)))
             .await;
         assert!(next
             .iter()
@@ -1719,7 +1670,9 @@ mod tests {
         let venue = FakeVenue::default();
         *venue.position_left.borrow_mut() = true;
         let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
 
         let events = session
             .on_trade(&venue, JAN_1 + 10 + TIMEOUT, dec!(100))
@@ -1736,7 +1689,9 @@ mod tests {
         venue: &FakeVenue,
         session: &mut TradingSession<Scripted>,
     ) -> Vec<SessionEvent> {
-        session.on_bar(venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
         session
             .on_execution(
                 venue,
@@ -1841,7 +1796,9 @@ mod tests {
         let venue = FakeVenue::default();
         *venue.fail_cancel.borrow_mut() = true;
         let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
         let due = JAN_1 + 10 + TIMEOUT;
 
         let first = session.on_trade(&venue, due, dec!(100)).await;
@@ -1863,7 +1820,9 @@ mod tests {
     async fn a_fill_that_arrives_after_the_timeout_flattens_and_stops_the_session() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
         session
             .on_trade(&venue, JAN_1 + 10 + TIMEOUT, dec!(100))
             .await;
@@ -1897,7 +1856,9 @@ mod tests {
     async fn a_repeated_fill_is_counted_once() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
         let first = with_trade_id(
             fill(
                 Side::Buy,
@@ -1955,7 +1916,9 @@ mod tests {
     async fn reports_without_a_trade_id_are_never_treated_as_repeats() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
 
         session
             .on_execution(
@@ -1996,7 +1959,9 @@ mod tests {
         let venue = FakeVenue::default();
         *venue.position_left.borrow_mut() = true;
         let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
         session
             .on_trade(&venue, JAN_1 + 10 + TIMEOUT, dec!(100))
             .await;
@@ -2058,7 +2023,9 @@ mod tests {
     async fn the_entry_timeout_runs_on_the_first_market_trade_after_it() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
-        session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
+        session
+            .on_trade_event(&venue, &print(JAN_1 + 10, dec!(100)))
+            .await;
 
         let early = session
             .on_trade(&venue, JAN_1 + 10 + TIMEOUT - 1, dec!(100))

@@ -47,10 +47,10 @@ pub use monte_carlo::{
     ResampleMethod,
 };
 pub use optimization::{
-    bar_tape, calculate_parameter_stability, calibration_end_ms, check_calibration,
-    deflated_sharpe_p_value, embargo_buckets, expected_max_sharpe, plateau_stability,
-    run_tape_slice, trade_tape, CandidateEvaluation, FeaturesOf, FoldMetrics, ReturnMoments, Tape,
-    TapeRun, WalkForwardOptimizer, DEFAULT_MIN_TRADES_PER_FOLD, TRADES_WARM_UP_MS,
+    calculate_parameter_stability, calibration_end_ms, check_calibration, deflated_sharpe_p_value,
+    embargo_buckets, expected_max_sharpe, plateau_stability, run_tape_slice, trade_tape,
+    CandidateEvaluation, FeaturesOf, FoldMetrics, ReturnMoments, Tape, TapeRun,
+    WalkForwardOptimizer, DEFAULT_MIN_TRADES_PER_FOLD, TRADES_WARM_UP_MS,
 };
 pub use parity::FillRecordError;
 pub use price_event::{bucket_trades, PriceEvent};

@@ -9,7 +9,7 @@
 
 pub mod swarm;
 
-use domain::{DollarBar, DollarBarAggregator, Side, Trade};
+use domain::{Side, Trade};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rust_decimal::Decimal;
@@ -103,13 +103,4 @@ pub fn synthetic_trades(seed: u64, n: usize) -> Vec<Trade> {
         trades.push(Trade::new(timestamp, price, quantity, side).expect("valid synthetic trade"));
     }
     trades
-}
-
-/// Dollar bars of `trades` at `threshold`, built with the production aggregator.
-pub fn dollar_bars(trades: &[Trade], threshold: Decimal) -> Vec<DollarBar> {
-    let mut aggregator = DollarBarAggregator::new(threshold).expect("positive threshold");
-    trades
-        .iter()
-        .filter_map(|trade| aggregator.process_trade(trade))
-        .collect()
 }

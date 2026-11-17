@@ -81,9 +81,5 @@ GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until
   opened. It fills a market order only against prints of the opposite aggressor and cancels an
   entry that waited 30 s, and that tape has one print an hour. It is a property of the
   synthetic tape, not of the gate. Check the two routes on real tick data before real money.
-- The strategy contract still has `input_kind`, `InputKind` and `BarPassThrough`, with no
-  strategy that consumes dollar bars. Removing them means removing the dollar-bar mode of
-  `backtest` and `run_hpo`, their flags and the `dollar_bar` sampling of artifacts: a decision
-  for the owner.
 - There is no live loop: no binary trades live or on paper. The paper runtime, the clock port and
   `SessionDriver::on_idle` were removed (2026-11-17) because nothing called them. Git keeps them.

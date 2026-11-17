@@ -1,12 +1,10 @@
 //! The loop that feeds a [`TradingSession`] with what happens in the market.
 //!
-//! Live trading and the tick-level simulation both drive their session through this type, so the
-//! order of operations the simulation validates is exactly the order live runs: a market trade
-//! first reaches the monthly breaker and the emergency-close retry, then the dollar-bar sampler,
-//! and a finished bar reaches the strategy last. Venues report executions and balances through
-//! the other methods.
+//! The tick-level simulation drives its session through this type, in the order a live run
+//! would: a market trade first reaches the monthly breaker, the exits and the emergency-close
+//! retry, and then the strategy. Venues report executions and balances through the other methods.
 
-use domain::{DollarBar, DollarBarAggregator, DomainError, Trade};
+use domain::Trade;
 use ports::{ExecutionReport, ExecutionVenue};
 use rust_decimal::Decimal;
 use strategies::Strategy;
@@ -16,46 +14,34 @@ use crate::session::{SessionEvent, TradingSession};
 /// What one market trade produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DriverStep {
-    /// The dollar bar this trade completed, if any.
-    pub bar: Option<DollarBar>,
-    /// What the session did because of the trade itself (monthly breaker, emergency close).
+    /// What the session did because of the trade itself (monthly breaker, exits, emergency close).
     pub trade_events: Vec<SessionEvent>,
-    /// What the session did because the trade completed a bar (time barrier, signal, entry).
-    pub bar_events: Vec<SessionEvent>,
+    /// What the session did because the strategy saw the trade (signal, entry).
+    pub strategy_events: Vec<SessionEvent>,
 }
 
 impl DriverStep {
     /// Every event of the step in the order it happened.
     pub fn into_events(self) -> Vec<SessionEvent> {
         let mut events = self.trade_events;
-        events.extend(self.bar_events);
+        events.extend(self.strategy_events);
         events
     }
 }
 
-/// A session plus the dollar-bar sampler that feeds its strategy.
+/// A session and the count of the market trades it was fed.
 pub struct SessionDriver<S: Strategy> {
     session: TradingSession<S>,
-    aggregator: DollarBarAggregator,
-    threshold: Decimal,
     ticks: u64,
-    bars: u64,
 }
 
 impl<S: Strategy> SessionDriver<S> {
-    /// Wraps `session`, sampling bars of `threshold` dollars.
-    pub fn new(session: TradingSession<S>, threshold: Decimal) -> Result<Self, DomainError> {
-        Ok(Self {
-            aggregator: DollarBarAggregator::new(threshold)?,
-            session,
-            threshold,
-            ticks: 0,
-            bars: 0,
-        })
+    /// Wraps `session`.
+    pub fn new(session: TradingSession<S>) -> Self {
+        Self { session, ticks: 0 }
     }
 
-    /// Feeds one market trade: the session's trade-time duties run first, then the sampler, and
-    /// a completed bar is delivered to the session (or raw trade for Trades strategies).
+    /// Feeds one market trade: the session's trade-time duties run first, then the strategy.
     pub async fn on_market_trade<V: ExecutionVenue>(
         &mut self,
         venue: &V,
@@ -66,25 +52,10 @@ impl<S: Strategy> SessionDriver<S> {
             .session
             .on_trade(venue, trade.timestamp, trade.price)
             .await;
-        let (bar, bar_events) = match self.session.strategy().input_kind() {
-            strategies::InputKind::Trades => {
-                let events = self.session.on_trade_event(venue, trade).await;
-                (None, events)
-            }
-            strategies::InputKind::DollarBars => {
-                let bar = self.aggregator.process_trade(trade);
-                let mut bar_events = Vec::new();
-                if let Some(bar) = &bar {
-                    self.bars += 1;
-                    bar_events = self.session.on_bar(venue, bar).await;
-                }
-                (bar, bar_events)
-            }
-        };
+        let strategy_events = self.session.on_trade_event(venue, trade).await;
         DriverStep {
-            bar,
             trade_events,
-            bar_events,
+            strategy_events,
         }
     }
 
@@ -112,12 +83,9 @@ impl<S: Strategy> SessionDriver<S> {
         self.session.set_account_ok(account_ok);
     }
 
-    /// Warms the strategy up on historical trades; the live sampler starts on a fresh bar.
-    pub fn warm_up_trades(
-        &mut self,
-        trades: impl IntoIterator<Item = Trade>,
-    ) -> Result<usize, DomainError> {
-        self.session.warm_up_trades(self.threshold, trades)
+    /// Warms the strategy up on historical trades. Returns how many trades it saw.
+    pub fn warm_up_trades(&mut self, trades: impl IntoIterator<Item = Trade>) -> usize {
+        self.session.warm_up_trades(trades)
     }
 
     /// The session being driven.
@@ -133,11 +101,6 @@ impl<S: Strategy> SessionDriver<S> {
     /// Market trades fed so far.
     pub fn ticks(&self) -> u64 {
         self.ticks
-    }
-
-    /// Dollar bars the strategy has seen so far.
-    pub fn bars(&self) -> u64 {
-        self.bars
     }
 }
 
@@ -199,7 +162,7 @@ mod tests {
 
     struct Scripted {
         intents: VecDeque<OrderIntent>,
-        bars_seen: usize,
+        trades_seen: usize,
     }
 
     impl Strategy for Scripted {
@@ -212,10 +175,10 @@ mod tests {
         }
 
         fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::DollarBar(_) = event else {
+            let MarketEvent::Trade(_) = event else {
                 return None;
             };
-            self.bars_seen += 1;
+            self.trades_seen += 1;
             self.intents.pop_front()
         }
 
@@ -239,10 +202,10 @@ mod tests {
             },
             Scripted {
                 intents: intents.into(),
-                bars_seen: 0,
+                trades_seen: 0,
             },
         );
-        SessionDriver::new(session, dec!(200)).unwrap()
+        SessionDriver::new(session)
     }
 
     fn long() -> OrderIntent {
@@ -254,99 +217,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_trade_that_does_not_complete_a_bar_does_not_reach_the_strategy() {
+    async fn a_trade_reaches_the_strategy_and_the_signal_reaches_the_venue() {
         let venue = Venue::default();
         let mut driver = driver(vec![long()]);
 
         let step = driver.on_market_trade(&venue, &print(1_000)).await;
 
-        assert!(step.bar.is_none());
-        assert!(step.trade_events.is_empty() && step.bar_events.is_empty());
-        assert_eq!((driver.ticks(), driver.bars()), (1, 0));
-    }
-
-    #[tokio::test]
-    async fn the_trade_that_completes_a_bar_delivers_it_and_the_signal_reaches_the_venue() {
-        let venue = Venue::default();
-        let mut driver = driver(vec![long()]);
-        driver.on_market_trade(&venue, &print(1_000)).await;
-
-        // $100 + $100 reaches the $200 threshold.
-        let step = driver.on_market_trade(&venue, &print(1_001)).await;
-
-        assert_eq!(step.bar.as_ref().map(|bar| bar.close), Some(dec!(100)));
         assert!(step.trade_events.is_empty());
-        assert!(matches!(step.bar_events[0], SessionEvent::Signal(_)));
+        assert!(matches!(step.strategy_events[0], SessionEvent::Signal(_)));
         assert!(step
-            .bar_events
+            .strategy_events
             .iter()
             .any(|e| matches!(e, SessionEvent::EntrySubmitted(_))));
         assert_eq!(venue.calls.borrow().as_slice(), ["entry"]);
-        assert_eq!((driver.ticks(), driver.bars()), (2, 1));
+        assert_eq!(driver.ticks(), 1);
+        assert_eq!(driver.strategy().trades_seen, 1);
     }
 
     #[tokio::test]
-    async fn trade_time_duties_run_before_the_bar_reaches_the_strategy() {
-        // The monthly kill-switch trips on the very trade that completes a bar; the signal that
-        // bar produces must then be refused, which only holds if the breaker ran first.
+    async fn trade_time_duties_run_before_the_strategy_sees_the_trade() {
+        // The monthly kill-switch trips on the very trade the strategy then signals on; the
+        // signal must be refused, which only holds if the breaker ran first.
         let venue = Venue::default();
-        let mut driver = driver(vec![long()]);
+        let mut driver = driver(vec![long(), long()]);
         driver.on_wallet_balance(dec!(1000));
+        // The first trade marks the month's open equity and sends the first entry.
         driver.on_market_trade(&venue, &print(1_000)).await;
-        // Month open equity was marked at 1000; a 20% wallet drop breaches the 15% limit.
+        // A 20% wallet drop breaches the 15% limit.
         driver.on_wallet_balance(dec!(800));
 
         let step = driver.on_market_trade(&venue, &print(1_001)).await;
 
-        // The breaker is a trade-time event; the refused signal belongs to the bar.
         assert!(matches!(
             step.trade_events[0],
             SessionEvent::MonthlyBreakerTripped { .. }
         ));
         assert!(step
-            .bar_events
+            .strategy_events
             .iter()
             .any(|e| matches!(e, SessionEvent::SignalSkipped(_))));
-        assert!(!venue.calls.borrow().iter().any(|c| c == "entry"));
+        let entries = venue
+            .calls
+            .borrow()
+            .iter()
+            .filter(|c| *c == "entry")
+            .count();
+        assert_eq!(entries, 1, "only the first signal reached the venue");
     }
 
     #[tokio::test]
-    async fn warming_up_shows_the_strategy_history_without_counting_live_bars() {
+    async fn warming_up_shows_the_strategy_history_without_counting_live_trades() {
         let venue = Venue::default();
         let mut driver = driver(vec![long()]);
 
-        let warm_bars = driver.warm_up_trades((0..2).map(print)).unwrap();
+        let warm = driver.warm_up_trades((0..2).map(print));
         let step = driver.on_market_trade(&venue, &print(5_000)).await;
 
-        // The scripted signal was spent on history; the live sampler starts on a fresh bar.
-        assert_eq!(warm_bars, 1);
-        assert!(step.bar.is_none());
-        assert_eq!((driver.ticks(), driver.bars()), (1, 0));
+        // The scripted signal was spent on history.
+        assert_eq!(warm, 2);
+        assert!(step.strategy_events.is_empty());
+        assert_eq!(driver.ticks(), 1);
         assert!(venue.calls.borrow().is_empty());
-    }
-
-    #[test]
-    fn an_invalid_threshold_is_rejected() {
-        let session = TradingSession::new(
-            SessionConfig {
-                symbol: "BTCUSDT".to_string(),
-                initial_equity: dec!(1000),
-                fallback_fee_pct: dec!(0.0005),
-                max_monthly_drawdown_pct: dec!(0.15),
-                halt_retry_ms: 5_000,
-                entry_timeout_ms: 30_000,
-                gate: domain::EntryGate::new(
-                    domain::RiskPolicy::default(),
-                    dec!(0.01),
-                    domain::MarketType::UsdMPerpetual,
-                ),
-            },
-            Scripted {
-                intents: VecDeque::new(),
-                bars_seen: 0,
-            },
-        );
-
-        assert!(SessionDriver::new(session, Decimal::ZERO).is_err());
     }
 }

@@ -10,8 +10,8 @@ fn sample_spec() -> RunSpec<PolicyConfig> {
         strategy_id: "swarm_consensus".to_string(),
         symbol: "BTCUSDT".to_string(),
         market_type: MarketType::UsdMPerpetual,
-        sampling: SamplingConfig::DollarBar {
-            threshold: dec!(1_000_000),
+        sampling: SamplingConfig::Trades {
+            price_bucket_ms: Some(1_000),
         },
         strategy_config: PolicyConfig::default(),
         execution_context: BacktestConfig::default(),
@@ -46,7 +46,7 @@ fn artifact_serializes_with_flat_legacy_layout() {
     };
     let value = serde_json::to_value(&artifact).unwrap();
     assert_eq!(value["strategy_id"], "swarm_consensus");
-    assert_eq!(value["sampling"]["type"], "dollar_bar");
+    assert_eq!(value["sampling"]["type"], "trades");
     assert_eq!(value["execution_context"]["taker_fee_pct"], "0.0005");
     assert!(value.get("spec").is_none());
 }

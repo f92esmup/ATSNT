@@ -29,8 +29,8 @@ fn spec() -> RunSpec<TestConfig> {
         strategy_id: "test_strategy".to_string(),
         symbol: "BTCUSDT".to_string(),
         market_type: MarketType::UsdMPerpetual,
-        sampling: SamplingConfig::DollarBar {
-            threshold: dec!(1_000_000),
+        sampling: SamplingConfig::Trades {
+            price_bucket_ms: Some(1_000),
         },
         strategy_config: TestConfig::default(),
         execution_context: BacktestConfig::default(),
@@ -110,7 +110,7 @@ fn run_row_records_full_spec_and_lineage() {
     let ctx: serde_json::Value = serde_json::from_str(&row.execution_context).unwrap();
     assert_eq!(ctx["taker_fee_pct"], "0.0005");
     let sampling: serde_json::Value = serde_json::from_str(&row.sampling).unwrap();
-    assert_eq!(sampling["type"], "dollar_bar");
+    assert_eq!(sampling["type"], "trades");
 }
 
 #[test]

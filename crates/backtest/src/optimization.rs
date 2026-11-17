@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use domain::{DollarBar, Trade};
+use domain::Trade;
 use ports::ProgressSink;
 use rayon::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
@@ -161,31 +161,6 @@ impl<F> Tape<F> {
         }
         Ok(trimmed)
     }
-}
-
-/// Builds the tape of a dollar-bar input: one price event per bar, and the features the
-/// extractor of `S` produced on that bar attached to it. For a dollar-bar strategy the feature
-/// is the bar itself ([`strategies::BarPassThrough`]).
-pub fn bar_tape<S: OptimizableStrategy>(
-    shared: &S::SharedConfig,
-    bars: &[DollarBar],
-) -> Result<Tape<FeaturesOf<S>>, BacktestError> {
-    let mut extractor = S::extractor(shared)?;
-    let mut features = Vec::with_capacity(bars.len());
-    let mut prices = Vec::with_capacity(bars.len());
-    let mut feature_ends = Vec::with_capacity(bars.len());
-    for bar in bars {
-        prices.push(PriceEvent::from(bar));
-        if let Some(feature) = extractor.on_event(&MarketEvent::DollarBar(bar)) {
-            features.push((bar.end_time, feature));
-        }
-        feature_ends.push(features.len());
-    }
-    Ok(Tape {
-        features,
-        prices,
-        feature_ends,
-    })
 }
 
 /// Builds the tape of a trade input (strategy spec §15.1): the trades stream once through the
@@ -626,18 +601,6 @@ impl<S: OptimizableStrategy> WalkForwardOptimizer<S> {
         &self.shared
     }
 
-    /// [`WalkForwardOptimizer::run_optimization_on_tape`] over the tape of `bars` (see
-    /// [`bar_tape`]); `folds` index the bars.
-    pub fn run_optimization(
-        &self,
-        bars: &[DollarBar],
-        folds: &[WalkForwardFold],
-        max_candidates: usize,
-    ) -> Result<Vec<CandidateEvaluation<S::Config>>, BacktestError> {
-        let tape = bar_tape::<S>(&self.shared, bars)?;
-        self.run_optimization_on_tape(&tape, folds, max_candidates)
-    }
-
     /// Evaluates candidate configurations in parallel across all CPU cores with `Rayon`.
     ///
     /// `folds` index the tape's price events. Per candidate and fold slice, a fresh decision
@@ -836,34 +799,55 @@ mod tests {
     use crate::walk_forward::WalkForwardConfig;
     use crate::walk_forward::WalkForwardSplitter;
 
-    fn generate_synthetic_bars(count: usize) -> Vec<DollarBar> {
-        let mut bars = Vec::with_capacity(count);
-        let mut current_price = dec!(40000.0);
-        let mut current_time = 1700000000000i64;
+    /// One print a minute on an oscillating price; with 60 s buckets each is one price event.
+    fn generate_synthetic_trades(count: usize) -> Vec<Trade> {
+        let mut price = dec!(40000.0);
+        (0..count)
+            .map(|i| {
+                price += if i % 2 == 0 { dec!(50.0) } else { dec!(-48.0) };
+                let side = if i % 2 == 0 {
+                    domain::Side::Buy
+                } else {
+                    domain::Side::Sell
+                };
+                Trade::new(
+                    1_700_000_000_000 + 60_000 * (i as i64 + 1),
+                    price,
+                    dec!(10),
+                    side,
+                )
+                .unwrap()
+            })
+            .collect()
+    }
 
-        for i in 0..count {
-            // Oscillating price movement
-            let delta = if i % 2 == 0 { dec!(50.0) } else { dec!(-48.0) };
-            current_price += delta;
-            current_time += 60000; // 1 minute per bar
+    /// The tape of `count` synthetic minutes for strategy `S`.
+    fn synthetic_tape<S: OptimizableStrategy>(count: usize) -> Tape<FeaturesOf<S>>
+    where
+        S::SharedConfig: Default,
+    {
+        trade_tape::<S>(
+            &S::SharedConfig::default(),
+            generate_synthetic_trades(count),
+            60_000,
+        )
+        .unwrap()
+    }
 
-            bars.push(DollarBar {
-                start_time: current_time - 60000,
-                end_time: current_time,
-                open: current_price - delta,
-                high: current_price + dec!(20.0),
-                low: current_price - dec!(20.0),
-                close: current_price,
-                volume: dec!(10.0),
-                dollar_volume: dec!(400000.0),
-                buy_volume: dec!(5.0),
-                sell_volume: dec!(5.0),
-                buy_dollar_volume: dec!(200000.0),
-                sell_dollar_volume: dec!(200000.0),
-                trade_count: 50,
-            });
+    /// The feature is the trade itself.
+    struct TradePassThrough;
+
+    impl strategies::FeatureExtractor for TradePassThrough {
+        type Features = Trade;
+
+        fn on_event(&mut self, event: &strategies::MarketEvent<'_>) -> Option<Trade> {
+            match event {
+                strategies::MarketEvent::Trade(trade) => Some((*trade).clone()),
+                _ => None,
+            }
         }
-        bars
+
+        fn reset(&mut self) {}
     }
 
     fn moments(count: usize, mean: f64, std_dev: f64) -> ReturnMoments {
@@ -937,13 +921,13 @@ mod tests {
     }
 
     fn mock_sweep(min_trades: usize) -> Vec<CandidateEvaluation<MockConfig>> {
-        let bars = generate_synthetic_bars(400);
+        let tape = synthetic_tape::<MockStrategy>(400);
         let wf_config = WalkForwardConfig {
             num_folds: 2,
             train_ratio: 0.70,
             embargo_bars: 5,
         };
-        let folds = WalkForwardSplitter::generate_rolling_folds(bars.len(), &wf_config).unwrap();
+        let folds = WalkForwardSplitter::generate_rolling_folds(tape.len(), &wf_config).unwrap();
         let engine_config = BacktestConfig {
             initial_capital: dec!(10000.0),
             risk_per_trade_pct: dec!(0.01),
@@ -961,7 +945,7 @@ mod tests {
             },
         )
         .with_min_trades_per_fold(min_trades)
-        .run_optimization(&bars, &folds, 10)
+        .run_optimization_on_tape(&tape, &folds, 10)
         .unwrap()
     }
 
@@ -1086,13 +1070,13 @@ mod tests {
 
     #[test]
     fn run_parallel_walk_forward_optimization() {
-        let bars = generate_synthetic_bars(500);
+        let tape = synthetic_tape::<MockStrategy>(500);
         let wf_config = WalkForwardConfig {
             num_folds: 2,
             train_ratio: 0.70,
             embargo_bars: 10,
         };
-        let folds = WalkForwardSplitter::generate_rolling_folds(bars.len(), &wf_config).unwrap();
+        let folds = WalkForwardSplitter::generate_rolling_folds(tape.len(), &wf_config).unwrap();
 
         let engine_config = BacktestConfig {
             initial_capital: dec!(10000.0),
@@ -1110,7 +1094,9 @@ mod tests {
         };
 
         let optimizer = WalkForwardOptimizer::<MockStrategy>::new(engine_config, param_space);
-        let results = optimizer.run_optimization(&bars, &folds, 8).unwrap();
+        let results = optimizer
+            .run_optimization_on_tape(&tape, &folds, 8)
+            .unwrap();
 
         assert!(!results.is_empty());
         // Verify results are sorted descending by fitness
@@ -1184,18 +1170,18 @@ mod tests {
         }
 
         fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<domain::OrderIntent> {
-            let MarketEvent::DollarBar(bar) = event else {
+            let MarketEvent::Trade(trade) = event else {
                 return None;
             };
             self.counter += 1;
             if self.counter >= self.config.window {
                 self.counter = 0;
                 domain::OrderIntent::new(
-                    bar.end_time,
+                    trade.timestamp,
                     domain::Side::Buy,
-                    bar.close,
-                    bar.close - dec!(100),
-                    bar.close + dec!(100),
+                    trade.price,
+                    trade.price - dec!(100),
+                    trade.price + dec!(100),
                     5,
                 )
                 .ok()
@@ -1213,7 +1199,7 @@ mod tests {
         type SharedConfig = ();
         type Config = MockConfig;
         type Space = MockSpace;
-        type Extractor = strategies::BarPassThrough;
+        type Extractor = TradePassThrough;
 
         fn id() -> &'static str {
             "mock_strategy"
@@ -1224,11 +1210,11 @@ mod tests {
         }
 
         fn extractor(_: &()) -> Result<Self::Extractor, domain::DomainError> {
-            Ok(strategies::BarPassThrough)
+            Ok(TradePassThrough)
         }
 
-        fn on_features(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
-            strategies::Strategy::on_event(self, &strategies::MarketEvent::DollarBar(bar))
+        fn on_features(&mut self, trade: &Trade) -> Option<domain::OrderIntent> {
+            strategies::Strategy::on_event(self, &strategies::MarketEvent::Trade(trade))
         }
 
         fn default_space() -> Self::Space {
@@ -1248,13 +1234,13 @@ mod tests {
     struct CountingExtractor;
 
     impl strategies::FeatureExtractor for CountingExtractor {
-        type Features = DollarBar;
+        type Features = Trade;
 
-        fn on_event(&mut self, event: &strategies::MarketEvent<'_>) -> Option<DollarBar> {
+        fn on_event(&mut self, event: &strategies::MarketEvent<'_>) -> Option<Trade> {
             EVENTS_EXTRACTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match event {
-                strategies::MarketEvent::DollarBar(bar) => Some((*bar).clone()),
-                strategies::MarketEvent::Trade(_) => None,
+                strategies::MarketEvent::Trade(trade) => Some((*trade).clone()),
+                _ => None,
             }
         }
 
@@ -1274,10 +1260,10 @@ mod tests {
         }
 
         fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<domain::OrderIntent> {
-            let MarketEvent::DollarBar(bar) = event else {
+            let MarketEvent::Trade(trade) = event else {
                 return None;
             };
-            self.0.on_event(&strategies::MarketEvent::DollarBar(bar))
+            self.0.on_event(&strategies::MarketEvent::Trade(trade))
         }
 
         fn reset(&mut self) {
@@ -1304,8 +1290,8 @@ mod tests {
             Ok(CountingExtractor)
         }
 
-        fn on_features(&mut self, bar: &DollarBar) -> Option<domain::OrderIntent> {
-            strategies::Strategy::on_event(self, &strategies::MarketEvent::DollarBar(bar))
+        fn on_features(&mut self, trade: &Trade) -> Option<domain::OrderIntent> {
+            strategies::Strategy::on_event(self, &strategies::MarketEvent::Trade(trade))
         }
 
         fn default_space() -> Self::Space {
@@ -1413,8 +1399,9 @@ mod tests {
     }
 
     #[test]
-    fn a_bar_tape_replays_exactly_like_the_bar_engine() {
-        let bars = generate_synthetic_bars(300);
+    fn a_trade_tape_replays_exactly_like_the_engine() {
+        let trades = generate_synthetic_trades(300);
+        let tape = trade_tape::<MockStrategy>(&(), trades.clone(), 60_000).unwrap();
         let config = MockConfig {
             window: 3,
             threshold: Decimal::ONE,
@@ -1426,12 +1413,13 @@ mod tests {
         };
         let mut strategy = MockStrategy::from_config(&(), config.clone()).unwrap();
         let mut engine = BacktestEngine::new(engine_config);
-        for bar in &bars[100..250] {
-            engine.process_bar(&mut strategy, bar);
+        for trade in &trades[100..250] {
+            engine.process_event(&PriceEvent::from(trade), &mut || {
+                strategies::Strategy::on_event(&mut strategy, &MarketEvent::Trade(trade))
+            });
         }
-        let expected = engine.finish_with_trades(bars.get(249).map(|b| b.close));
+        let expected = engine.finish_with_trades(trades.get(249).map(|t| t.price));
 
-        let tape = bar_tape::<MockStrategy>(&(), &bars).unwrap();
         let replayed =
             run_tape_slice::<MockStrategy>(engine_config, &(), &config, &tape, 100..250).unwrap();
 
@@ -1445,13 +1433,13 @@ mod tests {
     #[test]
     fn the_extractor_runs_exactly_once_per_optimisation_run() {
         use std::sync::atomic::Ordering;
-        let bars = generate_synthetic_bars(300);
+        let tape = synthetic_tape::<CountingStrategy>(300);
         let wf_config = WalkForwardConfig {
             num_folds: 2,
             train_ratio: 0.70,
             embargo_bars: 5,
         };
-        let folds = WalkForwardSplitter::generate_rolling_folds(bars.len(), &wf_config).unwrap();
+        let folds = WalkForwardSplitter::generate_rolling_folds(tape.len(), &wf_config).unwrap();
         let engine_config = BacktestConfig {
             max_order_notional: Some(dec!(100_000)),
             max_position_notional: Some(dec!(100_000)),
@@ -1460,23 +1448,23 @@ mod tests {
 
         let results = WalkForwardOptimizer::<CountingStrategy>::with_default_space(engine_config)
             .with_min_trades_per_fold(1)
-            .run_optimization(&bars, &folds, 3)
+            .run_optimization_on_tape(&tape, &folds, 3)
             .unwrap();
 
         assert_eq!(results.len(), 3, "three candidates over two folds");
         assert_eq!(EXTRACTORS_BUILT.load(Ordering::SeqCst), 1);
-        assert_eq!(EVENTS_EXTRACTED.load(Ordering::SeqCst), bars.len());
+        assert_eq!(EVENTS_EXTRACTED.load(Ordering::SeqCst), 300);
     }
 
     #[test]
     fn run_optimization_for_custom_mock_strategy() {
-        let bars = generate_synthetic_bars(200);
+        let tape = synthetic_tape::<MockStrategy>(200);
         let wf_config = WalkForwardConfig {
             num_folds: 2,
             train_ratio: 0.70,
             embargo_bars: 5,
         };
-        let folds = WalkForwardSplitter::generate_rolling_folds(bars.len(), &wf_config).unwrap();
+        let folds = WalkForwardSplitter::generate_rolling_folds(tape.len(), &wf_config).unwrap();
         let engine_config = BacktestConfig {
             initial_capital: dec!(10000.0),
             maker_fee_pct: dec!(0.0002),
@@ -1488,7 +1476,9 @@ mod tests {
         };
 
         let optimizer = WalkForwardOptimizer::<MockStrategy>::with_default_space(engine_config);
-        let results = optimizer.run_optimization(&bars, &folds, 6).unwrap();
+        let results = optimizer
+            .run_optimization_on_tape(&tape, &folds, 6)
+            .unwrap();
 
         assert!(!results.is_empty());
         for i in 1..results.len() {
@@ -1498,9 +1488,9 @@ mod tests {
 
     #[test]
     fn each_candidate_keeps_full_in_and_out_of_sample_metrics_per_fold() {
-        let bars = generate_synthetic_bars(600);
+        let tape = synthetic_tape::<MockStrategy>(600);
         let folds = WalkForwardSplitter::generate_rolling_folds(
-            bars.len(),
+            tape.len(),
             &WalkForwardConfig {
                 num_folds: 3,
                 train_ratio: 0.7,
@@ -1510,7 +1500,9 @@ mod tests {
         .unwrap();
         let optimizer =
             WalkForwardOptimizer::<MockStrategy>::with_default_space(BacktestConfig::default());
-        let evaluations = optimizer.run_optimization(&bars, &folds, 4).unwrap();
+        let evaluations = optimizer
+            .run_optimization_on_tape(&tape, &folds, 4)
+            .unwrap();
         assert!(!evaluations.is_empty());
         for eval in &evaluations {
             assert_eq!(eval.fold_metrics.len(), folds.len());

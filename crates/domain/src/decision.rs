@@ -6,35 +6,24 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::bar::DollarBar;
 use crate::order::OrderIntent;
 use crate::trade::Trade;
 
-/// The market input a strategy declares it consumes; runners prepare exactly that stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InputKind {
-    /// Finished dollar bars from the shared `DollarBarAggregator`.
-    DollarBars,
-    /// Raw aggregated trades; the strategy samples its own bars.
-    Trades,
-}
-
 /// One event a strategy reacts to.
+///
+/// Non-exhaustive: a strategy matches the trade and ignores whatever input is added later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MarketEvent<'a> {
     /// A single market trade.
     Trade(&'a Trade),
-    /// A finished dollar bar.
-    DollarBar(&'a DollarBar),
 }
 
 impl MarketEvent<'_> {
-    /// When the event happened (Unix ms): the trade time, or the bar's last trade time.
+    /// When the event happened (Unix ms).
     pub fn timestamp(&self) -> i64 {
         match self {
             MarketEvent::Trade(trade) => trade.timestamp,
-            MarketEvent::DollarBar(bar) => bar.end_time,
         }
     }
 }
@@ -81,7 +70,7 @@ impl ProtectiveExits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DollarBar, OrderIntent, Side, Trade};
+    use crate::{OrderIntent, Side, Trade};
     use rust_decimal_macros::dec;
 
     #[test]
@@ -104,33 +93,5 @@ mod tests {
     fn a_market_event_reports_when_it_happened() {
         let trade = Trade::new(42, dec!(100), dec!(1), Side::Buy).unwrap();
         assert_eq!(MarketEvent::Trade(&trade).timestamp(), 42);
-        let bar = DollarBar {
-            start_time: 10,
-            end_time: 99,
-            open: dec!(1),
-            high: dec!(1),
-            low: dec!(1),
-            close: dec!(1),
-            volume: dec!(1),
-            dollar_volume: dec!(1),
-            trade_count: 1,
-            buy_volume: dec!(1),
-            sell_volume: dec!(0),
-            buy_dollar_volume: dec!(1),
-            sell_dollar_volume: dec!(0),
-        };
-        assert_eq!(MarketEvent::DollarBar(&bar).timestamp(), 99);
-    }
-
-    #[test]
-    fn input_kind_round_trips_through_json() {
-        for kind in [InputKind::DollarBars, InputKind::Trades] {
-            let json = serde_json::to_string(&kind).unwrap();
-            assert_eq!(serde_json::from_str::<InputKind>(&json).unwrap(), kind);
-        }
-        assert_eq!(
-            serde_json::to_string(&InputKind::Trades).unwrap(),
-            "\"trades\""
-        );
     }
 }

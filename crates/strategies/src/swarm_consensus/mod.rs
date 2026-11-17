@@ -28,9 +28,7 @@ pub use sample::{ConsensusSample, FeedVote, FeedWeights, FeedWeightsError};
 
 use domain::{DomainError, OrderIntent};
 
-use crate::strategy::{
-    FeatureExtractor, InputKind, MarketEvent, MarketType, OptimizableStrategy, Strategy,
-};
+use crate::strategy::{FeatureExtractor, MarketEvent, MarketType, OptimizableStrategy, Strategy};
 
 /// The swarm consensus strategy: the [`SwarmEnsemble`] (frozen first stage) feeding the
 /// [`ConsensusPolicy`] (searched decision stage). It consumes raw trades and emits
@@ -49,10 +47,6 @@ impl Strategy for SwarmConsensusStrategy {
 
     fn compatible_market_types(&self) -> &'static [MarketType] {
         &[MarketType::Spot, MarketType::UsdMPerpetual]
-    }
-
-    fn input_kind(&self) -> InputKind {
-        InputKind::Trades
     }
 
     /// The two stages in one call, so the live path and the optimizer cannot drift apart.
@@ -119,7 +113,7 @@ impl OptimizableStrategy for SwarmConsensusStrategy {
 mod tests {
     use super::*;
     use crate::registry::canonical_id;
-    use crate::strategy::{InputKind, OptimizableStrategy, Strategy};
+    use crate::strategy::{OptimizableStrategy, Strategy};
 
     #[test]
     fn the_swarm_is_registered_under_its_id_and_alias() {
@@ -132,7 +126,6 @@ mod tests {
         let strategy =
             SwarmConsensusStrategy::from_config(&SwarmConfig::default(), PolicyConfig::default())
                 .unwrap();
-        assert_eq!(strategy.input_kind(), InputKind::Trades);
         let audit = strategy.audit().expect("the swarm reports an audit");
         assert!(audit.is_object());
     }

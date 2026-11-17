@@ -33,7 +33,6 @@ use strategies::{
 const DAYS: i64 = 90;
 const CAPITAL: Decimal = dec!(5000);
 const SEED: u64 = 7;
-const DOLLAR_BAR: Decimal = dec!(1_000_000);
 const TICK_LATENCY_MS: i64 = 100;
 const FIXED_RUN_ID: &str = "0198b3c0-7a4e-7c21-8f3d-5b2a9c6e1d40";
 
@@ -76,7 +75,6 @@ async fn tick_run<S: Strategy>(
     let config = TickSimulationConfig {
         backtest: account,
         symbol: "BTCUSDT".to_string(),
-        dollar_bar_threshold: DOLLAR_BAR,
         latency_ms: TICK_LATENCY_MS,
         funding: FundingSchedule::constant(account.funding_rate_pct),
     };

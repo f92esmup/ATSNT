@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use backtest::{BacktestConfig, BacktestEngine, PriceEvent, TickSimulationConfig};
 use domain::futures::FundingSchedule;
-use domain::{InputKind, MarketEvent, MarketType, OrderIntent, Side, Trade};
+use domain::{MarketEvent, MarketType, OrderIntent, Side, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategies::Strategy;
@@ -32,10 +32,6 @@ impl Strategy for EveryTrade {
 
     fn compatible_market_types(&self) -> &'static [MarketType] {
         &[MarketType::Spot, MarketType::UsdMPerpetual]
-    }
-
-    fn input_kind(&self) -> InputKind {
-        InputKind::Trades
     }
 
     fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
@@ -100,7 +96,6 @@ async fn tick_refusals(
     let config = TickSimulationConfig {
         backtest: config,
         symbol: "BTCUSDT".to_string(),
-        dollar_bar_threshold: dec!(1_000_000),
         latency_ms: 0,
         funding: FundingSchedule::constant(config.funding_rate_pct),
     };

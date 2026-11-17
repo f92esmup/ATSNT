@@ -11,8 +11,6 @@
 //! byte-identical to the pre-extraction engine (proved by `tests/golden_execution.rs`).
 
 use domain::futures;
-#[cfg(test)]
-use domain::DollarBar;
 use domain::MarketType;
 use domain::{OrderIntent, Position, PositionSide, ProtectiveExits, Side};
 use rust_decimal::prelude::ToPrimitive;
@@ -203,8 +201,7 @@ fn liquidation_of(position: &Position, margin: Decimal, config: &BacktestConfig)
     )
 }
 
-/// Evaluates the protective exits of a position on `side` against one price event (a
-/// [`domain::DollarBar`] converts into one with the same OHLC).
+/// Evaluates the protective exits of a position on `side` against one price event.
 ///
 /// Barrier exits are market orders: they fill at the trigger or, when the event gapped through
 /// it, at the open, and pay slippage against the position. The stop is checked first, then
@@ -928,19 +925,16 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
 
-    fn bar(open: Decimal, high: Decimal, low: Decimal, close: Decimal) -> DollarBar {
-        DollarBar {
-            start_time: 1_000,
-            end_time: 2_000,
+    fn bar(open: Decimal, high: Decimal, low: Decimal, close: Decimal) -> PriceEvent {
+        PriceEvent {
+            start_ms: 1_000,
+            end_ms: 2_000,
             open,
             high,
             low,
             close,
             volume: dec!(1),
             dollar_volume: close,
-            trade_count: 2,
-            buy_volume: dec!(0.5),
-            sell_volume: dec!(0.5),
             buy_dollar_volume: close / dec!(2),
             sell_dollar_volume: close / dec!(2),
         }
@@ -973,7 +967,7 @@ mod tests {
         let exits = stop_only(dec!(95));
         let rally = bar(dec!(100), dec!(150), dec!(99), dec!(140));
         assert_eq!(
-            barrier_exit(PositionSide::Long, &exits, &rally, usize::MAX, dec!(0.001)),
+            barrier_exit(PositionSide::Long, &exits, rally, usize::MAX, dec!(0.001)),
             None
         );
         let short_exits = stop_only(dec!(105));
@@ -982,7 +976,7 @@ mod tests {
             barrier_exit(
                 PositionSide::Short,
                 &short_exits,
-                &drop,
+                drop,
                 usize::MAX,
                 dec!(0.001)
             ),
@@ -994,7 +988,7 @@ mod tests {
     fn a_stop_gapped_through_fills_at_the_open_and_reports_slippage_from_the_trigger() {
         let exits = stop_only(dec!(95));
         let gap = bar(dec!(90), dec!(91), dec!(89), dec!(90));
-        let exit = barrier_exit(PositionSide::Long, &exits, &gap, 1, dec!(0.001));
+        let exit = barrier_exit(PositionSide::Long, &exits, gap, 1, dec!(0.001));
         assert_eq!(
             exit,
             Some(BarrierExit {
@@ -1005,7 +999,7 @@ mod tests {
         );
         let short_exits = stop_only(dec!(105));
         let gap_up = bar(dec!(110), dec!(111), dec!(109), dec!(110));
-        let exit = barrier_exit(PositionSide::Short, &short_exits, &gap_up, 1, dec!(0.001));
+        let exit = barrier_exit(PositionSide::Short, &short_exits, gap_up, 1, dec!(0.001));
         assert_eq!(
             exit,
             Some(BarrierExit {
@@ -1022,12 +1016,12 @@ mod tests {
         // Both the stop and the target trade on one bar: the stop wins.
         let both = bar(dec!(100), dec!(111), dec!(94), dec!(100));
         assert_eq!(
-            barrier_exit(PositionSide::Long, &exits, &both, 1, dec!(0)).map(|e| e.reason),
+            barrier_exit(PositionSide::Long, &exits, both, 1, dec!(0)).map(|e| e.reason),
             Some("StopLoss")
         );
         let target = bar(dec!(100), dec!(111), dec!(99), dec!(105));
         assert_eq!(
-            barrier_exit(PositionSide::Long, &exits, &target, 3, dec!(0.001)),
+            barrier_exit(PositionSide::Long, &exits, target, 3, dec!(0.001)),
             Some(BarrierExit {
                 price: dec!(109.890),
                 slippage_per_unit: dec!(0.110),
@@ -1036,11 +1030,11 @@ mod tests {
         );
         let quiet = bar(dec!(100), dec!(101), dec!(99), dec!(100));
         assert_eq!(
-            barrier_exit(PositionSide::Long, &exits, &quiet, 2, dec!(0.001)),
+            barrier_exit(PositionSide::Long, &exits, quiet, 2, dec!(0.001)),
             None
         );
         assert_eq!(
-            barrier_exit(PositionSide::Long, &exits, &quiet, 3, dec!(0.001)),
+            barrier_exit(PositionSide::Long, &exits, quiet, 3, dec!(0.001)),
             Some(BarrierExit {
                 price: dec!(99.900),
                 slippage_per_unit: dec!(0.100),
@@ -1065,7 +1059,7 @@ mod tests {
         let pending = core.take_pending().expect("queued");
         core.fill_entry(
             pending,
-            &bar(dec!(100), dec!(100), dec!(100), dec!(100)),
+            bar(dec!(100), dec!(100), dec!(100), dec!(100)),
             &config,
             &mut equity,
         );
@@ -1073,7 +1067,7 @@ mod tests {
         assert_eq!(core.exits().map(|e| e.stop), Some(dec!(95)));
 
         core.evaluate_exits(
-            &bar(dec!(100), dec!(111), dec!(100), dec!(110)),
+            bar(dec!(100), dec!(111), dec!(100), dec!(110)),
             &config,
             &mut equity,
             &mut excursion,
@@ -1115,7 +1109,7 @@ mod tests {
         let pending = core.take_pending().expect("queued");
         core.fill_entry(
             pending,
-            &bar(dec!(100), dec!(100), dec!(100), dec!(100)),
+            bar(dec!(100), dec!(100), dec!(100), dec!(100)),
             &config,
             &mut equity,
         );
@@ -1123,7 +1117,7 @@ mod tests {
 
         // Bar 1: Favorable excursion reaches 106 (+1.2 ATR >= 0.75 ATR)
         core.evaluate_exits(
-            &bar(dec!(100), dec!(106), dec!(99), dec!(105)),
+            bar(dec!(100), dec!(106), dec!(99), dec!(105)),
             &config,
             &mut equity,
             &mut excursion,
@@ -1160,14 +1154,14 @@ mod tests {
         let pending = core.take_pending().expect("queued");
         core.fill_entry(
             pending,
-            &bar(dec!(100), dec!(100), dec!(100), dec!(100)),
+            bar(dec!(100), dec!(100), dec!(100), dec!(100)),
             &config,
             &mut equity,
         );
 
         // Bar 1: High reaches 105.5 (+1.1 ATR >= 0.75 ATR) -> stop ratchets to breakeven (100)
         core.evaluate_exits(
-            &bar(dec!(100), dec!(105.5), dec!(99), dec!(104)),
+            bar(dec!(100), dec!(105.5), dec!(99), dec!(104)),
             &config,
             &mut equity,
             &mut excursion,
@@ -1176,7 +1170,7 @@ mod tests {
 
         // Bar 2: Sharp reversal drops below breakeven (low 98)
         core.evaluate_exits(
-            &bar(dec!(104), dec!(104), dec!(98), dec!(98.5)),
+            bar(dec!(104), dec!(104), dec!(98), dec!(98.5)),
             &config,
             &mut equity,
             &mut excursion,
@@ -1215,14 +1209,14 @@ mod tests {
         let pending = core.take_pending().expect("queued");
         core.fill_entry(
             pending,
-            &bar(dec!(100), dec!(100), dec!(100), dec!(100)),
+            bar(dec!(100), dec!(100), dec!(100), dec!(100)),
             &config,
             &mut equity,
         );
 
         // Bar 1: High reaches 108 (+1.6 ATR >= 1.5 ATR, k=3) -> Stop ratchets to entry + 1.0 ATR = 105.0
         core.evaluate_exits(
-            &bar(dec!(100), dec!(108), dec!(99), dec!(107)),
+            bar(dec!(100), dec!(108), dec!(99), dec!(107)),
             &config,
             &mut equity,
             &mut excursion,
@@ -1231,7 +1225,7 @@ mod tests {
 
         // Bar 2: High reaches 111 (+2.2 ATR >= 2.0 ATR, k=4) -> Stop ratchets to entry + 1.5 ATR = 107.5
         core.evaluate_exits(
-            &bar(dec!(107), dec!(111), dec!(106), dec!(110)),
+            bar(dec!(107), dec!(111), dec!(106), dec!(110)),
             &config,
             &mut equity,
             &mut excursion,
@@ -1240,7 +1234,7 @@ mod tests {
 
         // Bar 3: Reversal drops to 104, triggering the trailed stop at 107.5
         core.evaluate_exits(
-            &bar(dec!(110), dec!(110), dec!(104), dec!(104.5)),
+            bar(dec!(110), dec!(110), dec!(104), dec!(104.5)),
             &config,
             &mut equity,
             &mut excursion,
@@ -1279,7 +1273,7 @@ mod tests {
 
         // Bar touches limit price (low 99 <= 100)
         let bar_touched = bar(dec!(102), dec!(105), dec!(99), dec!(101));
-        let outcome = core.step_pending_entry(&bar_touched, &config, &mut equity);
+        let outcome = core.step_pending_entry(bar_touched, &config, &mut equity);
 
         assert_eq!(outcome, PendingEntryOutcome::FilledLimit);
         assert!(core.pending().is_none());
@@ -1315,7 +1309,7 @@ mod tests {
 
         // Bar 1: Price stays above limit (low 102 > 100)
         let bar_1 = bar(dec!(105), dec!(106), dec!(102), dec!(103));
-        let outcome_1 = core.step_pending_entry(&bar_1, &config, &mut equity);
+        let outcome_1 = core.step_pending_entry(bar_1, &config, &mut equity);
         assert_eq!(
             outcome_1,
             PendingEntryOutcome::RestingLimit { bars_pending: 1 }
@@ -1325,7 +1319,7 @@ mod tests {
 
         // Bar 2: Price still stays above limit (low 101 > 100) -> reaches TIF timeout of 2
         let bar_2 = bar(dec!(103), dec!(104), dec!(101), dec!(102));
-        let outcome_2 = core.step_pending_entry(&bar_2, &config, &mut equity);
+        let outcome_2 = core.step_pending_entry(bar_2, &config, &mut equity);
         assert_eq!(outcome_2, PendingEntryOutcome::ExpiredLimit);
         assert!(core.position().is_none());
         assert!(core.pending().is_none()); // Slot freed!
@@ -1343,7 +1337,7 @@ mod tests {
 
         let bar_1 = bar(dec!(100), dec!(105), dec!(95), dec!(100));
         let pending = core.take_pending().unwrap();
-        core.fill_entry(pending, &bar_1, &config, &mut equity);
+        core.fill_entry(pending, bar_1, &config, &mut equity);
 
         // Core must remain completely flat because short entries are forbidden in Spot
         assert!(core.position().is_none());
@@ -1361,10 +1355,10 @@ mod tests {
         // Cross 8-hour funding boundary (e.g. from 0 to 8*3600*1000 + 1000)
         let eight_hours = 8 * 3600 * 1000;
         let mut test_bar = bar(dec!(100), dec!(105), dec!(95), dec!(100));
-        test_bar.start_time = eight_hours;
-        test_bar.end_time = eight_hours + 1000;
+        test_bar.start_ms = eight_hours;
+        test_bar.end_ms = eight_hours + 1000;
 
-        core.settle_funding(0, &test_bar, &config, &mut equity);
+        core.settle_funding(0, test_bar, &config, &mut equity);
 
         assert_eq!(equity, dec!(10_000));
         assert_eq!(core.funding_accrued, Decimal::ZERO);
@@ -1384,7 +1378,7 @@ mod tests {
         // Even on a massive price collapse, liquidation does not trigger
         let crash_bar = bar(dec!(10), dec!(10), dec!(1), dec!(5));
         let mut excursion = None;
-        assert!(!core.liquidate_if_due(&(&crash_bar).into(), &config, &mut equity, &mut excursion));
+        assert!(!core.liquidate_if_due(&crash_bar, &config, &mut equity, &mut excursion));
     }
 
     #[test]
