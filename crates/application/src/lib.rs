@@ -9,13 +9,11 @@
 // AGENTS.md: no unwrap or expect in production code; test builds keep them.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-pub mod alert_throttle;
 pub mod config;
 pub mod driver;
 pub mod error;
 pub mod execution_core;
 pub mod live_exits;
-pub mod operator_alerts;
 pub mod parity;
 pub mod price_event;
 pub mod session;

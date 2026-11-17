@@ -2,8 +2,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub use application::{
-    alert_throttle, config, driver, execution_core, live_exits, operator_alerts, parity,
-    price_event, session, tick_simulation,
+    config, driver, execution_core, live_exits, parity, price_event, session, tick_simulation,
 };
 
 pub mod artifact;
@@ -22,7 +21,6 @@ pub use wiring::{
     load_strategy_with_shared, now_unix_ms, resolve_strategy_id,
 };
 
-pub use alert_throttle::AlertThrottle;
 pub use artifact::{
     parse_artifact_shared_config, parse_strategy_config, HpoDeploymentArtifact, HpoScorecard,
     LoadedStrategyConfig, SamplingConfig, StrategyDeploymentArtifact,

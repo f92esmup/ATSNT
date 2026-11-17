@@ -10,7 +10,6 @@ pub mod error;
 pub mod fetch_plan;
 pub mod simulated_venue;
 pub mod storage;
-pub mod telegram;
 #[cfg(test)]
 pub(crate) mod test_http;
 pub mod wall_time;
@@ -27,4 +26,3 @@ pub use storage::jsonl_file::JsonLinesFile;
 pub use storage::sqlite_runs::SqliteRunRecorder;
 pub use storage::tape_parquet::{TapeReader, TapeWriter};
 pub use storage::text_file::read_text;
-pub use telegram::{datetime_in_madrid, now_in_madrid, SymbolPerformanceSummary, TelegramNotifier};

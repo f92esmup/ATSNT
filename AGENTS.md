@@ -27,7 +27,7 @@ The project enforces strict separation of concerns:
        managing exchange-held exits. A venue executes; it sizes nothing and applies no risk rule.
      - `TapeVenue`: A venue replayed trade by trade, for simulations.
      - `Entropy`: Randomness, so a replay is deterministic.
-     - `RunRecorder`, `AlertNotifier`, `FillLog`, `ProgressSink`: Outbound records and reports.
+     - `RunRecorder`, `FillLog`, `ProgressSink`: Outbound records and reports.
 
 3. **Strategies (`strategies`)**:
    - Strategy traits that consume normalized market events and emit order intents.

@@ -27,7 +27,6 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
- "tracing",
  "zip",
 ]
 
@@ -144,7 +143,6 @@ dependencies = [
  "strategies",
  "thiserror 1.0.69",
  "tokio",
- "tracing",
 ]
 
 [[package]]
