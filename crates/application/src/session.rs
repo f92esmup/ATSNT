@@ -316,17 +316,6 @@ impl<S: Strategy> TradingSession<S> {
         events
     }
 
-    /// Advances the session's clock without a market trade, so an entry that never reaches a
-    /// terminal status is still resolved when the public stream goes quiet. `now_ms` is in the
-    /// same market-trade time as [`Self::on_trade`].
-    pub async fn on_idle<V: ExecutionVenue>(
-        &mut self,
-        venue: &V,
-        now_ms: i64,
-    ) -> Vec<SessionEvent> {
-        self.resolve_stale_entry(venue, now_ms).await
-    }
-
     /// Feeds one closed bar: enforces the time barrier, then lets the strategy signal.
     pub async fn on_bar<V: ExecutionVenue>(
         &mut self,
@@ -2066,14 +2055,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_entry_timeout_also_runs_when_no_market_trade_arrives() {
-        // The public stream is silent: only the clock moves.
+    async fn the_entry_timeout_runs_on_the_first_market_trade_after_it() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
         session.on_bar(&venue, &bar(JAN_1 + 10, dec!(100))).await;
 
-        let early = session.on_idle(&venue, JAN_1 + 10 + TIMEOUT - 1).await;
-        let late = session.on_idle(&venue, JAN_1 + 10 + TIMEOUT).await;
+        let early = session
+            .on_trade(&venue, JAN_1 + 10 + TIMEOUT - 1, dec!(100))
+            .await;
+        let late = session
+            .on_trade(&venue, JAN_1 + 10 + TIMEOUT, dec!(100))
+            .await;
 
         assert!(early.is_empty());
         assert!(late.contains(&SessionEvent::EntryTimedOut {
@@ -2083,11 +2075,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idling_does_nothing_without_a_pending_entry() {
+    async fn a_trade_does_nothing_without_a_pending_entry() {
         let venue = FakeVenue::default();
         let mut session = session(vec![long_intent()]);
 
-        let events = session.on_idle(&venue, JAN_1 + 10 * TIMEOUT).await;
+        let events = session
+            .on_trade(&venue, JAN_1 + 10 * TIMEOUT, dec!(100))
+            .await;
 
         assert!(events.is_empty());
         assert!(venue.calls().is_empty());

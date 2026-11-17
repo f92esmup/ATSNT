@@ -26,7 +26,7 @@ only and without leverage, once its economics pass the gates in
 | Crate | Role |
 |---|---|
 | `domain` | Pure rules: orders, positions, risk, the pre-trade gate, fees, accounting and metrics. No I/O and no floats. |
-| `ports` | The traits and plain data the core uses: market data, execution, clock, entropy, run recording and alerts. |
+| `ports` | The traits and plain data the core uses: market data, execution, entropy, run recording and alerts. |
 | `strategies` | The swarm consensus strategy, with its analytics, and the registry that names it. |
 | `application` | The session core that runs on any venue: the trading session, its driver, the exit lifecycle, the execution core and the tick simulation. |
 | `adapters` | Concrete ports: the Parquet tape store, the SQLite run store, the simulated venue, Telegram and the Binance downloader (until WP-09). |

@@ -85,5 +85,5 @@ GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until
   strategy that consumes dollar bars. Removing them means removing the dollar-bar mode of
   `backtest` and `run_hpo`, their flags and the `dollar_bar` sampling of artifacts: a decision
   for the owner.
-- `SimClock` and the clock argument of `SessionDriver::on_idle` have no caller outside tests:
-  no binary runs a live loop.
+- There is no live loop: no binary trades live or on paper. The paper runtime, the clock port and
+  `SessionDriver::on_idle` were removed (2026-11-17) because nothing called them. Git keeps them.

@@ -11,7 +11,6 @@ pub mod engine;
 pub mod error;
 pub mod monte_carlo;
 pub mod optimization;
-pub mod paper;
 pub mod recording;
 pub mod registry;
 pub mod run;
@@ -54,10 +53,6 @@ pub use optimization::{
     deflated_sharpe_p_value, embargo_buckets, expected_max_sharpe, plateau_stability,
     run_tape_slice, trade_tape, CandidateEvaluation, FeaturesOf, FoldMetrics, ReturnMoments, Tape,
     TapeRun, WalkForwardOptimizer, DEFAULT_MIN_TRADES_PER_FOLD, TRADES_WARM_UP_MS,
-};
-pub use paper::{
-    PaperSessionOwner, PaperSessionRuntime, PaperTradingConfig, PaperTradingEvent,
-    PaperTradingSession, TelemetryConfig, TelemetryEnvelope,
 };
 pub use parity::FillRecordError;
 pub use price_event::{bucket_trades, PriceEvent};

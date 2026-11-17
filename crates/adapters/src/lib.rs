@@ -5,7 +5,6 @@ pub mod analytics;
 pub mod binance_csv;
 pub mod binance_fetcher;
 pub mod binance_funding;
-pub mod clock;
 pub mod entropy;
 pub mod error;
 pub mod fetch_plan;
@@ -14,12 +13,12 @@ pub mod storage;
 pub mod telegram;
 #[cfg(test)]
 pub(crate) mod test_http;
+pub mod wall_time;
 
 pub use analytics::{InMemoryRunRecorder, NullRunRecorder, RecordedRuns};
 pub use binance_csv::BinanceCsvReader;
 pub use binance_fetcher::{BinanceDataFetcher, FetchParams, FetchSummary};
 pub use binance_funding::{funding_schedule_from_history, parse_funding_history};
-pub use clock::{SimClock, SystemClock};
 pub use entropy::OsEntropy;
 pub use error::AdapterError;
 pub use fetch_plan::{is_not_archived, plan_fetch_tasks, run_bounded, FetchTask};
