@@ -11,8 +11,6 @@ use crate::run::RunSpec;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SamplingConfig {
-    /// Information-driven volume in quote currency (USDT) to form a Dollar Bar.
-    DollarBar { threshold: Decimal },
     /// Raw trades, the input of a trade-consuming strategy (strategy spec §11.1): grouped into
     /// `price_bucket_ms` price events (HPO), or one price event per trade when it is `None`
     /// (the bar-fill backtest at trade resolution).
@@ -21,16 +19,6 @@ pub enum SamplingConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         price_bucket_ms: Option<i64>,
     },
-}
-
-impl SamplingConfig {
-    /// Returns the dollar bar threshold if this is a DollarBar sampling configuration.
-    pub fn dollar_bar_threshold(&self) -> Option<Decimal> {
-        match self {
-            Self::DollarBar { threshold } => Some(*threshold),
-            Self::Trades { .. } => None,
-        }
-    }
 }
 
 /// Evaluation scorecard and anti-overfitting metrics from the HPO run.
@@ -117,13 +105,6 @@ pub struct StrategyDeploymentArtifact<C> {
     pub hpo_scorecard: Option<HpoScorecard>,
 }
 
-impl<C> StrategyDeploymentArtifact<C> {
-    /// Convenience helper returning the dollar bar threshold if configured.
-    pub fn dollar_bar_threshold(&self) -> Option<Decimal> {
-        self.spec.sampling.dollar_bar_threshold()
-    }
-}
-
 /// The deployment artifact `run_hpo` writes: a [`StrategyDeploymentArtifact`] plus the shared
 /// configuration the whole run was frozen with (strategy spec §15.1).
 ///
@@ -180,14 +161,6 @@ impl<C> LoadedStrategyConfig<C> {
         match self {
             Self::Artifact(a) => a.spec.strategy_config,
             Self::Bare(c) => c,
-        }
-    }
-
-    /// Returns the sampling dollar bar threshold if specified in the artifact.
-    pub fn dollar_bar_threshold(&self) -> Option<Decimal> {
-        match self {
-            Self::Artifact(a) => a.dollar_bar_threshold(),
-            Self::Bare(_) => None,
         }
     }
 
@@ -383,8 +356,8 @@ mod tests {
                 strategy_id: "test_strategy".to_string(),
                 symbol: "BTCUSDT".to_string(),
                 market_type: MarketType::UsdMPerpetual,
-                sampling: SamplingConfig::DollarBar {
-                    threshold: dec!(10_000_000),
+                sampling: SamplingConfig::Trades {
+                    price_bucket_ms: Some(1_000),
                 },
                 strategy_config: config.clone(),
                 execution_context: BacktestConfig::default(),
@@ -408,7 +381,12 @@ mod tests {
         let parsed: StrategyDeploymentArtifact<TestConfig> = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.spec.strategy_id, "test_strategy");
-        assert_eq!(parsed.dollar_bar_threshold(), Some(dec!(10_000_000)));
+        assert_eq!(
+            parsed.spec.sampling,
+            SamplingConfig::Trades {
+                price_bucket_ms: Some(1_000)
+            }
+        );
         assert_eq!(parsed.spec.strategy_config, config);
         assert_eq!(parsed.spec.market_type, MarketType::UsdMPerpetual);
     }
@@ -420,8 +398,8 @@ mod tests {
                 strategy_id: "test_strategy".to_string(),
                 symbol: "BTCUSDT".to_string(),
                 market_type: MarketType::UsdMPerpetual,
-                sampling: SamplingConfig::DollarBar {
-                    threshold: dec!(1_000_000),
+                sampling: SamplingConfig::Trades {
+                    price_bucket_ms: Some(1_000),
                 },
                 strategy_config: TestConfig::default(),
                 execution_context: BacktestConfig::default(),
@@ -431,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn trade_sampling_round_trips_and_declares_no_dollar_bar() {
+    fn trade_sampling_round_trips() {
         let sampling = SamplingConfig::Trades {
             price_bucket_ms: Some(1_000),
         };
@@ -444,7 +422,6 @@ mod tests {
             serde_json::from_value::<SamplingConfig>(json).unwrap(),
             sampling
         );
-        assert_eq!(sampling.dollar_bar_threshold(), None);
 
         // Trade resolution (one price event per trade) has no bucket.
         let per_trade = SamplingConfig::Trades {
@@ -531,8 +508,8 @@ mod tests {
                 strategy_id: "test_strategy".to_string(),
                 symbol: "BTCUSDT".to_string(),
                 market_type: MarketType::UsdMPerpetual,
-                sampling: SamplingConfig::DollarBar {
-                    threshold: dec!(1_000_000),
+                sampling: SamplingConfig::Trades {
+                    price_bucket_ms: Some(1_000),
                 },
                 strategy_config: config.clone(),
                 execution_context: BacktestConfig::default(),
@@ -545,10 +522,6 @@ mod tests {
 
         let loaded_artifact = load_strategy_config::<TestConfig>(&artifact_path).unwrap();
         assert!(matches!(loaded_artifact, LoadedStrategyConfig::Artifact(_)));
-        assert_eq!(
-            loaded_artifact.dollar_bar_threshold(),
-            Some(dec!(1_000_000))
-        );
         assert_eq!(loaded_artifact.strategy_id(), Some("test_strategy"));
         assert_eq!(
             loaded_artifact.market_type(),
@@ -557,7 +530,6 @@ mod tests {
 
         let loaded_bare = load_strategy_config::<TestConfig>(&bare_path).unwrap();
         assert!(matches!(loaded_bare, LoadedStrategyConfig::Bare(_)));
-        assert_eq!(loaded_bare.dollar_bar_threshold(), None);
         assert_eq!(loaded_bare.strategy_config(), &config);
 
         let _ = fs::remove_file(artifact_path);

@@ -448,12 +448,10 @@ fn the_library_names_no_adapter_outside_composition() {
     );
 }
 
-/// Only two library files reach the wiring module: the crate root, which re-exports it, and the
-/// paper session. The paper session runs on a spawned task, so it holds the simulated venue
-/// concretely: a generic venue would have to prove its futures are `Send`.
+/// Only the crate root reaches the wiring module from the library, to re-export it.
 #[test]
 fn the_library_reaches_the_wiring_only_through_its_entries() {
-    const ENTRIES: [&str; 2] = ["lib.rs", "paper.rs"];
+    const ENTRIES: [&str; 1] = ["lib.rs"];
     let mut offenders = Vec::new();
     for (path, production) in production_sources("backtest") {
         let is_entry = ENTRIES.iter().any(|entry| named(&path, entry));

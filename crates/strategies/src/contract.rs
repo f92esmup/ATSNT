@@ -3,24 +3,34 @@
 //! A strategy that implements [`OptimizableStrategy`] and is listed in the
 //! [registry](crate::registry) is checked by [`assert_strategy_contract`] automatically, so a new
 //! strategy gets the same guarantees as the existing ones without writing these tests again.
-//! The suite feeds deterministic synthetic bars or trades (whichever the strategy declares it
-//! consumes) and makes no assumption about when a strategy decides: it pins what must hold
+//! The suite feeds deterministic synthetic trades and makes no assumption about when a strategy decides: it pins what must hold
 //! whenever it does.
 
-use domain::{DollarBar, OrderIntent, Side, Trade};
+use domain::{OrderIntent, Side, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 use crate::strategy::{
-    FeatureExtractor, HyperparameterSpace, InputKind, MarketEvent, OptimizableStrategy, Strategy,
+    FeatureExtractor, HyperparameterSpace, MarketEvent, OptimizableStrategy, Strategy,
 };
 
 /// Candidates requested from the search space when checking it.
 const CANDIDATE_BUDGET: usize = 25;
 
-/// Deterministic pseudo-random walk of well-formed dollar bars (a fixed linear congruential
+/// One synthetic minute: the open, high, low and close the trades below are cut from.
+struct Minute {
+    start_time: i64,
+    end_time: i64,
+    open: Decimal,
+    high: Decimal,
+    low: Decimal,
+    close: Decimal,
+    volume: Decimal,
+}
+
+/// Deterministic pseudo-random walk of well-formed minutes (a fixed linear congruential
 /// generator, so the series never changes between runs or machines).
-pub fn synthetic_bars(count: usize) -> Vec<DollarBar> {
+fn synthetic_minutes(count: usize) -> Vec<Minute> {
     let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut next = move || {
         seed = seed
@@ -39,12 +49,10 @@ pub fn synthetic_bars(count: usize) -> Vec<DollarBar> {
             let high = open.max(close) + wick_up;
             let low = (open.min(close) - wick_down).max(dec!(0.5));
             let volume = Decimal::from(5 + next() % 20);
-            let buy_share = Decimal::from(next() % 100) / dec!(100);
-            let buy_volume = volume * buy_share;
-            let sell_volume = volume - buy_volume;
-            let dollar_volume = volume * close;
+            // The original series drew a buy share here; the draw is kept so the prices do not move.
+            let _ = next();
             price = close;
-            DollarBar {
+            Minute {
                 start_time: 1_700_000_000_000 + index as i64 * 60_000,
                 end_time: 1_700_000_000_000 + index as i64 * 60_000 + 59_999,
                 open,
@@ -52,99 +60,53 @@ pub fn synthetic_bars(count: usize) -> Vec<DollarBar> {
                 low,
                 close,
                 volume,
-                dollar_volume,
-                trade_count: 50 + (index as u64 % 50),
-                buy_volume,
-                sell_volume,
-                buy_dollar_volume: buy_volume * close,
-                sell_dollar_volume: sell_volume * close,
             }
         })
         .collect()
 }
 
-/// Bars with no range, no price movement and a single trade: the degenerate input a quiet market
-/// produces, which must never panic or divide by zero.
-pub fn flat_bars(count: usize) -> Vec<DollarBar> {
-    (0..count)
-        .map(|index| DollarBar {
-            start_time: 1_700_000_000_000 + index as i64 * 60_000,
-            end_time: 1_700_000_000_000 + index as i64 * 60_000 + 59_999,
-            open: dec!(50_000),
-            high: dec!(50_000),
-            low: dec!(50_000),
-            close: dec!(50_000),
-            volume: dec!(1),
-            dollar_volume: dec!(50_000),
-            trade_count: 1,
-            buy_volume: dec!(0.5),
-            sell_volume: dec!(0.5),
-            buy_dollar_volume: dec!(25_000),
-            sell_dollar_volume: dec!(25_000),
-        })
-        .collect()
-}
-
-/// Trades that rebuild [`synthetic_bars`]: open, high, low and close of each bar, in that
-/// order, a quarter of the bar's volume each, inside the bar's time span.
-pub fn synthetic_trades(bar_count: usize) -> Vec<Trade> {
-    synthetic_bars(bar_count)
+/// Trades that walk [`synthetic_minutes`]: open, high, low and close of each minute, in that
+/// order, a quarter of the minute's volume each, inside its time span.
+pub fn synthetic_trades(minutes: usize) -> Vec<Trade> {
+    synthetic_minutes(minutes)
         .iter()
-        .flat_map(|bar| {
-            let quarter = bar.volume / dec!(4);
-            let step = (bar.end_time - bar.start_time) / 4;
-            [bar.open, bar.high, bar.low, bar.close]
+        .flat_map(|minute| {
+            let quarter = minute.volume / dec!(4);
+            let step = (minute.end_time - minute.start_time) / 4;
+            [minute.open, minute.high, minute.low, minute.close]
                 .into_iter()
                 .enumerate()
                 .map(move |(i, price)| {
                     let side = if i % 2 == 0 { Side::Buy } else { Side::Sell };
-                    Trade::new(bar.start_time + step * i as i64, price, quarter, side)
-                        .expect("synthetic bars have positive prices and volume")
+                    Trade::new(minute.start_time + step * i as i64, price, quarter, side)
+                        .expect("synthetic minutes have positive prices and volume")
                 })
         })
         .collect()
 }
 
-/// The synthetic input of the kind a strategy consumes.
-enum Input {
-    Bars(Vec<DollarBar>),
-    Trades(Vec<Trade>),
+/// Trades with no price movement, one a minute: the degenerate input a quiet market produces,
+/// which must never panic or divide by zero.
+pub fn flat_trades(count: usize) -> Vec<Trade> {
+    (0..count)
+        .map(|index| {
+            Trade::new(
+                1_700_000_000_000 + index as i64 * 60_000 + 59_999,
+                dec!(50_000),
+                dec!(1),
+                Side::Buy,
+            )
+            .expect("flat trades have positive prices and volume")
+        })
+        .collect()
 }
 
-impl Input {
-    fn synthetic(kind: InputKind, bar_count: usize) -> Self {
-        match kind {
-            InputKind::DollarBars => Input::Bars(synthetic_bars(bar_count)),
-            InputKind::Trades => Input::Trades(synthetic_trades(bar_count)),
-        }
-    }
-
-    fn flat(kind: InputKind, bar_count: usize) -> Self {
-        let bars = flat_bars(bar_count);
-        match kind {
-            InputKind::DollarBars => Input::Bars(bars),
-            InputKind::Trades => Input::Trades(
-                bars.iter()
-                    .map(|bar| {
-                        Trade::new(bar.end_time, bar.close, bar.volume, Side::Buy)
-                            .expect("flat bars have positive prices and volume")
-                    })
-                    .collect(),
-            ),
-        }
-    }
-
-    fn events(&self) -> Vec<MarketEvent<'_>> {
-        match self {
-            Input::Bars(bars) => bars.iter().map(MarketEvent::DollarBar).collect(),
-            Input::Trades(trades) => trades.iter().map(MarketEvent::Trade).collect(),
-        }
-    }
+fn events(trades: &[Trade]) -> Vec<MarketEvent<'_>> {
+    trades.iter().map(MarketEvent::Trade).collect()
 }
 
-fn replay<T: Strategy>(strategy: &mut T, input: &Input) -> Vec<Option<OrderIntent>> {
-    input
-        .events()
+fn replay<T: Strategy>(strategy: &mut T, input: &[Trade]) -> Vec<Option<OrderIntent>> {
+    events(input)
         .iter()
         .map(|event| strategy.on_event(event))
         .collect()
@@ -155,10 +117,9 @@ fn replay<T: Strategy>(strategy: &mut T, input: &Input) -> Vec<Option<OrderInten
 fn replay_in_two_stages<S: OptimizableStrategy>(
     extractor: &mut S::Extractor,
     strategy: &mut S,
-    input: &Input,
+    input: &[Trade],
 ) -> Vec<OrderIntent> {
-    input
-        .events()
+    events(input)
         .iter()
         .filter_map(|event| extractor.on_event(event))
         .filter_map(|features| strategy.on_features(&features))
@@ -264,8 +225,7 @@ where
     }
 
     // Behaviour on its input: deterministic, resettable and well-formed.
-    let kind = strategy.input_kind();
-    let input = Input::synthetic(kind, 400);
+    let input = synthetic_trades(400);
     let build = || {
         S::from_config(&shared, default_config.clone()).expect("the default configuration builds")
     };
@@ -302,7 +262,7 @@ where
 
     // Quiet markets must not break it.
     let mut quiet = build();
-    for decision in replay(&mut quiet, &Input::flat(kind, 200)).iter().flatten() {
+    for decision in replay(&mut quiet, &flat_trades(200)).iter().flatten() {
         assert_valid_intent(id, decision);
     }
 }
@@ -313,17 +273,12 @@ mod tests {
 
     #[test]
     fn the_synthetic_series_is_deterministic_and_well_formed() {
-        let a = synthetic_bars(100);
-        let b = synthetic_bars(100);
+        let a = synthetic_trades(100);
 
-        assert_eq!(a, b);
-        for bar in &a {
-            assert!(bar.high >= bar.open.max(bar.close));
-            assert!(bar.low <= bar.open.min(bar.close));
-            assert!(bar.low > Decimal::ZERO);
-            assert_eq!(bar.buy_volume + bar.sell_volume, bar.volume);
-        }
-        assert!(a.windows(2).all(|w| w[0].end_time < w[1].start_time));
+        assert_eq!(a, synthetic_trades(100));
+        assert_eq!(a.len(), 400);
+        assert!(a.iter().all(|trade| trade.price > Decimal::ZERO));
+        assert!(a.windows(2).all(|w| w[0].timestamp <= w[1].timestamp));
     }
 
     use crate::strategy::MarketType;
@@ -356,6 +311,22 @@ mod tests {
         }
     }
 
+    /// The feature is the trade itself.
+    struct TradePassThrough;
+
+    impl FeatureExtractor for TradePassThrough {
+        type Features = Trade;
+
+        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<Trade> {
+            let MarketEvent::Trade(trade) = event else {
+                return None;
+            };
+            Some((*trade).clone())
+        }
+
+        fn reset(&mut self) {}
+    }
+
     struct Faulty<const MODE: u8> {
         seen: usize,
     }
@@ -370,7 +341,7 @@ mod tests {
         }
 
         fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::DollarBar(bar) = event else {
+            let MarketEvent::Trade(trade) = event else {
                 return None;
             };
             self.seen += 1;
@@ -378,16 +349,16 @@ mod tests {
                 return None;
             }
             let stop = if MODE == 2 {
-                bar.close + dec!(10)
+                trade.price + dec!(10)
             } else {
-                bar.close - dec!(10)
+                trade.price - dec!(10)
             };
             OrderIntent::new(
-                bar.end_time,
+                trade.timestamp,
                 Side::Buy,
-                bar.close,
+                trade.price,
                 stop,
-                bar.close + dec!(10),
+                trade.price + dec!(10),
                 5,
             )
             .ok()
@@ -404,7 +375,7 @@ mod tests {
         type SharedConfig = ();
         type Config = FaultyConfig;
         type Space = FaultySpace;
-        type Extractor = crate::strategy::BarPassThrough;
+        type Extractor = TradePassThrough;
 
         fn id() -> &'static str {
             "faulty"
@@ -415,11 +386,11 @@ mod tests {
         }
 
         fn extractor(_: &()) -> Result<Self::Extractor, domain::DomainError> {
-            Ok(crate::strategy::BarPassThrough)
+            Ok(TradePassThrough)
         }
 
-        fn on_features(&mut self, bar: &DollarBar) -> Option<OrderIntent> {
-            let decision = self.on_event(&MarketEvent::DollarBar(bar));
+        fn on_features(&mut self, trade: &Trade) -> Option<OrderIntent> {
+            let decision = self.on_event(&MarketEvent::Trade(trade));
             if MODE == 3 {
                 None
             } else {
@@ -453,17 +424,5 @@ mod tests {
     #[should_panic(expected = "extractor + on_features must decide exactly what on_event decides")]
     fn a_strategy_whose_two_stages_disagree_is_rejected() {
         assert_strategy_contract::<Faulty<3>>();
-    }
-
-    #[test]
-    fn the_synthetic_trades_rebuild_the_synthetic_bars() {
-        let bars = synthetic_bars(50);
-        let trades = synthetic_trades(50);
-        assert_eq!(trades.len(), 200);
-        for (bar, chunk) in bars.iter().zip(trades.chunks(4)) {
-            let prices: Vec<_> = chunk.iter().map(|t| t.price).collect();
-            assert_eq!(prices, vec![bar.open, bar.high, bar.low, bar.close]);
-        }
-        assert!(trades.windows(2).all(|w| w[0].timestamp <= w[1].timestamp));
     }
 }

@@ -7,8 +7,6 @@
 // AGENTS.md: no unwrap or expect in production code; test builds keep them.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-pub mod alerts;
-pub mod clock;
 pub mod entropy;
 pub mod execution;
 pub mod exits;
@@ -18,8 +16,6 @@ pub mod progress;
 pub mod run_recorder;
 pub mod tape;
 
-pub use alerts::AlertNotifier;
-pub use clock::Clock;
 pub use entropy::Entropy;
 pub use execution::{AckStatus, EntryAck, ExecutionReport, ExecutionVenue, OrderRequest};
 pub use exits::ExitGateway;

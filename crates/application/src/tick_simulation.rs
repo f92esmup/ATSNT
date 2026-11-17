@@ -11,7 +11,7 @@
 //! and is not counted in the metrics, unlike the bar engine, which marks it out.
 
 use domain::futures::FundingSchedule;
-use domain::{DollarBar, DomainError, EntryGate, RiskError, Side, Trade};
+use domain::{EntryGate, RiskError, Side, Trade};
 use ports::TapeVenue;
 use rust_decimal::Decimal;
 use strategies::Strategy;
@@ -34,8 +34,6 @@ pub struct TickSimulationConfig {
     pub backtest: BacktestConfig,
     /// Instrument traded.
     pub symbol: String,
-    /// Dollar-bar threshold the strategy samples at.
-    pub dollar_bar_threshold: Decimal,
     /// Milliseconds an order takes to reach the market. It configures the simulated venue that
     /// the composition builds; [`TickSimulation::new`] takes its venue as given.
     pub latency_ms: i64,
@@ -48,9 +46,6 @@ pub struct TickSimulationConfig {
 /// Why a tick simulation could not be built.
 #[derive(Debug, thiserror::Error)]
 pub enum TickSimulationError {
-    /// The dollar-bar threshold is invalid.
-    #[error("invalid dollar bar threshold: {0}")]
-    Threshold(#[from] DomainError),
     /// The risk limits are invalid.
     #[error("invalid risk policy: {0}")]
     Risk(#[from] RiskError),
@@ -59,8 +54,6 @@ pub enum TickSimulationError {
 /// What one replayed trade produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TickStep {
-    /// The dollar bar this trade completed, if any.
-    pub bar: Option<DollarBar>,
     /// Everything the session did because of the trade.
     pub events: Vec<SessionEvent>,
 }
@@ -87,7 +80,8 @@ impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
             backtest.risk_policy()?,
             backtest.risk_per_trade_pct,
             backtest.market_type,
-        );
+        )
+        .with_margin(backtest.margin_rule());
         let session = TradingSession::new(
             SessionConfig {
                 symbol: config.symbol.clone(),
@@ -100,7 +94,7 @@ impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
             },
             strategy,
         );
-        let driver = SessionDriver::new(session, config.dollar_bar_threshold)?;
+        let driver = SessionDriver::new(session);
         Ok(Self {
             rejected_orders: std::collections::BTreeMap::new(),
             initial_capital: backtest.initial_capital,
@@ -130,26 +124,23 @@ impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
             self.driver.on_wallet_balance(self.venue.wallet_balance());
         }
         let step = self.driver.on_market_trade(&self.venue, trade).await;
-        let bar = step.bar.clone();
         events.extend(step.into_events());
         for event in &events {
-            if let SessionEvent::EntryRefused(refusal) = event {
-                *self
-                    .rejected_orders
-                    .entry(refusal.kind().to_string())
-                    .or_insert(0) += 1;
-            }
+            let reason = match event {
+                SessionEvent::EntryRefused(refusal) => refusal.kind(),
+                // The gate admitted the entry and the venue still refused it.
+                SessionEvent::EntryFailed(_) => domain::metrics::VENUE_REJECTED,
+                _ => continue,
+            };
+            *self.rejected_orders.entry(reason.to_string()).or_insert(0) += 1;
         }
-        TickStep { bar, events }
+        TickStep { events }
     }
 
-    /// Warms the strategy up on historical trades before the replay starts; nothing trades and
-    /// the replay's own bar sampling starts fresh. Returns the bars the strategy saw.
-    pub fn warm_up_trades(
-        &mut self,
-        trades: impl IntoIterator<Item = Trade>,
-    ) -> Result<usize, TickSimulationError> {
-        Ok(self.driver.warm_up_trades(trades)?)
+    /// Warms the strategy up on historical trades before the replay starts; nothing trades.
+    /// Returns how many trades the strategy saw.
+    pub fn warm_up_trades(&mut self, trades: impl IntoIterator<Item = Trade>) -> usize {
+        self.driver.warm_up_trades(trades)
     }
 
     /// Trades closed so far, oldest first.
@@ -165,11 +156,6 @@ impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
     /// Trades replayed so far.
     pub fn ticks_processed(&self) -> u64 {
         self.driver.ticks()
-    }
-
-    /// Dollar bars the strategy has seen so far.
-    pub fn bars_processed(&self) -> u64 {
-        self.driver.bars()
     }
 
     /// Strategy being executed by the simulation.

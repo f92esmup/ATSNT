@@ -435,7 +435,7 @@ impl FeatureExtractor for SwarmEnsemble {
     fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<ConsensusSample> {
         match event {
             MarketEvent::Trade(trade) => self.on_trade(trade),
-            MarketEvent::DollarBar(_) => None,
+            _ => None,
         }
     }
 
@@ -452,7 +452,7 @@ impl FeatureExtractor for SwarmEnsemble {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::{DollarBar, Side};
+    use domain::Side;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
@@ -724,30 +724,6 @@ mod tests {
         assert_eq!(used, fresh);
         let mut again = SwarmEnsemble::new(&test_config()).unwrap();
         assert_eq!(run(&mut used, &trades), run(&mut again, &trades));
-    }
-
-    #[test]
-    fn non_trade_events_are_ignored() {
-        let mut ensemble = SwarmEnsemble::new(&test_config()).unwrap();
-        let fresh = ensemble.clone();
-        let one = dec!(1);
-        let bar = DollarBar {
-            start_time: 0,
-            end_time: 1,
-            open: one,
-            high: one,
-            low: one,
-            close: one,
-            volume: one,
-            dollar_volume: one,
-            trade_count: 1,
-            buy_volume: one,
-            sell_volume: Decimal::ZERO,
-            buy_dollar_volume: one,
-            sell_dollar_volume: Decimal::ZERO,
-        };
-        assert!(ensemble.on_event(&MarketEvent::DollarBar(&bar)).is_none());
-        assert_eq!(ensemble, fresh);
     }
 
     #[test]

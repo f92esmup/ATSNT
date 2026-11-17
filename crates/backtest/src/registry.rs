@@ -5,7 +5,6 @@
 //! [`strategies`] registry. No runner matches on strategy names itself, so registering a new
 //! strategy there makes it available everywhere.
 
-use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use strategies::{
@@ -65,7 +64,7 @@ trades). Without it such an artifact is refused at start-up";
 
 /// A strategy resolved from the registry together with what its configuration file declared.
 pub struct LoadedStrategy {
-    /// The strategy, ready for `on_bar`.
+    /// The strategy, ready for `on_event`.
     pub strategy: Box<dyn Strategy>,
     /// Canonical id of the strategy.
     pub strategy_id: String,
@@ -75,8 +74,6 @@ pub struct LoadedStrategy {
     pub config_display: String,
     /// Where the configuration came from.
     pub source: ConfigSource,
-    /// Dollar-bar threshold the artifact declared.
-    pub dollar_bar_threshold: Option<Decimal>,
     /// Symbol the artifact declared.
     pub symbol: Option<String>,
     /// Market the artifact declared.
@@ -279,7 +276,7 @@ impl StrategyVisitor for Loader<'_> {
         S::Space: Serialize + DeserializeOwned,
     {
         let mut artifact_shared = None;
-        let (config, source, threshold, symbol, market_type, context) = match self.config {
+        let (config, source, symbol, market_type, context) = match self.config {
             Some(text) => {
                 let loaded = parse_strategy_config::<S::Config>(text)?;
                 if matches!(loaded, LoadedStrategyConfig::Artifact(_)) {
@@ -292,14 +289,12 @@ impl StrategyVisitor for Loader<'_> {
                     },
                     LoadedStrategyConfig::Bare(_) => ConfigSource::Bare,
                 };
-                let threshold = loaded.dollar_bar_threshold();
                 let symbol = loaded.symbol().map(str::to_string);
                 let market_type = loaded.market_type();
                 let context = loaded.execution_context().copied();
                 (
                     loaded.into_strategy_config(),
                     source,
-                    threshold,
                     symbol,
                     market_type,
                     context,
@@ -308,7 +303,6 @@ impl StrategyVisitor for Loader<'_> {
             None => (
                 S::Config::default(),
                 ConfigSource::Default,
-                None,
                 None,
                 None,
                 None,
@@ -332,7 +326,7 @@ impl StrategyVisitor for Loader<'_> {
             Some(market) => S::shared_for_market(given, market),
             None => given,
         };
-        // `()` (a dollar-bar strategy) serializes to `null`: there is nothing to report.
+        // A strategy without a shared configuration (`()`) serializes to `null`: nothing to report.
         let shared_json =
             serde_json::to_value(&shared).map_err(serialize("the shared configuration"))?;
         let narrowed_for_market = market.filter(|_| shared_json != given_json);
@@ -345,7 +339,6 @@ impl StrategyVisitor for Loader<'_> {
             config_json,
             config_display,
             source,
-            dollar_bar_threshold: threshold,
             symbol,
             market_type,
             execution_context: context,
@@ -492,7 +485,6 @@ mod tests {
             loaded.config_json,
             serde_json::to_value(strategies::PolicyConfig::default()).unwrap()
         );
-        assert!(loaded.dollar_bar_threshold.is_none());
         assert!(loaded.report_lines()[0].starts_with("[*] Using default swarm_consensus"));
     }
 
@@ -509,7 +501,6 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         assert_eq!(loaded.strategy_id, "swarm_consensus");
-        assert!(loaded.dollar_bar_threshold.is_none());
         assert_eq!(loaded.symbol.as_deref(), Some("ETHUSDT"));
         assert_eq!(loaded.market_type, Some(MarketType::UsdMPerpetual));
         assert_eq!(loaded.execution_context, Some(BacktestConfig::default()));
@@ -587,7 +578,6 @@ mod tests {
             loaded.shared_config_json,
             Some(serde_json::to_value(swarm_shared(7)).unwrap())
         );
-        assert_eq!(loaded.strategy.input_kind(), strategies::InputKind::Trades);
     }
 
     #[test]

@@ -1,19 +1,17 @@
 //! Composition of the concrete adapters for the binaries and the simulated runs.
 //!
-//! The library names no adapter (see the architecture contract): the binaries take the clock, the
-//! recorder and the simulated venue from here and pass them down as ports.
+//! The library names no adapter (see the architecture contract): the binaries take the recorder and
+//! the simulated venue from here and pass them down as ports.
 
 use std::path::Path;
 
 use adapters::{
-    read_text, NullRunRecorder, OsEntropy, SimClock, SimulatedVenue, SimulatedVenueConfig,
-    SqliteRunRecorder, SystemClock,
+    read_text, NullRunRecorder, OsEntropy, SimulatedVenue, SimulatedVenueConfig, SqliteRunRecorder,
 };
 use domain::futures::FundingSchedule;
 use domain::{MarketType, RiskError};
 use ports::{
-    Clock, ProgressSink, RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow,
-    SeriesPointRow,
+    ProgressSink, RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow,
 };
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -28,17 +26,7 @@ use crate::tick_simulation::{TickSimulation, TickSimulationConfig, TickSimulatio
 
 /// Current wall-clock time in Unix milliseconds, for the binaries that stamp their runs.
 pub fn now_unix_ms() -> i64 {
-    SystemClock.now_ms()
-}
-
-/// The clock of the binaries: the machine's wall clock.
-pub fn system_clock() -> SystemClock {
-    SystemClock
-}
-
-/// The clock of a replay, stopped at `now_ms` until the replay advances it.
-pub fn sim_clock(now_ms: i64) -> SimClock {
-    SimClock::at(now_ms)
+    adapters::wall_time::now_unix_ms()
 }
 
 /// The random source of the binaries: the operating system's generator.

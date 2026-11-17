@@ -26,8 +26,8 @@ The project enforces strict separation of concerns:
      - `ExecutionVenue` and `ExitGateway`: Traits for dispatching orders of an exact quantity and
        managing exchange-held exits. A venue executes; it sizes nothing and applies no risk rule.
      - `TapeVenue`: A venue replayed trade by trade, for simulations.
-     - `Clock`, `Entropy`: Time and randomness, so a replay is deterministic.
-     - `RunRecorder`, `AlertNotifier`, `FillLog`, `ProgressSink`: Outbound records and reports.
+     - `Entropy`: Randomness, so a replay is deterministic.
+     - `RunRecorder`, `FillLog`, `ProgressSink`: Outbound records and reports.
 
 3. **Strategies (`strategies`)**:
    - Strategy traits that consume normalized market events and emit order intents.

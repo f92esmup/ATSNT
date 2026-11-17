@@ -28,7 +28,6 @@ use support::swarm::{account, busy_policy, shared, swarm_trades};
 /// day 17.
 const DAYS: i64 = 90;
 const CAPITAL: Decimal = dec!(5000);
-const DOLLAR_BAR: Decimal = dec!(1_000_000);
 const TICK_LATENCY_MS: i64 = 100;
 
 /// One execution outcome as the snapshots store it.
@@ -116,7 +115,6 @@ async fn tick_run(allow_short: bool) -> (BacktestMetrics, Vec<ClosedTrade>) {
     let config = TickSimulationConfig {
         backtest: account,
         symbol: "BTCUSDT".to_string(),
-        dollar_bar_threshold: DOLLAR_BAR,
         latency_ms: TICK_LATENCY_MS,
         funding: FundingSchedule::constant(account.funding_rate_pct),
     };

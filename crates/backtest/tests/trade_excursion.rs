@@ -1,70 +1,45 @@
-use backtest::{BacktestConfig, BacktestEngine};
-use domain::{DollarBar, OrderIntent, Side};
+use backtest::{BacktestConfig, BacktestEngine, PriceEvent};
+use domain::{OrderIntent, Side};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use strategies::{MarketEvent, MarketType, Strategy};
 
-/// Emits a long intent on the scripted bar end times.
-struct ScriptedLong {
-    entries: Vec<i64>,
+/// A long intent at `bar`'s close, with a stop 20 below and a target 25 above.
+fn long_at(bar: &PriceEvent) -> OrderIntent {
+    OrderIntent {
+        timestamp: bar.end_ms,
+        side: Side::Buy,
+        price: bar.close,
+        stop_loss: bar.close - dec!(20),
+        take_profit: bar.close + dec!(25),
+        max_bars_hold: 4,
+        risk_fraction: None,
+        trailing_atr: None,
+        breakeven_atr: None,
+        deadline_ms: None,
+        order_type: domain::OrderType::Market,
+        time_in_force_bars: None,
+        post_only: false,
+    }
 }
 
-impl Strategy for ScriptedLong {
-    fn name(&self) -> &str {
-        "scripted_long"
-    }
-
-    fn compatible_market_types(&self) -> &'static [MarketType] {
-        &[MarketType::UsdMPerpetual]
-    }
-
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-        let MarketEvent::DollarBar(bar) = event else {
-            return None;
-        };
-        self.entries.contains(&bar.end_time).then(|| OrderIntent {
-            timestamp: bar.end_time,
-            side: Side::Buy,
-            price: bar.close,
-            stop_loss: bar.close - dec!(20),
-            take_profit: bar.close + dec!(25),
-            max_bars_hold: 4,
-            risk_fraction: None,
-            trailing_atr: None,
-            breakeven_atr: None,
-            deadline_ms: None,
-            order_type: domain::OrderType::Market,
-            time_in_force_bars: None,
-            post_only: false,
-        })
-    }
-
-    fn reset(&mut self) {}
-}
-
-fn bar(end_time: i64, low: Decimal, high: Decimal, close: Decimal) -> DollarBar {
-    DollarBar {
-        start_time: end_time - 500,
-        end_time,
+fn bar(end_ms: i64, low: Decimal, high: Decimal, close: Decimal) -> PriceEvent {
+    PriceEvent {
+        start_ms: end_ms - 500,
+        end_ms,
         open: close,
         high,
         low,
         close,
         volume: dec!(1),
         dollar_volume: close,
-        buy_volume: dec!(0.5),
-        sell_volume: dec!(0.5),
         buy_dollar_volume: close / dec!(2),
         sell_dollar_volume: close / dec!(2),
-        trade_count: 1,
     }
 }
 
 fn run_scenario() -> (backtest::BacktestMetrics, Vec<backtest::ClosedTrade>) {
     let mut engine = BacktestEngine::new(BacktestConfig::default());
-    let mut strategy = ScriptedLong {
-        entries: vec![1_000, 6_000],
-    };
+    let entries = [1_000, 6_000];
     let bars = [
         bar(1_000, dec!(100), dec!(100), dec!(100)), // entry #1
         bar(2_000, dec!(109), dec!(111), dec!(110)), // intra-trade high before the dip
@@ -76,7 +51,7 @@ fn run_scenario() -> (backtest::BacktestMetrics, Vec<backtest::ClosedTrade>) {
         bar(8_000, dec!(129), dec!(131), dec!(130)), // take profit at 130
     ];
     for b in &bars {
-        engine.process_bar(&mut strategy, b);
+        engine.process_event(b, &mut || entries.contains(&b.end_ms).then(|| long_at(b)));
     }
     engine.finish_with_trades(None)
 }

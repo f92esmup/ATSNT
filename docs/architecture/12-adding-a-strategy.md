@@ -19,10 +19,8 @@ The contract is in `crates/strategies/src/strategy.rs`. Two traits matter.
 - `compatible_market_types(&self) -> &'static [MarketType]`: the markets it trades, for example
   `&[MarketType::Spot, MarketType::UsdMPerpetual]`. `supports_market_type` checks a requested market
   against this list.
-- `input_kind(&self) -> InputKind`: `InputKind::DollarBars` (the default) or `InputKind::Trades`.
-  Runners prepare exactly that stream.
 - `on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent>`: the one decision method,
-  with no default. A strategy states what it does with each kind of event.
+  with no default. Runners call it once per market trade; a strategy that needs bars builds its own.
 - `reset(&mut self)`: restores the initial state.
 - `audit(&self) -> Option<serde_json::Value>`, default `None`: optional audit data stored with the run records
   under `strategy_audit`.
@@ -58,11 +56,10 @@ trait starts at `crates/strategies/src/strategy.rs:134`.
 `FeatureExtractor` has an associated `Features` type, `on_event(&mut self, event) -> Option<Features>`
 and `reset(&mut self)`.
 
-#### Single-stage strategies (dollar bars)
+#### A strategy with no frozen first stage
 
-The features are the bars themselves: `type SharedConfig = ()`, `type Extractor = BarPassThrough`
-(its `Features` is `DollarBar`), and `on_features` decides on each bar. The removed CUSUM strategies
-were of this kind.
+Its extractor passes the trade through: `Features` is `Trade`, `on_features` decides on it. Pick
+this when there is nothing expensive to compute once and replay.
 
 #### Two-stage strategies (`swarm_consensus`)
 

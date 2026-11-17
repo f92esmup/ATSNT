@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 
-use domain::{DollarBar, Position, PositionSide, RiskPolicy, Side};
 use domain::{EntryGate, EntryRefusal, OrderIntent};
+use domain::{Position, PositionSide, RiskPolicy, Side};
 use rust_decimal::Decimal;
-use strategies::{MarketEvent, Strategy};
 
 use crate::config::BacktestConfig;
 use crate::execution_core::{market_fill_price, ExecutionCore, PendingEntry, PendingEntryOutcome};
@@ -207,16 +206,6 @@ impl BacktestEngine {
         &self.config
     }
 
-    /// Ingests a closed DollarBar, updates position barriers, and steps the strategy.
-    ///
-    /// A thin wrapper over [`BacktestEngine::process_event`]: the bar is the price event and the
-    /// strategy's decision on it is the decision step.
-    pub fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &DollarBar) {
-        self.process_event(&PriceEvent::from(bar), &mut || {
-            strategy.on_event(&MarketEvent::DollarBar(bar))
-        });
-    }
-
     /// Processes one price event in the order of strategy spec §11.2: day and month rollover,
     /// funding, the pending order's fill when it is due, liquidation and protective exits, the
     /// monthly kill switch, the decision step (`decide`), mark to market and the daily breaker,
@@ -263,11 +252,13 @@ impl BacktestEngine {
 
         // 0. A pending order (market or limit) submitted on an earlier event evaluates once due.
         if !self.halted {
-            if let PendingEntryOutcome::ExpiredLimit =
-                self.core
-                    .step_pending_entry(*bar, &self.config, &mut self.equity)
+            match self
+                .core
+                .step_pending_entry(*bar, &self.config, &mut self.equity)
             {
-                self.count_rejection("LimitTimeoutExpired");
+                PendingEntryOutcome::ExpiredLimit => self.count_rejection("LimitTimeoutExpired"),
+                PendingEntryOutcome::Refused(reason) => self.count_rejection(reason),
+                _ => {}
             }
         }
         let had_position = self.core.position().is_some();
@@ -369,6 +360,7 @@ impl BacktestEngine {
                     self.config.risk_per_trade_pct,
                     self.config.market_type,
                 )
+                .with_margin(self.config.margin_rule())
                 .admit(
                     &intent,
                     self.total_equity(mark_price),
@@ -443,7 +435,20 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use std::collections::VecDeque;
-    use strategies::MarketType;
+    use strategies::{MarketEvent, MarketType, Strategy};
+
+    /// Feeds the engine one price event; the strategy decides on a print at its close.
+    trait Feed {
+        fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &PriceEvent);
+    }
+
+    impl Feed for BacktestEngine {
+        fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &PriceEvent) {
+            let print = domain::Trade::new(bar.end_ms, bar.close, dec!(1), Side::Buy)
+                .expect("a positive close");
+            self.process_event(bar, &mut || strategy.on_event(&MarketEvent::Trade(&print)));
+        }
+    }
 
     /// Emits one scripted decision per bar and counts how many bars it was shown.
     struct Scripted {
@@ -470,7 +475,7 @@ mod tests {
         }
 
         fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::DollarBar(_) = event else {
+            let MarketEvent::Trade(_) = event else {
                 return None;
             };
             self.bars_seen += 1;
@@ -511,7 +516,7 @@ mod tests {
         high: Decimal,
         low: Decimal,
         close: Decimal,
-    ) -> DollarBar {
+    ) -> PriceEvent {
         create_test_bar(time, open, high, low, close)
     }
 
@@ -702,21 +707,18 @@ mod tests {
         high: Decimal,
         low: Decimal,
         close: Decimal,
-    ) -> DollarBar {
-        DollarBar {
-            start_time: time - 50,
-            end_time: time,
+    ) -> PriceEvent {
+        PriceEvent {
+            start_ms: time - 50,
+            end_ms: time,
             open,
             high,
             low,
             close,
             volume: dec!(1.0),
             dollar_volume: close,
-            buy_volume: dec!(0.5),
-            sell_volume: dec!(0.5),
             buy_dollar_volume: close / dec!(2),
             sell_dollar_volume: close / dec!(2),
-            trade_count: 5,
         }
     }
 
@@ -1120,15 +1122,15 @@ mod tests {
         }
 
         fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::DollarBar(bar) = event else {
+            let MarketEvent::Trade(trade) = event else {
                 return None;
             };
             OrderIntent::new(
-                bar.end_time,
+                trade.timestamp,
                 Side::Buy,
-                bar.close,
+                trade.price,
                 self.stop,
-                bar.close * dec!(2),
+                trade.price * dec!(2),
                 1_000,
             )
             .ok()
@@ -1140,7 +1142,7 @@ mod tests {
     const JAN_1: i64 = 1_704_067_200_000;
     const DAY: i64 = 86_400_000;
 
-    fn flat_bar(time: i64, close: Decimal) -> DollarBar {
+    fn flat_bar(time: i64, close: Decimal) -> PriceEvent {
         create_test_bar(time, close, close, close, close)
     }
 
@@ -1475,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_the_balance_cannot_margin_never_opens() {
+    fn an_entry_the_balance_cannot_margin_is_sized_down_to_what_it_funds() {
         let mut engine = leveraged_engine(dec!(400));
         let intent =
             Some(OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.99), dec!(110), 50).unwrap());
@@ -1490,10 +1492,15 @@ mod tests {
             &ohlc_bar(2_000, dec!(100), dec!(100), dec!(100), dec!(100)),
         );
 
-        // The leverage cap limits the order to 8000 of notional: 400 of margin at 20x plus
-        // the entry fee exceeds the 400 balance.
-        assert!(engine.active_position().is_none());
-        assert_eq!(engine.cash_equity(), dec!(400));
+        // The risk sizing asks for the leverage cap, 8000 of notional: 400 of margin at 20x plus
+        // the entry fee exceeds the 400 balance, so the gate sizes the order down to fit.
+        let position = engine.active_position().expect("the entry opens, smaller");
+        assert!(position.quantity < dec!(80), "got {}", position.quantity);
+        assert!(position.quantity > dec!(70), "got {}", position.quantity);
+        assert!(engine.cash_equity() < dec!(400));
+        assert!(engine.cash_equity() > Decimal::ZERO);
+        let metrics = engine.finish(Some(dec!(100)));
+        assert!(metrics.rejected_orders.is_empty());
     }
 
     #[test]

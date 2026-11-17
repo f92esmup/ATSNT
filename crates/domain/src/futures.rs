@@ -114,6 +114,23 @@ pub fn minimum_leverage(
     })
 }
 
+/// Largest quantity at `price` that `balance` can margin at `maximum_leverage`: the inverse of
+/// [`minimum_leverage`]. A unit costs the larger of its initial and maintenance margin plus its
+/// entry commission, at `fee_rate` of the notional. Not rounded to a lot.
+pub fn maximum_quantity(
+    price: Decimal,
+    maintenance_rate: Decimal,
+    fee_rate: Decimal,
+    balance: Decimal,
+    maximum_leverage: u32,
+) -> Decimal {
+    if balance <= Decimal::ZERO || price <= Decimal::ZERO || maximum_leverage == 0 {
+        return Decimal::ZERO;
+    }
+    let initial_rate = Decimal::ONE / Decimal::from(maximum_leverage);
+    balance / (price * (initial_rate.max(maintenance_rate) + fee_rate))
+}
+
 /// Price at which an isolated position is liquidated: the mark where the margin left after the
 /// unrealized loss only covers the maintenance margin.
 pub fn liquidation_price(

@@ -1,7 +1,7 @@
 //! The `tick_simulation` module of the application core, run on the simulated venue the wiring builds.
 
 use backtest::session::SessionEvent;
-use backtest::tick_simulation::{TickSimulationConfig, TickSimulationError};
+use backtest::tick_simulation::TickSimulationConfig;
 use backtest::BacktestConfig;
 use domain::futures::FundingSchedule;
 use domain::OrderIntent;
@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use strategies::Strategy;
 use strategies::{MarketEvent, MarketType};
 
-/// Emits one scripted decision per bar.
+/// Emits one scripted decision per trade.
 struct Scripted {
     decisions: VecDeque<Option<OrderIntent>>,
 }
@@ -27,7 +27,7 @@ impl Strategy for Scripted {
     }
 
     fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-        let MarketEvent::DollarBar(_) = event else {
+        let MarketEvent::Trade(_) = event else {
             return None;
         };
         self.decisions.pop_front().flatten()
@@ -50,7 +50,6 @@ fn simulation(
             ..BacktestConfig::default()
         },
         symbol: "BTCUSDT".to_string(),
-        dollar_bar_threshold: dec!(2000),
         latency_ms: 0,
         funding: FundingSchedule::constant(dec!(0.0001)),
     };
@@ -67,7 +66,7 @@ fn print(timestamp: i64, price: Decimal, quantity: Decimal, side: Side) -> Trade
     Trade::new(timestamp, price, quantity, side).unwrap()
 }
 
-/// Two $1000 prints close the first bar; the entry fills on the next buyer print.
+/// Replays the prints through the simulation, one by one.
 async fn replay(
     simulation: &mut backtest::wiring::SimulatedTickSimulation<Scripted>,
     ticks: &[Trade],
@@ -91,7 +90,6 @@ async fn a_signal_becomes_a_position_filled_on_the_tape() {
 
     replay(&mut simulation, &entry_ticks()).await;
 
-    assert_eq!(simulation.bars_processed(), 1);
     let (side, quantity, entry) = simulation.open_position().unwrap();
     assert_eq!(side, Side::Buy);
     assert_eq!(quantity, dec!(5));
@@ -146,7 +144,8 @@ async fn a_stop_loss_pays_the_slippage_the_tape_charged_after_it_armed() {
 
 #[tokio::test]
 async fn the_time_barrier_closes_at_market_and_is_labelled_as_such() {
-    let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(98), dec!(104), 2).unwrap();
+    let mut intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(98), dec!(104), 2).unwrap();
+    intent.deadline_ms = Some(1_005);
     let mut simulation = simulation(vec![Some(intent)]);
     let mut ticks = entry_ticks();
     ticks.extend([
@@ -204,17 +203,16 @@ async fn the_wallet_reported_by_the_venue_matches_the_closed_trades() {
 }
 
 #[tokio::test]
-async fn warming_up_shows_the_strategy_bars_without_trading_or_counting_them() {
-    // The scripted signal is consumed by the warm-up bar, so the replay never trades.
+async fn warming_up_shows_the_strategy_history_without_trading() {
+    // The scripted signal is consumed by the warm-up print, so the replay never trades.
     let mut simulation = simulation(vec![long_signal()]);
-    // One $2000 print completes exactly one bar at the $2000 threshold.
     let history = vec![print(0, dec!(100), dec!(20), Side::Sell)];
 
-    let bars = simulation.warm_up_trades(history).unwrap();
+    let seen = simulation.warm_up_trades(history);
     replay(&mut simulation, &entry_ticks()).await;
 
-    assert_eq!(bars, 1);
-    assert_eq!(simulation.bars_processed(), 1);
+    assert_eq!(seen, 1);
+    assert_eq!(simulation.ticks_processed(), 3);
     assert!(simulation.open_position().is_none());
 }
 
@@ -228,26 +226,6 @@ async fn without_signals_nothing_trades() {
     let (metrics, trades) = simulation.finish();
     assert!(trades.is_empty());
     assert_eq!(metrics.total_trades, 0);
-}
-
-#[test]
-fn an_invalid_threshold_is_rejected() {
-    let config = TickSimulationConfig {
-        backtest: BacktestConfig::default(),
-        symbol: "BTCUSDT".to_string(),
-        dollar_bar_threshold: Decimal::ZERO,
-        latency_ms: 0,
-        funding: FundingSchedule::constant(Decimal::ZERO),
-    };
-
-    let result = backtest::wiring::tick_simulation(
-        config,
-        Scripted {
-            decisions: VecDeque::new(),
-        },
-    );
-
-    assert!(matches!(result, Err(TickSimulationError::Threshold(_))));
 }
 
 const SETTLEMENT: i64 = domain::futures::FUNDING_INTERVAL_MS * 10;

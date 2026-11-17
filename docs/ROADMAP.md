@@ -65,25 +65,35 @@ GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until
 - Spot accounting is not modelled as a ledger: there is one cash balance (`equity`), no EUR balances
   and no fee tiers (WP-11). `ExecutionCore::spot_balances` derives the base and free quote from the
   position, but no engine path reads it. The lot and notional filters are one global set of defaults
-  (0.001 minimum quantity and step, 5 minimum notional), not per-pair rules. An entry the margin rule
-  cannot fund is dropped without a rejection count (`execution_core.rs:733-735`). There is no spread,
+  (0.001 minimum quantity and step, 5 minimum notional), not per-pair rules. There is no spread,
   latency defaults to 0 ms, and maker fills ignore queue priority.
-- The spot defaults (`BacktestConfig::spot()`: 1 % risk, 1x leverage) size an entry whose stop is at
-  or below 1 % to the whole balance, so its fee and slippage do not fit, except through lot rounding.
-  The entry is dropped with no rejection count (`execution_core.rs:733-735`) and the report prints
-  `Rejected Signals: none`. Until rejections are counted, a run with no trades under these defaults
-  is a sizing artefact, not a strategy result.
+- An entry the balance cannot margin is sized down by `domain::EntryGate` to what it funds (the
+  margin rule, the entry fee and the configured slippage included), so the spot defaults
+  (`BacktestConfig::spot()`: 1 % risk, 1x leverage) now trade a stop of 1 % or less with a smaller
+  quantity than the risk asks for. When even the smallest order does not fit, the signal is counted
+  as `InsufficientMargin`. What is left uncounted by the gate is a fill that gaps past the slippage
+  allowed: the bar route counts it as `InsufficientMargin`, and the tick route counts a venue refusal
+  as `VenueRejected`. Results of spot runs made before 2026-11-17 are not comparable: an entry that
+  was dropped without a trace now trades.
 - Bar and tick refusals agree by construction since both routes ask `domain::EntryGate` with the
-  same `DailyBreaker`, and `tests/gate_parity.rs` pins it. The tick route used to report no
-  refusals at all: it did not count them. The routes still fill differently. On the 90-day
-  synthetic tape of the goldens the per-trade bar route closes 53 trades long only and the tick
-  route 22. The cause is measured: the tick route sent 54 entries, 32 of them timed out and 22
-  opened. It fills a market order only against prints of the opposite aggressor and cancels an
-  entry that waited 30 s, and that tape has one print an hour. It is a property of the
-  synthetic tape, not of the gate. Check the two routes on real tick data before real money.
-- The strategy contract still has `input_kind`, `InputKind` and `BarPassThrough`, with no
-  strategy that consumes dollar bars. Removing them means removing the dollar-bar mode of
-  `backtest` and `run_hpo`, their flags and the `dollar_bar` sampling of artifacts: a decision
-  for the owner.
-- `SimClock` and the clock argument of `SessionDriver::on_idle` have no caller outside tests:
-  no binary runs a live loop.
+  same `DailyBreaker`, and `tests/gate_parity.rs` pins it. The routes still fill differently, and
+  the synthetic tape of the goldens exaggerates it: there the per-trade bar route closes 53 trades
+  long only and the tick route 22, because that tape has one print an hour and the tick route fills
+  a market order only against prints of the opposite aggressor and cancels an entry that waited 30 s.
+  On real ticks (BTCUSDT USD-M, May to September 2026, 197.6 M trades, `configs/hpo_btcusdt_2026.json`,
+  200 USDT, measured 2026-11-17) the routes agree on the count and differ in the result:
+
+  | Market | Route | Trades | Net PnL | Profit factor | Max drawdown |
+  | :--- | :--- | :-: | :-: | :-: | :-: |
+  | Perpetual | bar | 47 | -3.42 | 0.90 | 12.2 % |
+  | Perpetual | tick (100 ms) | 48 | +4.11 | 1.12 | 11.5 % |
+  | Spot | bar | 47 | -0.26 | 0.99 | 6.9 % |
+  | Spot | tick (100 ms) | 48 | +4.88 | 1.20 | 7.3 % |
+
+  The sign flips between routes on about 47 trades, which is inside the noise of the sample: the
+  result is a hint that the bar route is not systematically optimistic, not a measurement of the
+  gap. Neither route shows an edge. Fill quality at the tick level (queue position, depth) is still
+  WP-15. The time barrier also differs: the tick route enforces `deadline_ms` only, and the bar
+  engine also counts `max_bars_hold` events; the swarm sets a deadline, so it is unaffected.
+- There is no live loop: no binary trades live or on paper. The paper runtime, the clock port and
+  `SessionDriver::on_idle` were removed (2026-11-17) because nothing called them. Git keeps them.

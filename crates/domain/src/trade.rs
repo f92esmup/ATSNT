@@ -44,12 +44,6 @@ impl Trade {
             side,
         })
     }
-
-    /// Computes the notional dollar value of the trade (Price * Quantity).
-    #[inline]
-    pub fn dollar_value(&self) -> Decimal {
-        self.price * self.quantity
-    }
 }
 
 #[cfg(test)]
@@ -61,8 +55,6 @@ mod tests {
     fn valid_trade_creation() {
         let trade = Trade::new(1700000000, dec!(50000), dec!(1.5), Side::Buy);
         assert!(trade.is_ok());
-        let trade = trade.unwrap();
-        assert_eq!(trade.dollar_value(), dec!(75000));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use backtest::{BacktestConfig, BacktestEngine, PriceEvent, TickSimulationConfig};
 use domain::futures::FundingSchedule;
-use domain::{InputKind, MarketEvent, MarketType, OrderIntent, Side, Trade};
+use domain::{MarketEvent, MarketType, OrderIntent, Side, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategies::Strategy;
@@ -32,10 +32,6 @@ impl Strategy for EveryTrade {
 
     fn compatible_market_types(&self) -> &'static [MarketType] {
         &[MarketType::Spot, MarketType::UsdMPerpetual]
-    }
-
-    fn input_kind(&self) -> InputKind {
-        InputKind::Trades
     }
 
     fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
@@ -100,7 +96,6 @@ async fn tick_refusals(
     let config = TickSimulationConfig {
         backtest: config,
         symbol: "BTCUSDT".to_string(),
-        dollar_bar_threshold: dec!(1_000_000),
         latency_ms: 0,
         funding: FundingSchedule::constant(config.funding_rate_pct),
     };
@@ -147,6 +142,55 @@ async fn a_short_on_spot_is_refused_alike_on_both_routes() {
     let tick = tick_refusals(config, strategy, &tape).await;
 
     assert_eq!(bar, (only("SpotShortingDisallowed", 48), 0));
+    assert_eq!(tick, bar);
+}
+
+#[tokio::test]
+async fn an_entry_the_balance_cannot_fund_is_sized_down_alike_on_both_routes() {
+    // 1 % risked over a 1 % stop asks for the whole balance, which leaves nothing for the fee:
+    // the spot defaults used to drop such an entry in silence on both routes.
+    let mut tape = flat_tape(3, dec!(100));
+    tape.extend((3..12).map(|i| {
+        trade(
+            START_MS + i * HOUR_MS,
+            dec!(103),
+            if i % 2 == 0 { Side::Buy } else { Side::Sell },
+        )
+    }));
+    let strategy = EveryTrade {
+        side: Side::Buy,
+        stop_fraction: dec!(0.01),
+    };
+    let config = BacktestConfig {
+        initial_capital: dec!(1_000),
+        ..BacktestConfig::spot()
+    };
+
+    let (bar, bar_trades) = bar_refusals(config, strategy.clone(), &tape);
+    let (tick, tick_trades) = tick_refusals(config, strategy, &tape).await;
+
+    assert!(bar.is_empty() && tick.is_empty(), "{bar:?} / {tick:?}");
+    assert!(bar_trades >= 1, "the bar route trades");
+    assert!(tick_trades >= 1, "the tick route trades");
+}
+
+#[tokio::test]
+async fn an_entry_below_the_smallest_order_the_balance_funds_is_refused_alike_on_both_routes() {
+    // 5.02 funds 0.049 units once the fee is left aside: 4.9 of notional, under the 5 minimum.
+    let tape = flat_tape(48, dec!(100));
+    let strategy = EveryTrade {
+        side: Side::Buy,
+        stop_fraction: dec!(0.01),
+    };
+    let config = BacktestConfig {
+        initial_capital: dec!(5.02),
+        ..BacktestConfig::spot()
+    };
+
+    let bar = bar_refusals(config, strategy.clone(), &tape);
+    let tick = tick_refusals(config, strategy, &tape).await;
+
+    assert_eq!(bar, (only("InsufficientMargin", 48), 0));
     assert_eq!(tick, bar);
 }
 

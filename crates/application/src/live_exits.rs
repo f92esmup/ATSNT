@@ -54,8 +54,6 @@ struct TrackedPosition {
     entry_price: Decimal,
     stop_loss: Decimal,
     take_profit: Decimal,
-    max_bars_hold: usize,
-    bars_held: usize,
     trailing_atr: Option<Decimal>,
     breakeven_dist: Option<Decimal>,
     deadline_ms: Option<i64>,
@@ -103,7 +101,6 @@ impl ExitManager {
         entry_side: Side,
         stop_loss: Decimal,
         take_profit: Decimal,
-        max_bars_hold: usize,
     ) -> ExitEvent {
         self.on_entry_filled_with_trailing(
             gateway,
@@ -111,7 +108,6 @@ impl ExitManager {
             stop_loss,
             stop_loss,
             take_profit,
-            max_bars_hold,
             None,
             None,
             None,
@@ -128,7 +124,6 @@ impl ExitManager {
         entry_price: Decimal,
         stop_loss: Decimal,
         take_profit: Decimal,
-        max_bars_hold: usize,
         trailing_atr: Option<Decimal>,
         breakeven_dist: Option<Decimal>,
         deadline_ms: Option<i64>,
@@ -138,8 +133,6 @@ impl ExitManager {
             entry_price,
             stop_loss,
             take_profit,
-            max_bars_hold,
-            bars_held: 0,
             trailing_atr,
             breakeven_dist,
             deadline_ms,
@@ -282,10 +275,10 @@ impl ExitManager {
         None
     }
 
-    /// A bar closed: retry pending cleanup and enforce the time barrier.
-    pub async fn on_bar_closed<G: ExitGateway>(&mut self, gateway: &G) -> Option<ExitEvent> {
+    /// Retries what an earlier attempt left pending: the close of a position that has no exits,
+    /// or the cancelling of the orders a closed position left behind.
+    pub async fn retry_pending<G: ExitGateway>(&mut self, gateway: &G) -> Option<ExitEvent> {
         if self.unprotected {
-            // A naked position is retried every bar, not only at the time barrier.
             return Some(match self.flatten(gateway).await {
                 Ok(()) => {
                     self.position = None;
@@ -300,24 +293,7 @@ impl ExitManager {
         if self.cleanup_pending {
             return Some(self.try_cleanup(gateway).await);
         }
-        let tracked = self.position.as_mut()?;
-        if tracked.deadline_ms.is_none() {
-            tracked.bars_held += 1;
-            if tracked.bars_held < tracked.max_bars_hold {
-                return None;
-            }
-        } else {
-            return None;
-        }
-        // Close first and cancel afterwards: the exchange-held exits protect until the
-        // position is really flat.
-        match self.flatten(gateway).await {
-            Ok(()) => {
-                self.position = None;
-                Some(ExitEvent::TimeBarrierClosed)
-            }
-            Err(reason) => Some(ExitEvent::TimeBarrierCloseFailed { reason }),
-        }
+        None
     }
 
     /// Monthly kill-switch: flatten, cancel everything and refuse new entries.
@@ -422,10 +398,10 @@ mod tests {
         }
     }
 
-    async fn entered(gateway: &MockGateway, max_bars: usize) -> ExitManager {
+    async fn entered(gateway: &MockGateway) -> ExitManager {
         let mut manager = ExitManager::new("BTCUSDT");
         let event = manager
-            .on_entry_filled(gateway, Side::Buy, dec!(90), dec!(110), max_bars)
+            .on_entry_filled(gateway, Side::Buy, dec!(90), dec!(110))
             .await;
         assert_eq!(event, ExitEvent::Protected);
         manager
@@ -434,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn protection_success_blocks_new_entries_until_the_position_is_gone() {
         let gateway = MockGateway::default();
-        let mut manager = entered(&gateway, 100).await;
+        let mut manager = entered(&gateway).await;
 
         assert!(!manager.can_open());
         assert_eq!(gateway.calls(), vec!["place"]);
@@ -452,7 +428,7 @@ mod tests {
         let mut manager = ExitManager::new("BTCUSDT");
 
         let event = manager
-            .on_entry_filled(&gateway, Side::Buy, dec!(90), dec!(110), 100)
+            .on_entry_filled(&gateway, Side::Buy, dec!(90), dec!(110))
             .await;
 
         assert!(matches!(event, ExitEvent::UnprotectedEntryClosed { .. }));
@@ -468,7 +444,7 @@ mod tests {
         let mut manager = ExitManager::new("BTCUSDT");
 
         let event = manager
-            .on_entry_filled(&gateway, Side::Sell, dec!(110), dec!(90), 100)
+            .on_entry_filled(&gateway, Side::Sell, dec!(110), dec!(90))
             .await;
 
         assert!(matches!(
@@ -479,17 +455,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_naked_position_is_retried_on_every_bar_until_closed() {
+    async fn a_naked_position_is_retried_until_closed() {
         let gateway = MockGateway::default();
         *gateway.place.borrow_mut() = VecDeque::from(vec![Err("place".to_string()); MAX_ATTEMPTS]);
         *gateway.close.borrow_mut() = VecDeque::from(vec![Err("close".to_string()); MAX_ATTEMPTS]);
         let mut manager = ExitManager::new("BTCUSDT");
         manager
-            .on_entry_filled(&gateway, Side::Buy, dec!(90), dec!(110), 1_000)
+            .on_entry_filled(&gateway, Side::Buy, dec!(90), dec!(110))
             .await;
 
-        // The exchange recovers: the very next bar closes it, long before the time barrier.
-        let event = manager.on_bar_closed(&gateway).await;
+        // The exchange recovers: the next retry closes it.
+        let event = manager.retry_pending(&gateway).await;
 
         assert!(matches!(
             event,
@@ -499,27 +475,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_failure_stays_pending_and_is_retried_on_the_next_bar() {
+    async fn cleanup_failure_stays_pending_and_is_retried() {
         let gateway = MockGateway::default();
-        let mut manager = entered(&gateway, 100).await;
+        let mut manager = entered(&gateway).await;
         *gateway.cancel.borrow_mut() = VecDeque::from(vec![Err("net".to_string()); MAX_ATTEMPTS]);
 
         let first = manager.on_position_closed_by_exchange(&gateway).await;
         assert!(matches!(first, ExitEvent::CleanupPending { .. }));
         assert!(!manager.can_open());
 
-        let retry = manager.on_bar_closed(&gateway).await;
+        let retry = manager.retry_pending(&gateway).await;
         assert_eq!(retry, Some(ExitEvent::CleanedUp));
         assert!(manager.can_open());
     }
 
-    #[tokio::test]
-    async fn time_barrier_closes_at_the_nth_bar_and_closes_before_cancelling() {
-        let gateway = MockGateway::default();
-        let mut manager = entered(&gateway, 2).await;
+    async fn entered_with_deadline(gateway: &MockGateway, deadline_ms: i64) -> ExitManager {
+        let mut manager = ExitManager::new("BTCUSDT");
+        let event = manager
+            .on_entry_filled_with_trailing(
+                gateway,
+                Side::Buy,
+                dec!(100),
+                dec!(90),
+                dec!(110),
+                None,
+                None,
+                Some(deadline_ms),
+            )
+            .await;
+        assert_eq!(event, ExitEvent::Protected);
+        manager
+    }
 
-        assert_eq!(manager.on_bar_closed(&gateway).await, None);
-        let event = manager.on_bar_closed(&gateway).await;
+    #[tokio::test]
+    async fn the_deadline_closes_before_cancelling() {
+        let gateway = MockGateway::default();
+        let mut manager = entered_with_deadline(&gateway, 1_000).await;
+
+        assert_eq!(manager.on_time_update(&gateway, 999).await, None);
+        let event = manager.on_time_update(&gateway, 1_000).await;
 
         assert_eq!(event, Some(ExitEvent::TimeBarrierClosed));
         assert_eq!(
@@ -531,26 +525,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_time_barrier_close_keeps_the_position_tracked_and_retries() {
+    async fn a_failed_deadline_close_keeps_the_position_tracked_and_retries() {
         let gateway = MockGateway::default();
-        let mut manager = entered(&gateway, 1).await;
+        let mut manager = entered_with_deadline(&gateway, 1_000).await;
         *gateway.close.borrow_mut() = VecDeque::from(vec![Err("net".to_string()); MAX_ATTEMPTS]);
 
-        let first = manager.on_bar_closed(&gateway).await;
+        let first = manager.on_time_update(&gateway, 1_000).await;
         assert!(matches!(
             first,
             Some(ExitEvent::TimeBarrierCloseFailed { .. })
         ));
         assert!(!manager.can_open());
 
-        let second = manager.on_bar_closed(&gateway).await;
+        let second = manager.on_time_update(&gateway, 1_001).await;
         assert_eq!(second, Some(ExitEvent::TimeBarrierClosed));
     }
 
     #[tokio::test]
     async fn halt_flattens_confirms_flat_and_blocks_entries() {
         let gateway = MockGateway::default();
-        let mut manager = entered(&gateway, 100).await;
+        let mut manager = entered(&gateway).await;
         // First close finds a position, the confirmation read finds it flat.
         *gateway.close.borrow_mut() = VecDeque::from(vec![Ok(true), Ok(false)]);
 
@@ -565,7 +559,7 @@ mod tests {
     #[tokio::test]
     async fn halt_never_claims_halted_while_the_position_may_be_open() {
         let gateway = MockGateway::default();
-        let mut manager = entered(&gateway, 100).await;
+        let mut manager = entered(&gateway).await;
         *gateway.close.borrow_mut() = VecDeque::from(vec![Err("net".to_string()); MAX_ATTEMPTS]);
 
         let first = manager.halt(&gateway).await;
@@ -603,7 +597,6 @@ mod tests {
                 dec!(100),
                 dec!(95),
                 dec!(115),
-                10,
                 Some(dec!(2.5)),  // 0.50 ATR trailing step
                 Some(dec!(3.75)), // 0.75 ATR breakeven trigger
                 None,

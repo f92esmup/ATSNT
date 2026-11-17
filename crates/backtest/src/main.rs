@@ -16,11 +16,10 @@ use backtest::{
 };
 use clap::Parser;
 use domain::futures::FundingSchedule;
-use domain::DollarBarAggregator;
 use ports::MarketDataStream;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use strategies::{InputKind, MarketEvent, MarketType, Strategy};
+use strategies::{MarketEvent, MarketType, Strategy};
 
 /// How simulated orders are filled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -40,10 +39,6 @@ struct Args {
     /// Path to historical market data file (.csv or .parquet)
     #[arg(short, long, default_value = "data/sample_trades.csv")]
     data: PathBuf,
-
-    /// Dollar bar threshold (e.g. 200000 for $200k, 1000000 for $1M; auto-adopted from --config artifact if omitted)
-    #[arg(long)]
-    dollar_bar: Option<Decimal>,
 
     /// Optional path to JSON strategy configuration (e.g. configs/hpo_btcusdt_2026.json)
     #[arg(short, long, visible_alias = "strategy-config")]
@@ -73,10 +68,9 @@ struct Args {
     #[arg(long)]
     risk_per_trade: Option<Decimal>,
 
-    /// Fill model: "bar" fills at bar granularity (fast, used by the optimizer), or at trade
-    /// resolution for strategies that consume trades; "tick" replays every trade through the
-    /// live trading session on a simulated venue with order latency and tape-walk market fills
-    /// (slow, for validating finalists; not yet available for strategies that consume trades)
+    /// Fill model: "bar" fills at trade resolution with the engine the optimizer uses (fast), or
+    /// "tick" replays every trade through the live trading session on a simulated venue with
+    /// order latency and tape-walk market fills (slow, for validating finalists)
     #[arg(long, value_enum, default_value_t = FillModelArg::Bar)]
     fill_model: FillModelArg,
 
@@ -176,51 +170,15 @@ async fn main() -> Result<()> {
     if let Some(reason) = loaded.deployment_blocker() {
         println!("[GATE] not deployable: {reason}");
     }
-    let input_kind = loaded.strategy.input_kind();
     let calibration_end = calibration_end_ms(&loaded.shared_config_json);
     let mut strategy = loaded.strategy;
     let strat_config_val = loaded.config_json;
     let strat_id = loaded.strategy_id;
-    let art_threshold = loaded.dollar_bar_threshold;
     let art_symbol = loaded.symbol;
     let art_market = loaded.market_type;
     let art_context = loaded.execution_context;
 
-    // Resolve Dollar Bar threshold: CLI override > Artifact manifest > Fallback default ($200,000)
-    let effective_dollar_bar = match (args.dollar_bar, art_threshold) {
-        (Some(cli_val), Some(artifact_val)) => {
-            if cli_val != artifact_val {
-                println!(
-                    "[WARNING] CLI override --dollar-bar (${}) overrides artifact threshold (${})!",
-                    cli_val, artifact_val
-                );
-            }
-            cli_val
-        }
-        (Some(cli_val), None) => cli_val,
-        (None, Some(artifact_val)) => {
-            println!(
-                "[*] Authoritative Contract: Adopted Dollar Bar threshold from artifact: ${}",
-                artifact_val
-            );
-            artifact_val
-        }
-        (None, None) => dec!(200_000),
-    };
-
-    // 2. Initialize Dollar Bar Aggregator
-    let mut aggregator = DollarBarAggregator::new(effective_dollar_bar)
-        .map_err(|e| anyhow::anyhow!("Failed to initialize aggregator: {e}"))?;
-
-    match input_kind {
-        InputKind::DollarBars => println!(
-            "[*] Configured DollarBarAggregator with threshold: ${}",
-            effective_dollar_bar
-        ),
-        InputKind::Trades => {
-            println!("[*] Input: raw trades, one price event per trade (trade resolution)")
-        }
-    }
+    println!("[*] Input: raw trades, one price event per trade (trade resolution)");
 
     println!("[*] Strategy loaded: {}", strategy.name());
 
@@ -318,7 +276,6 @@ async fn main() -> Result<()> {
     println!("[*] Replaying discrete market trade ticks...\n");
 
     let mut total_trades_processed = 0usize;
-    let mut total_bars_emitted = 0usize;
     let mut data_window = DataWindow {
         source: Some(args.data.display().to_string()),
         ..DataWindow::default()
@@ -327,7 +284,7 @@ async fn main() -> Result<()> {
     let replay_start = Instant::now();
     let strategy_audit;
     let (metrics, closed_trades) = match args.fill_model {
-        FillModelArg::Bar if input_kind == InputKind::Trades => {
+        FillModelArg::Bar => {
             let mut engine = BacktestEngine::new(engine_config);
             let mut last_price = Decimal::ZERO;
             while let Some(trade) = stream.next_trade()? {
@@ -346,35 +303,6 @@ async fn main() -> Result<()> {
                 if engine.is_halted() {
                     println!("{}", monthly_halt_message(data_window.end_ms));
                     break;
-                }
-            }
-            strategy_audit = strategy.audit();
-            let mark = (last_price > Decimal::ZERO).then_some(last_price);
-            let (metrics, trades) = engine.finish_with_trades(mark);
-            (metrics, trades)
-        }
-        FillModelArg::Bar => {
-            let mut engine = BacktestEngine::new(engine_config);
-            let mut last_price = Decimal::ZERO;
-            while let Some(trade) = stream.next_trade()? {
-                total_trades_processed += 1;
-                last_price = trade.price;
-                data_window.start_ms.get_or_insert(trade.timestamp);
-                data_window.end_ms = Some(trade.timestamp);
-
-                if let Some(bar) = aggregator.process_trade(&trade) {
-                    total_bars_emitted += 1;
-                    if total_bars_emitted <= 5 || total_bars_emitted % 250_000 == 0 {
-                        println!(
-                            "  [DollarBar #{:07}] Close: ${:.2} | Vol: {:.2} BTC | Notional: ${:.2}",
-                            total_bars_emitted, bar.close, bar.volume, bar.dollar_volume
-                        );
-                    }
-                    engine.process_bar(&mut strategy, &bar);
-                    if engine.is_halted() {
-                        println!("{}", monthly_halt_message(data_window.end_ms));
-                        break;
-                    }
                 }
             }
             strategy_audit = strategy.audit();
@@ -402,7 +330,6 @@ async fn main() -> Result<()> {
                 TickSimulationConfig {
                     backtest: engine_config,
                     symbol: symbol.clone(),
-                    dollar_bar_threshold: effective_dollar_bar,
                     latency_ms: args.latency_ms,
                     funding,
                 },
@@ -419,7 +346,6 @@ async fn main() -> Result<()> {
             }
             total_trades_processed =
                 usize::try_from(simulation.ticks_processed()).unwrap_or(usize::MAX);
-            total_bars_emitted = usize::try_from(simulation.bars_processed()).unwrap_or(usize::MAX);
             if let Some((side, quantity, entry)) = simulation.open_position() {
                 println!(
                     "[!] A {side:?} position of {quantity} @ {entry} was still open when the data ended; it is not part of the metrics."
@@ -436,7 +362,6 @@ async fn main() -> Result<()> {
     println!("               QUANTITATIVE PERFORMANCE REPORT              ");
     println!("============================================================");
     println!(" Raw Ticks Processed:       {}", total_trades_processed);
-    println!(" Dollar Bars Formed:        {}", total_bars_emitted);
     println!(" Total Trades Executed:     {}", metrics.total_trades);
     println!(" Winning Trades:            {}", metrics.winning_trades);
     println!(" Losing Trades:             {}", metrics.losing_trades);
@@ -511,13 +436,8 @@ async fn main() -> Result<()> {
         strategy_id: strat_id,
         symbol,
         market_type: target_market,
-        sampling: match input_kind {
-            InputKind::DollarBars => SamplingConfig::DollarBar {
-                threshold: effective_dollar_bar,
-            },
-            InputKind::Trades => SamplingConfig::Trades {
-                price_bucket_ms: None,
-            },
+        sampling: SamplingConfig::Trades {
+            price_bucket_ms: None,
         },
         strategy_config: strat_config_val,
         execution_context: engine_config,

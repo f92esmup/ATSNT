@@ -1,6 +1,6 @@
-use domain::{DollarBar, DomainError, OrderIntent};
+use domain::{DomainError, OrderIntent};
 
-pub use domain::{InputKind, MarketEvent, MarketType};
+pub use domain::{MarketEvent, MarketType};
 
 /// Universal contract for all quantitative trading strategies in ATSNT.
 ///
@@ -19,17 +19,9 @@ pub trait Strategy: Send {
         self.compatible_market_types().contains(&market_type)
     }
 
-    /// The market input this strategy consumes; runners prepare exactly that stream.
-    ///
-    /// Defaults to finished dollar bars, the input of every triple-barrier strategy.
-    fn input_kind(&self) -> InputKind {
-        InputKind::DollarBars
-    }
-
     /// Reacts to one market event and optionally decides a triple-barrier entry.
     ///
-    /// Every runner calls this method, with the events of the kind [`Strategy::input_kind`]
-    /// declares.
+    /// Every runner calls this method, once per market trade.
     fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent>;
 
     /// Clears internal state buffers to allow clean replay or backtest isolation.
@@ -52,23 +44,6 @@ pub trait FeatureExtractor: Send {
 
     /// Clears internal state.
     fn reset(&mut self);
-}
-
-/// Extractor of dollar-bar strategies: the feature is the bar itself.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct BarPassThrough;
-
-impl FeatureExtractor for BarPassThrough {
-    type Features = DollarBar;
-
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<DollarBar> {
-        match event {
-            MarketEvent::DollarBar(bar) => Some((*bar).clone()),
-            MarketEvent::Trade(_) => None,
-        }
-    }
-
-    fn reset(&mut self) {}
 }
 
 /// Universal contract for hyperparameter search spaces and stability perturbations.
@@ -160,10 +135,6 @@ impl<S: ?Sized + Strategy> Strategy for Box<S> {
         (**self).supports_market_type(market_type)
     }
 
-    fn input_kind(&self) -> InputKind {
-        (**self).input_kind()
-    }
-
     fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
         (**self).on_event(event)
     }
@@ -183,30 +154,12 @@ mod tests {
     use domain::{Side, Trade};
     use rust_decimal_macros::dec;
 
-    fn bar(close: rust_decimal::Decimal) -> DollarBar {
-        DollarBar {
-            start_time: 0,
-            end_time: 60_000,
-            open: close,
-            high: close,
-            low: close,
-            close,
-            volume: dec!(1),
-            dollar_volume: close,
-            trade_count: 1,
-            buy_volume: dec!(1),
-            sell_volume: dec!(0),
-            buy_dollar_volume: close,
-            sell_dollar_volume: dec!(0),
-        }
-    }
+    /// A strategy that buys on every trade.
+    struct EveryTrade;
 
-    /// A bar strategy: it decides on dollar bars and ignores raw trades.
-    struct BarOnly;
-
-    impl Strategy for BarOnly {
+    impl Strategy for EveryTrade {
         fn name(&self) -> &str {
-            "bar_only"
+            "every_trade"
         }
 
         fn compatible_market_types(&self) -> &'static [MarketType] {
@@ -214,51 +167,42 @@ mod tests {
         }
 
         fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::DollarBar(bar) = event else {
+            let MarketEvent::Trade(trade) = event else {
                 return None;
             };
-            OrderIntent::new(bar.end_time, Side::Buy, bar.close, dec!(90), dec!(110), 3).ok()
+            OrderIntent::new(
+                trade.timestamp,
+                Side::Buy,
+                trade.price,
+                dec!(90),
+                dec!(110),
+                3,
+            )
+            .ok()
         }
 
         fn reset(&mut self) {}
     }
 
+    fn trade() -> Trade {
+        Trade::new(1, dec!(100), dec!(1), Side::Buy).unwrap()
+    }
+
     #[test]
-    fn a_bar_strategy_declares_dollar_bars_and_decides_on_them() {
-        let mut strategy = BarOnly;
-        assert_eq!(strategy.input_kind(), InputKind::DollarBars);
-        let b = bar(dec!(100));
-        let intent = strategy.on_event(&MarketEvent::DollarBar(&b)).unwrap();
+    fn a_strategy_decides_on_a_trade() {
+        let trade = trade();
+        let intent = EveryTrade.on_event(&MarketEvent::Trade(&trade)).unwrap();
         assert_eq!(intent.price, dec!(100));
     }
 
     #[test]
     fn a_boxed_strategy_forwards_every_method() {
-        let mut boxed: Box<dyn Strategy> = Box::new(BarOnly);
-        let b = bar(dec!(100));
-        assert_eq!(boxed.input_kind(), InputKind::DollarBars);
-        assert!(boxed.on_event(&MarketEvent::DollarBar(&b)).is_some());
-        assert_eq!(boxed.name(), "bar_only");
+        let mut boxed: Box<dyn Strategy> = Box::new(EveryTrade);
+        let trade = trade();
+        assert!(boxed.on_event(&MarketEvent::Trade(&trade)).is_some());
+        assert_eq!(boxed.name(), "every_trade");
         assert!(boxed.supports_market_type(MarketType::UsdMPerpetual));
         assert_eq!(boxed.audit(), None);
         boxed.reset();
-    }
-
-    #[test]
-    fn a_bar_strategy_ignores_raw_trades() {
-        let trade = Trade::new(1, dec!(100), dec!(1), Side::Buy).unwrap();
-        assert_eq!(BarOnly.on_event(&MarketEvent::Trade(&trade)), None);
-    }
-
-    #[test]
-    fn bar_pass_through_extracts_the_bar_and_nothing_from_trades() {
-        let mut extractor = BarPassThrough;
-        let b = bar(dec!(100));
-        assert_eq!(
-            extractor.on_event(&MarketEvent::DollarBar(&b)),
-            Some(b.clone())
-        );
-        let trade = Trade::new(1, dec!(100), dec!(1), Side::Buy).unwrap();
-        assert_eq!(extractor.on_event(&MarketEvent::Trade(&trade)), None);
     }
 }

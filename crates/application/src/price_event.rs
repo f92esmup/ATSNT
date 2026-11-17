@@ -1,11 +1,10 @@
 //! Price events: what the execution core trades against (strategy spec
 //! `docs/strategy/03-swarm-consensus.md` §3.5 and §11.1).
 //!
-//! A price event is an OHLC bucket of trades. With the bar fill model it is one dollar bar; at
-//! trade resolution it is one trade; in HPO it is a fixed-width bucket of trades
-//! ([`bucket_trades`]).
+//! A price event is an OHLC bucket of trades. At trade resolution it is one trade; in HPO it is a
+//! fixed-width bucket of trades ([`bucket_trades`]).
 
-use domain::{DollarBar, Trade};
+use domain::Trade;
 use rust_decimal::Decimal;
 
 use crate::error::BacktestError;
@@ -15,7 +14,7 @@ use crate::error::BacktestError;
 /// `start_ms` is the timestamp of the first trade in the event and `end_ms` that of the last.
 /// Pending orders become due against `start_ms` (an order fills at the first event whose start
 /// is at or after its due time), while day and month rollovers, funding windows, exit times and
-/// the decision timestamp use `end_ms`, exactly as the bar engine used `DollarBar::end_time`.
+/// the decision timestamp use `end_ms`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PriceEvent {
     /// Timestamp of the first trade in the event, in Unix milliseconds.
@@ -38,24 +37,6 @@ pub struct PriceEvent {
     pub buy_dollar_volume: Decimal,
     /// Sell-initiated quote dollar volume.
     pub sell_dollar_volume: Decimal,
-}
-
-impl From<&DollarBar> for PriceEvent {
-    /// The bar's OHLC and volume metrics, with `start_ms = start_time` and `end_ms = end_time`.
-    fn from(bar: &DollarBar) -> Self {
-        Self {
-            start_ms: bar.start_time,
-            end_ms: bar.end_time,
-            open: bar.open,
-            high: bar.high,
-            low: bar.low,
-            close: bar.close,
-            volume: bar.volume,
-            dollar_volume: bar.dollar_volume,
-            buy_dollar_volume: bar.buy_dollar_volume,
-            sell_dollar_volume: bar.sell_dollar_volume,
-        }
-    }
 }
 
 impl From<&Trade> for PriceEvent {
@@ -131,7 +112,7 @@ pub fn bucket_trades(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::{DollarBar, Side, Trade};
+    use domain::{Side, Trade};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
@@ -142,40 +123,6 @@ mod tests {
             quantity: dec!(1),
             side: Side::Buy,
         }
-    }
-
-    #[test]
-    fn a_dollar_bar_maps_to_its_ohlc_and_both_times() {
-        let bar = DollarBar {
-            start_time: 1_000,
-            end_time: 2_000,
-            open: dec!(10),
-            high: dec!(12),
-            low: dec!(9),
-            close: dec!(11),
-            volume: dec!(1),
-            dollar_volume: dec!(11),
-            trade_count: 2,
-            buy_volume: dec!(0.5),
-            sell_volume: dec!(0.5),
-            buy_dollar_volume: dec!(5.5),
-            sell_dollar_volume: dec!(5.5),
-        };
-        assert_eq!(
-            PriceEvent::from(&bar),
-            PriceEvent {
-                start_ms: 1_000,
-                end_ms: 2_000,
-                open: dec!(10),
-                high: dec!(12),
-                low: dec!(9),
-                close: dec!(11),
-                volume: dec!(1),
-                dollar_volume: dec!(11),
-                buy_dollar_volume: dec!(5.5),
-                sell_dollar_volume: dec!(5.5),
-            }
-        );
     }
 
     #[test]
