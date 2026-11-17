@@ -65,14 +65,16 @@ GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until
 - Spot accounting is not modelled as a ledger: there is one cash balance (`equity`), no EUR balances
   and no fee tiers (WP-11). `ExecutionCore::spot_balances` derives the base and free quote from the
   position, but no engine path reads it. The lot and notional filters are one global set of defaults
-  (0.001 minimum quantity and step, 5 minimum notional), not per-pair rules. An entry the margin rule
-  cannot fund is dropped without a rejection count (`execution_core.rs:733-735`). There is no spread,
+  (0.001 minimum quantity and step, 5 minimum notional), not per-pair rules. There is no spread,
   latency defaults to 0 ms, and maker fills ignore queue priority.
-- The spot defaults (`BacktestConfig::spot()`: 1 % risk, 1x leverage) size an entry whose stop is at
-  or below 1 % to the whole balance, so its fee and slippage do not fit, except through lot rounding.
-  The entry is dropped with no rejection count (`execution_core.rs:733-735`) and the report prints
-  `Rejected Signals: none`. Until rejections are counted, a run with no trades under these defaults
-  is a sizing artefact, not a strategy result.
+- An entry the balance cannot margin is sized down by `domain::EntryGate` to what it funds (the
+  margin rule, the entry fee and the configured slippage included), so the spot defaults
+  (`BacktestConfig::spot()`: 1 % risk, 1x leverage) now trade a stop of 1 % or less with a smaller
+  quantity than the risk asks for. When even the smallest order does not fit, the signal is counted
+  as `InsufficientMargin`. What is left uncounted by the gate is a fill that gaps past the slippage
+  allowed: the bar route counts it as `InsufficientMargin`, and the tick route counts a venue refusal
+  as `VenueRejected`. Results of spot runs made before 2026-11-17 are not comparable: an entry that
+  was dropped without a trace now trades.
 - Bar and tick refusals agree by construction since both routes ask `domain::EntryGate` with the
   same `DailyBreaker`, and `tests/gate_parity.rs` pins it. The tick route used to report no
   refusals at all: it did not count them. The routes still fill differently. On the 90-day
@@ -80,6 +82,8 @@ GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until
   route 22. The cause is measured: the tick route sent 54 entries, 32 of them timed out and 22
   opened. It fills a market order only against prints of the opposite aggressor and cancels an
   entry that waited 30 s, and that tape has one print an hour. It is a property of the
-  synthetic tape, not of the gate. Check the two routes on real tick data before real money.
+  synthetic tape, not of the gate. Check the two routes on real tick data before real money. The
+  time barrier also differs: the tick route enforces `deadline_ms` only, and the bar engine also
+  counts `max_bars_hold` events; the swarm sets a deadline, so it is unaffected.
 - There is no live loop: no binary trades live or on paper. The paper runtime, the clock port and
   `SessionDriver::on_idle` were removed (2026-11-17) because nothing called them. Git keeps them.

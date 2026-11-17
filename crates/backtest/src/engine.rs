@@ -252,11 +252,13 @@ impl BacktestEngine {
 
         // 0. A pending order (market or limit) submitted on an earlier event evaluates once due.
         if !self.halted {
-            if let PendingEntryOutcome::ExpiredLimit =
-                self.core
-                    .step_pending_entry(*bar, &self.config, &mut self.equity)
+            match self
+                .core
+                .step_pending_entry(*bar, &self.config, &mut self.equity)
             {
-                self.count_rejection("LimitTimeoutExpired");
+                PendingEntryOutcome::ExpiredLimit => self.count_rejection("LimitTimeoutExpired"),
+                PendingEntryOutcome::Refused(reason) => self.count_rejection(reason),
+                _ => {}
             }
         }
         let had_position = self.core.position().is_some();
@@ -358,6 +360,7 @@ impl BacktestEngine {
                     self.config.risk_per_trade_pct,
                     self.config.market_type,
                 )
+                .with_margin(self.config.margin_rule())
                 .admit(
                     &intent,
                     self.total_equity(mark_price),
@@ -1474,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_the_balance_cannot_margin_never_opens() {
+    fn an_entry_the_balance_cannot_margin_is_sized_down_to_what_it_funds() {
         let mut engine = leveraged_engine(dec!(400));
         let intent =
             Some(OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.99), dec!(110), 50).unwrap());
@@ -1489,10 +1492,15 @@ mod tests {
             &ohlc_bar(2_000, dec!(100), dec!(100), dec!(100), dec!(100)),
         );
 
-        // The leverage cap limits the order to 8000 of notional: 400 of margin at 20x plus
-        // the entry fee exceeds the 400 balance.
-        assert!(engine.active_position().is_none());
-        assert_eq!(engine.cash_equity(), dec!(400));
+        // The risk sizing asks for the leverage cap, 8000 of notional: 400 of margin at 20x plus
+        // the entry fee exceeds the 400 balance, so the gate sizes the order down to fit.
+        let position = engine.active_position().expect("the entry opens, smaller");
+        assert!(position.quantity < dec!(80), "got {}", position.quantity);
+        assert!(position.quantity > dec!(70), "got {}", position.quantity);
+        assert!(engine.cash_equity() < dec!(400));
+        assert!(engine.cash_equity() > Decimal::ZERO);
+        let metrics = engine.finish(Some(dec!(100)));
+        assert!(metrics.rejected_orders.is_empty());
     }
 
     #[test]

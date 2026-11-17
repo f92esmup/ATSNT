@@ -38,6 +38,8 @@ pub enum PendingEntryOutcome {
     RestingLimit { bars_pending: usize },
     /// A limit order exceeded its Time-In-Force timeout and was canceled.
     ExpiredLimit,
+    /// The order was due but could not open: the rejection reason it is counted under.
+    Refused(&'static str),
 }
 
 /// A submitted entry: the strategy intent and the quantity sized when it was signalled.
@@ -488,8 +490,10 @@ impl ExecutionCore {
         match pending.intent.order_type {
             domain::OrderType::Market => {
                 if let Some(pending) = self.pending.take() {
-                    self.fill_entry(pending, bar, config, equity);
-                    PendingEntryOutcome::FilledMarket
+                    match self.fill_entry(pending, bar, config, equity) {
+                        Ok(()) => PendingEntryOutcome::FilledMarket,
+                        Err(reason) => PendingEntryOutcome::Refused(reason.kind()),
+                    }
                 } else {
                     PendingEntryOutcome::NoDueEntry
                 }
@@ -503,8 +507,10 @@ impl ExecutionCore {
 
                 if touched {
                     if let Some(pending) = self.pending.take() {
-                        self.fill_entry(pending, bar, config, equity);
-                        PendingEntryOutcome::FilledLimit
+                        match self.fill_entry(pending, bar, config, equity) {
+                            Ok(()) => PendingEntryOutcome::FilledLimit,
+                            Err(reason) => PendingEntryOutcome::Refused(reason.kind()),
+                        }
                     } else {
                         PendingEntryOutcome::NoDueEntry
                     }
@@ -603,21 +609,22 @@ impl ExecutionCore {
     /// Fills a pending market order at the event's open plus adverse slippage; the entry time
     /// is the event's start.
     ///
-    /// The exchange runs the position at the lowest leverage the balance can margin; an order
-    /// it cannot margin at any supported leverage is dropped.
+    /// The exchange runs the position at the lowest leverage the balance can margin. An order
+    /// it cannot margin at any supported leverage does not open: the gate sizes entries to fit,
+    /// so this only happens when the fill gapped past the slippage it allowed for.
     pub fn fill_entry(
         &mut self,
         pending: PendingEntry,
         event: impl Into<PriceEvent>,
         config: &BacktestConfig,
         equity: &mut Decimal,
-    ) {
+    ) -> Result<(), domain::EntryRefusal> {
         let bar = event.into();
         let PendingEntry {
             intent, quantity, ..
         } = pending;
         if config.market_type == MarketType::Spot && intent.side == Side::Sell {
-            return;
+            return Err(domain::EntryRefusal::SpotShortingDisallowed);
         }
         let is_limit = intent.order_type == domain::OrderType::Limit;
 
@@ -635,7 +642,7 @@ impl ExecutionCore {
 
         let notional = fill_price * quantity;
         let Some(leverage) = margin_leverage(notional, entry_fee, *equity, config) else {
-            return;
+            return Err(domain::EntryRefusal::InsufficientMargin);
         };
         // Slippage is already embedded in fill_price; do not deduct from cash equity here
         *equity -= entry_fee;
@@ -657,6 +664,7 @@ impl ExecutionCore {
             self.margin = notional / Decimal::from(leverage);
             self.funding_accrued = Decimal::ZERO;
         }
+        Ok(())
     }
 
     /// Counts one more event held and closes the position when it is liquidated or a protective
@@ -1062,7 +1070,8 @@ mod tests {
             bar(dec!(100), dec!(100), dec!(100), dec!(100)),
             &config,
             &mut equity,
-        );
+        )
+        .unwrap();
         assert_eq!(equity, dec!(9_999.8));
         assert_eq!(core.exits().map(|e| e.stop), Some(dec!(95)));
 
@@ -1112,7 +1121,8 @@ mod tests {
             bar(dec!(100), dec!(100), dec!(100), dec!(100)),
             &config,
             &mut equity,
-        );
+        )
+        .unwrap();
         assert_eq!(core.exits().map(|e| e.stop), Some(dec!(95)));
 
         // Bar 1: Favorable excursion reaches 106 (+1.2 ATR >= 0.75 ATR)
@@ -1157,7 +1167,8 @@ mod tests {
             bar(dec!(100), dec!(100), dec!(100), dec!(100)),
             &config,
             &mut equity,
-        );
+        )
+        .unwrap();
 
         // Bar 1: High reaches 105.5 (+1.1 ATR >= 0.75 ATR) -> stop ratchets to breakeven (100)
         core.evaluate_exits(
@@ -1212,7 +1223,8 @@ mod tests {
             bar(dec!(100), dec!(100), dec!(100), dec!(100)),
             &config,
             &mut equity,
-        );
+        )
+        .unwrap();
 
         // Bar 1: High reaches 108 (+1.6 ATR >= 1.5 ATR, k=3) -> Stop ratchets to entry + 1.0 ATR = 105.0
         core.evaluate_exits(
@@ -1337,9 +1349,12 @@ mod tests {
 
         let bar_1 = bar(dec!(100), dec!(105), dec!(95), dec!(100));
         let pending = core.take_pending().unwrap();
-        core.fill_entry(pending, bar_1, &config, &mut equity);
+        let refusal = core
+            .fill_entry(pending, bar_1, &config, &mut equity)
+            .unwrap_err();
 
         // Core must remain completely flat because short entries are forbidden in Spot
+        assert_eq!(refusal, domain::EntryRefusal::SpotShortingDisallowed);
         assert!(core.position().is_none());
         assert_eq!(equity, dec!(10_000));
     }

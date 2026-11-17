@@ -135,6 +135,15 @@ impl BacktestConfig {
             )
     }
 
+    /// The margin rule the entry gate sizes against: what carrying a position costs here.
+    pub fn margin_rule(&self) -> domain::MarginRule {
+        domain::MarginRule {
+            maintenance_rate: self.maintenance_margin_rate,
+            fee_rate: self.taker_fee_pct,
+            slippage_pct: self.slippage_pct,
+        }
+    }
+
     /// `(order, position)` notional caps in force: the configured ones, else the policy defaults.
     pub fn effective_notional_caps(&self) -> (Decimal, Decimal) {
         let defaults = domain::RiskPolicy::default();

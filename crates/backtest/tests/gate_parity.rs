@@ -145,6 +145,55 @@ async fn a_short_on_spot_is_refused_alike_on_both_routes() {
     assert_eq!(tick, bar);
 }
 
+#[tokio::test]
+async fn an_entry_the_balance_cannot_fund_is_sized_down_alike_on_both_routes() {
+    // 1 % risked over a 1 % stop asks for the whole balance, which leaves nothing for the fee:
+    // the spot defaults used to drop such an entry in silence on both routes.
+    let mut tape = flat_tape(3, dec!(100));
+    tape.extend((3..12).map(|i| {
+        trade(
+            START_MS + i * HOUR_MS,
+            dec!(103),
+            if i % 2 == 0 { Side::Buy } else { Side::Sell },
+        )
+    }));
+    let strategy = EveryTrade {
+        side: Side::Buy,
+        stop_fraction: dec!(0.01),
+    };
+    let config = BacktestConfig {
+        initial_capital: dec!(1_000),
+        ..BacktestConfig::spot()
+    };
+
+    let (bar, bar_trades) = bar_refusals(config, strategy.clone(), &tape);
+    let (tick, tick_trades) = tick_refusals(config, strategy, &tape).await;
+
+    assert!(bar.is_empty() && tick.is_empty(), "{bar:?} / {tick:?}");
+    assert!(bar_trades >= 1, "the bar route trades");
+    assert!(tick_trades >= 1, "the tick route trades");
+}
+
+#[tokio::test]
+async fn an_entry_below_the_smallest_order_the_balance_funds_is_refused_alike_on_both_routes() {
+    // 5.02 funds 0.049 units once the fee is left aside: 4.9 of notional, under the 5 minimum.
+    let tape = flat_tape(48, dec!(100));
+    let strategy = EveryTrade {
+        side: Side::Buy,
+        stop_fraction: dec!(0.01),
+    };
+    let config = BacktestConfig {
+        initial_capital: dec!(5.02),
+        ..BacktestConfig::spot()
+    };
+
+    let bar = bar_refusals(config, strategy.clone(), &tape);
+    let tick = tick_refusals(config, strategy, &tape).await;
+
+    assert_eq!(bar, (only("InsufficientMargin", 48), 0));
+    assert_eq!(tick, bar);
+}
+
 /// A day that opens flat at 100, falls to 80 and stays there, then a second day at 80.
 fn crash_tape() -> Vec<Trade> {
     let mut tape = Vec::new();

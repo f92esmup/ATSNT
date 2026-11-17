@@ -80,7 +80,8 @@ impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
             backtest.risk_policy()?,
             backtest.risk_per_trade_pct,
             backtest.market_type,
-        );
+        )
+        .with_margin(backtest.margin_rule());
         let session = TradingSession::new(
             SessionConfig {
                 symbol: config.symbol.clone(),
@@ -125,12 +126,13 @@ impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
         let step = self.driver.on_market_trade(&self.venue, trade).await;
         events.extend(step.into_events());
         for event in &events {
-            if let SessionEvent::EntryRefused(refusal) = event {
-                *self
-                    .rejected_orders
-                    .entry(refusal.kind().to_string())
-                    .or_insert(0) += 1;
-            }
+            let reason = match event {
+                SessionEvent::EntryRefused(refusal) => refusal.kind(),
+                // The gate admitted the entry and the venue still refused it.
+                SessionEvent::EntryFailed(_) => domain::metrics::VENUE_REJECTED,
+                _ => continue,
+            };
+            *self.rejected_orders.entry(reason.to_string()).or_insert(0) += 1;
         }
         TickStep { events }
     }

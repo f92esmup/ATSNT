@@ -227,6 +227,14 @@ pub const DAILY_HALT_REJECTION: &str = "DailyHalt";
 /// Same namespace as [`DAILY_HALT_REJECTION`].
 pub const SPOT_SHORTING_DISALLOWED: &str = "SpotShortingDisallowed";
 
+/// Rejection reason of an entry the balance cannot margin, even sized down to what it can fund.
+/// Same namespace as [`DAILY_HALT_REJECTION`].
+pub const INSUFFICIENT_MARGIN: &str = "InsufficientMargin";
+
+/// Rejection reason of an entry order the venue refused after the gate admitted it.
+/// Same namespace as [`DAILY_HALT_REJECTION`].
+pub const VENUE_REJECTED: &str = "VenueRejected";
+
 /// Two-decimal rendering of a ratio for reports, `n/a` where it is undefined.
 pub fn format_ratio(ratio: Option<Decimal>) -> String {
     ratio.map_or_else(|| "n/a".to_string(), |r| format!("{r:.2}"))

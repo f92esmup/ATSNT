@@ -26,7 +26,7 @@ pub use analytics::{
 };
 pub use decision::{MarketEvent, ProtectiveExits};
 pub use error::DomainError;
-pub use gate::{EntryGate, EntryRefusal};
+pub use gate::{EntryGate, EntryRefusal, MarginRule};
 pub use market::MarketType;
 pub use order::{Order, OrderIntent, OrderStatus, OrderType, TimeInForce};
 pub use position::{Position, PositionSide};

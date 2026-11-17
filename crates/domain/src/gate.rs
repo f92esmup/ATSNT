@@ -4,10 +4,12 @@
 //! gate, so a signal is refused for the same reason and sized to the same quantity wherever it
 //! is decided.
 
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
+use crate::futures;
 use crate::market::MarketType;
-use crate::metrics::{DAILY_HALT_REJECTION, SPOT_SHORTING_DISALLOWED};
+use crate::metrics::{DAILY_HALT_REJECTION, INSUFFICIENT_MARGIN, SPOT_SHORTING_DISALLOWED};
 use crate::order::OrderIntent;
 use crate::risk::{RiskError, RiskPolicy};
 use crate::trade::Side;
@@ -21,6 +23,9 @@ pub enum EntryRefusal {
     /// A spot account cannot open a short.
     #[error("a spot account cannot open a short position")]
     SpotShortingDisallowed,
+    /// The balance cannot margin even the smallest order the exchange accepts.
+    #[error("the balance cannot margin the smallest order")]
+    InsufficientMargin,
     /// Sizing or a limit of the risk policy refused the order.
     #[error(transparent)]
     Risk(#[from] RiskError),
@@ -32,9 +37,22 @@ impl EntryRefusal {
         match self {
             Self::DailyHalt => DAILY_HALT_REJECTION,
             Self::SpotShortingDisallowed => SPOT_SHORTING_DISALLOWED,
+            Self::InsufficientMargin => INSUFFICIENT_MARGIN,
             Self::Risk(error) => error.kind(),
         }
     }
+}
+
+/// What the exchange asks to carry a position, as the gate needs it to size an entry the
+/// balance can fund. The leverage cap is the risk policy's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarginRule {
+    /// Maintenance margin as a fraction of notional.
+    pub maintenance_rate: Decimal,
+    /// Entry commission as a fraction of notional (the taker rate: the order may fill as taker).
+    pub fee_rate: Decimal,
+    /// Adverse slippage an entry may pay, as a fraction of the signal price.
+    pub slippage_pct: Decimal,
 }
 
 /// The account rules a signal must pass to become an order.
@@ -43,6 +61,7 @@ pub struct EntryGate {
     policy: RiskPolicy,
     risk_per_trade_pct: Decimal,
     market: MarketType,
+    margin: Option<MarginRule>,
 }
 
 impl EntryGate {
@@ -53,7 +72,15 @@ impl EntryGate {
             policy,
             risk_per_trade_pct,
             market,
+            margin: None,
         }
+    }
+
+    /// The same gate, sizing an entry down to what the balance can margin under `margin`.
+    /// Without it an entry is sized by risk alone and the venue may refuse it.
+    pub fn with_margin(mut self, margin: MarginRule) -> Self {
+        self.margin = Some(margin);
+        self
     }
 
     /// The risk policy the gate sizes with.
@@ -86,14 +113,65 @@ impl EntryGate {
         if self.market == MarketType::Spot && intent.side == Side::Sell {
             return Err(EntryRefusal::SpotShortingDisallowed);
         }
-        Ok(self.policy.size_order(
+        let quantity = self.policy.size_order(
             intent,
             intent.price,
             equity,
             self.risk_per_trade_pct,
             Decimal::ZERO,
             drawdown,
-        )?)
+        )?;
+        match self.margin {
+            Some(margin) => self.fund(quantity, intent.price, equity, margin),
+            None => Ok(quantity),
+        }
+    }
+
+    /// `quantity`, or the most the `balance` can margin when that is less, floored to a lot.
+    /// Refused when what the balance funds is below the smallest order the exchange accepts.
+    fn fund(
+        &self,
+        quantity: Decimal,
+        price: Decimal,
+        balance: Decimal,
+        margin: MarginRule,
+    ) -> Result<Decimal, EntryRefusal> {
+        let leverage = self.policy.max_leverage.trunc().to_u32().unwrap_or(1);
+        // The worst fill the signal may get: slippage moves the price against the entry.
+        let fill_price = price * (Decimal::ONE + margin.slippage_pct);
+        let fundable = |quantity: Decimal| {
+            let notional = quantity * fill_price;
+            futures::minimum_leverage(
+                notional,
+                notional * margin.maintenance_rate,
+                notional * margin.fee_rate,
+                balance,
+                leverage,
+            )
+            .is_some()
+        };
+        if fundable(quantity) {
+            return Ok(quantity);
+        }
+        let step = self.policy.quantity_step_size;
+        let cap = futures::maximum_quantity(
+            fill_price,
+            margin.maintenance_rate,
+            margin.fee_rate,
+            balance,
+            leverage,
+        );
+        let mut capped = (cap / step).floor() * step;
+        // The closed form divides by the leverage, which may round: step down until it holds.
+        while capped > Decimal::ZERO && !fundable(capped) {
+            capped -= step;
+        }
+        if capped < self.policy.min_order_quantity
+            || capped * price < self.policy.min_order_notional
+        {
+            return Err(EntryRefusal::InsufficientMargin);
+        }
+        Ok(capped)
     }
 }
 
@@ -170,5 +248,67 @@ mod tests {
             .admit(&long(), equity, dec!(1000), false)
             .unwrap_err();
         assert_eq!(refusal, EntryRefusal::DailyHalt);
+    }
+
+    /// A spot account (1x), the exchange's lot rules and a 0.8 % taker fee.
+    fn spot_gate() -> EntryGate {
+        let policy = RiskPolicy::default()
+            .with_execution_rules(dec!(1), dec!(0.001), dec!(0.001), dec!(5))
+            .unwrap();
+        EntryGate::new(policy, dec!(0.01), MarketType::Spot).with_margin(MarginRule {
+            maintenance_rate: Decimal::ZERO,
+            fee_rate: dec!(0.008),
+            slippage_pct: dec!(0.0005),
+        })
+    }
+
+    fn long_with_stop(stop: Decimal) -> OrderIntent {
+        OrderIntent::new(1, Side::Buy, dec!(100), stop, dec!(110), 5).unwrap()
+    }
+
+    #[test]
+    fn an_entry_the_balance_funds_is_not_resized() {
+        // A 5 % stop risks 1 % of 1000 on 2 units: 200 of notional, far inside the balance.
+        let quantity = spot_gate()
+            .admit(&long_with_stop(dec!(95)), dec!(1000), dec!(1000), false)
+            .unwrap();
+        assert_eq!(quantity, dec!(2));
+    }
+
+    #[test]
+    fn an_entry_that_needs_the_whole_balance_is_sized_down_to_leave_its_fee() {
+        // A 1 % stop risks 1 % of 1000 on 10 units: the whole balance, with nothing left for the
+        // 0.8 % fee or the slippage.
+        let quantity = spot_gate()
+            .admit(&long_with_stop(dec!(99)), dec!(1000), dec!(1000), false)
+            .unwrap();
+        assert!(quantity < dec!(10), "sized down, got {quantity}");
+        let fill = dec!(100) * dec!(1.0005);
+        let cost = quantity * fill * dec!(1.008);
+        assert!(cost <= dec!(1000), "the cost {cost} fits the balance");
+        // One more lot would not fit.
+        let more = (quantity + dec!(0.001)) * fill * dec!(1.008);
+        assert!(more > dec!(1000));
+    }
+
+    #[test]
+    fn an_entry_the_balance_cannot_fund_even_sized_down_is_refused_by_name() {
+        // 5.02 funds 0.049 units after the fee: 4.9 of notional, under the 5 minimum.
+        let refusal = spot_gate()
+            .admit(&long_with_stop(dec!(99)), dec!(5.02), dec!(5.02), false)
+            .unwrap_err();
+        assert_eq!(refusal, EntryRefusal::InsufficientMargin);
+        assert_eq!(refusal.kind(), "InsufficientMargin");
+    }
+
+    #[test]
+    fn without_a_margin_rule_the_gate_sizes_by_risk_alone() {
+        let policy = RiskPolicy::default()
+            .with_execution_rules(dec!(1), dec!(0.001), dec!(0.001), dec!(5))
+            .unwrap();
+        let quantity = EntryGate::new(policy, dec!(0.01), MarketType::Spot)
+            .admit(&long_with_stop(dec!(99)), dec!(1000), dec!(1000), false)
+            .unwrap();
+        assert_eq!(quantity, dec!(10));
     }
 }
