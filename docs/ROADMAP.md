@@ -22,6 +22,20 @@ truth; this page summarises them.
   venue only executes. The swarm is a classifier only: the level machine and the whole
   target-position route are removed. It runs on spot, long only, and on perpetuals.
 
+## Hosting new strategies (2026-11-19)
+
+The plan is [`plan/plan-nuevas-estrategias.md`](plan/plan-nuevas-estrategias.md). The swarm is the
+one-instrument case of every phase, so its golden tests must not change.
+
+| Phase | What | Status |
+|---|---|---|
+| F0 | Governance and stale documentation | Done |
+| F1 | Warm-up, calibration and shared configuration declared by the strategy; one time barrier in ms; a contract suite that cannot pass empty; swarm leftovers in generic code | In progress |
+| F2 | Signal exits and a read-only view of the strategy's position | Pending |
+| F3 | Multi-asset domain: instruments, a book of positions, portfolio limits in the gate | Pending |
+| F4 | Multi-asset runners: merged tapes, bar and tick routes, HPO, artifacts v2 | Pending |
+| F5 | Funding events for strategies; the order book waits for a data source (WP-10) | Pending |
+
 ## Gates
 
 | Gate | What it decides | Who runs it | Status |
@@ -50,7 +64,9 @@ GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until
 
 ## Decisions
 
-- The swarm is the only strategy. The venue is Kraken spot in EUR, long only, with no leverage.
+- Several registered strategies are allowed since 2026-11-19 (the owner reopened "the swarm is the
+  only strategy"). The swarm stays the reference of the golden tests. The venue is Kraken spot in
+  EUR, long only, with no leverage.
 - Kraken Prop accounts take manual orders only, so they are outside the system.
 - GA is a refutation. Its Binance proxy and window are not clean out-of-sample data.
 - GB needs twelve months of Kraken tape, in line with the owner's requirement.

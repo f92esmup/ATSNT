@@ -32,7 +32,7 @@ profit and its time barrier. It never sizes the order or checks the account: the
 ### `OptimizableStrategy`: how it is searched and loaded
 
 Implement it to take part in hyperparameter optimisation, walk-forward analysis and artifacts. The
-trait starts at `crates/strategies/src/strategy.rs:134`.
+trait is `OptimizableStrategy` in `crates/strategies/src/strategy.rs`.
 
 - `fn id() -> &'static str`: the canonical snake_case id used by the CLI flags and stored as the
   `strategy_id` of the run registry. It takes no `self`.

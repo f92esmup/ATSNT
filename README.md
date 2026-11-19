@@ -10,8 +10,9 @@ only and without leverage, once its economics pass the gates in
 - **Stage:** the refactor is complete: batch 1 (the swarm-only refactor) and batch 2 (gate A,
   cleanup and the SQLite run store) are done, and the hexagonal consolidation followed them (an
   `application` crate, one pre-trade gate, a venue that only executes). The only registered
-  strategy is `swarm_consensus`: a classifier that emits triple-barrier entries, on spot (long
-  only) or USD-M perpetuals. The cleanup branch removes the Binance execution path and its
+  strategy so far is `swarm_consensus`; since 2026-11-19 the repository is being prepared to host
+  more ([`docs/plan/plan-nuevas-estrategias.md`](docs/plan/plan-nuevas-estrategias.md)). The
+  swarm is a classifier that emits triple-barrier entries, on spot (long only) or USD-M perpetuals. The cleanup branch removes the Binance execution path and its
   binaries (L3N) and is merged into `main`. A Kraken client from an earlier branch, `feat/kraken-eur-spot-portfolio`,
   is archived as the tag `archive/kraken-eur-spot-portfolio`; it does not merge with this refactor.
   See [`HANDOFF.md`](HANDOFF.md).
@@ -27,7 +28,7 @@ only and without leverage, once its economics pass the gates in
 |---|---|
 | `domain` | Pure rules: orders, positions, risk, the pre-trade gate, fees, accounting and metrics. No I/O and no floats. |
 | `ports` | The traits and plain data the core uses: market data, execution, entropy, run recording, fill logs and progress. |
-| `strategies` | The swarm consensus strategy, with its analytics, and the registry that names it. |
+| `strategies` | The strategy contract, the registry that names every strategy, and the swarm consensus strategy with its analytics. |
 | `application` | The session core that runs on any venue: the trading session, its driver, the exit lifecycle, the execution core and the tick simulation. |
 | `adapters` | Concrete ports: the Parquet tape store, the SQLite run store, the simulated venue and the Binance downloader (until WP-09). |
 | `backtest` | The bar engine, the optimizer, Monte Carlo and the binaries. The library names no adapter: `main.rs` and `wiring.rs` compose them. |
