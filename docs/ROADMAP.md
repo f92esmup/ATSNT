@@ -30,8 +30,8 @@ one-instrument case of every phase, so its golden tests must not change.
 | Phase | What | Status |
 |---|---|---|
 | F0 | Governance and stale documentation | Done |
-| F1 | Warm-up, calibration and shared configuration declared by the strategy; one time barrier in ms; a contract suite that cannot pass empty; swarm leftovers in generic code | In progress |
-| F2 | Signal exits and a read-only view of the strategy's position | Pending |
+| F1 | Warm-up, calibration and shared configuration declared by the strategy; one time barrier in ms; a contract suite that cannot pass empty; swarm leftovers in generic code | Done |
+| F2 | Signal exits and a read-only view of the strategy's position | Next |
 | F3 | Multi-asset domain: instruments, a book of positions, portfolio limits in the gate | Pending |
 | F4 | Multi-asset runners: merged tapes, bar and tick routes, HPO, artifacts v2 | Pending |
 | F5 | Funding events for strategies; the order book waits for a data source (WP-10) | Pending |
@@ -109,7 +109,7 @@ GA did not pass, so plan v4 stops the Kraken route. Nothing below is built until
   The sign flips between routes on about 47 trades, which is inside the noise of the sample: the
   result is a hint that the bar route is not systematically optimistic, not a measurement of the
   gap. Neither route shows an edge. Fill quality at the tick level (queue position, depth) is still
-  WP-15. The time barrier also differs: the tick route enforces `deadline_ms` only, and the bar
-  engine also counts `max_bars_hold` events; the swarm sets a deadline, so it is unaffected.
+  WP-15. Both routes apply the same time barrier since 2026-11-19: a deadline in milliseconds
+  (`tests/time_barrier_parity.rs`). The bar count that only the bar engine applied is gone.
 - There is no live loop: no binary trades live or on paper. The paper runtime, the clock port and
   `SessionDriver::on_idle` were removed (2026-11-17) because nothing called them. Git keeps them.

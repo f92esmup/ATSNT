@@ -210,7 +210,7 @@ let results = optimizer.run_optimization(&bars, &folds, 60)?;
 
 ## 5. Configuration Persistence & Strategy Loading
 
-### 5.1 Output Schema (`configs/hpo_swarm_results.json`)
+### 5.1 Output Schema (`configs/hpo_<strategy>_results.json`)
 The HPO engine produces a structured JSON artifact summarizing the optimization run:
 
 ```json
@@ -242,7 +242,7 @@ The HPO engine produces a structured JSON artifact summarizing the optimization 
 ## 6. Running the optimization
 
 `run_hpo --help` lists the options. A walk-forward sweep of the swarm over a tape writes the winner
-to `configs/hpo_swarm_results.json` and, with `--record`, its run to the run registry:
+to `configs/hpo_<strategy>_results.json` and, with `--record`, its run to the run registry:
 
 ```bash
 cargo run --release -p backtest --bin run_hpo -- \
@@ -255,7 +255,7 @@ values depend on the account size, see [Capital scaling](../capital-scaling.md).
 
 1. **Purged Walk-Forward Folds**: Dynamically constructs rolling train/embargo/test folds across the in-memory series of the input.
 2. **Rayon Thread Pool**: Evaluates candidate parameter combinations concurrently across all physical CPU cores.
-3. **Artifact Serialization**: Persists the winning parameter set to the `--output-config` file (default `configs/hpo_swarm_results.json`). With `--record`, the run's metrics go to the run registry.
+3. **Artifact Serialization**: Persists the winning parameter set to the `--output-config` file (default `configs/hpo_<strategy>_results.json`). With `--record`, the run's metrics go to the run registry.
 4. **Backtest handshake**: `backtest --config` reads the winning artifact directly; no step copies it.
 
 

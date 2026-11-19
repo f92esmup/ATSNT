@@ -43,8 +43,10 @@ pub struct OrderIntent {
     pub stop_loss: Decimal,
     /// Take Profit barrier price (Z = 0 exit).
     pub take_profit: Decimal,
-    /// Horizontal time barrier (maximum bars to hold before forced exit).
-    pub max_bars_hold: usize,
+    /// Horizontal time barrier: the position is closed when an event ends at or after this
+    /// timestamp (Unix ms). It is always later than `timestamp`, and every runner applies it
+    /// the same way.
+    pub deadline_ms: i64,
     /// Optional position risk fraction calculated at entry (e.g. from consensus conviction).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk_fraction: Option<Decimal>,
@@ -54,9 +56,6 @@ pub struct OrderIntent {
     /// Optional ATR or price distance for breakeven trigger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakeven_atr: Option<Decimal>,
-    /// Optional timestamp deadline in Unix ms for real-time / intraday time barriers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deadline_ms: Option<i64>,
     /// Order execution type: Market (aggressive Taker) or Limit (passive Maker).
     #[serde(default)]
     pub order_type: OrderType,
@@ -69,14 +68,15 @@ pub struct OrderIntent {
 }
 
 impl OrderIntent {
-    /// Constructs a validated OrderIntent with default portfolio risk.
+    /// Constructs a validated triple-barrier intent with default portfolio risk. The time barrier
+    /// ends `max_hold_ms` after `timestamp`.
     pub fn new(
         timestamp: i64,
         side: Side,
         price: Decimal,
         stop_loss: Decimal,
         take_profit: Decimal,
-        max_bars_hold: usize,
+        max_hold_ms: i64,
     ) -> Result<Self, DomainError> {
         Self::with_risk_and_exits(
             timestamp,
@@ -84,8 +84,7 @@ impl OrderIntent {
             price,
             stop_loss,
             take_profit,
-            max_bars_hold,
-            None,
+            max_hold_ms,
             None,
             None,
             None,
@@ -99,7 +98,7 @@ impl OrderIntent {
         price: Decimal,
         stop_loss: Decimal,
         take_profit: Decimal,
-        max_bars_hold: usize,
+        max_hold_ms: i64,
         risk_fraction: Option<Decimal>,
     ) -> Result<Self, DomainError> {
         Self::with_risk_and_exits(
@@ -108,42 +107,15 @@ impl OrderIntent {
             price,
             stop_loss,
             take_profit,
-            max_bars_hold,
+            max_hold_ms,
             risk_fraction,
-            None,
             None,
             None,
         )
     }
 
-    /// Constructs a validated OrderIntent with optional risk fraction, trailing ATR distance, and deadline.
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_risk_and_trailing(
-        timestamp: i64,
-        side: Side,
-        price: Decimal,
-        stop_loss: Decimal,
-        take_profit: Decimal,
-        max_bars_hold: usize,
-        risk_fraction: Option<Decimal>,
-        trailing_atr: Option<Decimal>,
-        deadline_ms: Option<i64>,
-    ) -> Result<Self, DomainError> {
-        Self::with_risk_and_exits(
-            timestamp,
-            side,
-            price,
-            stop_loss,
-            take_profit,
-            max_bars_hold,
-            risk_fraction,
-            trailing_atr,
-            None,
-            deadline_ms,
-        )
-    }
-
-    /// Constructs a validated OrderIntent with optional risk fraction, trailing ATR distance, breakeven distance, and deadline.
+    /// Constructs a validated OrderIntent with optional risk fraction, trailing ATR distance and
+    /// breakeven distance. The time barrier ends `max_hold_ms` after `timestamp`.
     #[allow(clippy::too_many_arguments)]
     pub fn with_risk_and_exits(
         timestamp: i64,
@@ -151,11 +123,10 @@ impl OrderIntent {
         price: Decimal,
         stop_loss: Decimal,
         take_profit: Decimal,
-        max_bars_hold: usize,
+        max_hold_ms: i64,
         risk_fraction: Option<Decimal>,
         trailing_atr: Option<Decimal>,
         breakeven_atr: Option<Decimal>,
-        deadline_ms: Option<i64>,
     ) -> Result<Self, DomainError> {
         if price <= Decimal::ZERO {
             return Err(DomainError::InvalidPrice(price.to_string()));
@@ -166,6 +137,10 @@ impl OrderIntent {
         if take_profit <= Decimal::ZERO {
             return Err(DomainError::InvalidPrice(take_profit.to_string()));
         }
+        let deadline_ms = timestamp
+            .checked_add(max_hold_ms)
+            .filter(|_| max_hold_ms > 0)
+            .ok_or(DomainError::InvalidTimeBarrier(max_hold_ms))?;
         if let Some(risk) = risk_fraction {
             if risk <= Decimal::ZERO || risk > Decimal::ONE {
                 return Err(DomainError::InvalidTarget(format!(
@@ -193,11 +168,10 @@ impl OrderIntent {
             price,
             stop_loss,
             take_profit,
-            max_bars_hold,
+            deadline_ms,
             risk_fraction,
             trailing_atr,
             breakeven_atr,
-            deadline_ms,
             order_type: OrderType::Market,
             time_in_force_bars: None,
             post_only: false,
@@ -220,7 +194,7 @@ impl OrderIntent {
         limit_price: Decimal,
         stop_loss: Decimal,
         take_profit: Decimal,
-        max_bars_hold: usize,
+        max_hold_ms: i64,
         time_in_force_bars: Option<usize>,
         post_only: bool,
     ) -> Result<Self, DomainError> {
@@ -230,7 +204,7 @@ impl OrderIntent {
             limit_price,
             stop_loss,
             take_profit,
-            max_bars_hold,
+            max_hold_ms,
         )?;
         intent.order_type = OrderType::Limit;
         intent.time_in_force_bars = time_in_force_bars;
@@ -453,6 +427,24 @@ mod tests {
         let res = order.transition_to_fill(dec!(1.5));
         assert_eq!(res, Err(DomainError::OverfillError));
         assert_eq!(order.status, OrderStatus::New);
+    }
+
+    #[test]
+    fn the_time_barrier_ends_after_the_decision() {
+        let intent =
+            OrderIntent::new(1_000, Side::Buy, dec!(100), dec!(95), dec!(110), 60_000).unwrap();
+        assert_eq!(intent.deadline_ms, 61_000);
+
+        for hold in [0, -1] {
+            assert_eq!(
+                OrderIntent::new(1_000, Side::Buy, dec!(100), dec!(95), dec!(110), hold),
+                Err(DomainError::InvalidTimeBarrier(hold))
+            );
+        }
+        assert_eq!(
+            OrderIntent::new(i64::MAX, Side::Buy, dec!(100), dec!(95), dec!(110), 1),
+            Err(DomainError::InvalidTimeBarrier(1))
+        );
     }
 
     #[test]

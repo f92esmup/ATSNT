@@ -408,10 +408,9 @@ impl ConsensusPolicy {
                 sample.price - take_profit_distance,
             ),
         };
-        let deadline_ms = i64::try_from(self.config.decay_horizon_seconds)
+        let horizon_ms = i64::try_from(self.config.decay_horizon_seconds)
             .ok()
-            .and_then(|seconds| seconds.checked_mul(1000))
-            .and_then(|horizon_ms| sample.timestamp.checked_add(horizon_ms))?;
+            .and_then(|seconds| seconds.checked_mul(1000))?;
 
         let intent = OrderIntent::with_risk_and_exits(
             sample.timestamp,
@@ -419,11 +418,10 @@ impl ConsensusPolicy {
             sample.price,
             stop_loss,
             take_profit,
-            0,
+            horizon_ms,
             Some(self.config.risk_fraction(conviction, theta)),
             self.config.trailing_atr_multiplier.map(|m| m * atr),
             self.config.breakeven_atr_multiplier.map(|m| m * atr),
-            Some(deadline_ms),
         )
         .ok()?;
 
@@ -864,7 +862,7 @@ mod tests {
         // Default: stop 1.0 ATR, take profit 2.0 ATR, time barrier 14 400 s.
         assert_eq!(intent.stop_loss, PRICE - ATR);
         assert_eq!(intent.take_profit, PRICE + dec!(2) * ATR);
-        assert_eq!(intent.deadline_ms, Some(2_000 + 14_400_000));
+        assert_eq!(intent.deadline_ms, 2_000 + 14_400_000);
         assert_eq!(intent.breakeven_atr, Some(dec!(0.75) * ATR));
         assert_eq!(intent.trailing_atr, Some(dec!(0.50) * ATR));
         assert_eq!(p.signal_side(), Some(Side::Buy));

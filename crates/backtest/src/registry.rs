@@ -8,8 +8,8 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use strategies::{
-    canonical_id, dispatch, unknown_strategy_message, MarketType, OptimizableStrategy, Strategy,
-    StrategyVisitor,
+    canonical_id, dispatch, strategy_ids, unknown_strategy_message, MarketType,
+    OptimizableStrategy, Strategy, StrategyVisitor,
 };
 
 use crate::artifact::{
@@ -17,9 +17,6 @@ use crate::artifact::{
 };
 use crate::config::BacktestConfig;
 use crate::error::{ConfigText, LoadError};
-
-/// Strategy a runner uses when neither the artifact nor the command line names one.
-pub const DEFAULT_STRATEGY_ID: &str = "swarm_consensus";
 
 /// Where a loaded strategy's configuration came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +80,9 @@ pub struct LoadedStrategy {
     /// The shared configuration the strategy was built with, as JSON; `None` for a strategy
     /// without one (its shared configuration is `()`).
     pub shared_config_json: Option<serde_json::Value>,
+    /// Last timestamp of the data the shared configuration was calibrated on
+    /// ([`OptimizableStrategy::calibration_end_ms`]); evaluated data must start after it.
+    pub calibration_end_ms: Option<i64>,
     /// The market the strategy narrowed its shared configuration for, when that changed it
     /// (the swarm drops short selling on spot).
     pub narrowed_for_market: Option<MarketType>,
@@ -176,7 +176,8 @@ impl LoadedStrategy {
     }
 }
 
-/// Strategy id to use: the artifact's id, else the command line, else the default. Aliases
+/// Strategy id to use: the artifact's id, else the command line, else the only registered
+/// strategy when there is exactly one; with several, naming none is an error. Aliases
 /// resolve to the canonical id; an unregistered name is an error listing the registered ones.
 /// A command-line strategy that disagrees with the artifact's is an error too, never silently
 /// ignored.
@@ -217,7 +218,17 @@ pub fn strategy_id_of(
         }
         (Some(declared), None) => resolve(&declared),
         (None, Some(asked)) => resolve(asked),
-        (None, None) => resolve(DEFAULT_STRATEGY_ID),
+        (None, None) => match strategy_ids().as_slice() {
+            [only] => Ok((*only).to_string()),
+            ids => Err(LoadError::UnknownStrategy(format!(
+                "no strategy named: pass --strategy or a deployment artifact. Available \
+                 strategies: {}",
+                ids.iter()
+                    .map(|id| format!("'{id}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        },
     }
 }
 
@@ -330,6 +341,7 @@ impl StrategyVisitor for Loader<'_> {
         let shared_json =
             serde_json::to_value(&shared).map_err(serialize("the shared configuration"))?;
         let narrowed_for_market = market.filter(|_| shared_json != given_json);
+        let calibration_end_ms = S::calibration_end_ms(&shared);
         let shared_config_json = Some(shared_json).filter(|v| !v.is_null());
         let strategy = S::from_config(&shared, config)
             .map_err(|error| LoadError::Initialize(error.to_string()))?;
@@ -343,6 +355,7 @@ impl StrategyVisitor for Loader<'_> {
             market_type,
             execution_context: context,
             shared_config_json,
+            calibration_end_ms,
             narrowed_for_market,
         })
     }
@@ -544,10 +557,9 @@ mod tests {
             resolve_strategy_id(Some("swarm"), None).unwrap(),
             "swarm_consensus"
         );
-        assert_eq!(
-            resolve_strategy_id(None, None).unwrap(),
-            DEFAULT_STRATEGY_ID
-        );
+        // With one registered strategy, naming none picks it.
+        assert_eq!(strategies::strategy_ids(), ["swarm_consensus"]);
+        assert_eq!(resolve_strategy_id(None, None).unwrap(), "swarm_consensus");
     }
 
     #[test]

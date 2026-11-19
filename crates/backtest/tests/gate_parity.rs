@@ -49,7 +49,8 @@ impl Strategy for EveryTrade {
             trade.price,
             stop_loss,
             take_profit,
-            1_000,
+            // A year: the time barrier plays no part in these tests.
+            365 * 86_400_000,
         )
         .ok()
     }

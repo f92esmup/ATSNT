@@ -36,15 +36,14 @@ pub struct ProtectiveExits {
     pub stop: Decimal,
     /// Take-profit price on the winning side; `None` when only the stop protects.
     pub take_profit: Option<Decimal>,
-    /// Bars to hold before a forced exit; `None` when a deadline is the time barrier.
-    pub max_bars: Option<usize>,
     /// Optional step-trailing ATR distance for adaptive breakeven and trailing stops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_trailing_atr: Option<Decimal>,
     /// Optional breakeven trigger price distance from entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakeven_dist: Option<Decimal>,
-    /// Optional timestamp deadline in Unix ms for real-time / intraday time barriers.
+    /// Time barrier in Unix ms: the position closes on the first event that ends at or after it.
+    /// Every triple-barrier entry has one; `None` only for a stop-only protection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<i64>,
 }
@@ -55,14 +54,9 @@ impl ProtectiveExits {
         Self {
             stop: intent.stop_loss,
             take_profit: Some(intent.take_profit),
-            max_bars: if intent.deadline_ms.is_some() {
-                None
-            } else {
-                Some(intent.max_bars_hold)
-            },
             step_trailing_atr: intent.trailing_atr,
             breakeven_dist: intent.breakeven_atr,
-            deadline_ms: intent.deadline_ms,
+            deadline_ms: Some(intent.deadline_ms),
         }
     }
 }
@@ -75,16 +69,15 @@ mod tests {
 
     #[test]
     fn exits_from_an_intent_copy_its_three_barriers() {
-        let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(98), dec!(104), 7).unwrap();
+        let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(98), dec!(104), 7_000).unwrap();
         assert_eq!(
             ProtectiveExits::from_intent(&intent),
             ProtectiveExits {
                 stop: dec!(98),
                 take_profit: Some(dec!(104)),
-                max_bars: Some(7),
                 step_trailing_atr: None,
                 breakeven_dist: None,
-                deadline_ms: None,
+                deadline_ms: Some(7_001),
             }
         );
     }

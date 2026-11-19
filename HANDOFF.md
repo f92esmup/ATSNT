@@ -16,6 +16,12 @@ en código genérico), F2 (salida por señal y vista de la posición), F3 (domin
 (runners multi-activo) y F5 (eventos de funding). El swarm es el caso de un instrumento: sus goldens
 no deben cambiar en ninguna fase.
 
+F1 hecha el mismo día: `OptimizableStrategy` declara `warm_up_ms`, `calibration_end_ms`,
+`requires_shared_config` y `contract_fixture`; `max_bars_hold` desapareció y la barrera temporal es
+un plazo en ms que aplican las dos rutas; la suite de contrato exige al menos una decisión (con la
+configuración por defecto el swarm no decidía nunca en ella, así que sus comprobaciones pasaban en
+vacío); `run_hpo` exige `--strategy` y `backtest` ya no tiene estrategia por defecto si hay varias.
+
 ## Actualización del 2026-11-17: cierre de lo pendiente
 
 Esta sección y la siguiente son posteriores al resto del documento y mandan sobre él donde se
@@ -56,7 +62,7 @@ Lo que queda abierto está en "Known gaps" de `docs/ROADMAP.md`:
   `docs/ROADMAP.md`. Los 70 días de calentamiento salen del propio fichero: las primeras operaciones
   caen a mediados de julio.
 - `scripts/gate_a.sh`: solo se verificó su sintaxis.
-- La barrera temporal por `max_bars_hold` solo la cuenta el motor de barras; la ruta de tick aplica
+- (Resuelto el 2026-11-19, F1) La barrera temporal por `max_bars_hold` solo la cuenta el motor de barras; la ruta de tick aplica
   `deadline_ms`. El swarm fija un plazo, así que no le afecta.
 
 ## Actualización del 2026-11-16: consolidación hexagonal
@@ -475,7 +481,7 @@ cortacircuitos en 1):
    posterior a `calibration_end_ms` (2026-01-31T23:59:59.730Z). Si el HPO que produjo
    `hpo_btcusdt_2026.json` usó la misma guarda, evaluó datos de feb-2026 en adelante. Eso no encaja con
    «solo enero». **Pendiente de confirmar** con el historial del HPO. Evidencia nueva (2026-10-31): el scorecard del artefacto reporta 84 operaciones OOS, y la ventana feb–sep de la prueba A da 87 operaciones. Es compatible con el solapamiento, pero no lo prueba.
-2. **Las 70 jornadas son del HPO.** `TRADES_WARM_UP_MS` (`optimization.rs:30`) corta los folds del
+2. **Las 70 jornadas son del HPO.** `SwarmConsensusStrategy::warm_up_ms` (antes `TRADES_WARM_UP_MS`) corta los folds del
    walk-forward; el CLI por trades no lo impone. El golden sintético abre su primera operación hacia el
    día 17.
 3. **Un mes no basta.** `fetch_data --month` escribe un Parquet mensual (`binance_fetcher.rs:52-60`).
