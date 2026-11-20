@@ -170,7 +170,12 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
     fn extractor(shared: &Self::SharedConfig) -> Result<Self::Extractor, DomainError>;
 
     /// Decides on features produced by `extractor`: the decision stage of the strategy.
-    fn on_features(&mut self, features: &<Self::Extractor as FeatureExtractor>::Features) -> Option<OrderIntent>;
+    fn on_features(
+        &mut self,
+        features: &<Self::Extractor as FeatureExtractor>::Features,
+        view: &StrategyView,
+        out: &mut Vec<Decision>,
+    );
 }
 ```
 
@@ -196,8 +201,8 @@ impl OptimizableStrategy for MyNewStrategy {
     fn from_config(_shared: &MyNewShared, config: Self::Config) -> Result<Self, DomainError> { Self::new(config) }
     fn default_space() -> Self::Space { MyNewSpace::default() }
     fn extractor(shared: &MyNewShared) -> Result<Self::Extractor, DomainError> { MyNewExtractor::new(shared) }
-    fn on_features(&mut self, features: &MyNewFeatures) -> Option<OrderIntent> {
-        self.decide(features)
+    fn on_features(&mut self, features: &MyNewFeatures, view: &StrategyView, out: &mut Vec<Decision>) {
+        out.extend(self.decide(features, view));
     }
 }
 

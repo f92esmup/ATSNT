@@ -19,15 +19,27 @@ The contract is in `crates/strategies/src/strategy.rs`. Two traits matter.
 - `compatible_market_types(&self) -> &'static [MarketType]`: the markets it trades, for example
   `&[MarketType::Spot, MarketType::UsdMPerpetual]`. `supports_market_type` checks a requested market
   against this list.
-- `on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent>`: the one decision method,
-  with no default. Runners call it once per market trade; a strategy that needs bars builds its own.
+- `on_event(&mut self, event: &MarketEvent<'_>, view: &StrategyView, out: &mut Vec<Decision>)`: the
+  one decision method, with no default. Runners call it once per market trade; a strategy that
+  needs bars builds its own. `view` shows the strategy's open position (side, quantity, entry
+  price) and whether an entry is pending, never the balances. The strategy pushes its decisions to
+  `out`, which arrives empty and is reused, so deciding allocates nothing.
 - `reset(&mut self)`: restores the initial state.
 - `audit(&self) -> Option<serde_json::Value>`, default `None`: optional audit data stored with the run records
   under `strategy_audit`.
 
-A strategy decides one thing: a triple-barrier entry, `domain::OrderIntent`, with its stop, its take
-profit and its time barrier. It never sizes the order or checks the account: the shared
-`domain::EntryGate` does both, on every runner.
+A strategy decides two things (`domain::Decision`):
+
+- `Decision::Enter(OrderIntent)`: a triple-barrier entry, with its stop, its take profit and its
+  time barrier. It is ignored while a position is open or an entry is pending.
+- `Decision::Exit`: close the open position at market. The trade is labelled `SignalExit`. It is
+  ignored while flat. On the bar route the close is a market order that fills at the open of the
+  first event due after the decision, with slippage and the taker fee, as entries do; on the tick
+  route the session flattens the position on the venue. `tests/signal_exit_parity.rs` pins that
+  both routes close alike.
+
+It never sizes the order or checks the account: the shared `domain::EntryGate` does both, on every
+runner.
 
 The time barrier is a duration in milliseconds. The constructors (`OrderIntent::new`,
 `with_risk`, `with_risk_and_exits`, `limit`) take `max_hold_ms` and store `deadline_ms =
@@ -52,8 +64,10 @@ trait is `OptimizableStrategy` in `crates/strategies/src/strategy.rs`.
   decision stage reads.
 - `fn extractor(shared: &Self::SharedConfig) -> Result<Self::Extractor, DomainError>`.
 - `fn from_config(shared: &Self::SharedConfig, config: Self::Config) -> Result<Self, DomainError>`.
-- `fn on_features(&mut self, features: &<Self::Extractor as FeatureExtractor>::Features) ->
-  Option<OrderIntent>`: the decision stage.
+- `fn on_features(&mut self, features: &<Self::Extractor as FeatureExtractor>::Features, view:
+  &StrategyView, out: &mut Vec<Decision>)`: the decision stage, deciding as `on_event` does. When
+  several features land in one price bucket of the optimizer's tape, the decisions of the last one
+  that decided are the bucket's.
 - `fn default_space() -> Self::Space`.
 - `fn shared_for_market(shared, market) -> Self::SharedConfig`, default: unchanged. A strategy that
   trades several markets narrows its shared configuration here. The swarm drops short selling on

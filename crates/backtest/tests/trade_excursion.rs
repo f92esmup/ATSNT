@@ -1,5 +1,5 @@
 use backtest::{BacktestConfig, BacktestEngine, PriceEvent};
-use domain::{OrderIntent, Side};
+use domain::{Decision, OrderIntent, Side};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -51,7 +51,13 @@ fn run_scenario() -> (backtest::BacktestMetrics, Vec<backtest::ClosedTrade>) {
         bar(8_000, dec!(129), dec!(131), dec!(130)), // take profit at 130
     ];
     for b in &bars {
-        engine.process_event(b, &mut || entries.contains(&b.end_ms).then(|| long_at(b)));
+        engine.process_event(b, &mut |_, out| {
+            out.extend(
+                entries
+                    .contains(&b.end_ms)
+                    .then(|| Decision::Enter(long_at(b))),
+            )
+        });
     }
     engine.finish_with_trades(None)
 }

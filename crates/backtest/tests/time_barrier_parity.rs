@@ -6,7 +6,7 @@
 
 use backtest::{BacktestConfig, BacktestEngine, ClosedTrade, PriceEvent, TickSimulationConfig};
 use domain::futures::FundingSchedule;
-use domain::{MarketEvent, MarketType, OrderIntent, Side, Trade};
+use domain::{Decision, MarketEvent, MarketType, OrderIntent, Side, StrategyView, Trade};
 use rust_decimal_macros::dec;
 use strategies::Strategy;
 
@@ -21,16 +21,8 @@ struct OneLong {
     signalled: bool,
 }
 
-impl Strategy for OneLong {
-    fn name(&self) -> &str {
-        "one_long"
-    }
-
-    fn compatible_market_types(&self) -> &'static [MarketType] {
-        &[MarketType::UsdMPerpetual]
-    }
-
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+impl OneLong {
+    fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
         let MarketEvent::Trade(trade) = event else {
             return None;
         };
@@ -47,6 +39,20 @@ impl Strategy for OneLong {
             HOLD_MS,
         )
         .ok()
+    }
+}
+
+impl Strategy for OneLong {
+    fn name(&self) -> &str {
+        "one_long"
+    }
+
+    fn compatible_market_types(&self) -> &'static [MarketType] {
+        &[MarketType::UsdMPerpetual]
+    }
+
+    fn on_event(&mut self, event: &MarketEvent<'_>, _view: &StrategyView, out: &mut Vec<Decision>) {
+        out.extend(self.decide(event).map(Decision::Enter));
     }
 
     fn reset(&mut self) {
@@ -72,8 +78,8 @@ fn bar_trades(tape: &[Trade]) -> Vec<ClosedTrade> {
     let mut engine = BacktestEngine::new(BacktestConfig::default());
     let mut strategy = OneLong::default();
     for trade in tape {
-        engine.process_event(&PriceEvent::from(trade), &mut || {
-            strategy.on_event(&MarketEvent::Trade(trade))
+        engine.process_event(&PriceEvent::from(trade), &mut |view, out| {
+            strategy.on_event(&MarketEvent::Trade(trade), view, out)
         });
     }
     engine.finish_with_trades(None).1

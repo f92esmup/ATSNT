@@ -1,12 +1,14 @@
-//! What a strategy reacts to and the exits that protect the position its entry opens.
+//! What a strategy reacts to, what it decides, and the exits that protect the position its
+//! entry opens.
 //!
-//! A strategy decides a triple-barrier entry ([`crate::OrderIntent`]); the barriers travel with
-//! the position as [`ProtectiveExits`].
+//! A strategy decides a triple-barrier entry ([`crate::OrderIntent`]) or the close of its open
+//! position ([`Decision`]); the barriers travel with the position as [`ProtectiveExits`].
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::order::OrderIntent;
+use crate::position::PositionSide;
 use crate::trade::Trade;
 
 /// One event a strategy reacts to.
@@ -25,6 +27,52 @@ impl MarketEvent<'_> {
         match self {
             MarketEvent::Trade(trade) => trade.timestamp,
         }
+    }
+}
+
+/// What a strategy decides on one event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Decision {
+    /// Open a triple-barrier position. Ignored while a position is open or an entry is pending.
+    Enter(OrderIntent),
+    /// Close the open position at market, labelled [`SIGNAL_EXIT`]. Ignored while flat.
+    Exit,
+}
+
+/// Exit reason of a position the strategy closed with [`Decision::Exit`].
+pub const SIGNAL_EXIT: &str = "SignalExit";
+
+/// The strategy's open position, as it may see it when it decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PositionView {
+    /// Direction of the position.
+    pub side: PositionSide,
+    /// Quantity held, in base units.
+    pub quantity: Decimal,
+    /// Average entry price.
+    pub entry_price: Decimal,
+}
+
+/// What a strategy may see of its own book when it decides: its position and whether an entry is
+/// on its way. It shows no balances; sizing and the account rules belong to the gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StrategyView {
+    /// The open position, if any.
+    pub position: Option<PositionView>,
+    /// `true` while an entry order is pending and the position not yet open.
+    pub entry_pending: bool,
+}
+
+impl StrategyView {
+    /// A flat book with nothing pending.
+    pub const FLAT: Self = Self {
+        position: None,
+        entry_pending: false,
+    };
+
+    /// Whether nothing is open or pending.
+    pub fn is_flat(&self) -> bool {
+        self.position.is_none() && !self.entry_pending
     }
 }
 

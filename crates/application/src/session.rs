@@ -8,7 +8,10 @@
 
 use std::collections::VecDeque;
 
-use domain::{EntryGate, EntryRefusal, OrderIntent, PositionSide, Side, Trade};
+use domain::{
+    Decision, EntryGate, EntryRefusal, OrderIntent, PositionSide, PositionView, Side, StrategyView,
+    Trade, SIGNAL_EXIT,
+};
 use ports::{EntryAck, ExecutionReport, ExecutionVenue, OrderRequest};
 use rust_decimal::Decimal;
 use strategies::{MarketEvent, Strategy};
@@ -57,6 +60,8 @@ pub enum SkipReason {
 pub enum SessionEvent {
     /// The strategy emitted an order intent.
     Signal(OrderIntent),
+    /// The strategy decided to close its position.
+    ExitSignal,
     /// The intent was not dispatched.
     SignalSkipped(SkipReason),
     /// The pre-trade gate refused the signal: the daily breaker, the market's rules or the risk
@@ -163,6 +168,8 @@ pub struct TradingSession<S: Strategy> {
     seen_trade_ids: VecDeque<i64>,
     /// A position the entry timeout had to close because its fill report was lost.
     recovery: Option<Recovery>,
+    /// The strategy's decisions on the current trade; kept to reuse its allocation.
+    decisions: Vec<Decision>,
 }
 
 /// What is known about a position recovered by the entry timeout: the signal that opened it
@@ -195,6 +202,7 @@ impl<S: Strategy> TradingSession<S> {
             last_entry_timeout_attempt_ms: None,
             seen_trade_ids: VecDeque::new(),
             recovery: None,
+            decisions: Vec::new(),
         }
     }
 
@@ -235,8 +243,14 @@ impl<S: Strategy> TradingSession<S> {
     /// trades the strategy saw.
     pub fn warm_up_trades(&mut self, trades: impl IntoIterator<Item = Trade>) -> usize {
         let mut seen = 0;
+        let mut discarded = Vec::new();
         for trade in trades {
-            let _ = self.strategy.on_event(&MarketEvent::Trade(&trade));
+            self.strategy.on_event(
+                &MarketEvent::Trade(&trade),
+                &StrategyView::FLAT,
+                &mut discarded,
+            );
+            discarded.clear();
             seen += 1;
         }
         seen
@@ -329,14 +343,58 @@ impl<S: Strategy> TradingSession<S> {
             marked_equity(self.wallet, open_position, trade.price),
         );
 
-        if let Some(intent) = self.strategy.on_event(&MarketEvent::Trade(trade)) {
-            events.push(SessionEvent::Signal(intent.clone()));
-            events.extend(
-                self.dispatch(venue, intent, day_peak, trade.timestamp)
-                    .await,
-            );
+        let view = self.view();
+        let mut decisions = std::mem::take(&mut self.decisions);
+        decisions.clear();
+        self.strategy
+            .on_event(&MarketEvent::Trade(trade), &view, &mut decisions);
+        for decision in decisions.drain(..) {
+            match decision {
+                Decision::Enter(intent) => {
+                    events.push(SessionEvent::Signal(intent.clone()));
+                    events.extend(
+                        self.dispatch(venue, intent, day_peak, trade.timestamp)
+                            .await,
+                    );
+                }
+                Decision::Exit => {
+                    events.push(SessionEvent::ExitSignal);
+                    events.extend(self.signal_exit(venue).await);
+                }
+            }
         }
+        self.decisions = decisions;
         events
+    }
+
+    /// What the strategy may see of its book: the open position and whether an entry is pending.
+    pub fn view(&self) -> StrategyView {
+        StrategyView {
+            position: self
+                .open_position()
+                .map(|(side, entry_price, quantity)| PositionView {
+                    side: match side {
+                        Side::Buy => PositionSide::Long,
+                        Side::Sell => PositionSide::Short,
+                    },
+                    quantity,
+                    entry_price,
+                }),
+            entry_pending: matches!(self.phase, Phase::EntryPending { .. }),
+        }
+    }
+
+    /// Closes the open position at market for the strategy; a no-op unless a position is open.
+    /// The trade is labelled [`SIGNAL_EXIT`] when its closing fill is reported.
+    async fn signal_exit<V: ExecutionVenue>(&mut self, venue: &V) -> Option<SessionEvent> {
+        if !matches!(self.phase, Phase::Open { .. }) {
+            return None;
+        }
+        let event = self.exits.on_signal_exit(venue).await?;
+        if event == ExitEvent::SignalExitClosed {
+            self.exit_hint = Some(SIGNAL_EXIT);
+        }
+        Some(SessionEvent::Exit(event))
     }
 
     /// Feeds one execution report from the venue (entry fills, exit fills, acknowledgements).
@@ -946,6 +1004,15 @@ mod tests {
         }
     }
 
+    impl Scripted {
+        fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+            let MarketEvent::Trade(_) = event else {
+                return None;
+            };
+            self.intents.pop_front()
+        }
+    }
+
     impl Strategy for Scripted {
         fn name(&self) -> &str {
             "scripted"
@@ -955,11 +1022,13 @@ mod tests {
             &[MarketType::UsdMPerpetual]
         }
 
-        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::Trade(_) = event else {
-                return None;
-            };
-            self.intents.pop_front()
+        fn on_event(
+            &mut self,
+            event: &MarketEvent<'_>,
+            _view: &StrategyView,
+            out: &mut Vec<Decision>,
+        ) {
+            out.extend(self.decide(event).map(Decision::Enter));
         }
 
         fn reset(&mut self) {}

@@ -26,9 +26,12 @@ pub use priors_calibration::{calibrate_empirical_priors, EmpiricalPriors};
 pub use rules::{AgentVote, ConflictKind};
 pub use sample::{ConsensusSample, FeedVote, FeedWeights, FeedWeightsError};
 
-use domain::{DomainError, OrderIntent};
+use domain::DomainError;
 
-use crate::strategy::{FeatureExtractor, MarketEvent, MarketType, OptimizableStrategy, Strategy};
+use crate::strategy::{
+    Decision, FeatureExtractor, MarketEvent, MarketType, OptimizableStrategy, Strategy,
+    StrategyView,
+};
 
 /// Lead the data must give the swarm before its first evaluated decision (strategy spec §15.2):
 /// 70 days, so the slowest feed (1 day, 64 closed bars) is warm.
@@ -54,9 +57,10 @@ impl Strategy for SwarmConsensusStrategy {
     }
 
     /// The two stages in one call, so the live path and the optimizer cannot drift apart.
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-        let sample = self.ensemble.on_event(event)?;
-        self.on_features(&sample)
+    fn on_event(&mut self, event: &MarketEvent<'_>, view: &StrategyView, out: &mut Vec<Decision>) {
+        if let Some(sample) = self.ensemble.on_event(event) {
+            self.on_features(&sample, view, out);
+        }
     }
 
     fn reset(&mut self) {
@@ -93,8 +97,18 @@ impl OptimizableStrategy for SwarmConsensusStrategy {
         SwarmEnsemble::new(shared)
     }
 
-    fn on_features(&mut self, sample: &ConsensusSample) -> Option<OrderIntent> {
-        self.policy.on_sample(sample, self.allow_short)
+    /// The swarm decides entries only; its barriers close the position.
+    fn on_features(
+        &mut self,
+        sample: &ConsensusSample,
+        _view: &StrategyView,
+        out: &mut Vec<Decision>,
+    ) {
+        out.extend(
+            self.policy
+                .on_sample(sample, self.allow_short)
+                .map(Decision::Enter),
+        );
     }
 
     fn default_space() -> SwarmPolicySpace {

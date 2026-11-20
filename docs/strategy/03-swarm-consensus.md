@@ -98,10 +98,11 @@ pub struct ProtectiveExits {
 }
 ```
 
-A strategy returns `Option<OrderIntent>`. The gate turns it into a quantity (Section 11.3), and the
-execution core carries `ProtectiveExits::from_intent` with the position until a barrier closes it.
-Only one position is open at a time: an intent that arrives while the account is not flat is
-ignored.
+A strategy pushes `Decision`s: `Enter(OrderIntent)` or `Exit`. The gate turns an entry into a
+quantity (Section 11.3), and the execution core carries `ProtectiveExits::from_intent` with the
+position until a barrier or an `Exit` closes it. Only one position is open at a time: an entry that
+arrives while the account is not flat is ignored. The swarm decides entries only; its barriers
+close its positions.
 
 ### 3.3 One strategy contract
 
@@ -114,7 +115,7 @@ pub enum MarketEvent<'a> { Trade(&'a Trade) }
 pub trait Strategy: Send {
     fn name(&self) -> &str;
     fn compatible_market_types(&self) -> &'static [MarketType];
-    fn on_event(&mut self, event: &MarketEvent) -> Option<OrderIntent>;
+    fn on_event(&mut self, event: &MarketEvent, view: &StrategyView, out: &mut Vec<Decision>);
     fn reset(&mut self);
     /// Strategy-specific audit written into reports as `strategy_audit`. Default: None.
     fn audit(&self) -> Option<serde_json::Value> { None }
@@ -145,8 +146,12 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
     fn id() -> &'static str;
     fn from_config(shared: &Self::SharedConfig, config: Self::Config) -> Result<Self, DomainError>;
     fn extractor(shared: &Self::SharedConfig) -> Result<Self::Extractor, DomainError>;
-    fn on_features(&mut self, features: &<Self::Extractor as FeatureExtractor>::Features)
-        -> Option<OrderIntent>;
+    fn on_features(
+        &mut self,
+        features: &<Self::Extractor as FeatureExtractor>::Features,
+        view: &StrategyView,
+        out: &mut Vec<Decision>,
+    );
     fn default_space() -> Self::Space;
     fn shared_for_market(shared: Self::SharedConfig, market: MarketType) -> Self::SharedConfig;
 }

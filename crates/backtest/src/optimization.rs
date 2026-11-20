@@ -214,8 +214,8 @@ pub fn embargo_buckets(embargo_ms: i64, bucket_ms: i64) -> Result<usize, Backtes
 ///
 /// Each price event goes through [`BacktestEngine::process_event`]; its decision step feeds
 /// every feature attached to the event to [`OptimizableStrategy::on_features`] in order, and
-/// the last decision among them is the event's decision. A position still open at the end of
-/// the slice is closed at the last close as `EndOfSimulation`.
+/// the decisions of the last feature that decided are the event's decisions. A position still
+/// open at the end of the slice is closed at the last close as `EndOfSimulation`.
 pub fn run_tape_slice<S: OptimizableStrategy>(
     config: BacktestConfig,
     shared: &S::SharedConfig,
@@ -234,16 +234,20 @@ pub fn run_tape_slice<S: OptimizableStrategy>(
         .map_err(|e| BacktestError::Strategy(e.to_string()))?;
     let mut engine = BacktestEngine::new(config);
 
+    let (mut scratch, mut latest) = (Vec::new(), Vec::new());
     for (index, event) in range.zip(prices) {
         let features = tape.features_at(index);
-        engine.process_event(event, &mut || {
-            let mut decision = None;
+        engine.process_event(event, &mut |view, out| {
+            latest.clear();
             for (_, feature) in features {
-                if let Some(decided) = strategy.on_features(feature) {
-                    decision = Some(decided);
+                scratch.clear();
+                strategy.on_features(feature, view, &mut scratch);
+                if !scratch.is_empty() {
+                    latest.clear();
+                    latest.append(&mut scratch);
                 }
             }
-            decision
+            out.append(&mut latest);
         });
         if engine.is_halted() {
             break;
@@ -1158,24 +1162,30 @@ mod tests {
             &[strategies::MarketType::UsdMPerpetual]
         }
 
-        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<domain::OrderIntent> {
+        fn on_event(
+            &mut self,
+            event: &MarketEvent<'_>,
+            _view: &strategies::StrategyView,
+            out: &mut Vec<strategies::Decision>,
+        ) {
             let MarketEvent::Trade(trade) = event else {
-                return None;
+                return;
             };
             self.counter += 1;
             if self.counter >= self.config.window {
                 self.counter = 0;
-                domain::OrderIntent::new(
-                    trade.timestamp,
-                    domain::Side::Buy,
-                    trade.price,
-                    trade.price - dec!(100),
-                    trade.price + dec!(100),
-                    5,
-                )
-                .ok()
-            } else {
-                None
+                out.extend(
+                    domain::OrderIntent::new(
+                        trade.timestamp,
+                        domain::Side::Buy,
+                        trade.price,
+                        trade.price - dec!(100),
+                        trade.price + dec!(100),
+                        5,
+                    )
+                    .ok()
+                    .map(strategies::Decision::Enter),
+                );
             }
         }
 
@@ -1202,8 +1212,13 @@ mod tests {
             Ok(TradePassThrough)
         }
 
-        fn on_features(&mut self, trade: &Trade) -> Option<domain::OrderIntent> {
-            strategies::Strategy::on_event(self, &strategies::MarketEvent::Trade(trade))
+        fn on_features(
+            &mut self,
+            trade: &Trade,
+            view: &strategies::StrategyView,
+            out: &mut Vec<strategies::Decision>,
+        ) {
+            strategies::Strategy::on_event(self, &strategies::MarketEvent::Trade(trade), view, out)
         }
 
         fn warm_up_ms(_: &()) -> i64 {
@@ -1252,11 +1267,13 @@ mod tests {
             &[strategies::MarketType::UsdMPerpetual]
         }
 
-        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<domain::OrderIntent> {
-            let MarketEvent::Trade(trade) = event else {
-                return None;
-            };
-            self.0.on_event(&strategies::MarketEvent::Trade(trade))
+        fn on_event(
+            &mut self,
+            event: &MarketEvent<'_>,
+            view: &strategies::StrategyView,
+            out: &mut Vec<strategies::Decision>,
+        ) {
+            self.0.on_event(event, view, out)
         }
 
         fn reset(&mut self) {
@@ -1283,8 +1300,13 @@ mod tests {
             Ok(CountingExtractor)
         }
 
-        fn on_features(&mut self, trade: &Trade) -> Option<domain::OrderIntent> {
-            strategies::Strategy::on_event(self, &strategies::MarketEvent::Trade(trade))
+        fn on_features(
+            &mut self,
+            trade: &Trade,
+            view: &strategies::StrategyView,
+            out: &mut Vec<strategies::Decision>,
+        ) {
+            strategies::Strategy::on_event(self, &strategies::MarketEvent::Trade(trade), view, out)
         }
 
         fn warm_up_ms(_: &()) -> i64 {
@@ -1398,8 +1420,8 @@ mod tests {
         let mut strategy = MockStrategy::from_config(&(), config.clone()).unwrap();
         let mut engine = BacktestEngine::new(engine_config);
         for trade in &trades[100..250] {
-            engine.process_event(&PriceEvent::from(trade), &mut || {
-                strategies::Strategy::on_event(&mut strategy, &MarketEvent::Trade(trade))
+            engine.process_event(&PriceEvent::from(trade), &mut |view, out| {
+                strategies::Strategy::on_event(&mut strategy, &MarketEvent::Trade(trade), view, out)
             });
         }
         let expected = engine.finish_with_trades(trades.get(249).map(|t| t.price));

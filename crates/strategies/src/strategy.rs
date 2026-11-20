@@ -1,6 +1,6 @@
-use domain::{DomainError, OrderIntent};
+use domain::DomainError;
 
-pub use domain::{MarketEvent, MarketType};
+pub use domain::{Decision, MarketEvent, MarketType, PositionView, StrategyView};
 
 /// Universal contract for all quantitative trading strategies in ATSNT.
 ///
@@ -19,10 +19,13 @@ pub trait Strategy: Send {
         self.compatible_market_types().contains(&market_type)
     }
 
-    /// Reacts to one market event and optionally decides a triple-barrier entry.
+    /// Reacts to one market event and pushes its decisions, if any, to `out`.
     ///
-    /// Every runner calls this method, once per market trade.
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent>;
+    /// Every runner calls this method once per market trade, with `view` showing the strategy's
+    /// open position. `out` is empty on entry and reused across calls, so deciding allocates
+    /// nothing. Runners apply the decisions in order: an [`Decision::Enter`] while a position is
+    /// open or an entry pending is ignored, as is a [`Decision::Exit`] while flat.
+    fn on_event(&mut self, event: &MarketEvent<'_>, view: &StrategyView, out: &mut Vec<Decision>);
 
     /// Clears internal state buffers to allow clean replay or backtest isolation.
     fn reset(&mut self);
@@ -105,11 +108,14 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
     /// Builds the frozen first stage of this strategy.
     fn extractor(shared: &Self::SharedConfig) -> Result<Self::Extractor, DomainError>;
 
-    /// The decision stage: decides on features produced by [`OptimizableStrategy::extractor`].
+    /// The decision stage: decides on features produced by [`OptimizableStrategy::extractor`],
+    /// as [`Strategy::on_event`] does on events.
     fn on_features(
         &mut self,
         features: &<Self::Extractor as FeatureExtractor>::Features,
-    ) -> Option<OrderIntent>;
+        view: &StrategyView,
+        out: &mut Vec<Decision>,
+    );
 
     /// Default search space defining hyperparameter candidate domains and ranges.
     fn default_space() -> Self::Space;
@@ -161,8 +167,8 @@ impl<S: ?Sized + Strategy> Strategy for Box<S> {
         (**self).supports_market_type(market_type)
     }
 
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-        (**self).on_event(event)
+    fn on_event(&mut self, event: &MarketEvent<'_>, view: &StrategyView, out: &mut Vec<Decision>) {
+        (**self).on_event(event, view, out)
     }
 
     fn reset(&mut self) {
@@ -177,7 +183,7 @@ impl<S: ?Sized + Strategy> Strategy for Box<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::{Side, Trade};
+    use domain::{OrderIntent, Side, Trade};
     use rust_decimal_macros::dec;
 
     /// A strategy that buys on every trade.
@@ -192,19 +198,27 @@ mod tests {
             &[MarketType::UsdMPerpetual]
         }
 
-        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+        fn on_event(
+            &mut self,
+            event: &MarketEvent<'_>,
+            _view: &StrategyView,
+            out: &mut Vec<Decision>,
+        ) {
             let MarketEvent::Trade(trade) = event else {
-                return None;
+                return;
             };
-            OrderIntent::new(
-                trade.timestamp,
-                Side::Buy,
-                trade.price,
-                dec!(90),
-                dec!(110),
-                180_000,
-            )
-            .ok()
+            out.extend(
+                OrderIntent::new(
+                    trade.timestamp,
+                    Side::Buy,
+                    trade.price,
+                    dec!(90),
+                    dec!(110),
+                    180_000,
+                )
+                .ok()
+                .map(Decision::Enter),
+            );
         }
 
         fn reset(&mut self) {}
@@ -214,10 +228,18 @@ mod tests {
         Trade::new(1, dec!(100), dec!(1), Side::Buy).unwrap()
     }
 
+    fn decide<S: Strategy>(strategy: &mut S, trade: &Trade) -> Vec<Decision> {
+        let mut out = Vec::new();
+        strategy.on_event(&MarketEvent::Trade(trade), &StrategyView::FLAT, &mut out);
+        out
+    }
+
     #[test]
     fn a_strategy_decides_on_a_trade() {
         let trade = trade();
-        let intent = EveryTrade.on_event(&MarketEvent::Trade(&trade)).unwrap();
+        let [Decision::Enter(intent)] = &decide(&mut EveryTrade, &trade)[..] else {
+            panic!("one entry expected");
+        };
         assert_eq!(intent.price, dec!(100));
     }
 
@@ -225,7 +247,7 @@ mod tests {
     fn a_boxed_strategy_forwards_every_method() {
         let mut boxed: Box<dyn Strategy> = Box::new(EveryTrade);
         let trade = trade();
-        assert!(boxed.on_event(&MarketEvent::Trade(&trade)).is_some());
+        assert_eq!(decide(&mut boxed, &trade).len(), 1);
         assert_eq!(boxed.name(), "every_trade");
         assert!(boxed.supports_market_type(MarketType::UsdMPerpetual));
         assert_eq!(boxed.audit(), None);

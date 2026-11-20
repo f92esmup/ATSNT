@@ -296,8 +296,8 @@ async fn main() -> Result<()> {
                 data_window.start_ms.get_or_insert(trade.timestamp);
                 data_window.end_ms = Some(trade.timestamp);
 
-                engine.process_event(&PriceEvent::from(&trade), &mut || {
-                    strategy.on_event(&MarketEvent::Trade(&trade))
+                engine.process_event(&PriceEvent::from(&trade), &mut |view, out| {
+                    strategy.on_event(&MarketEvent::Trade(&trade), view, out)
                 });
                 if engine.is_halted() {
                     println!("{}", monthly_halt_message(data_window.end_ms));
