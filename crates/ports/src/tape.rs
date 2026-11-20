@@ -41,3 +41,20 @@ pub trait TapeVenue: ExecutionVenue {
     /// Side, quantity and average entry price of the open position, if any.
     fn position(&self) -> Option<(Side, Decimal, Decimal)>;
 }
+
+/// A tape venue that keeps one position per symbol on one wallet balance, for simulations of an
+/// account that trades several instruments. Its [`ExecutionVenue`] and
+/// [`crate::ExitGateway`] methods act on the symbol they are given.
+pub trait MultiTapeVenue: TapeVenue {
+    /// Advances `symbol`'s market by one print and returns the executions it caused there.
+    fn on_trade_of(&self, symbol: &str, trade: &Trade) -> Vec<ExecutionReport>;
+
+    /// Funding payments settled on `symbol` since the last call, oldest first.
+    fn take_funding_of(&self, symbol: &str) -> Vec<FundingPayment>;
+
+    /// Side, quantity and average entry price of the position on `symbol`, if any.
+    fn position_of(&self, symbol: &str) -> Option<(Side, Decimal, Decimal)>;
+
+    /// Margin posted for every open position.
+    fn margin_in_use(&self) -> Decimal;
+}

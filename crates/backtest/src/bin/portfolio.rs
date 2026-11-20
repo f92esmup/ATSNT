@@ -15,19 +15,29 @@ use anyhow::{bail, Context, Result};
 use backtest::{
     check_calibration, now_unix_ms, record_backtest_with_audit, results_by_instrument,
     BacktestConfig, DataWindow, MergedTrades, PortfolioEngine, PortfolioStrategies, RunContext,
-    RunSpec, RunType, SamplingConfig,
+    RunSpec, RunType, SamplingConfig, TickSimulationConfig,
 };
 use clap::Parser;
+use domain::futures::FundingSchedule;
 use domain::InstrumentId;
 use ports::MarketDataStream;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategies::{MarketType, Strategy};
 
+/// How simulated orders are filled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum FillModelArg {
+    /// Bar-level fills through `PortfolioEngine`.
+    Bar,
+    /// Tick-level fills: one live session per instrument on one simulated venue account.
+    Tick,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "portfolio",
-    about = "ATSNT - one strategy on several instruments with one account (bar fills)"
+    about = "ATSNT - one strategy on several instruments with one account"
 )]
 struct Args {
     /// One instrument's trades as SYMBOL=PATH (a .parquet file, a directory of them, or a .csv);
@@ -67,6 +77,15 @@ struct Args {
     /// Most gross notional open at once, as a multiple of equity (e.g. 1.5)
     #[arg(long)]
     max_gross_exposure: Option<Decimal>,
+
+    /// Fill model: "bar" (fast, the optimizer's engine) or "tick" (one live session per
+    /// instrument on one simulated venue; per-instrument strategies only)
+    #[arg(long, value_enum, default_value_t = FillModelArg::Bar)]
+    fill_model: FillModelArg,
+
+    /// Milliseconds an order takes to reach the market with `--fill-model tick`
+    #[arg(long, default_value_t = 100)]
+    latency_ms: i64,
 
     /// Write the run analytics to this SQLite file, created if missing
     #[arg(long)]
@@ -198,27 +217,72 @@ async fn main() -> Result<()> {
         streams.push((instrument.clone(), open_stream(path)?));
     }
     let mut merged = MergedTrades::new(streams);
-    let mut engine = PortfolioEngine::new(config, Vec::new());
     let mut window = DataWindow {
         source: Some(args.data.join(",")),
         ..DataWindow::default()
     };
     let mut processed = 0usize;
-    while let Some((instrument, trade)) = merged.next_trade()? {
-        if processed == 0 {
-            check_calibration(calibration_end, trade.timestamp)?;
+    let (metrics, trades, audit) = match args.fill_model {
+        FillModelArg::Bar => {
+            let mut engine = PortfolioEngine::new(config, Vec::new());
+            while let Some((instrument, trade)) = merged.next_trade()? {
+                if processed == 0 {
+                    check_calibration(calibration_end, trade.timestamp)?;
+                }
+                processed += 1;
+                window.start_ms.get_or_insert(trade.timestamp);
+                window.end_ms = Some(trade.timestamp);
+                strategies.on_trade(&mut engine, &instrument, &trade);
+                if engine.is_halted() {
+                    println!("[!] Monthly circuit breaker tripped: simulation halted early.");
+                    break;
+                }
+            }
+            let audit = strategies.audit();
+            let (metrics, trades) = engine.finish_with_trades(true);
+            (metrics, trades, audit)
         }
-        processed += 1;
-        window.start_ms.get_or_insert(trade.timestamp);
-        window.end_ms = Some(trade.timestamp);
-        strategies.on_trade(&mut engine, &instrument, &trade);
-        if engine.is_halted() {
-            println!("[!] Monthly circuit breaker tripped: simulation halted early.");
-            break;
+        FillModelArg::Tick => {
+            let PortfolioStrategies::PerInstrument(instances) = strategies else {
+                bail!(
+                    "the tick route runs per-instrument strategies only; run a cross-sectional \
+                     strategy with --fill-model bar"
+                );
+            };
+            println!(
+                "[*] Fill model: tick, one session per instrument, {} ms order latency",
+                args.latency_ms
+            );
+            let tick_config = TickSimulationConfig {
+                backtest: config,
+                symbol: String::new(),
+                latency_ms: args.latency_ms,
+                funding: FundingSchedule::constant(config.funding_rate_pct),
+            };
+            let mut simulation =
+                backtest::wiring::portfolio_tick_simulation(tick_config, instances)?;
+            while let Some((instrument, trade)) = merged.next_trade()? {
+                if processed == 0 {
+                    check_calibration(calibration_end, trade.timestamp)?;
+                }
+                processed += 1;
+                window.start_ms.get_or_insert(trade.timestamp);
+                window.end_ms = Some(trade.timestamp);
+                simulation.on_trade(&instrument, &trade).await;
+            }
+            let audits = simulation.strategy_audits();
+            let audit = (!audits.is_empty()).then(|| {
+                serde_json::Value::Object(
+                    audits
+                        .into_iter()
+                        .map(|(id, audit)| (id.to_string(), audit))
+                        .collect(),
+                )
+            });
+            let (metrics, trades) = simulation.finish();
+            (metrics, trades, audit)
         }
-    }
-    let audit = strategies.audit();
-    let (metrics, trades) = engine.finish_with_trades(true);
+    };
 
     println!("============================================================");
     println!(" Trades processed:          {processed}");
@@ -262,7 +326,10 @@ async fn main() -> Result<()> {
         started_at_ms,
         &backtest::wiring::entropy(),
     )
-    .with_fill_model(backtest::FillModel::Bar);
+    .with_fill_model(match args.fill_model {
+        FillModelArg::Bar => backtest::FillModel::Bar,
+        FillModelArg::Tick => backtest::FillModel::Tick,
+    });
     let recorder = backtest::wiring::recorder(args.record.as_deref())?;
     record_backtest_with_audit(
         &recorder,

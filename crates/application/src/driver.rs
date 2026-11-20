@@ -93,6 +93,11 @@ impl<S: Strategy> SessionDriver<S> {
         &self.session
     }
 
+    /// The session being driven, to configure it between trades.
+    pub fn session_mut(&mut self) -> &mut TradingSession<S> {
+        &mut self.session
+    }
+
     /// The strategy inside the session.
     pub fn strategy(&self) -> &S {
         self.session.strategy()

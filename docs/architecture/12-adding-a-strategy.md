@@ -164,12 +164,20 @@ The second element lists optional short aliases.
 ### On several instruments
 
 `portfolio --data BTCUSDT=… --data ETHUSDT=… --strategy <id>` runs the strategy on one account that
-trades every instrument given, on the bar route (`backtest::PortfolioEngine`). A `PerInstrument`
+trades every instrument given, on the bar route (`backtest::PortfolioEngine`) or, with
+`--fill-model tick`, with one live session per instrument on one simulated venue account
+(`backtest::PortfolioTickSimulation`; per-instrument strategies only). A `PerInstrument`
 strategy runs one instance per instrument; a `CrossSectional` one runs once and sees the account's
 positions on the other instruments in `view.others`. The portfolio limits come from the execution
 context or the flags `--max-open-positions` (default 1), `--max-same-direction` and
 `--max-gross-exposure`. On one instrument `PortfolioEngine` reproduces `BacktestEngine` exactly
-(`tests/portfolio_engine.rs`).
+(`tests/portfolio_engine.rs`), and so does the tick simulation (`tests/portfolio_tick.rs`).
+
+`run_hpo --instrument-data BTCUSDT=… --instrument-data ETHUSDT=…` optimises a per-instrument
+strategy on one account over several instruments: their tapes merge in time order
+(`Tape::merge_instruments`), so every walk-forward fold is a period common to all of them, and
+each candidate replays on `PortfolioEngine`. The artifact has schema 2.0 and lists the instruments
+in its symbol.
 
 ## 4. What stays yours
 

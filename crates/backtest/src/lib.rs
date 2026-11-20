@@ -2,8 +2,8 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub use application::{
-    config, driver, execution_core, live_exits, merged_trades, parity, price_event, session,
-    tick_simulation,
+    config, driver, execution_core, live_exits, merged_trades, parity, portfolio_tick, price_event,
+    session, tick_simulation,
 };
 
 pub mod artifact;
@@ -57,6 +57,7 @@ pub use optimization::{
 };
 pub use parity::FillRecordError;
 pub use portfolio::{results_by_instrument, PortfolioEngine, PortfolioStrategies};
+pub use portfolio_tick::PortfolioTickSimulation;
 pub use price_event::{bucket_trades, PriceEvent};
 pub use recording::{
     record_backtest, record_backtest_with_audit, record_closed_trade, record_hpo,

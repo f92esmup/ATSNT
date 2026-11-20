@@ -1,18 +1,22 @@
+use std::collections::BTreeMap;
 use std::ops::Range;
 
-use domain::Trade;
+use domain::{InstrumentId, Trade};
 use ports::ProgressSink;
 use rayon::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use strategies::{FeatureExtractor, HyperparameterSpace, MarketEvent, OptimizableStrategy};
+use strategies::{
+    FeatureExtractor, HyperparameterSpace, MarketEvent, OptimizableStrategy, StrategyScope,
+};
 
 use crate::config::BacktestConfig;
 use crate::engine::BacktestEngine;
 use crate::error::BacktestError;
 use crate::metrics::{trade_returns, BacktestMetrics, ClosedTrade};
+use crate::portfolio::PortfolioEngine;
 use crate::price_event::{bucket_trades, PriceEvent};
 use crate::walk_forward::WalkForwardFold;
 
@@ -42,6 +46,11 @@ pub struct Tape<F> {
     prices: Vec<PriceEvent>,
     /// `feature_ends[i]`: number of features attached to the price events `0..=i`.
     feature_ends: Vec<usize>,
+    /// The instruments of a tape of several; empty for a single-instrument tape.
+    instruments: Vec<InstrumentId>,
+    /// `lanes[i]`: index in `instruments` of price event `i`'s instrument; empty for a
+    /// single-instrument tape.
+    lanes: Vec<usize>,
 }
 
 impl<F> Tape<F> {
@@ -69,7 +78,61 @@ impl<F> Tape<F> {
             features,
             prices,
             feature_ends,
+            instruments: Vec::new(),
+            lanes: Vec::new(),
         })
+    }
+
+    /// One tape of several instruments' tapes: their price events in time order (by start, then
+    /// end, then instrument), each keeping its features. Walk-forward folds over it are periods
+    /// of time common to every instrument.
+    pub fn merge_instruments(tapes: Vec<(InstrumentId, Tape<F>)>) -> Self
+    where
+        F: Clone,
+    {
+        let mut tapes = tapes;
+        tapes.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut order: Vec<(i64, i64, usize, usize)> = tapes
+            .iter()
+            .enumerate()
+            .flat_map(|(lane, (_, tape))| {
+                tape.prices
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, event)| (event.start_ms, event.end_ms, lane, index))
+            })
+            .collect();
+        order.sort_unstable();
+        let mut merged = Self {
+            features: Vec::new(),
+            prices: Vec::with_capacity(order.len()),
+            feature_ends: Vec::with_capacity(order.len()),
+            instruments: tapes.iter().map(|(id, _)| id.clone()).collect(),
+            lanes: Vec::with_capacity(order.len()),
+        };
+        for (_, _, lane, index) in order {
+            let tape = &tapes[lane].1;
+            merged.prices.push(tape.prices[index]);
+            merged
+                .features
+                .extend(tape.features_at(index).iter().cloned());
+            merged.feature_ends.push(merged.features.len());
+            merged.lanes.push(lane);
+        }
+        merged
+    }
+
+    /// The instruments of a tape of several, in instrument order; empty for a single-instrument
+    /// tape.
+    pub fn instruments(&self) -> &[InstrumentId] {
+        &self.instruments
+    }
+
+    /// The instrument of price event `index` on a tape of several instruments.
+    pub fn instrument_at(&self, index: usize) -> Option<&InstrumentId> {
+        self.lanes
+            .get(index)
+            .and_then(|lane| self.instruments.get(*lane))
     }
 
     /// Number of price events.
@@ -116,6 +179,9 @@ impl<F> Tape<F> {
         self.prices.drain(..skipped);
         self.features.drain(..dropped_features);
         self.feature_ends.drain(..skipped);
+        if !self.lanes.is_empty() {
+            self.lanes.drain(..skipped);
+        }
         for end in &mut self.feature_ends {
             *end -= dropped_features;
         }
@@ -232,6 +298,9 @@ pub fn run_tape_slice<S: OptimizableStrategy>(
             tape.len()
         ))
     })?;
+    if !tape.instruments.is_empty() {
+        return run_portfolio_tape_slice::<S>(config, shared, strat_config, tape, range);
+    }
     let mut strategy = S::from_config(shared, strat_config.clone())
         .map_err(|e| BacktestError::Strategy(e.to_string()))?;
     let mut engine = BacktestEngine::new(config);
@@ -258,6 +327,68 @@ pub fn run_tape_slice<S: OptimizableStrategy>(
 
     let mark_price = prices.last().map(|event| event.close);
     Ok(engine.finish_with_trades(mark_price))
+}
+
+/// [`run_tape_slice`] on a tape of several instruments: one decision stage per instrument, each
+/// fed its instrument's features, on one [`PortfolioEngine`] account. Positions still open at the
+/// end of the slice close at each instrument's last close as `EndOfSimulation`. A
+/// cross-sectional strategy is refused: its decision stage would need to know which instrument
+/// a feature belongs to.
+fn run_portfolio_tape_slice<S: OptimizableStrategy>(
+    config: BacktestConfig,
+    shared: &S::SharedConfig,
+    strat_config: &S::Config,
+    tape: &Tape<FeaturesOf<S>>,
+    range: Range<usize>,
+) -> Result<(BacktestMetrics, Vec<ClosedTrade>), BacktestError> {
+    let prices = tape.prices.get(range.clone()).ok_or_else(|| {
+        BacktestError::InvalidFoldConfig(format!(
+            "slice {range:?} is outside a tape of {} price events",
+            tape.len()
+        ))
+    })?;
+    let build = || {
+        S::from_config(shared, strat_config.clone())
+            .map_err(|e| BacktestError::Strategy(e.to_string()))
+    };
+    let mut strategies = BTreeMap::new();
+    for instrument in &tape.instruments {
+        let strategy = build()?;
+        if strategy.scope() == StrategyScope::CrossSectional {
+            return Err(BacktestError::Strategy(format!(
+                "{} is cross-sectional: optimising it on several instruments is not supported",
+                S::id()
+            )));
+        }
+        strategies.insert(instrument.clone(), strategy);
+    }
+    let mut engine = PortfolioEngine::new(config, Vec::new());
+    let (mut scratch, mut latest) = (Vec::new(), Vec::new());
+    for (index, event) in range.zip(prices) {
+        let Some(instrument) = tape.instrument_at(index) else {
+            continue;
+        };
+        let Some(strategy) = strategies.get_mut(instrument) else {
+            continue;
+        };
+        let features = tape.features_at(index);
+        engine.process_event(instrument, event, &mut |view, out| {
+            latest.clear();
+            for (_, feature) in features {
+                scratch.clear();
+                strategy.on_features(feature, view, &mut scratch);
+                if !scratch.is_empty() {
+                    latest.clear();
+                    latest.append(&mut scratch);
+                }
+            }
+            out.append(&mut latest);
+        });
+        if engine.is_halted() {
+            break;
+        }
+    }
+    Ok(engine.finish_with_trades(true))
 }
 
 /// One optimisation run's frozen inputs: the tape, the shared configuration and the account.
@@ -1369,6 +1500,52 @@ mod tests {
         assert_eq!(tape.prices()[0].start_ms, 1_000);
         assert_eq!(tape.features_at(0), &[(1_100, 'b')]);
         assert_eq!(tape.features_at(1), &[(2_100, 'c'), (2_200, 'd')]);
+    }
+
+    #[test]
+    fn tapes_of_several_instruments_merge_in_time_order_with_their_features() {
+        let btc = InstrumentId::from_static("BTC");
+        let eth = InstrumentId::from_static("ETH");
+        let a = Tape::merge(
+            vec![event(0, 999), event(2_000, 2_999)],
+            vec![(500, 'a'), (2_500, 'b')],
+        )
+        .unwrap();
+        let b = Tape::merge(
+            vec![event(1_000, 1_999), event(2_000, 2_999)],
+            vec![(1_500, 'c')],
+        )
+        .unwrap();
+        let merged = Tape::merge_instruments(vec![(eth.clone(), b), (btc.clone(), a)]);
+
+        assert_eq!(merged.instruments(), [btc.clone(), eth.clone()]);
+        assert_eq!(merged.len(), 4);
+        let order: Vec<_> = (0..4)
+            .map(|i| {
+                (
+                    merged.prices()[i].start_ms,
+                    merged.instrument_at(i).cloned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                (0, Some(btc.clone())),
+                (1_000, Some(eth.clone())),
+                (2_000, Some(btc.clone())),
+                (2_000, Some(eth.clone())),
+            ]
+        );
+        assert_eq!(merged.features_at(0), &[(500, 'a')]);
+        assert_eq!(merged.features_at(1), &[(1_500, 'c')]);
+        assert_eq!(merged.features_at(2), &[(2_500, 'b')]);
+        assert!(merged.features_at(3).is_empty());
+
+        let cut = merged.starting_at(1_000);
+        assert_eq!(cut.len(), 3);
+        assert_eq!(cut.instrument_at(0), Some(&eth));
+        assert_eq!(cut.features_at(0), &[(1_500, 'c')]);
     }
 
     #[test]

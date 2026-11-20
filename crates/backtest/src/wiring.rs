@@ -3,13 +3,14 @@
 //! The library names no adapter (see the architecture contract): the binaries take the recorder and
 //! the simulated venue from here and pass them down as ports.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use adapters::{
     read_text, NullRunRecorder, OsEntropy, SimulatedVenue, SimulatedVenueConfig, SqliteRunRecorder,
 };
 use domain::futures::FundingSchedule;
-use domain::{MarketType, RiskError};
+use domain::{InstrumentId, MarketType, RiskError};
 use ports::{
     ProgressSink, RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow,
 };
@@ -21,6 +22,7 @@ use strategies::Strategy;
 
 use crate::artifact::{parse_artifact_shared_config, parse_strategy_config, LoadedStrategyConfig};
 use crate::error::{ConfigText, LoadError};
+use crate::portfolio_tick::PortfolioTickSimulation;
 use crate::registry::{build_strategy, strategy_id_of, LoadedStrategy};
 use crate::tick_simulation::{TickSimulation, TickSimulationConfig, TickSimulationError};
 
@@ -146,15 +148,34 @@ pub fn tick_simulation<S: Strategy>(
     TickSimulation::new(config, strategy, venue)
 }
 
+/// A tick-level simulation of several instruments on one simulated exchange account.
+pub type SimulatedPortfolioTickSimulation<S> = PortfolioTickSimulation<S, SimulatedVenue>;
+
+/// A tick-level simulation of `strategies`, one per instrument, on one simulated exchange account
+/// configured from `config` (its `symbol` is not used).
+pub fn portfolio_tick_simulation<S: Strategy>(
+    config: TickSimulationConfig,
+    strategies: BTreeMap<InstrumentId, S>,
+) -> Result<SimulatedPortfolioTickSimulation<S>, TickSimulationError> {
+    let venue = SimulatedVenue::multi(simulated_venue_config(&config)?);
+    PortfolioTickSimulation::new(config, strategies, venue)
+}
+
 /// The simulated exchange of a tick-level run: the fees, latency, funding and risk of `config`.
 pub fn simulated_venue(config: &TickSimulationConfig) -> Result<SimulatedVenue, RiskError> {
+    Ok(SimulatedVenue::new(simulated_venue_config(config)?))
+}
+
+fn simulated_venue_config(
+    config: &TickSimulationConfig,
+) -> Result<SimulatedVenueConfig, RiskError> {
     let backtest = &config.backtest;
     let maker_fee_pct = if backtest.resting_maker_exits {
         Some(backtest.maker_fee_pct)
     } else {
         None
     };
-    Ok(SimulatedVenue::new(SimulatedVenueConfig {
+    Ok(SimulatedVenueConfig {
         initial_equity: backtest.initial_capital,
         taker_fee_pct: backtest.taker_fee_pct,
         maker_fee_pct,
@@ -167,7 +188,7 @@ pub fn simulated_venue(config: &TickSimulationConfig) -> Result<SimulatedVenue, 
             .unwrap_or(1),
         funding: config.funding.clone(),
         maintenance_margin_rate: backtest.maintenance_margin_rate,
-    }))
+    })
 }
 
 /// The venue a parity replay runs on at `latency_ms`: a balance no replay can exhaust, no fees and

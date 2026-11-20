@@ -9,8 +9,9 @@
 use std::collections::VecDeque;
 
 use domain::{
-    Decision, EntryGate, EntryRefusal, InstrumentId, OrderIntent, PositionSide, PositionView, Side,
-    StrategyView, Trade, SIGNAL_EXIT, UNNAMED_INSTRUMENT,
+    AccountState, Book, BookEntry, Decision, EntryGate, EntryRefusal, InstrumentId,
+    InstrumentPosition, OrderIntent, PositionSide, PositionView, Side, StrategyView, Trade,
+    SIGNAL_EXIT, UNNAMED_INSTRUMENT,
 };
 use ports::{EntryAck, ExecutionReport, ExecutionVenue, OrderRequest};
 use rust_decimal::Decimal;
@@ -147,6 +148,20 @@ enum Phase {
     },
 }
 
+/// What a session that shares its account with sessions on other instruments must know of that
+/// account to apply the account rules: set by the portfolio simulation before each trade.
+#[derive(Debug, Clone, Default)]
+pub struct AccountContext {
+    /// Marked equity of the whole account, this session's position included.
+    pub marked_equity: Decimal,
+    /// The positions and pending entries of the other instruments.
+    pub book: Book,
+    /// Gross notional of `book` at current marks.
+    pub gross_exposure: Decimal,
+    /// The other instruments' open positions, as the strategy sees them.
+    pub others: Vec<InstrumentPosition>,
+}
+
 /// One strategy trading one symbol on one venue.
 pub struct TradingSession<S: Strategy> {
     config: SessionConfig,
@@ -173,6 +188,8 @@ pub struct TradingSession<S: Strategy> {
     /// The instrument traded: the configured symbol, or the unnamed one when it is not a valid
     /// instrument name.
     instrument: InstrumentId,
+    /// The account this session shares with others, when it does.
+    account: Option<AccountContext>,
 }
 
 /// What is known about a position recovered by the entry timeout: the signal that opened it
@@ -209,6 +226,7 @@ impl<S: Strategy> TradingSession<S> {
             recovery: None,
             decisions: Vec::new(),
             instrument,
+            account: None,
         }
     }
 
@@ -262,6 +280,53 @@ impl<S: Strategy> TradingSession<S> {
         seen
     }
 
+    /// Shares the account with sessions on other instruments: from now on the breakers watch
+    /// the account's marked equity and the gate judges entries against the account's book.
+    /// Set it before every trade; without it the session is the whole account.
+    pub fn set_account(&mut self, account: AccountContext) {
+        self.account = Some(account);
+    }
+
+    /// The instrument the session trades.
+    pub fn instrument(&self) -> &InstrumentId {
+        &self.instrument
+    }
+
+    /// The position or the pending entry as the account's book counts them, with the margin
+    /// they tie up at `max_leverage`. A pending entry counts with no quantity.
+    pub fn book_entry(&self, max_leverage: Decimal) -> Option<BookEntry> {
+        let leverage = max_leverage.max(Decimal::ONE);
+        let (side, price, quantity) = match &self.phase {
+            Phase::Open {
+                side,
+                entry_price,
+                quantity,
+                ..
+            } => (*side, *entry_price, *quantity),
+            Phase::EntryPending { intent, .. } => (intent.side, intent.price, Decimal::ZERO),
+            _ => return None,
+        };
+        Some(BookEntry {
+            position: PositionView {
+                side: match side {
+                    Side::Buy => PositionSide::Long,
+                    Side::Sell => PositionSide::Short,
+                },
+                quantity,
+                entry_price: price,
+            },
+            margin: quantity * price / leverage,
+        })
+    }
+
+    /// The account's marked equity: shared when the account is, else this session's own.
+    fn account_equity(&self, price: Decimal) -> Decimal {
+        match &self.account {
+            Some(account) => account.marked_equity,
+            None => marked_equity(self.wallet, self.open_position(), price),
+        }
+    }
+
     /// Records the latest wallet balance reported by the venue.
     pub fn on_wallet_balance(&mut self, equity: Decimal) {
         self.wallet = equity;
@@ -290,7 +355,7 @@ impl<S: Strategy> TradingSession<S> {
         price: Decimal,
     ) -> Vec<SessionEvent> {
         let mut events = Vec::new();
-        let marked = marked_equity(self.wallet, self.open_position(), price);
+        let marked = self.account_equity(price);
         if let Some(drawdown) = self.monthly.observe(time_ms, marked) {
             events.push(SessionEvent::MonthlyBreakerTripped { drawdown });
         }
@@ -343,13 +408,18 @@ impl<S: Strategy> TradingSession<S> {
             );
         }
 
-        let open_position = self.open_position();
-        let day_peak = self.daily.observe(
-            trade.timestamp,
-            marked_equity(self.wallet, open_position, trade.price),
-        );
+        let day_peak = self
+            .daily
+            .observe(trade.timestamp, self.account_equity(trade.price));
 
-        let view = self.view();
+        let own = self.view();
+        let view = StrategyView {
+            others: self
+                .account
+                .as_ref()
+                .map_or(&[][..], |account| &account.others[..]),
+            ..own
+        };
         let mut decisions = std::mem::take(&mut self.decisions);
         decisions.clear();
         self.strategy.on_event(
@@ -588,15 +658,27 @@ impl<S: Strategy> TradingSession<S> {
             return vec![SessionEvent::SignalSkipped(reason)];
         }
 
-        let quantity =
-            match self
+        let admitted = match &self.account {
+            Some(account) => self.config.gate.admit_to_book(
+                &intent,
+                &self.instrument,
+                &AccountState {
+                    equity: account.marked_equity,
+                    day_peak,
+                    breaker_tripped: self.daily.is_tripped(),
+                    book: &account.book,
+                    gross_exposure: account.gross_exposure,
+                },
+            ),
+            None => self
                 .config
                 .gate
-                .admit(&intent, self.wallet, day_peak, self.daily.is_tripped())
-            {
-                Ok(quantity) => quantity,
-                Err(refusal) => return vec![SessionEvent::EntryRefused(refusal)],
-            };
+                .admit(&intent, self.wallet, day_peak, self.daily.is_tripped()),
+        };
+        let quantity = match admitted {
+            Ok(quantity) => quantity,
+            Err(refusal) => return vec![SessionEvent::EntryRefused(refusal)],
+        };
         let request = OrderRequest {
             side: intent.side,
             quantity,
