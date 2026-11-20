@@ -29,6 +29,10 @@ pub struct ClosedTrade {
     /// Account equity path observed while the trade was open.
     #[serde(default)]
     pub excursion: TradeExcursion,
+    /// The instrument traded, on a run of several instruments; `None` on a single-instrument
+    /// run, whose instrument is the run's symbol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument: Option<crate::InstrumentId>,
 }
 
 /// Comprehensive risk and return metrics adhering to Section 6 of strategy specifications.

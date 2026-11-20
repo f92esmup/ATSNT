@@ -33,7 +33,7 @@ one-instrument case of every phase, so its golden tests must not change.
 | F1 | Warm-up, calibration and shared configuration declared by the strategy; one time barrier in ms; a contract suite that cannot pass empty; swarm leftovers in generic code | Done |
 | F2 | Signal exits and a read-only view of the strategy's position | Done |
 | F3 | Multi-asset domain: instruments, a book of positions, portfolio limits in the gate | Done |
-| F4 | Multi-asset runners: merged tapes, bar and tick routes, HPO, artifacts v2 | Pending |
+| F4 | Multi-asset runners: merged tapes, bar and tick routes, HPO, artifacts v2 | In progress: merged tapes, the bar route (`PortfolioEngine`) and the `portfolio` binary are done |
 | F5 | Funding events for strategies; the order book waits for a data source (WP-10) | Pending |
 
 ## Gates

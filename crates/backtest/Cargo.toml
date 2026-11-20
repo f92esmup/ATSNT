@@ -43,6 +43,10 @@ path = "src/bin/calibrate_feeds.rs"
 name = "prune_swarm"
 path = "src/bin/prune_swarm.rs"
 
+[[bin]]
+name = "portfolio"
+path = "src/bin/portfolio.rs"
+
 
 
 [dev-dependencies]

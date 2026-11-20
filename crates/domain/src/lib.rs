@@ -28,7 +28,8 @@ pub use analytics::{
 };
 pub use book::{Book, BookEntry, PortfolioLimits};
 pub use decision::{
-    Decision, MarketEvent, PositionView, ProtectiveExits, StrategyView, SIGNAL_EXIT,
+    Decision, InstrumentPosition, MarketEvent, PositionView, ProtectiveExits, StrategyView,
+    SIGNAL_EXIT,
 };
 pub use error::DomainError;
 pub use gate::{AccountState, EntryGate, EntryRefusal, MarginRule};

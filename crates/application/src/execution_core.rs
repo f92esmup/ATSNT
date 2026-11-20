@@ -367,6 +367,7 @@ impl TradeLedger {
             exit_reason: exit_reason.to_string(),
             holding_duration_seconds,
             excursion,
+            instrument: None,
         });
         let index = self.trades.len() - 1;
         &self.trades[index]

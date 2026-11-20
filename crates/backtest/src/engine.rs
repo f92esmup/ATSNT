@@ -94,7 +94,7 @@ impl BacktestEngine {
     }
 
     /// What the strategy may see of its book: the open position and whether an entry is pending.
-    pub fn view(&self) -> StrategyView {
+    pub fn view(&self) -> StrategyView<'static> {
         StrategyView {
             position: self.core.position().map(|position| PositionView {
                 side: position.side,
@@ -102,6 +102,7 @@ impl BacktestEngine {
                 entry_price: position.entry_price,
             }),
             entry_pending: self.core.pending().is_some(),
+            others: &[],
         }
     }
 

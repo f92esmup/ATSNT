@@ -185,7 +185,7 @@ fn events(trades: &[Trade]) -> Vec<MarketEvent<'_>> {
 /// that reads its position sees the same view in one and in two stages.
 #[derive(Default)]
 struct PaperBook {
-    view: StrategyView,
+    view: StrategyView<'static>,
 }
 
 impl PaperBook {

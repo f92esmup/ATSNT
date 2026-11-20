@@ -102,24 +102,40 @@ pub struct PositionView {
     pub entry_price: Decimal,
 }
 
-/// What a strategy may see of its own book when it decides: its position and whether an entry is
-/// on its way. It shows no balances; sizing and the account rules belong to the gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct StrategyView {
-    /// The open position, if any.
-    pub position: Option<PositionView>,
-    /// `true` while an entry order is pending and the position not yet open.
-    pub entry_pending: bool,
+/// An open position of the account on one instrument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstrumentPosition {
+    /// The instrument.
+    pub instrument: InstrumentId,
+    /// The position.
+    pub position: PositionView,
 }
 
-impl StrategyView {
+/// What a strategy may see of its own book when it decides on an event: its position on the
+/// event's instrument, whether an entry is on its way there, and its positions on the other
+/// instruments. It shows no balances; sizing and the account rules belong to the gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StrategyView<'a> {
+    /// The open position on the event's instrument, if any.
+    pub position: Option<PositionView>,
+    /// `true` while an entry order on the event's instrument is pending.
+    pub entry_pending: bool,
+    /// The open positions on the other instruments, in instrument order. Always empty on a
+    /// single-instrument run.
+    pub others: &'a [InstrumentPosition],
+}
+
+impl StrategyView<'static> {
     /// A flat book with nothing pending.
     pub const FLAT: Self = Self {
         position: None,
         entry_pending: false,
+        others: &[],
     };
+}
 
-    /// Whether nothing is open or pending.
+impl StrategyView<'_> {
+    /// Whether nothing is open or pending on the event's instrument.
     pub fn is_flat(&self) -> bool {
         self.position.is_none() && !self.entry_pending
     }

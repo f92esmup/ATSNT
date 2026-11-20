@@ -26,6 +26,7 @@ fn trade(
         exit_reason: reason.to_string(),
         holding_duration_seconds: holding,
         excursion,
+        instrument: None,
     }
 }
 

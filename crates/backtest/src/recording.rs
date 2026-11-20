@@ -216,7 +216,12 @@ impl RunContext {
                 run_id: self.run_id.to_string(),
                 run_type: self.run_type.as_str().to_string(),
                 strategy_id: self.strategy_id.clone(),
-                symbol: self.symbol.clone(),
+                // A trade of a multi-instrument run names its instrument; the run's symbol lists
+                // them all.
+                symbol: t
+                    .instrument
+                    .as_ref()
+                    .map_or_else(|| self.symbol.clone(), ToString::to_string),
                 side: match t.side {
                     PositionSide::Long => "Long",
                     PositionSide::Short => "Short",

@@ -14,6 +14,7 @@ pub mod driver;
 pub mod error;
 pub mod execution_core;
 pub mod live_exits;
+pub mod merged_trades;
 pub mod parity;
 pub mod price_event;
 pub mod session;
