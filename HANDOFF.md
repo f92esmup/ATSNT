@@ -16,6 +16,10 @@ en código genérico), F2 (salida por señal y vista de la posición), F3 (domin
 (runners multi-activo) y F5 (eventos de funding). El swarm es el caso de un instrumento: sus goldens
 no deben cambiar en ninguna fase.
 
+F5 hecha el 2026-11-20: `MarketEvent::Funding` llega a las estrategias en todas las rutas (y al
+extractor del HPO); las decisiones sobre él se ignoran. El libro de órdenes sigue sin evento porque
+no hay datos (WP-10). Con esto el plan queda completo, salvo R11, que espera al usuario.
+
 F2 a F4 hechas el 2026-11-20 (PR #11 a #14): salida por señal y vista de la posición; instrumentos,
 cartera y límites de cartera en el gate; `PortfolioEngine` (barras) y `PortfolioTickSimulation`
 (tick) con equivalencia exacta a los motores de un instrumento, binario `portfolio` y

@@ -9,12 +9,13 @@ use std::time::Instant;
 use adapters::{BinanceCsvReader, TapeReader};
 use anyhow::{Context, Result};
 use backtest::{
-    check_calibration, embargo_buckets, now_unix_ms, record_hpo, trade_tape, BacktestConfig,
-    DataWindow, FeaturesOf, HpoDeploymentArtifact, HpoScorecard, RunContext, RunSpec, RunType,
-    SamplingConfig, StrategyDeploymentArtifact, Tape, WalkForwardConfig, WalkForwardFold,
-    WalkForwardOptimizer, WalkForwardSplitter,
+    check_calibration, embargo_buckets, now_unix_ms, record_hpo, trade_tape_with_funding,
+    BacktestConfig, DataWindow, FeaturesOf, HpoDeploymentArtifact, HpoScorecard, RunContext,
+    RunSpec, RunType, SamplingConfig, StrategyDeploymentArtifact, Tape, WalkForwardConfig,
+    WalkForwardFold, WalkForwardOptimizer, WalkForwardSplitter,
 };
 use clap::Parser;
+use domain::futures::FundingSchedule;
 use ports::MarketDataStream;
 use rust_decimal::Decimal;
 use serde_json::json;
@@ -221,6 +222,7 @@ struct PreparedInput<F> {
 fn prepare<S: OptimizableStrategy>(
     args: &Args,
     shared: &S::SharedConfig,
+    funding: Option<FundingSchedule>,
     start_total: Instant,
 ) -> Result<PreparedInput<FeaturesOf<S>>> {
     let bucket_ms = args.price_bucket_ms.unwrap_or(DEFAULT_PRICE_BUCKET_MS);
@@ -243,7 +245,9 @@ fn prepare<S: OptimizableStrategy>(
         bucket_ms
     );
     let mut raw_trades = 0usize;
-    let mut tape_of = |path: &std::path::Path| -> Result<Tape<FeaturesOf<S>>> {
+    let mut tape_of = |instrument: &domain::InstrumentId,
+                       path: &std::path::Path|
+     -> Result<Tape<FeaturesOf<S>>> {
         let mut stream = open_stream(path)?;
         let mut read_error = None;
         let trades = std::iter::from_fn(|| match stream.next_trade() {
@@ -254,20 +258,27 @@ fn prepare<S: OptimizableStrategy>(
             }
         })
         .inspect(|_| raw_trades += 1);
-        let tape = trade_tape::<S>(shared, trades, bucket_ms)?;
+        let tape =
+            trade_tape_with_funding::<S>(shared, instrument, trades, bucket_ms, funding.clone())?;
         if let Some(error) = read_error {
             return Err(error.into());
         }
         Ok(tape)
     };
     let (tape, source) = if args.instrument_data.is_empty() {
-        (tape_of(&args.data)?, args.data.display().to_string())
+        let instrument = domain::InstrumentId::new(args.symbol.to_ascii_uppercase())
+            .unwrap_or_else(|_| domain::UNNAMED_INSTRUMENT.clone());
+        (
+            tape_of(&instrument, &args.data)?,
+            args.data.display().to_string(),
+        )
     } else {
         let mut tapes = Vec::new();
         for spec in &args.instrument_data {
             let (instrument, path) = parse_instrument_data(spec)?;
             println!("      {instrument}: {}", path.display());
-            tapes.push((instrument, tape_of(&path)?));
+            let tape = tape_of(&instrument, &path)?;
+            tapes.push((instrument, tape));
         }
         (
             Tape::merge_instruments(tapes),
@@ -392,34 +403,6 @@ where
         symbol_upper,
     } = run;
     let shared = shared_config::<S>(args)?;
-    let prepared = prepare::<S>(args, &shared, start_total)?;
-
-    // 2. Generate Walk-Forward Folds with Embargo
-    println!("[2/4] Generating Purged & Embargoed temporal splits...");
-    println!("      Trades (Total: {} buckets):", prepared.tape.len());
-    for fold in &prepared.folds {
-        println!(
-            "        Fold #{}: Train [{}..{}] ({} buckets) | Embargo [{}..{}] ({} buckets) | Test [{}..{}] ({} buckets)",
-            fold.fold_idx,
-            fold.train_range.start,
-            fold.train_range.end,
-            fold.train_len(),
-            fold.embargo_range.start,
-            fold.embargo_range.end,
-            fold.embargo_len(),
-            fold.test_range.start,
-            fold.test_range.end,
-            fold.test_len(),
-        );
-    }
-
-    // 3. Multi-Core Rayon Optimization
-    println!(
-        "\n[3/4] Launching parallel Rayon search across {} candidate(s)...",
-        args.candidates
-    );
-    let opt_start = Instant::now();
-
     let mut engine_config = match &args.execution_context {
         Some(path) => {
             let content = fs::read_to_string(path).with_context(|| {
@@ -484,6 +467,37 @@ where
         "      {}",
         engine_config.describe_notional_caps(engine_config.initial_capital)
     );
+    // The extractor is told of the funding settlements the account pays, as the runners tell
+    // the strategy.
+    let funding = (engine_config.market_type == strategies::MarketType::UsdMPerpetual)
+        .then(|| FundingSchedule::constant(engine_config.funding_rate_pct));
+    let prepared = prepare::<S>(args, &shared, funding, start_total)?;
+
+    // 2. Generate Walk-Forward Folds with Embargo
+    println!("[2/4] Generating Purged & Embargoed temporal splits...");
+    println!("      Trades (Total: {} buckets):", prepared.tape.len());
+    for fold in &prepared.folds {
+        println!(
+            "        Fold #{}: Train [{}..{}] ({} buckets) | Embargo [{}..{}] ({} buckets) | Test [{}..{}] ({} buckets)",
+            fold.fold_idx,
+            fold.train_range.start,
+            fold.train_range.end,
+            fold.train_len(),
+            fold.embargo_range.start,
+            fold.embargo_range.end,
+            fold.embargo_len(),
+            fold.test_range.start,
+            fold.test_range.end,
+            fold.test_len(),
+        );
+    }
+
+    // 3. Multi-Core Rayon Optimization
+    println!(
+        "\n[3/4] Launching parallel Rayon search across {} candidate(s)...",
+        args.candidates
+    );
+    let opt_start = Instant::now();
 
     let param_space = if let Some(path) = &args.param_space {
         let content = fs::read_to_string(path)

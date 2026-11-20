@@ -162,6 +162,41 @@ pub fn is_liquidated(side: Side, mark_price: Decimal, liquidation_price: Decimal
     }
 }
 
+/// The funding settlements a replay crosses, in order: each trade asks for the settlements since
+/// the previous one, so a strategy can be told of them before that trade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FundingFeed {
+    schedule: FundingSchedule,
+    last_ms: Option<i64>,
+}
+
+impl FundingFeed {
+    /// A feed of `schedule`'s settlements, from the first trade on.
+    pub fn new(schedule: FundingSchedule) -> Self {
+        Self {
+            schedule,
+            last_ms: None,
+        }
+    }
+
+    /// The settlements after the previous call and at or before `now_ms`, with their rates.
+    /// The first call only starts the clock: a replay is not told of settlements before its data.
+    pub fn due(&mut self, now_ms: i64) -> Vec<(i64, Decimal)> {
+        let Some(last_ms) = self.last_ms.replace(now_ms) else {
+            return Vec::new();
+        };
+        if now_ms <= last_ms {
+            self.last_ms = Some(last_ms);
+            return Vec::new();
+        }
+        self.schedule
+            .settlements(last_ms, now_ms)
+            .into_iter()
+            .map(|at| (at, self.schedule.rate_at(at)))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +320,25 @@ mod tests {
         assert!(!is_liquidated(Side::Buy, dec!(90.5), dec!(90.4)));
         assert!(is_liquidated(Side::Sell, dec!(109.6), dec!(109.6)));
         assert!(!is_liquidated(Side::Sell, dec!(109.5), dec!(109.6)));
+    }
+
+    #[test]
+    fn a_funding_feed_reports_each_settlement_once_after_its_first_trade() {
+        let hour = 3_600_000;
+        let mut feed = FundingFeed::new(FundingSchedule::constant(Decimal::new(1, 4)));
+        assert!(
+            feed.due(hour).is_empty(),
+            "the first trade starts the clock"
+        );
+        assert_eq!(feed.due(9 * hour), vec![(8 * hour, Decimal::new(1, 4))]);
+        assert!(feed.due(9 * hour).is_empty());
+        assert!(feed.due(8 * hour).is_empty(), "time never runs back");
+        assert_eq!(
+            feed.due(25 * hour)
+                .iter()
+                .map(|(at, _)| *at)
+                .collect::<Vec<_>>(),
+            [16 * hour, 24 * hour]
+        );
     }
 }

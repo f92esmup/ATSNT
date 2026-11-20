@@ -1,5 +1,12 @@
 # Plan: preparar ATSNT para alojar nuevas estrategias (fricciones + molde completo)
 
+> **Estado (2026-11-20):** plan completo. F0 y F1 en el PR #10; F2 en #11; F3 en #12; F4 en #13
+> y #14; F5 en el PR que lo cierra. Queda solo la regla R11 (4.5), propuesta y no añadida porque
+> cambia `AGENTS.md`. Desviaciones: una entrada con la posición abierta se sigue ignorando sin
+> contarla (contarla movería los goldens); el multi-activo de barras es un motor nuevo
+> (`PortfolioEngine`) y no una reescritura de `BacktestEngine`, con equivalencia exacta probada
+> en N=1; la ruta de tick y el HPO multi-instrumento admiten solo estrategias por instrumento.
+
 ## Contexto
 
 Revisé `main` (`d993d3d`): 569 pruebas pasan, y clippy y fmt están limpios. El repo ya registra una

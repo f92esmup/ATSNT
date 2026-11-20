@@ -6,6 +6,7 @@
 //! cross-sectional one runs once over all of them. The account's portfolio limits decide how many
 //! positions may be open at once.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ use backtest::{
     RunSpec, RunType, SamplingConfig, TickSimulationConfig,
 };
 use clap::Parser;
-use domain::futures::FundingSchedule;
+use domain::futures::{FundingFeed, FundingSchedule};
 use domain::InstrumentId;
 use ports::MarketDataStream;
 use rust_decimal::Decimal;
@@ -225,7 +226,25 @@ async fn main() -> Result<()> {
     let (metrics, trades, audit) = match args.fill_model {
         FillModelArg::Bar => {
             let mut engine = PortfolioEngine::new(config, Vec::new());
+            // Each instrument's strategy is told of the funding settlements the engine charges.
+            let mut funding: BTreeMap<InstrumentId, FundingFeed> =
+                if config.market_type == MarketType::UsdMPerpetual {
+                    instruments
+                        .iter()
+                        .map(|id| {
+                            let schedule = FundingSchedule::constant(config.funding_rate_pct);
+                            (id.clone(), FundingFeed::new(schedule))
+                        })
+                        .collect()
+                } else {
+                    BTreeMap::new()
+                };
             while let Some((instrument, trade)) = merged.next_trade()? {
+                if let Some(feed) = funding.get_mut(&instrument) {
+                    for (time_ms, rate) in feed.due(trade.timestamp) {
+                        strategies.on_funding(&engine, &instrument, time_ms, rate);
+                    }
+                }
                 if processed == 0 {
                     check_calibration(calibration_end, trade.timestamp)?;
                 }

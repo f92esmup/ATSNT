@@ -327,6 +327,27 @@ impl<S: Strategy> TradingSession<S> {
         }
     }
 
+    /// Tells the strategy of a funding settlement of its instrument at `time_ms`. It informs:
+    /// whatever the strategy decides on it is ignored.
+    pub fn on_funding_rate(&mut self, time_ms: i64, rate: Decimal) {
+        let own = self.view();
+        let view = StrategyView {
+            others: self
+                .account
+                .as_ref()
+                .map_or(&[][..], |account| &account.others[..]),
+            ..own
+        };
+        let mut ignored = std::mem::take(&mut self.decisions);
+        self.strategy.on_event(
+            &MarketEvent::funding(&self.instrument, time_ms, rate),
+            &view,
+            &mut ignored,
+        );
+        ignored.clear();
+        self.decisions = ignored;
+    }
+
     /// Records the latest wallet balance reported by the venue.
     pub fn on_wallet_balance(&mut self, equity: Decimal) {
         self.wallet = equity;
