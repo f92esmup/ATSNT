@@ -63,6 +63,7 @@ fn closed_trade() -> ClosedTrade {
             max_drawdown_amount: dec!(10),
             max_drawdown_pct: dec!(0.001),
         },
+        instrument: None,
     }
 }
 

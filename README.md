@@ -72,6 +72,7 @@ UPDATE_GOLDEN=1 cargo test -p backtest --test golden_swarm
 |---|---|---|
 | `fetch_data` | `adapters` | Downloads Binance USD-M `aggTrades` archives and converts them to Parquet. Used for the economics screen; Kraken history replaces it (WP-09). |
 | `backtest` | `backtest` | Replays a tape through the swarm, with bar or tick fills, optional Monte Carlo and optional run recording. |
+| `portfolio` | `backtest` | Replays one strategy on several instruments with one account (bar fills): `--data SYMBOL=PATH` per instrument, with portfolio limits such as `--max-open-positions`. |
 | `run_hpo` | `backtest` | Walk-forward optimization of the swarm, with embargo and the Deflated Sharpe Ratio. |
 | `calibrate_feeds` | `backtest` | Calibrates the swarm's feed thresholds on a period before the evaluation. |
 | `prune_swarm` | `backtest` | Prunes candidate agents by their information coefficient. |

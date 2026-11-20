@@ -364,6 +364,7 @@ mod tests {
                 exit_reason: "TakeProfit".to_string(),
                 holding_duration_seconds: 1,
                 excursion: TradeExcursion::default(),
+                instrument: None,
             },
             ClosedTrade {
                 entry_time: 1500,
@@ -381,6 +382,7 @@ mod tests {
                 exit_reason: "StopLoss".to_string(),
                 holding_duration_seconds: 1,
                 excursion: TradeExcursion::default(),
+                instrument: None,
             },
             ClosedTrade {
                 entry_time: 2500,
@@ -398,6 +400,7 @@ mod tests {
                 exit_reason: "TakeProfit".to_string(),
                 holding_duration_seconds: 1,
                 excursion: TradeExcursion::default(),
+                instrument: None,
             },
             ClosedTrade {
                 entry_time: 3500,
@@ -415,6 +418,7 @@ mod tests {
                 exit_reason: "TimeBarrier".to_string(),
                 holding_duration_seconds: 1,
                 excursion: TradeExcursion::default(),
+                instrument: None,
             },
             ClosedTrade {
                 entry_time: 4500,
@@ -432,6 +436,7 @@ mod tests {
                 exit_reason: "TakeProfit".to_string(),
                 holding_duration_seconds: 1,
                 excursion: TradeExcursion::default(),
+                instrument: None,
             },
         ]
     }

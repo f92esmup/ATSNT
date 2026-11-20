@@ -2,7 +2,8 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub use application::{
-    config, driver, execution_core, live_exits, parity, price_event, session, tick_simulation,
+    config, driver, execution_core, live_exits, merged_trades, parity, price_event, session,
+    tick_simulation,
 };
 
 pub mod artifact;
@@ -10,6 +11,7 @@ pub mod engine;
 pub mod error;
 pub mod monte_carlo;
 pub mod optimization;
+pub mod portfolio;
 pub mod recording;
 pub mod registry;
 pub mod run;
@@ -38,6 +40,7 @@ pub use execution_core::{
     TradeLedger,
 };
 pub use live_exits::{ExitEvent, ExitGateway, ExitManager, HaltState};
+pub use merged_trades::MergedTrades;
 pub use metrics::{
     format_ratio, format_rejections, sortino_ratio, trade_returns, BacktestMetrics, ClosedTrade,
     TradeExcursion, DAILY_HALT_REJECTION,
@@ -53,6 +56,7 @@ pub use optimization::{
     DEFAULT_MIN_TRADES_PER_FOLD,
 };
 pub use parity::FillRecordError;
+pub use portfolio::{results_by_instrument, PortfolioEngine, PortfolioStrategies};
 pub use price_event::{bucket_trades, PriceEvent};
 pub use recording::{
     record_backtest, record_backtest_with_audit, record_closed_trade, record_hpo,

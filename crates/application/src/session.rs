@@ -384,7 +384,7 @@ impl<S: Strategy> TradingSession<S> {
     }
 
     /// What the strategy may see of its book: the open position and whether an entry is pending.
-    pub fn view(&self) -> StrategyView {
+    pub fn view(&self) -> StrategyView<'static> {
         StrategyView {
             position: self
                 .open_position()
@@ -397,6 +397,7 @@ impl<S: Strategy> TradingSession<S> {
                     entry_price,
                 }),
             entry_pending: matches!(self.phase, Phase::EntryPending { .. }),
+            others: &[],
         }
     }
 
