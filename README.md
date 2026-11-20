@@ -44,7 +44,9 @@ The architecture rules are tests in `crates/backtest/tests/architecture_contract
 - `ports` name no exchange and no storage format;
 - `domain` uses no `f32` or `f64`;
 - only `adapters` and the composition read the wall clock;
-- runners dispatch through the strategy registry.
+- runners dispatch through the strategy registry;
+- the crates a replay runs through (`domain`, `strategies`, `application`, `backtest`) use no
+  `HashMap` or `HashSet`, so every replay iterates its state in the same order (R11).
 
 `AGENTS.md` forbids `unwrap()` and `expect()` outside tests. Every crate root and binary root
 denies `clippy::unwrap_used` and `clippy::expect_used` when it is not built for tests.
