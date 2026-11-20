@@ -43,6 +43,15 @@ struct Args {
     )]
     data: PathBuf,
 
+    /// One instrument's trades as SYMBOL=PATH; repeat it to optimise one per-instrument strategy
+    /// on several instruments with one account. When given, --data and --symbol are not used
+    #[arg(long)]
+    instrument_data: Vec<String>,
+
+    /// Most positions open at once across instruments when optimising on several [default: 1]
+    #[arg(long)]
+    max_open_positions: Option<usize>,
+
     /// Number of Walk-Forward validation folds
     #[arg(short, long, visible_alias = "windows", default_value_t = 3)]
     folds: usize,
@@ -113,7 +122,16 @@ async fn main() -> Result<()> {
     println!("============================================================");
     println!(" ATSNT - Walk-Forward Hyperparameter Optimization (Rayon)  ");
     println!("============================================================");
-    let symbol_upper = args.symbol.to_ascii_uppercase();
+    let symbol_upper = if args.instrument_data.is_empty() {
+        args.symbol.to_ascii_uppercase()
+    } else {
+        let mut symbols = Vec::new();
+        for spec in &args.instrument_data {
+            symbols.push(parse_instrument_data(spec)?.0.to_string());
+        }
+        symbols.sort();
+        symbols.join(",")
+    };
     println!("Symbol:      {}", symbol_upper);
     println!("Data:        {}", args.data.display());
 
@@ -175,6 +193,16 @@ fn open_stream(
     }
 }
 
+/// `SYMBOL=PATH` of `--instrument-data`.
+fn parse_instrument_data(spec: &str) -> Result<(domain::InstrumentId, PathBuf)> {
+    let Some((symbol, path)) = spec.split_once('=') else {
+        anyhow::bail!("--instrument-data {spec}: expected SYMBOL=PATH");
+    };
+    let instrument = domain::InstrumentId::new(symbol.to_uppercase())
+        .with_context(|| format!("--instrument-data {spec}: invalid symbol"))?;
+    Ok((instrument, PathBuf::from(path)))
+}
+
 /// The run's input once prepared (strategy spec §15.1): the tape, its temporal splits, the
 /// sampling it declares and the window of data it covers.
 struct PreparedInput<F> {
@@ -214,26 +242,43 @@ fn prepare<S: OptimizableStrategy>(
         S::id(),
         bucket_ms
     );
-    let mut stream = open_stream(&args.data)?;
-    let mut read_error = None;
     let mut raw_trades = 0usize;
-    let trades = std::iter::from_fn(|| match stream.next_trade() {
-        Ok(trade) => trade,
-        Err(error) => {
-            read_error = Some(error);
-            None
+    let mut tape_of = |path: &std::path::Path| -> Result<Tape<FeaturesOf<S>>> {
+        let mut stream = open_stream(path)?;
+        let mut read_error = None;
+        let trades = std::iter::from_fn(|| match stream.next_trade() {
+            Ok(trade) => trade,
+            Err(error) => {
+                read_error = Some(error);
+                None
+            }
+        })
+        .inspect(|_| raw_trades += 1);
+        let tape = trade_tape::<S>(shared, trades, bucket_ms)?;
+        if let Some(error) = read_error {
+            return Err(error.into());
         }
-    })
-    .inspect(|_| raw_trades += 1);
-    let tape = trade_tape::<S>(shared, trades, bucket_ms)?;
-    if let Some(error) = read_error {
-        return Err(error.into());
-    }
+        Ok(tape)
+    };
+    let (tape, source) = if args.instrument_data.is_empty() {
+        (tape_of(&args.data)?, args.data.display().to_string())
+    } else {
+        let mut tapes = Vec::new();
+        for spec in &args.instrument_data {
+            let (instrument, path) = parse_instrument_data(spec)?;
+            println!("      {instrument}: {}", path.display());
+            tapes.push((instrument, tape_of(&path)?));
+        }
+        (
+            Tape::merge_instruments(tapes),
+            args.instrument_data.join(","),
+        )
+    };
     let (Some(first), Some(last)) = (tape.prices().first(), tape.prices().last()) else {
-        anyhow::bail!("No trades were read from {}", args.data.display());
+        anyhow::bail!("No trades were read from {source}");
     };
     let data_window = DataWindow {
-        source: Some(args.data.display().to_string()),
+        source: Some(source),
         start_ms: Some(first.start_ms),
         end_ms: Some(last.end_ms),
     };
@@ -427,6 +472,7 @@ where
     if let Some(cap) = args.capital {
         engine_config.initial_capital = cap;
     }
+    engine_config.max_open_positions = args.max_open_positions.or(engine_config.max_open_positions);
     println!(
         "      Execution context: capital ${}, maker {} / taker {} fees, slippage {}",
         engine_config.initial_capital,
@@ -639,7 +685,13 @@ where
 
     let deployment_artifact = HpoDeploymentArtifact {
         artifact: StrategyDeploymentArtifact {
-            schema_version: "1.0".to_string(),
+            // 2.0 marks an artifact optimised on several instruments: its symbol lists them.
+            schema_version: if args.instrument_data.is_empty() {
+                "1.0"
+            } else {
+                "2.0"
+            }
+            .to_string(),
             spec: sweep_spec.with_config(winner_eval.config.clone()),
             hpo_scorecard: Some(scorecard),
         },

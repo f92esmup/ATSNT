@@ -133,3 +133,17 @@ fn an_instrument_given_twice_is_refused() {
     assert!(!out.status.success());
     assert!(text(&out).contains("each instrument may be given once"));
 }
+
+#[test]
+fn the_tick_route_runs_one_session_per_instrument() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(
+        dir.path(),
+        &["--fill-model", "tick", "--max-open-positions", "2"],
+    );
+    let output = text(&out);
+    assert!(out.status.success(), "{output}");
+    assert!(output.contains("one session per instrument"), "{output}");
+    assert!(output.contains(" BTCUSDT "), "{output}");
+    assert!(output.contains(" ETHUSDT "), "{output}");
+}

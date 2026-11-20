@@ -20,13 +20,14 @@
 //! `aggTrades` carries no mark price, so triggers use the last trade price as the mark proxy.
 //! Maintenance margin uses one flat rate instead of the exchange's notional brackets.
 
+use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 
 use domain::futures::{self, FundingSchedule};
 use domain::{Side, Trade};
 use ports::{
     AckStatus, EntryAck, ExecutionReport, ExecutionVenue, ExitGateway, FundingPayment,
-    OrderRequest, TapeVenue,
+    MultiTapeVenue, OrderRequest, TapeVenue,
 };
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -123,23 +124,59 @@ struct ExitLegs {
     take_profit: Option<Decimal>,
 }
 
-#[derive(Debug)]
-struct State {
+/// The market and the account's position on one symbol.
+#[derive(Debug, Default)]
+struct SymbolBook {
     clock_ms: i64,
     last_price: Option<Decimal>,
-    wallet: Decimal,
     position: Option<SimPosition>,
     exits: Option<ExitLegs>,
     orders: Vec<WorkingOrder>,
-    next_order_id: u64,
-    next_trade_id: i64,
     funding: Vec<FundingPayment>,
 }
 
-/// Simulated exchange account for one symbol, driven tick by tick.
+#[derive(Debug)]
+struct State {
+    wallet: Decimal,
+    next_order_id: u64,
+    next_trade_id: i64,
+    /// The book of the symbol being operated on.
+    book: SymbolBook,
+    /// Which symbol `book` belongs to.
+    book_key: String,
+    /// The books of the other symbols.
+    parked: BTreeMap<String, SymbolBook>,
+}
+
+impl State {
+    /// Makes `key`'s book the current one.
+    fn select(&mut self, key: &str) {
+        if self.book_key == key {
+            return;
+        }
+        let incoming = self.parked.remove(key).unwrap_or_default();
+        let outgoing = std::mem::replace(&mut self.book, incoming);
+        let old_key = std::mem::replace(&mut self.book_key, key.to_string());
+        self.parked.insert(old_key, outgoing);
+    }
+
+    /// Every symbol's position, the current book's included.
+    fn positions(&self) -> impl Iterator<Item = &SimPosition> {
+        self.book.position.iter().chain(
+            self.parked
+                .values()
+                .filter_map(|book| book.position.as_ref()),
+        )
+    }
+}
+
+/// Simulated exchange account, driven tick by tick. Built with [`SimulatedVenue::new`] it trades
+/// one symbol and ignores the symbol it is given; built with [`SimulatedVenue::multi`] it keeps one
+/// position per symbol on one wallet balance.
 pub struct SimulatedVenue {
     config: SimulatedVenueConfig,
     state: Mutex<State>,
+    multi: bool,
 }
 
 fn opposite(side: Side) -> Side {
@@ -156,17 +193,30 @@ impl SimulatedVenue {
         Self {
             config,
             state: Mutex::new(State {
-                clock_ms: 0,
-                last_price: None,
                 wallet,
-                position: None,
-                exits: None,
-                orders: Vec::new(),
                 next_order_id: 1,
                 next_trade_id: 1,
-                funding: Vec::new(),
+                book: SymbolBook::default(),
+                book_key: String::new(),
+                parked: BTreeMap::new(),
             }),
+            multi: false,
         }
+    }
+
+    /// Creates a flat venue holding the configured balance that keeps one position per symbol.
+    pub fn multi(config: SimulatedVenueConfig) -> Self {
+        Self {
+            multi: true,
+            ..Self::new(config)
+        }
+    }
+
+    /// Locks the account with `symbol`'s book selected (the only book of a one-symbol venue).
+    fn lock_symbol(&self, symbol: &str) -> MutexGuard<'_, State> {
+        let mut state = self.lock();
+        state.select(if self.multi { symbol } else { "" });
+        state
     }
 
     /// Locks the account state; a poisoned lock still holds consistent data because no
@@ -190,7 +240,7 @@ impl SimulatedVenue {
     ) -> String {
         let order_id = format!("sim-{}", state.next_order_id);
         state.next_order_id += 1;
-        state.orders.push(WorkingOrder {
+        state.book.orders.push(WorkingOrder {
             side,
             remaining: quantity,
             due_ms: at_ms + self.config.latency_ms,
@@ -221,17 +271,17 @@ impl SimulatedVenue {
     /// Charges the settlements that passed since the previous print to the position held at
     /// that instant, at the last price seen before them.
     fn settle_funding(&self, state: &mut State, now_ms: i64) {
-        let (Some(position), Some(mark)) = (state.position, state.last_price) else {
+        let (Some(position), Some(mark)) = (state.book.position, state.book.last_price) else {
             return;
         };
-        if state.clock_ms == 0 {
+        if state.book.clock_ms == 0 {
             return;
         }
-        for settlement in self.config.funding.settlements(state.clock_ms, now_ms) {
+        for settlement in self.config.funding.settlements(state.book.clock_ms, now_ms) {
             let rate = self.config.funding.rate_at(settlement);
             let amount = futures::funding_payment(position.side, position.quantity, mark, rate);
             state.wallet -= amount;
-            state.funding.push(FundingPayment {
+            state.book.funding.push(FundingPayment {
                 time_ms: settlement,
                 amount,
             });
@@ -241,7 +291,7 @@ impl SimulatedVenue {
     /// Closes an isolated position the mark has pushed to its liquidation price. The exchange
     /// does it, so it needs no latency and no working order, and it takes the whole margin.
     fn liquidate_if_due(&self, state: &mut State, trade: &Trade) -> Option<ExecutionReport> {
-        let position = state.position?;
+        let position = state.book.position?;
         let maintenance =
             position.quantity * position.entry_price * self.config.maintenance_margin_rate;
         let liquidation_price = futures::liquidation_price(
@@ -272,8 +322,8 @@ impl SimulatedVenue {
                 leverage: 1,
             },
         );
-        state.exits = None;
-        state.orders.clear();
+        state.book.exits = None;
+        state.book.orders.clear();
         Some(ExecutionReport {
             time_ms: trade.timestamp,
             side,
@@ -290,7 +340,7 @@ impl SimulatedVenue {
 
     /// Arms the closing market order of a leg the tape has crossed; the other leg is dropped.
     fn arm_triggered_exits(&self, state: &mut State, price: Decimal) {
-        let (Some(position), Some(legs)) = (state.position, state.exits) else {
+        let (Some(position), Some(legs)) = (state.book.position, state.book.exits) else {
             return;
         };
         let (stop_hit, take_hit) = match position.side {
@@ -304,15 +354,15 @@ impl SimulatedVenue {
             ),
         };
         if stop_hit || take_hit {
-            state.exits = None;
-            let due_ms = state.clock_ms + self.config.latency_ms;
+            state.book.exits = None;
+            let due_ms = state.book.clock_ms + self.config.latency_ms;
             let (is_maker, limit_price) =
                 if take_hit && !stop_hit && self.config.maker_fee_pct.is_some() {
                     (true, legs.take_profit)
                 } else {
                     (false, None)
                 };
-            state.orders.push(WorkingOrder {
+            state.book.orders.push(WorkingOrder {
                 side: opposite(position.side),
                 remaining: position.quantity,
                 due_ms,
@@ -329,8 +379,8 @@ impl SimulatedVenue {
         let mut reports = Vec::new();
         let mut available = trade.quantity;
         let mut index = 0;
-        while index < state.orders.len() && available > Decimal::ZERO {
-            let order = &state.orders[index];
+        while index < state.book.orders.len() && available > Decimal::ZERO {
+            let order = &state.book.orders[index];
             if order.due_ms > trade.timestamp || order.side != trade.side {
                 index += 1;
                 continue;
@@ -340,6 +390,7 @@ impl SimulatedVenue {
                 // A reduce-only order only closes a position on the other side, and never more
                 // than is open, so it can neither flip nor grow the position.
                 let open = state
+                    .book
                     .position
                     .filter(|p| p.side != order.side)
                     .map_or(Decimal::ZERO, |p| p.quantity);
@@ -347,7 +398,7 @@ impl SimulatedVenue {
             }
             if take <= Decimal::ZERO {
                 // A closing order with nothing left to close is void.
-                state.orders.remove(index);
+                state.book.orders.remove(index);
                 continue;
             }
             available -= take;
@@ -360,8 +411,8 @@ impl SimulatedVenue {
             } else {
                 trade.price
             };
-            state.orders[index].remaining -= take;
-            let filled = state.orders[index].remaining <= Decimal::ZERO;
+            state.book.orders[index].remaining -= take;
+            let filled = state.book.orders[index].remaining <= Decimal::ZERO;
             let fee_rate = if is_maker {
                 self.config.maker_fee_rate()
             } else {
@@ -394,7 +445,7 @@ impl SimulatedVenue {
                 trade_id: Some(trade_id),
             });
             if filled {
-                state.orders.remove(index);
+                state.book.orders.remove(index);
             } else {
                 index += 1;
             }
@@ -412,7 +463,7 @@ impl SimulatedVenue {
             leverage,
         } = fill;
         state.wallet -= commission;
-        match state.position {
+        match state.book.position {
             Some(mut position) if reduce_only || position.side != side => {
                 let direction = match position.side {
                     Side::Buy => Decimal::ONE,
@@ -423,15 +474,15 @@ impl SimulatedVenue {
                 let remaining = position.quantity - closed;
                 position.margin = position.margin * remaining / position.quantity;
                 position.quantity = remaining;
-                state.position = (position.quantity > Decimal::ZERO).then_some(position);
-                if state.position.is_none() {
-                    state.exits = None;
+                state.book.position = (position.quantity > Decimal::ZERO).then_some(position);
+                if state.book.position.is_none() {
+                    state.book.exits = None;
                 }
                 // An opening order larger than the opposite position flips it (one-way mode);
                 // a reduce-only order was already clipped to the open quantity.
                 let excess = quantity - closed;
                 if !reduce_only && excess > Decimal::ZERO {
-                    state.position = Some(SimPosition {
+                    state.book.position = Some(SimPosition {
                         side,
                         quantity: excess,
                         entry_price: price,
@@ -445,10 +496,10 @@ impl SimulatedVenue {
                     (position.entry_price * position.quantity + price * quantity) / total;
                 position.quantity = total;
                 position.margin += price * quantity / Decimal::from(leverage);
-                state.position = Some(position);
+                state.book.position = Some(position);
             }
             None => {
-                state.position = Some(SimPosition {
+                state.book.position = Some(SimPosition {
                     side,
                     quantity,
                     entry_price: price,
@@ -479,28 +530,36 @@ impl TapeVenue for SimulatedVenue {
                 "the order quantity must be positive".to_string(),
             ));
         }
-        let mut state = self.lock();
+        let mut state = self.lock_symbol("");
         Ok(self.queue_order(&mut state, side, quantity, at_ms, false, 1))
     }
 
     /// Funding payments settled since the last call, oldest first.
     fn take_funding(&self) -> Vec<FundingPayment> {
-        std::mem::take(&mut self.lock().funding)
+        std::mem::take(&mut self.lock_symbol("").book.funding)
     }
 
     /// Side, quantity and average entry price of the open position, if any.
     fn position(&self) -> Option<(Side, Decimal, Decimal)> {
-        self.lock()
+        self.lock_symbol("")
+            .book
             .position
             .map(|p| (p.side, p.quantity, p.entry_price))
     }
 
     /// Advances the market by one print and returns the executions it caused, oldest first.
     fn on_trade(&self, trade: &Trade) -> Vec<ExecutionReport> {
-        let mut state = self.lock();
+        self.trade_symbol("", trade)
+    }
+}
+
+impl SimulatedVenue {
+    /// Advances `symbol`'s market by one print and returns the executions it caused there.
+    fn trade_symbol(&self, symbol: &str, trade: &Trade) -> Vec<ExecutionReport> {
+        let mut state = self.lock_symbol(symbol);
         self.settle_funding(&mut state, trade.timestamp);
-        state.clock_ms = trade.timestamp;
-        state.last_price = Some(trade.price);
+        state.book.clock_ms = trade.timestamp;
+        state.book.last_price = Some(trade.price);
         // Orders already at the market trade first; an exit armed by this print reaches the
         // market after it, so the print that triggers a stop never fills it.
         let mut reports = self.match_orders(&mut state, trade);
@@ -510,19 +569,46 @@ impl TapeVenue for SimulatedVenue {
     }
 }
 
+impl MultiTapeVenue for SimulatedVenue {
+    fn on_trade_of(&self, symbol: &str, trade: &Trade) -> Vec<ExecutionReport> {
+        self.trade_symbol(symbol, trade)
+    }
+
+    fn take_funding_of(&self, symbol: &str) -> Vec<FundingPayment> {
+        std::mem::take(&mut self.lock_symbol(symbol).book.funding)
+    }
+
+    fn position_of(&self, symbol: &str) -> Option<(Side, Decimal, Decimal)> {
+        self.lock_symbol(symbol)
+            .book
+            .position
+            .map(|p| (p.side, p.quantity, p.entry_price))
+    }
+
+    fn margin_in_use(&self) -> Decimal {
+        self.lock()
+            .positions()
+            .map(|position| position.margin)
+            .sum()
+    }
+}
+
 impl ExitGateway for SimulatedVenue {
     type Error = SimulatedVenueError;
 
     async fn place_exits(
         &self,
-        _symbol: &str,
+        symbol: &str,
         entry_side: Side,
         stop_loss: Decimal,
         take_profit: Option<Decimal>,
     ) -> Result<(), Self::Error> {
-        let mut state = self.lock();
-        let last = state.last_price.ok_or(SimulatedVenueError::NoMarketData)?;
-        if state.position.is_none() {
+        let mut state = self.lock_symbol(symbol);
+        let last = state
+            .book
+            .last_price
+            .ok_or(SimulatedVenueError::NoMarketData)?;
+        if state.book.position.is_none() {
             return Err(SimulatedVenueError::NoPosition);
         }
         let immediate = match entry_side {
@@ -532,26 +618,27 @@ impl ExitGateway for SimulatedVenue {
         if immediate {
             return Err(SimulatedVenueError::WouldTriggerImmediately);
         }
-        state.exits = Some(ExitLegs {
+        state.book.exits = Some(ExitLegs {
             stop_loss,
             take_profit,
         });
         Ok(())
     }
 
-    async fn cancel_orders(&self, _symbol: &str) -> Result<(), Self::Error> {
-        let mut state = self.lock();
-        state.exits = None;
-        state.orders.retain(|order| order.reduce_only);
+    async fn cancel_orders(&self, symbol: &str) -> Result<(), Self::Error> {
+        let mut state = self.lock_symbol(symbol);
+        state.book.exits = None;
+        state.book.orders.retain(|order| order.reduce_only);
         Ok(())
     }
 
-    async fn close_position(&self, _symbol: &str) -> Result<bool, Self::Error> {
-        let mut state = self.lock();
-        let Some(position) = state.position else {
+    async fn close_position(&self, symbol: &str) -> Result<bool, Self::Error> {
+        let mut state = self.lock_symbol(symbol);
+        let Some(position) = state.book.position else {
             return Ok(false);
         };
         let pending: Decimal = state
+            .book
             .orders
             .iter()
             .filter(|order| order.reduce_only)
@@ -563,8 +650,8 @@ impl ExitGateway for SimulatedVenue {
             // flight as a position that reappeared.
             return Ok(false);
         }
-        let due_ms = state.clock_ms + self.config.latency_ms;
-        state.orders.push(WorkingOrder {
+        let due_ms = state.book.clock_ms + self.config.latency_ms;
+        state.book.orders.push(WorkingOrder {
             side: opposite(position.side),
             remaining: position.quantity - pending,
             due_ms,
@@ -585,7 +672,7 @@ impl ExecutionVenue for SimulatedVenue {
     /// margins the notional it adds (at the last price) with the wallet balance.
     async fn submit_order(
         &self,
-        _symbol: &str,
+        symbol: &str,
         request: &OrderRequest,
     ) -> Result<EntryAck, Self::Error> {
         if request.quantity <= Decimal::ZERO {
@@ -593,12 +680,15 @@ impl ExecutionVenue for SimulatedVenue {
                 "the order quantity must be positive".to_string(),
             ));
         }
-        let mut state = self.lock();
-        let last = state.last_price.ok_or(SimulatedVenueError::NoMarketData)?;
+        let mut state = self.lock_symbol(symbol);
+        let last = state
+            .book
+            .last_price
+            .ok_or(SimulatedVenueError::NoMarketData)?;
         let leverage = if request.reduce_only {
             1
         } else {
-            let added = match state.position {
+            let added = match state.book.position {
                 Some(position) if position.side == request.side => {
                     position.quantity + request.quantity
                 }
@@ -611,7 +701,7 @@ impl ExecutionVenue for SimulatedVenue {
                 1
             }
         };
-        let clock_ms = state.clock_ms;
+        let clock_ms = state.book.clock_ms;
         let order_id = self.queue_order(
             &mut state,
             request.side,
@@ -1246,5 +1336,55 @@ mod tests {
             .await;
 
         assert_eq!(result, Err(SimulatedVenueError::WouldTriggerImmediately));
+    }
+
+    #[tokio::test]
+    async fn a_multi_symbol_venue_keeps_one_position_per_symbol_on_one_wallet() {
+        let venue = SimulatedVenue::multi(SimulatedVenueConfig {
+            initial_equity: dec!(10_000),
+            taker_fee_pct: dec!(0.001),
+            maker_fee_pct: None,
+            latency_ms: 0,
+            max_leverage: 1,
+            funding: FundingSchedule::constant(Decimal::ZERO),
+            maintenance_margin_rate: dec!(0.004),
+        });
+        venue.on_trade_of("BTC", &print(1, dec!(100), dec!(10), Side::Sell));
+        venue.on_trade_of("ETH", &print(1, dec!(10), dec!(10), Side::Sell));
+        venue
+            .submit_order("BTC", &order(Side::Buy, dec!(2), false))
+            .await
+            .unwrap();
+        venue
+            .submit_order("ETH", &order(Side::Buy, dec!(5), false))
+            .await
+            .unwrap();
+
+        // A BTC print fills only the BTC order.
+        let reports = venue.on_trade_of("BTC", &print(2, dec!(100), dec!(10), Side::Buy));
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            venue.position_of("BTC"),
+            Some((Side::Buy, dec!(2), dec!(100)))
+        );
+        assert_eq!(venue.position_of("ETH"), None);
+
+        venue.on_trade_of("ETH", &print(3, dec!(10), dec!(10), Side::Buy));
+        assert_eq!(
+            venue.position_of("ETH"),
+            Some((Side::Buy, dec!(5), dec!(10)))
+        );
+        // Both commissions came out of the one wallet, and both positions post margin.
+        assert_eq!(
+            venue.wallet_balance(),
+            dec!(10_000) - dec!(0.2) - dec!(0.05)
+        );
+        assert_eq!(venue.margin_in_use(), dec!(250));
+
+        // Closing one symbol leaves the other.
+        assert!(venue.close_position("BTC").await.unwrap());
+        venue.on_trade_of("BTC", &print(4, dec!(110), dec!(10), Side::Sell));
+        assert_eq!(venue.position_of("BTC"), None);
+        assert!(venue.position_of("ETH").is_some());
     }
 }

@@ -473,3 +473,54 @@ fn the_backtest_runs_the_tick_fill_model_for_a_trade_strategy() {
     assert!(t.contains("QUANTITATIVE PERFORMANCE REPORT"));
     assert!(t.contains("STRATEGY AUDIT"));
 }
+
+#[test]
+fn run_hpo_optimises_one_account_on_several_instruments() {
+    let dir = tempfile::tempdir().unwrap();
+    let btc = write_trades(dir.path(), &swarm_trades(90));
+    let eth_trades: Vec<Trade> = swarm_trades(90)
+        .iter()
+        .map(|trade| {
+            Trade::new(
+                trade.timestamp + 1_000,
+                trade.price / dec!(10),
+                trade.quantity * dec!(10),
+                trade.side,
+            )
+            .unwrap()
+        })
+        .collect();
+    let eth = dir.path().join("ETHUSDT-swarm.parquet");
+    let mut writer = TapeWriter::new(&eth).unwrap();
+    for trade in &eth_trades {
+        writer.write_trade(trade).unwrap();
+    }
+    writer.finish().unwrap();
+    let shared_path = write_json(dir.path(), "shared.json", &shared());
+    let space_path = write_json(dir.path(), "space.json", &space());
+    let output = dir.path().join("portfolio_hpo.json");
+
+    let out = run_hpo(
+        &btc,
+        &output,
+        &[
+            "--instrument-data",
+            &format!("BTCUSDT={}", btc.display()),
+            "--instrument-data",
+            &format!("ETHUSDT={}", eth.display()),
+            "--max-open-positions",
+            "2",
+            "--shared-config",
+            shared_path.to_str().unwrap(),
+            "--param-space",
+            space_path.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+
+    let artifact: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&output).unwrap()).unwrap();
+    assert_eq!(artifact["schema_version"], "2.0");
+    assert_eq!(artifact["symbol"], "BTCUSDT,ETHUSDT");
+    assert_eq!(artifact["execution_context"]["max_open_positions"], 2);
+}

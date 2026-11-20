@@ -10,12 +10,15 @@ creating the file if needed; without the flag nothing is written. The implementa
   Columns: `run_id`, `parent_run_id`, `baseline_run_id`, `run_type`, `status`, `recorded_at`,
   `started_at`, `finished_at`, `strategy_id`, `symbol`, `market_type`, `sampling`, `params` (JSON),
   `execution_context` (JSON), `fill_model`, `data_source`, `data_start`, `data_end`, `git_sha`.
+  A run on several instruments (`portfolio`, `run_hpo --instrument-data`) stores them in `symbol`,
+  comma-separated in instrument order.
 - **`run_metrics`**: one row per run and scope (`full`, `is`, `oos`, `fold_<n>`). Columns: the
   trade counts, `win_rate`, the profit and loss totals, `total_fees`, `total_slippage`,
   `profit_factor`, `payoff_ratio`, `mathematical_expectancy`, the drawdown, `sortino_ratio`,
   `fee_drag_pct`, the holding and excursion averages, `exit_reason_counts` (JSON), `halted`,
   `rejected_orders` (JSON) and `extras` (JSON).
-- **`trades`**: closed trades with their equity excursion. Columns: `trade_id`, `run_id`, `side`,
+- **`trades`**: closed trades with their equity excursion. On a run of several instruments each
+  row's `symbol` is the trade's own instrument. Columns: `trade_id`, `run_id`, `symbol`, `side`,
   entry and exit timestamps and prices, `quantity`, the gross, fee, funding, slippage and net PnL,
   `return_pct`, `exit_reason`, the holding time, the entry, trough, peak and exit equity with their
   timestamps, and the maximum drawdown.

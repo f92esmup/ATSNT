@@ -16,6 +16,7 @@ pub mod execution_core;
 pub mod live_exits;
 pub mod merged_trades;
 pub mod parity;
+pub mod portfolio_tick;
 pub mod price_event;
 pub mod session;
 pub mod tick_simulation;

@@ -25,4 +25,4 @@ pub use progress::ProgressSink;
 pub use run_recorder::{
     RecorderError, RunMetricsRow, RunRecorder, RunRow, RunTradeRow, SeriesPointRow,
 };
-pub use tape::{FundingPayment, TapeVenue};
+pub use tape::{FundingPayment, MultiTapeVenue, TapeVenue};

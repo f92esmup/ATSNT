@@ -16,6 +16,12 @@ en código genérico), F2 (salida por señal y vista de la posición), F3 (domin
 (runners multi-activo) y F5 (eventos de funding). El swarm es el caso de un instrumento: sus goldens
 no deben cambiar en ninguna fase.
 
+F2 a F4 hechas el 2026-11-20 (PR #11 a #14): salida por señal y vista de la posición; instrumentos,
+cartera y límites de cartera en el gate; `PortfolioEngine` (barras) y `PortfolioTickSimulation`
+(tick) con equivalencia exacta a los motores de un instrumento, binario `portfolio` y
+`run_hpo --instrument-data`. La regla de arquitectura R11 (sin `HashMap` en el estado de cartera)
+queda propuesta, no añadida, porque cambia `AGENTS.md`.
+
 F1 hecha el mismo día: `OptimizableStrategy` declara `warm_up_ms`, `calibration_end_ms`,
 `requires_shared_config` y `contract_fixture`; `max_bars_hold` desapareció y la barrera temporal es
 un plazo en ms que aplican las dos rutas; la suite de contrato exige al menos una decisión (con la
