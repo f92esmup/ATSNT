@@ -96,7 +96,11 @@ fn per_trade_run(allow_short: bool) -> (BacktestMetrics, Vec<ClosedTrade>) {
     for trade in &trades {
         last_price = trade.price;
         engine.process_event(&PriceEvent::from(trade), &mut |view, out| {
-            strategy.on_event(&MarketEvent::Trade(trade), view, out)
+            strategy.on_event(
+                &MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade),
+                view,
+                out,
+            )
         });
         if engine.is_halted() {
             break;

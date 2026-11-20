@@ -172,7 +172,9 @@ pub fn trade_tape<S: OptimizableStrategy>(
     let mut features = Vec::new();
     let prices = bucket_trades(
         trades.into_iter().inspect(|trade| {
-            if let Some(feature) = extractor.on_event(&MarketEvent::Trade(trade)) {
+            if let Some(feature) =
+                extractor.on_event(&MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade))
+            {
                 features.push((trade.timestamp, feature));
             }
         }),
@@ -835,7 +837,7 @@ mod tests {
 
         fn on_event(&mut self, event: &strategies::MarketEvent<'_>) -> Option<Trade> {
             match event {
-                strategies::MarketEvent::Trade(trade) => Some((*trade).clone()),
+                strategies::MarketEvent::Trade { trade, .. } => Some((*trade).clone()),
                 _ => None,
             }
         }
@@ -1168,7 +1170,7 @@ mod tests {
             _view: &strategies::StrategyView,
             out: &mut Vec<strategies::Decision>,
         ) {
-            let MarketEvent::Trade(trade) = event else {
+            let MarketEvent::Trade { trade, .. } = event else {
                 return;
             };
             self.counter += 1;
@@ -1218,7 +1220,12 @@ mod tests {
             view: &strategies::StrategyView,
             out: &mut Vec<strategies::Decision>,
         ) {
-            strategies::Strategy::on_event(self, &strategies::MarketEvent::Trade(trade), view, out)
+            strategies::Strategy::on_event(
+                self,
+                &strategies::MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade),
+                view,
+                out,
+            )
         }
 
         fn warm_up_ms(_: &()) -> i64 {
@@ -1247,7 +1254,7 @@ mod tests {
         fn on_event(&mut self, event: &strategies::MarketEvent<'_>) -> Option<Trade> {
             EVENTS_EXTRACTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match event {
-                strategies::MarketEvent::Trade(trade) => Some((*trade).clone()),
+                strategies::MarketEvent::Trade { trade, .. } => Some((*trade).clone()),
                 _ => None,
             }
         }
@@ -1306,7 +1313,12 @@ mod tests {
             view: &strategies::StrategyView,
             out: &mut Vec<strategies::Decision>,
         ) {
-            strategies::Strategy::on_event(self, &strategies::MarketEvent::Trade(trade), view, out)
+            strategies::Strategy::on_event(
+                self,
+                &strategies::MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade),
+                view,
+                out,
+            )
         }
 
         fn warm_up_ms(_: &()) -> i64 {
@@ -1421,7 +1433,12 @@ mod tests {
         let mut engine = BacktestEngine::new(engine_config);
         for trade in &trades[100..250] {
             engine.process_event(&PriceEvent::from(trade), &mut |view, out| {
-                strategies::Strategy::on_event(&mut strategy, &MarketEvent::Trade(trade), view, out)
+                strategies::Strategy::on_event(
+                    &mut strategy,
+                    &MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade),
+                    view,
+                    out,
+                )
             });
         }
         let expected = engine.finish_with_trades(trades.get(249).map(|t| t.price));

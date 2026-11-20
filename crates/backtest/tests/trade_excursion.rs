@@ -16,6 +16,7 @@ fn long_at(bar: &PriceEvent) -> OrderIntent {
         risk_fraction: None,
         trailing_atr: None,
         breakeven_atr: None,
+        instrument: None,
         order_type: domain::OrderType::Market,
         time_in_force_bars: None,
         post_only: false,

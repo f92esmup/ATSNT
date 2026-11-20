@@ -24,6 +24,10 @@ The contract is in `crates/strategies/src/strategy.rs`. Two traits matter.
   needs bars builds its own. `view` shows the strategy's open position (side, quantity, entry
   price) and whether an entry is pending, never the balances. The strategy pushes its decisions to
   `out`, which arrives empty and is reused, so deciding allocates nothing.
+- `scope(&self) -> StrategyScope`, default `PerInstrument`: how the strategy runs on an account
+  that trades several instruments. `PerInstrument` runs one instance per instrument, each seeing
+  only its instrument; `CrossSectional` runs one instance that sees every instrument and names the
+  instrument in its decisions.
 - `reset(&mut self)`: restores the initial state.
 - `audit(&self) -> Option<serde_json::Value>`, default `None`: optional audit data stored with the run records
   under `strategy_audit`.
@@ -38,8 +42,17 @@ A strategy decides two things (`domain::Decision`):
   route the session flattens the position on the venue. `tests/signal_exit_parity.rs` pins that
   both routes close alike.
 
+Every event names its instrument: `MarketEvent::Trade { instrument, trade }`, and
+`event.instrument()` returns it. A decision may name an instrument too (`OrderIntent::on(id)`,
+`Decision::exit_of(id)`); without one it is about the instrument of the event being decided on,
+which is all a `PerInstrument` strategy needs. A single-instrument runner ignores a decision that
+names another instrument.
+
 It never sizes the order or checks the account: the shared `domain::EntryGate` does both, on every
-runner.
+runner. Against a book of several positions (`domain::Book`) it also applies the portfolio limits
+of `domain::PortfolioLimits` (positions open at once, positions on one side, gross exposure), sizes
+with the instrument's own order filters (`domain::InstrumentSpec`), and posts margin from the
+balance the open positions leave free.
 
 The time barrier is a duration in milliseconds. The constructors (`OrderIntent::new`,
 `with_risk`, `with_risk_and_exits`, `limit`) take `max_hold_ms` and store `deadline_ms =

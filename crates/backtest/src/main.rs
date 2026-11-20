@@ -267,6 +267,8 @@ async fn main() -> Result<()> {
             .to_uppercase()
     });
 
+    let instrument = domain::InstrumentId::new(symbol.clone())
+        .unwrap_or_else(|_| domain::UNNAMED_INSTRUMENT.clone());
     println!("[*] Initial Capital: ${}", engine_config.initial_capital);
     println!(
         "[*] {}",
@@ -297,7 +299,7 @@ async fn main() -> Result<()> {
                 data_window.end_ms = Some(trade.timestamp);
 
                 engine.process_event(&PriceEvent::from(&trade), &mut |view, out| {
-                    strategy.on_event(&MarketEvent::Trade(&trade), view, out)
+                    strategy.on_event(&MarketEvent::trade(&instrument, &trade), view, out)
                 });
                 if engine.is_halted() {
                     println!("{}", monthly_halt_message(data_window.end_ms));

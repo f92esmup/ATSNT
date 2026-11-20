@@ -174,7 +174,10 @@ pub fn flat_trades(count: usize) -> Vec<Trade> {
 }
 
 fn events(trades: &[Trade]) -> Vec<MarketEvent<'_>> {
-    trades.iter().map(MarketEvent::Trade).collect()
+    trades
+        .iter()
+        .map(|trade| MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade))
+        .collect()
 }
 
 /// The smallest book a strategy can decide against: an entry opens a position of one unit at
@@ -199,7 +202,7 @@ impl PaperBook {
                         entry_price: intent.price,
                     });
                 }
-                Decision::Exit => self.view.position = None,
+                Decision::Exit { .. } => self.view.position = None,
                 Decision::Enter(_) => {}
             }
         }
@@ -471,7 +474,7 @@ mod tests {
         type Features = Trade;
 
         fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<Trade> {
-            let MarketEvent::Trade(trade) = event else {
+            let MarketEvent::Trade { trade, .. } = event else {
                 return None;
             };
             Some((*trade).clone())
@@ -499,7 +502,7 @@ mod tests {
             view: &StrategyView,
             out: &mut Vec<Decision>,
         ) {
-            let MarketEvent::Trade(trade) = event else {
+            let MarketEvent::Trade { trade, .. } = event else {
                 return;
             };
             self.seen += 1;
@@ -508,7 +511,7 @@ mod tests {
             }
             // Holding a position, it closes it; flat, it opens one.
             if view.position.is_some() {
-                out.push(Decision::Exit);
+                out.push(Decision::exit());
                 return;
             }
             let stop = if MODE == 2 {
@@ -556,7 +559,11 @@ mod tests {
 
         fn on_features(&mut self, trade: &Trade, view: &StrategyView, out: &mut Vec<Decision>) {
             let mut decided = Vec::new();
-            self.on_event(&MarketEvent::Trade(trade), view, &mut decided);
+            self.on_event(
+                &MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade),
+                view,
+                &mut decided,
+            );
             if MODE != 3 {
                 out.extend(decided);
             }

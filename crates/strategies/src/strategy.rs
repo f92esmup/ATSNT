@@ -2,6 +2,18 @@ use domain::DomainError;
 
 pub use domain::{Decision, MarketEvent, MarketType, PositionView, StrategyView};
 
+/// How a strategy is run on an account that trades several instruments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StrategyScope {
+    /// One instance per instrument, each seeing only its instrument's trades and position; the
+    /// instances share the account and its gate. A single-instrument strategy is this.
+    #[default]
+    PerInstrument,
+    /// One instance sees every instrument's trades and decides on any of them, naming the
+    /// instrument in its decisions.
+    CrossSectional,
+}
+
 /// Universal contract for all quantitative trading strategies in ATSNT.
 ///
 /// Ensures compliance with the Open-Closed Principle (SOLID): the backtester
@@ -26,6 +38,11 @@ pub trait Strategy: Send {
     /// nothing. Runners apply the decisions in order: an [`Decision::Enter`] while a position is
     /// open or an entry pending is ignored, as is a [`Decision::Exit`] while flat.
     fn on_event(&mut self, event: &MarketEvent<'_>, view: &StrategyView, out: &mut Vec<Decision>);
+
+    /// How the strategy runs on several instruments; [`StrategyScope::PerInstrument`] by default.
+    fn scope(&self) -> StrategyScope {
+        StrategyScope::PerInstrument
+    }
 
     /// Clears internal state buffers to allow clean replay or backtest isolation.
     fn reset(&mut self);
@@ -171,6 +188,10 @@ impl<S: ?Sized + Strategy> Strategy for Box<S> {
         (**self).on_event(event, view, out)
     }
 
+    fn scope(&self) -> StrategyScope {
+        (**self).scope()
+    }
+
     fn reset(&mut self) {
         (**self).reset()
     }
@@ -204,7 +225,7 @@ mod tests {
             _view: &StrategyView,
             out: &mut Vec<Decision>,
         ) {
-            let MarketEvent::Trade(trade) = event else {
+            let MarketEvent::Trade { trade, .. } = event else {
                 return;
             };
             out.extend(
@@ -230,7 +251,11 @@ mod tests {
 
     fn decide<S: Strategy>(strategy: &mut S, trade: &Trade) -> Vec<Decision> {
         let mut out = Vec::new();
-        strategy.on_event(&MarketEvent::Trade(trade), &StrategyView::FLAT, &mut out);
+        strategy.on_event(
+            &MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade),
+            &StrategyView::FLAT,
+            &mut out,
+        );
         out
     }
 
@@ -250,6 +275,7 @@ mod tests {
         assert_eq!(decide(&mut boxed, &trade).len(), 1);
         assert_eq!(boxed.name(), "every_trade");
         assert!(boxed.supports_market_type(MarketType::UsdMPerpetual));
+        assert_eq!(boxed.scope(), StrategyScope::PerInstrument);
         assert_eq!(boxed.audit(), None);
         boxed.reset();
     }

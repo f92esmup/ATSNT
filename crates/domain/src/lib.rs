@@ -7,10 +7,12 @@
 
 pub mod accounting;
 pub mod analytics;
+pub mod book;
 pub mod decision;
 pub mod error;
 pub mod futures;
 pub mod gate;
+pub mod instrument;
 pub mod market;
 pub mod metrics;
 pub mod order;
@@ -24,11 +26,13 @@ pub use analytics::{
     TickBarAggregator, TimeBarAggregator, VolumeBarAggregator, VwapDeviation, WilderAtr, WilderRsi,
     ZScoreResult,
 };
+pub use book::{Book, BookEntry, PortfolioLimits};
 pub use decision::{
     Decision, MarketEvent, PositionView, ProtectiveExits, StrategyView, SIGNAL_EXIT,
 };
 pub use error::DomainError;
-pub use gate::{EntryGate, EntryRefusal, MarginRule};
+pub use gate::{AccountState, EntryGate, EntryRefusal, MarginRule};
+pub use instrument::{InstrumentId, InstrumentSpec, UNNAMED_INSTRUMENT};
 pub use market::MarketType;
 pub use order::{Order, OrderIntent, OrderStatus, OrderType, TimeInForce};
 pub use position::{Position, PositionSide};

@@ -113,6 +113,16 @@ pub struct BacktestConfig {
     /// `maker_fee_pct` without adverse slippage), rather than aggressive Takers.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resting_maker_exits: bool,
+    /// Most positions open at once across instruments; `None` for one, the single-instrument
+    /// rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_open_positions: Option<usize>,
+    /// Most positions open at once on one side, when limited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_same_direction: Option<usize>,
+    /// Most gross notional open at once, as a multiple of equity, when limited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_gross_exposure_pct: Option<Decimal>,
 }
 
 fn is_zero(value: &i64) -> bool {
@@ -133,6 +143,15 @@ impl BacktestConfig {
                 self.quantity_step_size,
                 self.min_order_notional,
             )
+    }
+
+    /// The limits on the book a new entry must respect.
+    pub fn portfolio_limits(&self) -> domain::PortfolioLimits {
+        domain::PortfolioLimits {
+            max_open_positions: self.max_open_positions.unwrap_or(1),
+            max_same_direction: self.max_same_direction,
+            max_gross_exposure_pct: self.max_gross_exposure_pct,
+        }
     }
 
     /// The margin rule the entry gate sizes against: what carrying a position costs here.
@@ -194,6 +213,20 @@ impl BacktestConfig {
         };
         fraction("max_daily_drawdown_pct", self.max_daily_drawdown_pct)?;
         fraction("max_monthly_drawdown_pct", self.max_monthly_drawdown_pct)?;
+        if self.max_open_positions == Some(0) || self.max_same_direction == Some(0) {
+            return Err(crate::error::BacktestError::General(
+                "max_open_positions and max_same_direction must allow at least one position"
+                    .to_string(),
+            ));
+        }
+        if self
+            .max_gross_exposure_pct
+            .is_some_and(|limit| limit <= Decimal::ZERO)
+        {
+            return Err(crate::error::BacktestError::General(
+                "max_gross_exposure_pct must be positive".to_string(),
+            ));
+        }
         for (name, cap) in [
             ("max_order_notional", self.max_order_notional),
             ("max_position_notional", self.max_position_notional),
@@ -282,6 +315,9 @@ impl BacktestConfig {
             maintenance_margin_rate: Decimal::ZERO,
             latency_ms: 0,
             resting_maker_exits: false,
+            max_open_positions: None,
+            max_same_direction: None,
+            max_gross_exposure_pct: None,
         }
     }
 }
@@ -307,6 +343,9 @@ impl Default for BacktestConfig {
             maintenance_margin_rate: default_maintenance_margin_rate(),
             latency_ms: 0,
             resting_maker_exits: false,
+            max_open_positions: None,
+            max_same_direction: None,
+            max_gross_exposure_pct: None,
         }
     }
 }

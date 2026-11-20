@@ -9,8 +9,8 @@
 use std::collections::VecDeque;
 
 use domain::{
-    Decision, EntryGate, EntryRefusal, OrderIntent, PositionSide, PositionView, Side, StrategyView,
-    Trade, SIGNAL_EXIT,
+    Decision, EntryGate, EntryRefusal, InstrumentId, OrderIntent, PositionSide, PositionView, Side,
+    StrategyView, Trade, SIGNAL_EXIT, UNNAMED_INSTRUMENT,
 };
 use ports::{EntryAck, ExecutionReport, ExecutionVenue, OrderRequest};
 use rust_decimal::Decimal;
@@ -170,6 +170,9 @@ pub struct TradingSession<S: Strategy> {
     recovery: Option<Recovery>,
     /// The strategy's decisions on the current trade; kept to reuse its allocation.
     decisions: Vec<Decision>,
+    /// The instrument traded: the configured symbol, or the unnamed one when it is not a valid
+    /// instrument name.
+    instrument: InstrumentId,
 }
 
 /// What is known about a position recovered by the entry timeout: the signal that opened it
@@ -184,6 +187,8 @@ impl<S: Strategy> TradingSession<S> {
     /// Creates a flat session.
     pub fn new(config: SessionConfig, strategy: S) -> Self {
         let daily = DailyBreaker::new(config.gate.policy().max_daily_drawdown_pct);
+        let instrument =
+            InstrumentId::new(config.symbol.clone()).unwrap_or_else(|_| UNNAMED_INSTRUMENT.clone());
         Self {
             exits: ExitManager::new(config.symbol.clone()),
             monthly: MonthlyGuard::new(config.max_monthly_drawdown_pct),
@@ -203,6 +208,7 @@ impl<S: Strategy> TradingSession<S> {
             seen_trade_ids: VecDeque::new(),
             recovery: None,
             decisions: Vec::new(),
+            instrument,
         }
     }
 
@@ -246,7 +252,7 @@ impl<S: Strategy> TradingSession<S> {
         let mut discarded = Vec::new();
         for trade in trades {
             self.strategy.on_event(
-                &MarketEvent::Trade(&trade),
+                &MarketEvent::trade(&self.instrument, &trade),
                 &StrategyView::FLAT,
                 &mut discarded,
             );
@@ -346,9 +352,19 @@ impl<S: Strategy> TradingSession<S> {
         let view = self.view();
         let mut decisions = std::mem::take(&mut self.decisions);
         decisions.clear();
-        self.strategy
-            .on_event(&MarketEvent::Trade(trade), &view, &mut decisions);
+        self.strategy.on_event(
+            &MarketEvent::trade(&self.instrument, trade),
+            &view,
+            &mut decisions,
+        );
         for decision in decisions.drain(..) {
+            // A single-instrument session acts only on its own instrument.
+            if decision
+                .instrument()
+                .is_some_and(|instrument| instrument != &self.instrument)
+            {
+                continue;
+            }
             match decision {
                 Decision::Enter(intent) => {
                     events.push(SessionEvent::Signal(intent.clone()));
@@ -357,7 +373,7 @@ impl<S: Strategy> TradingSession<S> {
                             .await,
                     );
                 }
-                Decision::Exit => {
+                Decision::Exit { .. } => {
                     events.push(SessionEvent::ExitSignal);
                     events.extend(self.signal_exit(venue).await);
                 }
@@ -1006,7 +1022,7 @@ mod tests {
 
     impl Scripted {
         fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::Trade(_) = event else {
+            let MarketEvent::Trade { .. } = event else {
                 return None;
             };
             self.intents.pop_front()

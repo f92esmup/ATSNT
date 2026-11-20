@@ -27,7 +27,7 @@ struct EveryTrade {
 
 impl EveryTrade {
     fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-        let MarketEvent::Trade(trade) = event else {
+        let MarketEvent::Trade { trade, .. } = event else {
             return None;
         };
         let stop = trade.price * self.stop_fraction;
@@ -87,7 +87,11 @@ fn bar_refusals(
     let mut engine = BacktestEngine::new(config);
     for trade in tape {
         engine.process_event(&PriceEvent::from(trade), &mut |view, out| {
-            strategy.on_event(&MarketEvent::Trade(trade), view, out)
+            strategy.on_event(
+                &MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade),
+                view,
+                out,
+            )
         });
     }
     let (metrics, trades) = engine.finish_with_trades(tape.last().map(|trade| trade.price));

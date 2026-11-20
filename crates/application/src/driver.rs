@@ -167,7 +167,7 @@ mod tests {
 
     impl Scripted {
         fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::Trade(_) = event else {
+            let MarketEvent::Trade { .. } = event else {
                 return None;
             };
             self.trades_seen += 1;
