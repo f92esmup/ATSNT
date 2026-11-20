@@ -18,13 +18,15 @@ no deben cambiar en ninguna fase.
 
 F5 hecha el 2026-11-20: `MarketEvent::Funding` llega a las estrategias en todas las rutas (y al
 extractor del HPO); las decisiones sobre él se ignoran. El libro de órdenes sigue sin evento porque
-no hay datos (WP-10). Con esto el plan queda completo, salvo R11, que espera al usuario.
+no hay datos (WP-10). R11 la aprobó el usuario el 2026-11-20 y está aplicada: `domain`,
+`strategies`, `application` y `backtest` no usan `HashMap` ni `HashSet` en producción. El plan
+queda completo.
 
 F2 a F4 hechas el 2026-11-20 (PR #11 a #14): salida por señal y vista de la posición; instrumentos,
 cartera y límites de cartera en el gate; `PortfolioEngine` (barras) y `PortfolioTickSimulation`
 (tick) con equivalencia exacta a los motores de un instrumento, binario `portfolio` y
 `run_hpo --instrument-data`. La regla de arquitectura R11 (sin `HashMap` en el estado de cartera)
-queda propuesta, no añadida, porque cambia `AGENTS.md`.
+se aplicó después, con la aprobación del usuario.
 
 F1 hecha el mismo día: `OptimizableStrategy` declara `warm_up_ms`, `calibration_end_ms`,
 `requires_shared_config` y `contract_fixture`; `max_bars_hold` desapareció y la barrera temporal es

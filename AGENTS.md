@@ -61,6 +61,7 @@ The project enforces strict separation of concerns:
 - **R8**: `application` names no adapter and performs no file or network I/O.
 - **R9**: no library uses `anyhow`; the binaries and `main.rs` may.
 - **R10**: `domain` names no strategy.
+- **R11**: `domain`, `strategies`, `application` and `backtest` use no `HashMap` or `HashSet` in production code: a replay must iterate its state in a deterministic order, so they use `BTreeMap`, `BTreeSet` or another ordered structure. Unit tests may use them; `adapters` is not covered.
 
 Sizing and the pre-trade risk rules live in `domain::EntryGate`, which every runner asks. Review, not
 a test, keeps them out of adapters.

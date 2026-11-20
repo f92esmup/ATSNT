@@ -8,7 +8,8 @@
 //! API in the core (`domain`, `strategies`, `ports`); ports hold only traits and plain data;
 //! network clients stay in adapters; the application core names no adapter, file or clock; the
 //! `backtest` library names adapters and reads the wall clock only in composition; no library
-//! uses `anyhow`; the domain names no strategy; runners resolve strategies through the registry.
+//! uses `anyhow`; the domain names no strategy; runners resolve strategies through the registry;
+//! the crates a replay runs through use no hash collection (R11).
 //! Not checked: determinism beyond the clock, and business logic placed in adapters or binaries,
 //! which need review.
 
@@ -231,6 +232,25 @@ fn no_library_uses_anyhow() {
     assert!(
         offenders.is_empty(),
         "anyhow belongs to the entry points:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// A replay must give the same result every time, so the state it iterates is ordered: the
+/// iteration order of `HashMap` and `HashSet` depends on a seed drawn per process (R11).
+#[test]
+fn deterministic_crates_use_no_hash_collections() {
+    let mut offenders = Vec::new();
+    for name in ["domain", "strategies", "application", "backtest"] {
+        offenders.extend(lines_naming(
+            name,
+            &["HashMap", "HashSet", "hash_map::", "hash_set::"],
+            |_| false,
+        ));
+    }
+    assert!(
+        offenders.is_empty(),
+        "use BTreeMap or BTreeSet, whose iteration order is deterministic:\n{}",
         offenders.join("\n")
     );
 }
