@@ -345,7 +345,7 @@ impl BacktestEngine {
                             self.submit_entry(intent, bar.close, due_ms);
                         }
                     }
-                    Decision::Exit => {
+                    Decision::Exit { .. } => {
                         if self.core.position().is_some() && self.pending_exit_due_ms.is_none() {
                             self.pending_exit_due_ms = Some(due_ms);
                         }
@@ -492,7 +492,11 @@ mod tests {
             let print = domain::Trade::new(bar.end_ms, bar.close, dec!(1), Side::Buy)
                 .expect("a positive close");
             self.process_event(bar, &mut |view, out| {
-                strategy.on_event(&MarketEvent::Trade(&print), view, out)
+                strategy.on_event(
+                    &MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, &print),
+                    view,
+                    out,
+                )
             });
         }
     }
@@ -514,7 +518,7 @@ mod tests {
 
     impl Scripted {
         fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::Trade(_) = event else {
+            let MarketEvent::Trade { .. } = event else {
                 return None;
             };
             self.bars_seen += 1;
@@ -1203,7 +1207,7 @@ mod tests {
 
     impl ScriptedLong {
         fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::Trade(trade) = event else {
+            let MarketEvent::Trade { trade, .. } = event else {
                 return None;
             };
             OrderIntent::new(

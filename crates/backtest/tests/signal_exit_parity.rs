@@ -34,13 +34,13 @@ impl Strategy for InAndOut {
     }
 
     fn on_event(&mut self, event: &MarketEvent<'_>, view: &StrategyView, out: &mut Vec<Decision>) {
-        let MarketEvent::Trade(trade) = event else {
+        let MarketEvent::Trade { trade, .. } = event else {
             return;
         };
         if view.position.is_some() {
             let since = *self.seen_open_at.get_or_insert(trade.timestamp);
             if trade.timestamp - since >= HOLD_MS {
-                out.push(Decision::Exit);
+                out.push(Decision::exit());
             }
             return;
         }
@@ -82,7 +82,11 @@ fn bar_trades(tape: &[Trade]) -> Vec<ClosedTrade> {
     let mut strategy = InAndOut::default();
     for trade in tape {
         engine.process_event(&PriceEvent::from(trade), &mut |view, out| {
-            strategy.on_event(&MarketEvent::Trade(trade), view, out)
+            strategy.on_event(
+                &MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade),
+                view,
+                out,
+            )
         });
     }
     engine.finish_with_trades(None).1
@@ -130,7 +134,7 @@ fn an_exit_while_flat_changes_nothing() {
     for trade in tape().iter().take(100) {
         engine.process_event(&PriceEvent::from(trade), &mut |view, out| {
             assert!(view.is_flat());
-            out.push(Decision::Exit);
+            out.push(Decision::exit());
         });
     }
     let (metrics, trades) = engine.finish_with_trades(None);

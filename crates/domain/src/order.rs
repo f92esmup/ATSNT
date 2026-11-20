@@ -2,6 +2,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::error::DomainError;
+use crate::instrument::InstrumentId;
 use crate::trade::Side;
 
 /// Order execution type.
@@ -56,6 +57,10 @@ pub struct OrderIntent {
     /// Optional ATR or price distance for breakeven trigger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakeven_atr: Option<Decimal>,
+    /// The instrument to trade; `None` for the instrument of the event the strategy decided on.
+    /// A strategy that trades several instruments names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument: Option<InstrumentId>,
     /// Order execution type: Market (aggressive Taker) or Limit (passive Maker).
     #[serde(default)]
     pub order_type: OrderType,
@@ -172,10 +177,17 @@ impl OrderIntent {
             risk_fraction,
             trailing_atr,
             breakeven_atr,
+            instrument: None,
             order_type: OrderType::Market,
             time_in_force_bars: None,
             post_only: false,
         })
+    }
+
+    /// This intent, for `instrument`.
+    pub fn on(mut self, instrument: InstrumentId) -> Self {
+        self.instrument = Some(instrument);
+        self
     }
 
     /// Converts this intent into a passive Limit order with an optional Time-In-Force (bars) and post-only flag.

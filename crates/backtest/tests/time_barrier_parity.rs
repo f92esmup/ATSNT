@@ -23,7 +23,7 @@ struct OneLong {
 
 impl OneLong {
     fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-        let MarketEvent::Trade(trade) = event else {
+        let MarketEvent::Trade { trade, .. } = event else {
             return None;
         };
         if self.signalled {
@@ -79,7 +79,11 @@ fn bar_trades(tape: &[Trade]) -> Vec<ClosedTrade> {
     let mut strategy = OneLong::default();
     for trade in tape {
         engine.process_event(&PriceEvent::from(trade), &mut |view, out| {
-            strategy.on_event(&MarketEvent::Trade(trade), view, out)
+            strategy.on_event(
+                &MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade),
+                view,
+                out,
+            )
         });
     }
     engine.finish_with_trades(None).1

@@ -434,7 +434,7 @@ impl FeatureExtractor for SwarmEnsemble {
     /// Accepts only trades; any other event is ignored (§9.3).
     fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<ConsensusSample> {
         match event {
-            MarketEvent::Trade(trade) => self.on_trade(trade),
+            MarketEvent::Trade { trade, .. } => self.on_trade(trade),
             _ => None,
         }
     }
@@ -504,7 +504,7 @@ mod tests {
     fn run(ensemble: &mut SwarmEnsemble, trades: &[Trade]) -> Vec<Option<ConsensusSample>> {
         trades
             .iter()
-            .map(|t| ensemble.on_event(&MarketEvent::Trade(t)))
+            .map(|t| ensemble.on_event(&MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, t)))
             .collect()
     }
 
@@ -570,7 +570,7 @@ mod tests {
         let mut first_sample = None;
         for (index, trade) in trades.iter().enumerate() {
             slowest_bars += usize::from(slowest.process_trade(trade).is_some());
-            let sample = ensemble.on_event(&MarketEvent::Trade(trade));
+            let sample = ensemble.on_event(&MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade));
             if !ensemble.is_ready() {
                 assert!(sample.is_none(), "sample before readiness at {index}");
             }
@@ -601,7 +601,7 @@ mod tests {
         let mut ensemble = SwarmEnsemble::new(&test_config()).unwrap();
         let mut multi_close_samples = 0;
         for trade in &trades {
-            let sample = ensemble.on_event(&MarketEvent::Trade(trade));
+            let sample = ensemble.on_event(&MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade));
             let closed = ensemble.last_closed().iter().filter(|c| **c).count();
             if ensemble.is_ready() {
                 assert_eq!(sample.is_some(), closed > 0);
@@ -636,7 +636,7 @@ mod tests {
         let mut persisted_non_wait = 0;
         for trade in &trades {
             let before = ensemble.votes().to_vec();
-            ensemble.on_event(&MarketEvent::Trade(trade));
+            ensemble.on_event(&MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade));
             for (id, vote) in ensemble.votes().iter().enumerate() {
                 if !ensemble.last_closed()[id / per_feed] {
                     assert_eq!(*vote, before[id]);
@@ -659,7 +659,9 @@ mod tests {
             if let Some(bar) = hourly.process_trade(trade) {
                 hourly_atr = indicators.update(&BarInput::from(&bar)).map(|s| s.atr);
             }
-            if let Some(sample) = ensemble.on_event(&MarketEvent::Trade(trade)) {
+            if let Some(sample) =
+                ensemble.on_event(&MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade))
+            {
                 assert_eq!(Some(sample.atr_stop_reference), hourly_atr);
                 samples += 1;
             }
@@ -677,8 +679,8 @@ mod tests {
         let mut samples = 0;
         let mut non_wait = 0;
         for (x, y) in base.iter().zip(&scaled) {
-            let sa = a.on_event(&MarketEvent::Trade(x));
-            let sb = b.on_event(&MarketEvent::Trade(y));
+            let sa = a.on_event(&MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, x));
+            let sb = b.on_event(&MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, y));
             assert_eq!(a.votes(), b.votes());
             non_wait += a.votes().iter().filter(|v| **v != AgentVote::WAIT).count();
             assert_eq!(sa.is_some(), sb.is_some());
@@ -739,7 +741,11 @@ mod tests {
             for feed in &mut feeds {
                 closes += u64::from(feed.aggregator.process_trade(trade).is_some());
             }
-            samples += u64::from(ensemble.on_event(&MarketEvent::Trade(trade)).is_some());
+            samples += u64::from(
+                ensemble
+                    .on_event(&MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade))
+                    .is_some(),
+            );
         }
         let audit = ensemble.audit();
         let expected = closes * u64::from(config.agents_per_feed);

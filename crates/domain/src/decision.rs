@@ -7,6 +7,7 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::instrument::InstrumentId;
 use crate::order::OrderIntent;
 use crate::position::PositionSide;
 use crate::trade::Trade;
@@ -17,15 +18,32 @@ use crate::trade::Trade;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MarketEvent<'a> {
-    /// A single market trade.
-    Trade(&'a Trade),
+    /// A single market trade of one instrument.
+    Trade {
+        /// The instrument traded.
+        instrument: &'a InstrumentId,
+        /// The trade.
+        trade: &'a Trade,
+    },
 }
 
-impl MarketEvent<'_> {
+impl<'a> MarketEvent<'a> {
+    /// A trade of `instrument`.
+    pub fn trade(instrument: &'a InstrumentId, trade: &'a Trade) -> Self {
+        Self::Trade { instrument, trade }
+    }
+
     /// When the event happened (Unix ms).
     pub fn timestamp(&self) -> i64 {
         match self {
-            MarketEvent::Trade(trade) => trade.timestamp,
+            MarketEvent::Trade { trade, .. } => trade.timestamp,
+        }
+    }
+
+    /// The instrument the event is about.
+    pub fn instrument(&self) -> &'a InstrumentId {
+        match self {
+            MarketEvent::Trade { instrument, .. } => instrument,
         }
     }
 }
@@ -36,7 +54,38 @@ pub enum Decision {
     /// Open a triple-barrier position. Ignored while a position is open or an entry is pending.
     Enter(OrderIntent),
     /// Close the open position at market, labelled [`SIGNAL_EXIT`]. Ignored while flat.
-    Exit,
+    Exit {
+        /// The instrument whose position to close; `None` for the instrument of the event the
+        /// strategy is deciding on.
+        instrument: Option<InstrumentId>,
+    },
+}
+
+impl Decision {
+    /// Close the position of the instrument of the event being decided on.
+    pub fn exit() -> Self {
+        Self::Exit { instrument: None }
+    }
+
+    /// Close the position of `instrument`.
+    pub fn exit_of(instrument: InstrumentId) -> Self {
+        Self::Exit {
+            instrument: Some(instrument),
+        }
+    }
+
+    /// The instrument the decision names, if it names one.
+    pub fn instrument(&self) -> Option<&InstrumentId> {
+        match self {
+            Self::Enter(intent) => intent.instrument.as_ref(),
+            Self::Exit { instrument } => instrument.as_ref(),
+        }
+    }
+
+    /// The instrument the decision is about: the one it names, else the event's.
+    pub fn instrument_or<'a>(&'a self, event_instrument: &'a InstrumentId) -> &'a InstrumentId {
+        self.instrument().unwrap_or(event_instrument)
+    }
 }
 
 /// Exit reason of a position the strategy closed with [`Decision::Exit`].
@@ -133,6 +182,8 @@ mod tests {
     #[test]
     fn a_market_event_reports_when_it_happened() {
         let trade = Trade::new(42, dec!(100), dec!(1), Side::Buy).unwrap();
-        assert_eq!(MarketEvent::Trade(&trade).timestamp(), 42);
+        let event = MarketEvent::trade(&crate::UNNAMED_INSTRUMENT, &trade);
+        assert_eq!(event.timestamp(), 42);
+        assert_eq!(event.instrument().as_str(), "UNNAMED");
     }
 }
