@@ -17,7 +17,11 @@ use crate::strategy::{
 /// Candidates requested from the search space when checking it.
 const CANDIDATE_BUDGET: usize = 25;
 
+/// Minutes of four-trade input the contract evaluates after the strategy's warm-up.
+const EVALUATED_MINUTES: usize = 400;
+
 /// One synthetic minute: the open, high, low and close the trades below are cut from.
+#[derive(Clone, Copy)]
 struct Minute {
     start_time: i64,
     end_time: i64,
@@ -70,19 +74,86 @@ fn synthetic_minutes(count: usize) -> Vec<Minute> {
 pub fn synthetic_trades(minutes: usize) -> Vec<Trade> {
     synthetic_minutes(minutes)
         .iter()
-        .flat_map(|minute| {
-            let quarter = minute.volume / dec!(4);
-            let step = (minute.end_time - minute.start_time) / 4;
-            [minute.open, minute.high, minute.low, minute.close]
-                .into_iter()
-                .enumerate()
-                .map(move |(i, price)| {
-                    let side = if i % 2 == 0 { Side::Buy } else { Side::Sell };
-                    Trade::new(minute.start_time + step * i as i64, price, quarter, side)
-                        .expect("synthetic minutes have positive prices and volume")
-                })
-        })
+        .flat_map(quarters)
         .collect()
+}
+
+/// The four trades of one minute: open, high, low and close.
+fn quarters(minute: &Minute) -> impl Iterator<Item = Trade> {
+    let quarter = minute.volume / dec!(4);
+    let step = (minute.end_time - minute.start_time) / 4;
+    let start = minute.start_time;
+    [minute.open, minute.high, minute.low, minute.close]
+        .into_iter()
+        .enumerate()
+        .map(move |(i, price)| {
+            let side = if i % 2 == 0 { Side::Buy } else { Side::Sell };
+            Trade::new(start + step * i as i64, price, quarter, side)
+                .expect("synthetic minutes have positive prices and volume")
+        })
+}
+
+/// Spacing of the bursts of the contract's warm-up: eight a day.
+const BURST_EVERY_MS: i64 = 3 * 3_600_000;
+
+/// The contract's input for a strategy that needs `warm_up_ms` of data before it decides.
+///
+/// The warm-up is a trending walk, cheap to replay: every [`BURST_EVERY_MS`] a burst of three
+/// trades ten minutes apart, the price drifting 8 bp a trade in a direction that flips every ten
+/// days, with up to 60 bp of noise. A strategy finds trends in it to decide on, which a flat or
+/// trendless input would not give. [`EVALUATED_MINUTES`] minutes cut as in [`synthetic_trades`]
+/// follow it. With no warm-up the input is exactly `synthetic_trades(EVALUATED_MINUTES)`.
+pub fn contract_trades(warm_up_ms: i64) -> Vec<Trade> {
+    const START_MS: i64 = 1_700_000_000_000;
+    const DAY_MS: i64 = 86_400_000;
+    let bursts = (warm_up_ms.max(0) + BURST_EVERY_MS - 1) / BURST_EVERY_MS;
+    let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = move |modulus: u64| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        i64::try_from((seed >> 33) % modulus).unwrap_or(0)
+    };
+    let mut price = dec!(50_000);
+    let mut trades = Vec::new();
+    for burst in 0..bursts {
+        let at = START_MS + burst * BURST_EVERY_MS;
+        let drift = if (at - START_MS) / (10 * DAY_MS) % 2 == 0 {
+            8
+        } else {
+            -8
+        };
+        for k in 0..3 {
+            let step = Decimal::new(drift + next(121) - 60, 4);
+            price = (price * (Decimal::ONE + step)).round_dp(2).max(dec!(1));
+            let quantity = Decimal::new(50 + next(100), 2);
+            let side = if next(2) == 0 { Side::Buy } else { Side::Sell };
+            trades.push(
+                Trade::new(at + k * 600_000, price, quantity, side)
+                    .expect("the walk keeps prices and quantities positive"),
+            );
+        }
+    }
+    // The evaluated minutes follow the warm-up, at the warm-up's last price.
+    let shift = bursts * BURST_EVERY_MS;
+    let level = price - dec!(50_000);
+    trades.extend(
+        synthetic_minutes(EVALUATED_MINUTES)
+            .iter()
+            .flat_map(|minute| {
+                quarters(&Minute {
+                    start_time: minute.start_time + shift,
+                    end_time: minute.end_time + shift,
+                    open: (minute.open + level).max(dec!(1)),
+                    high: (minute.high + level).max(dec!(1)),
+                    low: (minute.low + level).max(dec!(0.5)),
+                    close: (minute.close + level).max(dec!(1)),
+                    volume: minute.volume,
+                })
+                .collect::<Vec<_>>()
+            }),
+    );
+    trades
 }
 
 /// Trades with no price movement, one a minute: the degenerate input a quiet market produces,
@@ -132,8 +203,8 @@ fn assert_valid_intent(id: &str, intent: &OrderIntent) {
         "{id}: intent price must be positive"
     );
     assert!(
-        intent.max_bars_hold >= 1 || intent.deadline_ms.is_some_and(|at| at > intent.timestamp),
-        "{id}: the time barrier must hold at least one bar or end after the decision"
+        intent.deadline_ms > intent.timestamp,
+        "{id}: the time barrier must end after the decision"
     );
     match intent.side {
         Side::Buy => assert!(
@@ -224,8 +295,22 @@ where
             .unwrap_or_else(|error| panic!("{id}: neighbor {neighbor} must build: {error}"));
     }
 
-    // Behaviour on its input: deterministic, resettable and well-formed.
-    let input = synthetic_trades(400);
+    // Behaviour on its input: deterministic, resettable and well-formed. The input covers the
+    // warm-up the strategy declares, and the strategy runs with the configuration it says it
+    // decides with on synthetic data, so it has the chance to decide.
+    let (shared, default_config) = S::contract_fixture().unwrap_or((shared, default_config));
+    S::from_config(&shared, default_config.clone())
+        .unwrap_or_else(|error| panic!("{id}: the contract fixture must build: {error}"));
+    let warm_up_ms = S::warm_up_ms(&shared);
+    assert!(warm_up_ms >= 0, "{id}: the warm-up must not be negative");
+    if let Some(end) = S::calibration_end_ms(&shared) {
+        assert!(
+            end < 1_700_000_000_000,
+            "{id}: the default shared configuration claims a calibration that ends at {end}, \
+             inside the contract's synthetic data"
+        );
+    }
+    let input = contract_trades(warm_up_ms);
     let build = || {
         S::from_config(&shared, default_config.clone()).expect("the default configuration builds")
     };
@@ -246,6 +331,14 @@ where
         "{id}: reset() must restore the state of a fresh instance"
     );
 
+    let decided = first.iter().flatten().count();
+    assert!(
+        decided > 0,
+        "{id}: the default configuration never decided on {} synthetic trades after a warm-up of \
+         {warm_up_ms} ms, so every check of its decisions below would pass without checking \
+         anything; give the strategy a contract_fixture that decides on synthetic data",
+        input.len()
+    );
     for decision in first.iter().flatten() {
         assert_valid_intent(id, decision);
     }
@@ -272,6 +365,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_contract_input_covers_the_warm_up_then_the_evaluated_minutes() {
+        assert_eq!(contract_trades(0), synthetic_trades(EVALUATED_MINUTES));
+
+        // Two bursts of three trades cover a warm-up of four hours.
+        let input = contract_trades(4 * 3_600_000);
+        assert_eq!(input.len(), 6 + 4 * EVALUATED_MINUTES);
+        assert_eq!(input[6].timestamp, input[0].timestamp + 2 * BURST_EVERY_MS);
+        assert!(input.windows(2).all(|w| w[0].timestamp <= w[1].timestamp));
+    }
+
+    #[test]
     fn the_synthetic_series_is_deterministic_and_well_formed() {
         let a = synthetic_trades(100);
 
@@ -286,7 +390,7 @@ mod tests {
 
     /// A small strategy with a switchable defect: `0` is well behaved, `1` forgets to clear its
     /// state on `reset`, `2` emits a long whose stop sits above the entry, `3` decides nothing
-    /// in its two-stage form.
+    /// in its two-stage form, `4` never decides at all.
     #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
     struct FaultyConfig;
 
@@ -345,7 +449,7 @@ mod tests {
                 return None;
             };
             self.seen += 1;
-            if self.seen % 7 != 0 {
+            if MODE == 4 || self.seen % 7 != 0 {
                 return None;
             }
             let stop = if MODE == 2 {
@@ -359,7 +463,7 @@ mod tests {
                 trade.price,
                 stop,
                 trade.price + dec!(10),
-                5,
+                300_000,
             )
             .ok()
         }
@@ -398,6 +502,10 @@ mod tests {
             }
         }
 
+        fn warm_up_ms(_: &()) -> i64 {
+            0
+        }
+
         fn default_space() -> FaultySpace {
             FaultySpace
         }
@@ -418,6 +526,12 @@ mod tests {
     #[should_panic(expected = "a long needs stop < price < target")]
     fn an_intent_with_the_stop_on_the_wrong_side_is_rejected() {
         assert_strategy_contract::<Faulty<2>>();
+    }
+
+    #[test]
+    #[should_panic(expected = "the default configuration never decided")]
+    fn a_strategy_that_never_decides_is_rejected() {
+        assert_strategy_contract::<Faulty<4>>();
     }
 
     #[test]

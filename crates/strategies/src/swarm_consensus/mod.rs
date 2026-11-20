@@ -30,6 +30,10 @@ use domain::{DomainError, OrderIntent};
 
 use crate::strategy::{FeatureExtractor, MarketEvent, MarketType, OptimizableStrategy, Strategy};
 
+/// Lead the data must give the swarm before its first evaluated decision (strategy spec §15.2):
+/// 70 days, so the slowest feed (1 day, 64 closed bars) is warm.
+pub const SWARM_WARM_UP_MS: i64 = 70 * 86_400_000;
+
 /// The swarm consensus strategy: the [`SwarmEnsemble`] (frozen first stage) feeding the
 /// [`ConsensusPolicy`] (searched decision stage). It consumes raw trades and emits
 /// triple-barrier entries.
@@ -97,6 +101,47 @@ impl OptimizableStrategy for SwarmConsensusStrategy {
         SwarmPolicySpace::default()
     }
 
+    fn warm_up_ms(_shared: &SwarmConfig) -> i64 {
+        SWARM_WARM_UP_MS
+    }
+
+    /// The feed thresholds are calibrated on data that ends here (strategy spec §14.1).
+    fn calibration_end_ms(shared: &SwarmConfig) -> Option<i64> {
+        Some(shared.calibration_end_ms)
+    }
+
+    /// The default thresholds are not calibrated to any market, so an optimisation must be given
+    /// the calibrated ones.
+    fn requires_shared_config() -> bool {
+        true
+    }
+
+    /// The default feed thresholds are sized for BTCUSDT and never close a bar on the contract's
+    /// synthetic walk: small thresholds and a low vote threshold make the swarm decide on it.
+    fn contract_fixture() -> Option<(SwarmConfig, PolicyConfig)> {
+        let shared = SwarmConfig {
+            tick_thresholds: [1, 2, 3, 4],
+            volume_thresholds: [
+                rust_decimal::Decimal::ONE,
+                rust_decimal::Decimal::TWO,
+                rust_decimal::Decimal::from(3),
+                rust_decimal::Decimal::from(4),
+            ],
+            range_thresholds: [
+                rust_decimal::Decimal::new(1, 3),
+                rust_decimal::Decimal::new(2, 3),
+                rust_decimal::Decimal::new(4, 3),
+                rust_decimal::Decimal::new(8, 3),
+            ],
+            ..SwarmConfig::default()
+        };
+        let policy = PolicyConfig {
+            threshold_base: rust_decimal::Decimal::new(5, 2),
+            ..PolicyConfig::default()
+        };
+        Some((shared, policy))
+    }
+
     /// A spot account cannot sell what it does not hold, so on spot the swarm is long only.
     fn shared_for_market(shared: SwarmConfig, market: MarketType) -> SwarmConfig {
         match market {
@@ -128,6 +173,20 @@ mod tests {
                 .unwrap();
         let audit = strategy.audit().expect("the swarm reports an audit");
         assert!(audit.is_object());
+    }
+
+    #[test]
+    fn the_swarm_declares_its_warm_up_and_calibration() {
+        let shared = SwarmConfig {
+            calibration_end_ms: 42,
+            ..SwarmConfig::default()
+        };
+        assert_eq!(SwarmConsensusStrategy::warm_up_ms(&shared), 70 * 86_400_000);
+        assert_eq!(
+            SwarmConsensusStrategy::calibration_end_ms(&shared),
+            Some(42)
+        );
+        assert!(SwarmConsensusStrategy::requires_shared_config());
     }
 
     #[test]

@@ -29,10 +29,16 @@ A strategy decides one thing: a triple-barrier entry, `domain::OrderIntent`, wit
 profit and its time barrier. It never sizes the order or checks the account: the shared
 `domain::EntryGate` does both, on every runner.
 
+The time barrier is a duration in milliseconds. The constructors (`OrderIntent::new`,
+`with_risk`, `with_risk_and_exits`, `limit`) take `max_hold_ms` and store `deadline_ms =
+timestamp + max_hold_ms`, which must be later than the decision. The bar route and the tick route
+close the position on the first event that ends at or after the deadline, so both apply the same
+barrier (`crates/backtest/tests/time_barrier_parity.rs`). There is no barrier counted in bars.
+
 ### `OptimizableStrategy`: how it is searched and loaded
 
 Implement it to take part in hyperparameter optimisation, walk-forward analysis and artifacts. The
-trait starts at `crates/strategies/src/strategy.rs:134`.
+trait is `OptimizableStrategy` in `crates/strategies/src/strategy.rs`.
 
 - `fn id() -> &'static str`: the canonical snake_case id used by the CLI flags and stored as the
   `strategy_id` of the run registry. It takes no `self`.
@@ -52,6 +58,19 @@ trait starts at `crates/strategies/src/strategy.rs:134`.
 - `fn shared_for_market(shared, market) -> Self::SharedConfig`, default: unchanged. A strategy that
   trades several markets narrows its shared configuration here. The swarm drops short selling on
   spot.
+- `fn warm_up_ms(shared) -> i64`, required: the data the strategy needs before its first evaluated
+  decision. `run_hpo` evaluates nothing earlier and refuses data that is shorter. The swarm
+  declares 70 days; a strategy that decides from its first trade declares 0.
+- `fn calibration_end_ms(shared) -> Option<i64>`, default `None`: the last timestamp of the data the
+  shared configuration was fitted on. `backtest` and `run_hpo` refuse data that starts at or before
+  it, so a calibration never leaks into a result. Declare it whenever the shared configuration is
+  fitted to data.
+- `fn requires_shared_config() -> bool`, default `false`: `true` when the default shared
+  configuration would mislead, so `run_hpo` refuses to run without `--shared-config`. The swarm
+  returns `true`: its default feed thresholds are not calibrated.
+- `fn contract_fixture() -> Option<(SharedConfig, Config)>`, default `None`: the configuration the
+  contract suite runs the strategy with when its defaults never decide on synthetic data. The
+  swarm's defaults are sized for BTCUSDT, so it gives small thresholds here.
 
 `FeatureExtractor` has an associated `Features` type, `on_event(&mut self, event) -> Option<Features>`
 and `reset(&mut self)`.
@@ -95,7 +114,10 @@ The second element lists optional short aliases.
 
 ## 3. What you get without further code
 
-- `--strategy <id or alias>` in `backtest` and `run_hpo`.
+- `--strategy <id or alias>` in `backtest` and `run_hpo`. `run_hpo` requires it and writes its
+  artifact to `configs/hpo_<id>_results.json` unless `--output-config` says otherwise. `backtest`
+  takes the strategy from the artifact, else from `--strategy`; it picks the only registered
+  strategy when there is one and refuses to guess when there are several.
 - Artifact and bare-config loading through `backtest::load_strategy` (files, in
   `crates/backtest/src/wiring.rs`) and `backtest::build_strategy` (text, in
   `crates/backtest/src/registry.rs`).
@@ -105,13 +127,19 @@ The second element lists optional short aliases.
   - a default configuration that builds, and a strategy that describes itself;
   - JSON round-trip of the shared and the candidate configuration;
   - search-space candidates and neighbours that build, within the candidate budget;
+  - a warm-up that is not negative, and a default calibration that ends before the synthetic data;
+  - at least one decision on an input that covers the declared warm-up (a trending walk) and then
+    400 synthetic minutes, so the checks below never pass without checking anything;
   - deterministic replay, and `reset()` matching a fresh instance;
   - the two-stage run agreeing with the one-stage run;
-  - well-formed decisions on synthetic and flat feeds.
+  - well-formed decisions on synthetic and flat feeds, with a time barrier after the decision.
 
 ## 4. What stays yours
 
 - Unit tests specific to the strategy, and a sensible `default_space`.
+- A golden test that pins its trades on a deterministic tape, following
+  `crates/backtest/tests/golden_swarm.rs` and its tape in `crates/backtest/tests/support/swarm.rs`.
+  The contract checks behaviour, not results: only a golden shows that a change moved the trades.
 - Verification at increasing fidelity:
   1. a bar-level backtest, or a trade-resolution one with `backtest --fill-model tick`;
   2. a walk-forward optimisation with `run_hpo`;

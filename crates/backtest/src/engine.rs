@@ -176,12 +176,6 @@ impl BacktestEngine {
         self.core.ledger().trades()
     }
 
-    /// Returns the number of bars the active position has been held.
-    #[inline]
-    pub fn bars_held(&self) -> usize {
-        self.core.bars_held()
-    }
-
     /// Returns the peak equity reached during the simulation.
     #[inline]
     pub fn peak_equity(&self) -> Decimal {
@@ -485,17 +479,40 @@ mod tests {
         fn reset(&mut self) {}
     }
 
+    /// Width of the tests' bars: one a second.
+    const BAR_MS: i64 = 1_000;
+
+    /// A time barrier a year away, for tests where it plays no part.
+    const YEAR_MS: i64 = 365 * 86_400_000;
+
     /// A strategy that signals a long on the plunge to 90 (the fifth bar of the tests' tape) with
-    /// the given stop, target and time barrier.
-    fn plunge_to_90(stop: Decimal, take_profit: Decimal, max_bars_hold: usize) -> Scripted {
-        let signal =
-            OrderIntent::new(5000, Side::Buy, dec!(90), stop, take_profit, max_bars_hold).unwrap();
+    /// the given stop, target and a time barrier `hold_bars` bars after the signal.
+    fn plunge_to_90(stop: Decimal, take_profit: Decimal, hold_bars: i64) -> Scripted {
+        let signal = OrderIntent::new(
+            5000,
+            Side::Buy,
+            dec!(90),
+            stop,
+            take_profit,
+            hold_bars * BAR_MS,
+        )
+        .unwrap();
         Scripted::new(vec![None, None, None, None, Some(signal)])
     }
 
-    /// Long intent at 100 with SL 95, TP 110 and the given time barrier.
-    fn long_intent(max_bars_hold: usize) -> Option<OrderIntent> {
-        Some(OrderIntent::new(1, Side::Buy, dec!(100), dec!(95), dec!(110), max_bars_hold).unwrap())
+    /// Long intent at 100 with SL 95, TP 110 and a time barrier `hold_bars` bars after it.
+    fn long_intent(hold_bars: i64) -> Option<OrderIntent> {
+        Some(
+            OrderIntent::new(
+                1,
+                Side::Buy,
+                dec!(100),
+                dec!(95),
+                dec!(110),
+                hold_bars * BAR_MS,
+            )
+            .unwrap(),
+        )
     }
 
     fn realistic_engine() -> BacktestEngine {
@@ -527,7 +544,11 @@ mod tests {
             max_order_notional: Some(dec!(1000)),
             ..realistic_engine().config
         });
-        let mut strategy = Scripted::new(vec![long_intent(50), long_intent(50), None]);
+        let mut strategy = Scripted::new(vec![
+            long_intent(YEAR_MS / BAR_MS),
+            long_intent(YEAR_MS / BAR_MS),
+            None,
+        ]);
 
         for t in [1000, 2000, 3000] {
             engine.process_bar(
@@ -548,7 +569,7 @@ mod tests {
     #[test]
     fn the_strategy_sees_every_bar_even_while_a_position_is_open() {
         let mut engine = realistic_engine();
-        let mut strategy = Scripted::new(vec![long_intent(50), None, None, None]);
+        let mut strategy = Scripted::new(vec![long_intent(YEAR_MS / BAR_MS), None, None, None]);
 
         for (i, price) in [dec!(100), dec!(100), dec!(101), dec!(102)]
             .iter()
@@ -565,7 +586,7 @@ mod tests {
     #[test]
     fn a_market_entry_fills_at_the_next_bar_open_with_slippage() {
         let mut engine = realistic_engine();
-        let mut strategy = Scripted::new(vec![long_intent(50), None]);
+        let mut strategy = Scripted::new(vec![long_intent(YEAR_MS / BAR_MS), None]);
 
         engine.process_bar(
             &mut strategy,
@@ -585,13 +606,12 @@ mod tests {
         // Open 102 plus 1% slippage; sized at the signal price: 10_000 * 1% / (100 - 95) = 20.
         assert_eq!(position.entry_price, dec!(103.02));
         assert_eq!(position.quantity, dec!(20));
-        assert_eq!(engine.bars_held(), 1);
     }
 
     #[test]
     fn take_profit_is_a_taker_exit_with_slippage() {
         let mut engine = realistic_engine();
-        let mut strategy = Scripted::new(vec![long_intent(50), None, None]);
+        let mut strategy = Scripted::new(vec![long_intent(YEAR_MS / BAR_MS), None, None]);
         engine.process_bar(
             &mut strategy,
             &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
@@ -619,7 +639,7 @@ mod tests {
     #[test]
     fn a_stop_through_a_gap_fills_at_the_open_not_at_the_trigger() {
         let mut engine = realistic_engine();
-        let mut strategy = Scripted::new(vec![long_intent(50), None, None]);
+        let mut strategy = Scripted::new(vec![long_intent(YEAR_MS / BAR_MS), None, None]);
         engine.process_bar(
             &mut strategy,
             &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
@@ -643,7 +663,7 @@ mod tests {
     #[test]
     fn a_take_profit_gap_in_favor_fills_at_the_open() {
         let mut engine = realistic_engine();
-        let mut strategy = Scripted::new(vec![long_intent(50), None, None]);
+        let mut strategy = Scripted::new(vec![long_intent(YEAR_MS / BAR_MS), None, None]);
         engine.process_bar(
             &mut strategy,
             &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
@@ -667,7 +687,12 @@ mod tests {
     fn no_entry_is_taken_on_the_bar_where_the_time_barrier_closed_the_position() {
         let mut engine = realistic_engine();
         // Signal, fill bar, time-barrier bar (which also signals again), one more bar.
-        let mut strategy = Scripted::new(vec![long_intent(2), None, long_intent(50), None]);
+        let mut strategy = Scripted::new(vec![
+            long_intent(2),
+            None,
+            long_intent(YEAR_MS / BAR_MS),
+            None,
+        ]);
 
         for (i, price) in [dec!(100), dec!(100), dec!(100), dec!(100)]
             .iter()
@@ -689,7 +714,7 @@ mod tests {
     #[test]
     fn an_order_still_pending_when_the_data_ends_never_trades() {
         let mut engine = realistic_engine();
-        let mut strategy = Scripted::new(vec![long_intent(50)]);
+        let mut strategy = Scripted::new(vec![long_intent(YEAR_MS / BAR_MS)]);
         engine.process_bar(
             &mut strategy,
             &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
@@ -898,9 +923,8 @@ mod tests {
             &create_test_bar(6000, dec!(91), dec!(92), dec!(89), dec!(91)),
         );
         assert!(engine.active_position().is_some());
-        assert_eq!(engine.bars_held(), 1);
 
-        // Bar 2 of hold -> reaches time_barrier_bars (2) -> Forced market close!
+        // Two bars after the signal the deadline is reached: forced market close.
         engine.process_bar(
             &mut strategy,
             &create_test_bar(7000, dec!(91), dec!(92), dec!(89), dec!(91)),
@@ -996,14 +1020,15 @@ mod tests {
         let day_2_ms: i64 = day_1_ms + 86_400_000; // Next UTC day (+24h)
 
         // The day-1 plunge stops out and trips the breaker; the day-2 plunge signals again.
-        let first = OrderIntent::new(5000, Side::Buy, dec!(90), dec!(75), dec!(110), 10).unwrap();
+        let first =
+            OrderIntent::new(5000, Side::Buy, dec!(90), dec!(75), dec!(110), YEAR_MS).unwrap();
         let second = OrderIntent::new(
             day_2_ms + 4000,
             Side::Buy,
             dec!(50),
             dec!(40),
             dec!(110),
-            10,
+            YEAR_MS,
         )
         .unwrap();
         let mut strategy = Scripted::new(vec![
@@ -1131,7 +1156,7 @@ mod tests {
                 trade.price,
                 self.stop,
                 trade.price * dec!(2),
-                1_000,
+                YEAR_MS,
             )
             .ok()
         }
@@ -1301,13 +1326,13 @@ mod tests {
 
     /// Long at 100 with a stop 0.1 away, so the risk sizing asks for a lot of notional.
     fn tight_long() -> Option<OrderIntent> {
-        Some(OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.9), dec!(110), 50).unwrap())
+        Some(OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.9), dec!(110), YEAR_MS).unwrap())
     }
 
     #[test]
     fn a_settlement_crossed_while_open_charges_funding_to_the_trade() {
         let mut engine = realistic_engine();
-        let mut strategy = Scripted::new(vec![long_intent(50), None, None, None]);
+        let mut strategy = Scripted::new(vec![long_intent(YEAR_MS / BAR_MS), None, None, None]);
         engine.process_bar(
             &mut strategy,
             &ohlc_bar(
@@ -1364,7 +1389,8 @@ mod tests {
     #[test]
     fn funding_is_not_charged_without_a_position_or_a_settlement() {
         let mut engine = realistic_engine();
-        let mut strategy = Scripted::new(vec![None, None, long_intent(50), None, None]);
+        let mut strategy =
+            Scripted::new(vec![None, None, long_intent(YEAR_MS / BAR_MS), None, None]);
         // The settlement passes while flat.
         engine.process_bar(
             &mut strategy,
@@ -1479,8 +1505,9 @@ mod tests {
     #[test]
     fn an_entry_the_balance_cannot_margin_is_sized_down_to_what_it_funds() {
         let mut engine = leveraged_engine(dec!(400));
-        let intent =
-            Some(OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.99), dec!(110), 50).unwrap());
+        let intent = Some(
+            OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.99), dec!(110), YEAR_MS).unwrap(),
+        );
         let mut strategy = Scripted::new(vec![intent, None]);
         engine.process_bar(
             &mut strategy,
@@ -1506,7 +1533,7 @@ mod tests {
     #[test]
     fn slippage_paid_on_a_favorable_target_gap_is_still_reported() {
         let mut engine = realistic_engine();
-        let mut strategy = Scripted::new(vec![long_intent(50), None, None]);
+        let mut strategy = Scripted::new(vec![long_intent(YEAR_MS / BAR_MS), None, None]);
         engine.process_bar(
             &mut strategy,
             &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
@@ -1530,7 +1557,7 @@ mod tests {
     #[test]
     fn slippage_paid_on_an_entry_that_gaps_in_favor_is_still_reported() {
         let mut engine = realistic_engine();
-        let mut strategy = Scripted::new(vec![long_intent(50), None, None]);
+        let mut strategy = Scripted::new(vec![long_intent(YEAR_MS / BAR_MS), None, None]);
         engine.process_bar(
             &mut strategy,
             &ohlc_bar(1000, dec!(100), dec!(100), dec!(100), dec!(100)),
@@ -1569,7 +1596,15 @@ mod tests {
             ..BacktestConfig::default()
         });
         let mut entry = Some(
-            OrderIntent::new(times[0].0, Side::Buy, times[0].1, dec!(90), dec!(200), 50).unwrap(),
+            OrderIntent::new(
+                times[0].0,
+                Side::Buy,
+                times[0].1,
+                dec!(90),
+                dec!(200),
+                YEAR_MS,
+            )
+            .unwrap(),
         );
         times
             .iter()
@@ -1619,7 +1654,7 @@ mod tests {
     fn spot_engine_rejects_short_entry_and_records_rejection_counter() {
         let mut engine = BacktestEngine::new(BacktestConfig::spot());
         let sell_intent =
-            OrderIntent::new(1, Side::Sell, dec!(100), dec!(105), dec!(95), 5).unwrap();
+            OrderIntent::new(1, Side::Sell, dec!(100), dec!(105), dec!(95), YEAR_MS).unwrap();
 
         engine.submit_entry(sell_intent, dec!(100), 2_000);
         assert_eq!(
@@ -1631,7 +1666,8 @@ mod tests {
         assert!(engine.pending_intent().is_none());
 
         // Now submit a valid Buy intent in Spot
-        let buy_intent = OrderIntent::new(2, Side::Buy, dec!(100), dec!(95), dec!(105), 5).unwrap();
+        let buy_intent =
+            OrderIntent::new(2, Side::Buy, dec!(100), dec!(95), dec!(105), YEAR_MS).unwrap();
         engine.submit_entry(buy_intent, dec!(100), 2_000);
         assert!(engine.pending_intent().is_some());
     }

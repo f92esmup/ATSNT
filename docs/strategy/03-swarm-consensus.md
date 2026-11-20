@@ -83,8 +83,7 @@ pub struct OrderIntent {
     pub price: Decimal,                 // the signal price: sizing reference
     pub stop_loss: Decimal,
     pub take_profit: Decimal,
-    pub max_bars_hold: usize,           // time barrier in price events; 0 when a deadline is set
-    pub deadline_ms: Option<i64>,       // time barrier as a timestamp
+    pub deadline_ms: i64,               // time barrier: timestamp + the decay horizon
     pub risk_fraction: Option<Decimal>, // overrides the account's risk per trade
     pub trailing_atr: Option<Decimal>,  // trailing step distance
     pub breakeven_atr: Option<Decimal>, // favourable excursion that moves the stop to entry
@@ -94,8 +93,7 @@ pub struct OrderIntent {
 pub struct ProtectiveExits {
     pub stop: Decimal,
     pub take_profit: Option<Decimal>,
-    pub max_bars: Option<usize>,
-    pub deadline_ms: Option<i64>,
+    pub deadline_ms: Option<i64>,       // `Some` for every triple-barrier entry
     // ...trailing and breakeven distances
 }
 ```

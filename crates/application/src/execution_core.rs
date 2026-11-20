@@ -213,15 +213,13 @@ pub fn barrier_exit(
     side: PositionSide,
     exits: &ProtectiveExits,
     event: impl Into<PriceEvent>,
-    bars_held: usize,
     slippage_pct: Decimal,
 ) -> Option<BarrierExit> {
     let bar = event.into();
     let close_side = closing_side(side);
-    let time_due = exits.max_bars.is_some_and(|max_bars| bars_held >= max_bars)
-        || exits
-            .deadline_ms
-            .is_some_and(|deadline| bar.end_ms >= deadline);
+    let time_due = exits
+        .deadline_ms
+        .is_some_and(|deadline| bar.end_ms >= deadline);
     match side {
         PositionSide::Long => {
             if bar.low <= exits.stop {
@@ -388,7 +386,6 @@ pub struct ExecutionCore {
     pending: Option<PendingEntry>,
     /// Earliest event start, in Unix milliseconds, at which `pending` may fill.
     pending_due_ms: i64,
-    bars_held: usize,
     /// Isolated margin posted for the open position.
     margin: Decimal,
     /// Funding paid by the open position so far.
@@ -549,11 +546,6 @@ impl ExecutionCore {
         self.margin
     }
 
-    /// Bars the open position has been held.
-    pub fn bars_held(&self) -> usize {
-        self.bars_held
-    }
-
     /// The closed trades so far.
     pub fn ledger(&self) -> &TradeLedger {
         &self.ledger
@@ -660,15 +652,14 @@ impl ExecutionCore {
             self.position = Some(pos);
             self.exits = Some(ProtectiveExits::from_intent(&intent));
             self.intent = Some(intent);
-            self.bars_held = 0;
             self.margin = notional / Decimal::from(leverage);
             self.funding_accrued = Decimal::ZERO;
         }
         Ok(())
     }
 
-    /// Counts one more event held and closes the position when it is liquidated or a protective
-    /// exit triggers on this event, at the event's end time. Liquidation is evaluated first.
+    /// Closes the position when it is liquidated or a protective exit triggers on this event, at
+    /// the event's end time. Liquidation is evaluated first.
     pub fn evaluate_exits(
         &mut self,
         event: impl Into<PriceEvent>,
@@ -677,20 +668,13 @@ impl ExecutionCore {
         excursion: &mut Option<TradeExcursion>,
     ) {
         let bar = event.into();
-        self.bars_held += 1;
         if self.liquidate_if_due(&bar, config, equity, excursion) {
             return;
         }
         let (Some(mut exits), Some(position)) = (self.exits, &self.position) else {
             return;
         };
-        if let Some(exit) = barrier_exit(
-            position.side,
-            &exits,
-            bar,
-            self.bars_held,
-            config.slippage_pct,
-        ) {
+        if let Some(exit) = barrier_exit(position.side, &exits, bar, config.slippage_pct) {
             let is_taker = !(config.resting_maker_exits && exit.reason == "TakeProfit");
             let slippage = if !is_taker {
                 Decimal::ZERO
@@ -948,14 +932,28 @@ mod tests {
         }
     }
 
-    fn triple(stop: Decimal, take_profit: Decimal, max_bars: usize) -> ProtectiveExits {
+    fn triple(stop: Decimal, take_profit: Decimal, deadline_ms: i64) -> ProtectiveExits {
         ProtectiveExits {
             stop,
             take_profit: Some(take_profit),
-            max_bars: Some(max_bars),
             step_trailing_atr: None,
             breakeven_dist: None,
-            deadline_ms: None,
+            deadline_ms: Some(deadline_ms),
+        }
+    }
+
+    /// [`bar`] ending at `end_ms`.
+    fn bar_ending(
+        end_ms: i64,
+        open: Decimal,
+        high: Decimal,
+        low: Decimal,
+        close: Decimal,
+    ) -> PriceEvent {
+        PriceEvent {
+            start_ms: end_ms - 1_000,
+            end_ms,
+            ..bar(open, high, low, close)
         }
     }
 
@@ -963,7 +961,6 @@ mod tests {
         ProtectiveExits {
             stop,
             take_profit: None,
-            max_bars: None,
             step_trailing_atr: None,
             breakeven_dist: None,
             deadline_ms: None,
@@ -975,19 +972,13 @@ mod tests {
         let exits = stop_only(dec!(95));
         let rally = bar(dec!(100), dec!(150), dec!(99), dec!(140));
         assert_eq!(
-            barrier_exit(PositionSide::Long, &exits, rally, usize::MAX, dec!(0.001)),
+            barrier_exit(PositionSide::Long, &exits, rally, dec!(0.001)),
             None
         );
         let short_exits = stop_only(dec!(105));
         let drop = bar(dec!(100), dec!(101), dec!(50), dec!(60));
         assert_eq!(
-            barrier_exit(
-                PositionSide::Short,
-                &short_exits,
-                drop,
-                usize::MAX,
-                dec!(0.001)
-            ),
+            barrier_exit(PositionSide::Short, &short_exits, drop, dec!(0.001)),
             None
         );
     }
@@ -996,7 +987,7 @@ mod tests {
     fn a_stop_gapped_through_fills_at_the_open_and_reports_slippage_from_the_trigger() {
         let exits = stop_only(dec!(95));
         let gap = bar(dec!(90), dec!(91), dec!(89), dec!(90));
-        let exit = barrier_exit(PositionSide::Long, &exits, gap, 1, dec!(0.001));
+        let exit = barrier_exit(PositionSide::Long, &exits, gap, dec!(0.001));
         assert_eq!(
             exit,
             Some(BarrierExit {
@@ -1007,7 +998,7 @@ mod tests {
         );
         let short_exits = stop_only(dec!(105));
         let gap_up = bar(dec!(110), dec!(111), dec!(109), dec!(110));
-        let exit = barrier_exit(PositionSide::Short, &short_exits, gap_up, 1, dec!(0.001));
+        let exit = barrier_exit(PositionSide::Short, &short_exits, gap_up, dec!(0.001));
         assert_eq!(
             exit,
             Some(BarrierExit {
@@ -1020,29 +1011,30 @@ mod tests {
 
     #[test]
     fn the_triple_barrier_checks_stop_then_take_profit_then_time() {
-        let exits = triple(dec!(95), dec!(110), 3);
+        let exits = triple(dec!(95), dec!(110), 3_000);
         // Both the stop and the target trade on one bar: the stop wins.
         let both = bar(dec!(100), dec!(111), dec!(94), dec!(100));
         assert_eq!(
-            barrier_exit(PositionSide::Long, &exits, both, 1, dec!(0)).map(|e| e.reason),
+            barrier_exit(PositionSide::Long, &exits, both, dec!(0)).map(|e| e.reason),
             Some("StopLoss")
         );
-        let target = bar(dec!(100), dec!(111), dec!(99), dec!(105));
+        let target = bar_ending(3_000, dec!(100), dec!(111), dec!(99), dec!(105));
         assert_eq!(
-            barrier_exit(PositionSide::Long, &exits, target, 3, dec!(0.001)),
+            barrier_exit(PositionSide::Long, &exits, target, dec!(0.001)),
             Some(BarrierExit {
                 price: dec!(109.890),
                 slippage_per_unit: dec!(0.110),
                 reason: "TakeProfit",
             })
         );
-        let quiet = bar(dec!(100), dec!(101), dec!(99), dec!(100));
+        let quiet = bar_ending(2_999, dec!(100), dec!(101), dec!(99), dec!(100));
         assert_eq!(
-            barrier_exit(PositionSide::Long, &exits, quiet, 2, dec!(0.001)),
+            barrier_exit(PositionSide::Long, &exits, quiet, dec!(0.001)),
             None
         );
+        let due = bar_ending(3_000, dec!(100), dec!(101), dec!(99), dec!(100));
         assert_eq!(
-            barrier_exit(PositionSide::Long, &exits, quiet, 3, dec!(0.001)),
+            barrier_exit(PositionSide::Long, &exits, due, dec!(0.001)),
             Some(BarrierExit {
                 price: dec!(99.900),
                 slippage_per_unit: dec!(0.100),
@@ -1107,11 +1099,10 @@ mod tests {
             dec!(100),
             dec!(95),
             dec!(115),
-            5,
+            60_000,
             Some(dec!(0.01)),
             None,
             Some(dec!(3.75)), // 0.75 ATR (ATR = 5)
-            None,
         )
         .expect("valid intent");
         core.submit(PendingEntry::new(intent, dec!(1)));
@@ -1153,11 +1144,10 @@ mod tests {
             dec!(100),
             dec!(95),
             dec!(115),
-            5,
+            60_000,
             Some(dec!(0.01)),
             None,
             Some(dec!(3.75)), // 0.75 ATR (ATR = 5)
-            None,
         )
         .expect("valid intent");
         core.submit(PendingEntry::new(intent, dec!(1)));
@@ -1209,11 +1199,10 @@ mod tests {
             dec!(100),
             dec!(95),
             dec!(120),
-            5,
+            60_000,
             Some(dec!(0.01)),
             Some(dec!(2.5)),  // 0.50 ATR step (ATR = 5)
             Some(dec!(3.75)), // 0.75 ATR breakeven trigger
-            None,
         )
         .expect("valid intent");
         core.submit(PendingEntry::new(intent, dec!(1)));

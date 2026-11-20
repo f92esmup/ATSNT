@@ -37,7 +37,8 @@ impl Strategy for Scripted {
 }
 
 fn long_signal() -> Option<OrderIntent> {
-    Some(OrderIntent::new(1, Side::Buy, dec!(100), dec!(98), dec!(104), 5).unwrap())
+    // An hour: the time barrier plays no part in these tests.
+    Some(OrderIntent::new(1, Side::Buy, dec!(100), dec!(98), dec!(104), 3_600_000).unwrap())
 }
 
 fn simulation(
@@ -144,8 +145,8 @@ async fn a_stop_loss_pays_the_slippage_the_tape_charged_after_it_armed() {
 
 #[tokio::test]
 async fn the_time_barrier_closes_at_market_and_is_labelled_as_such() {
-    let mut intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(98), dec!(104), 2).unwrap();
-    intent.deadline_ms = Some(1_005);
+    let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(98), dec!(104), 1_004).unwrap();
+    assert_eq!(intent.deadline_ms, 1_005);
     let mut simulation = simulation(vec![Some(intent)]);
     let mut ticks = entry_ticks();
     ticks.extend([
@@ -260,7 +261,8 @@ async fn funding_paid_while_a_position_is_open_is_part_of_its_trade() {
 
 #[tokio::test]
 async fn a_liquidation_closes_the_trade_as_liquidated_and_loses_the_margin() {
-    let intent = OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.9), dec!(104), 5).unwrap();
+    let intent =
+        OrderIntent::new(1, Side::Buy, dec!(100), dec!(99.9), dec!(104), 3_600_000).unwrap();
     let mut simulation = simulation(vec![Some(intent)]);
     let ticks = [
         print(1_000, dec!(100), dec!(10), Side::Sell),

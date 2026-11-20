@@ -666,7 +666,7 @@ impl<S: Strategy> TradingSession<S> {
                 intent.take_profit,
                 intent.trailing_atr,
                 intent.breakeven_atr,
-                intent.deadline_ms,
+                Some(intent.deadline_ms),
             )
             .await;
         if matches!(
@@ -1388,7 +1388,7 @@ mod tests {
     async fn the_time_barrier_closes_the_position_and_labels_the_trade() {
         let venue = FakeVenue::default();
         let mut intent = long_intent();
-        intent.deadline_ms = Some(JAN_1 + 250);
+        intent.deadline_ms = JAN_1 + 250;
         let mut session = session(vec![intent]);
         open_long(&mut session, &venue).await;
 

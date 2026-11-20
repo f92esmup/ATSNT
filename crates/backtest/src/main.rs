@@ -9,10 +9,9 @@ use std::time::Instant;
 use adapters::{BinanceCsvReader, TapeReader};
 use anyhow::{Context, Result};
 use backtest::{
-    calibration_end_ms, check_calibration, now_unix_ms, record_backtest_with_audit,
-    record_monte_carlo, BacktestConfig, BacktestEngine, DataWindow, MonteCarloConfig,
-    MonteCarloSimulator, PriceEvent, RunContext, RunSpec, RunType, SamplingConfig,
-    TickSimulationConfig,
+    check_calibration, now_unix_ms, record_backtest_with_audit, record_monte_carlo, BacktestConfig,
+    BacktestEngine, DataWindow, MonteCarloConfig, MonteCarloSimulator, PriceEvent, RunContext,
+    RunSpec, RunType, SamplingConfig, TickSimulationConfig,
 };
 use clap::Parser;
 use domain::futures::FundingSchedule;
@@ -170,7 +169,7 @@ async fn main() -> Result<()> {
     if let Some(reason) = loaded.deployment_blocker() {
         println!("[GATE] not deployable: {reason}");
     }
-    let calibration_end = calibration_end_ms(&loaded.shared_config_json);
+    let calibration_end = loaded.calibration_end_ms;
     let mut strategy = loaded.strategy;
     let strat_config_val = loaded.config_json;
     let strat_id = loaded.strategy_id;

@@ -114,6 +114,32 @@ pub trait OptimizableStrategy: Strategy + Sync + Sized {
     /// Default search space defining hyperparameter candidate domains and ranges.
     fn default_space() -> Self::Space;
 
+    /// Data, in milliseconds, a run must give the strategy before its first evaluated decision:
+    /// the time its slowest input needs to be warm. The optimizer evaluates nothing earlier.
+    /// Every strategy declares it; `0` means it decides from its first trade.
+    fn warm_up_ms(shared: &Self::SharedConfig) -> i64;
+
+    /// Last timestamp (Unix ms) of the data `shared` was calibrated on, for a strategy whose
+    /// shared configuration is fitted to data. Evaluated data must start after it, or the
+    /// calibration leaks into the result. `None` (the default) for a strategy that calibrates
+    /// nothing.
+    fn calibration_end_ms(_shared: &Self::SharedConfig) -> Option<i64> {
+        None
+    }
+
+    /// Whether a run must be given the shared configuration explicitly because its default
+    /// would mislead (for example, uncalibrated thresholds). `false` by default.
+    fn requires_shared_config() -> bool {
+        false
+    }
+
+    /// The shared and searched configuration the contract suite runs the strategy with, when its
+    /// defaults would never decide on the suite's synthetic data (for example, thresholds sized
+    /// for a real market). `None` (the default) runs it with its defaults. Used by tests only.
+    fn contract_fixture() -> Option<(Self::SharedConfig, Self::Config)> {
+        None
+    }
+
     /// The shared configuration this strategy runs with on `market`. A strategy that trades
     /// several markets narrows itself here to what the market allows; by default the
     /// configuration is used as given.
@@ -176,7 +202,7 @@ mod tests {
                 trade.price,
                 dec!(90),
                 dec!(110),
-                3,
+                180_000,
             )
             .ok()
         }

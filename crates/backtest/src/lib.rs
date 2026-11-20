@@ -47,10 +47,10 @@ pub use monte_carlo::{
     ResampleMethod,
 };
 pub use optimization::{
-    calculate_parameter_stability, calibration_end_ms, check_calibration, deflated_sharpe_p_value,
-    embargo_buckets, expected_max_sharpe, plateau_stability, run_tape_slice, trade_tape,
-    CandidateEvaluation, FeaturesOf, FoldMetrics, ReturnMoments, Tape, TapeRun,
-    WalkForwardOptimizer, DEFAULT_MIN_TRADES_PER_FOLD, TRADES_WARM_UP_MS,
+    calculate_parameter_stability, check_calibration, deflated_sharpe_p_value, embargo_buckets,
+    expected_max_sharpe, plateau_stability, run_tape_slice, trade_tape, CandidateEvaluation,
+    FeaturesOf, FoldMetrics, ReturnMoments, Tape, TapeRun, WalkForwardOptimizer,
+    DEFAULT_MIN_TRADES_PER_FOLD,
 };
 pub use parity::FillRecordError;
 pub use price_event::{bucket_trades, PriceEvent};
@@ -60,7 +60,7 @@ pub use recording::{
 };
 pub use registry::{
     build_strategy, strategy_id_of, ConfigSource, DeploymentPolicy, LoadedStrategy,
-    ALLOW_UNPROVEN_STRATEGY_HELP, DEFAULT_STRATEGY_ID,
+    ALLOW_UNPROVEN_STRATEGY_HELP,
 };
 pub use run::{FillModel, InvalidRunId, RunId, RunSpec, RunType};
 pub use tick_simulation::{TickSimulation, TickSimulationConfig, TickSimulationError, TickStep};

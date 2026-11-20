@@ -9,10 +9,10 @@ use std::time::Instant;
 use adapters::{BinanceCsvReader, TapeReader};
 use anyhow::{Context, Result};
 use backtest::{
-    calibration_end_ms, check_calibration, embargo_buckets, now_unix_ms, record_hpo, trade_tape,
-    BacktestConfig, DataWindow, FeaturesOf, HpoDeploymentArtifact, HpoScorecard, RunContext,
-    RunSpec, RunType, SamplingConfig, StrategyDeploymentArtifact, Tape, WalkForwardConfig,
-    WalkForwardFold, WalkForwardOptimizer, WalkForwardSplitter, TRADES_WARM_UP_MS,
+    check_calibration, embargo_buckets, now_unix_ms, record_hpo, trade_tape, BacktestConfig,
+    DataWindow, FeaturesOf, HpoDeploymentArtifact, HpoScorecard, RunContext, RunSpec, RunType,
+    SamplingConfig, StrategyDeploymentArtifact, Tape, WalkForwardConfig, WalkForwardFold,
+    WalkForwardOptimizer, WalkForwardSplitter,
 };
 use clap::Parser;
 use ports::MarketDataStream;
@@ -52,8 +52,8 @@ struct Args {
     train_ratio: f64,
 
     /// Path to the JSON shared configuration (structural, frozen for the whole run) of the
-    /// strategy, e.g. the swarm's calibrated feeds written by calibrate_feeds. Required; stored
-    /// in the winning artifact
+    /// strategy, e.g. the swarm's calibrated feeds written by calibrate_feeds. Required by a
+    /// strategy that calibrates it (the swarm); stored in the winning artifact
     #[arg(long)]
     shared_config: Option<PathBuf>,
 
@@ -75,17 +75,12 @@ struct Args {
     #[arg(long, default_value_t = backtest::DEFAULT_MIN_TRADES_PER_FOLD)]
     min_trades_per_fold: usize,
 
-    /// Output path for winning configuration JSON
-    #[arg(
-        short,
-        long,
-        visible_alias = "output",
-        default_value = "configs/hpo_swarm_results.json"
-    )]
-    output_config: PathBuf,
+    /// Output path for the winning configuration JSON [default: configs/hpo_<strategy>_results.json]
+    #[arg(short, long, visible_alias = "output")]
+    output_config: Option<PathBuf>,
 
-    /// Target strategy identifier to optimize (e.g. 'swarm_consensus')
-    #[arg(long, default_value = "swarm_consensus")]
+    /// Strategy to optimize: a registered id or alias (e.g. 'swarm_consensus')
+    #[arg(long)]
     strategy: String,
 
     /// Optional path to JSON file overriding the strategy's default parameter search space
@@ -242,16 +237,17 @@ fn prepare<S: OptimizableStrategy>(
         start_ms: Some(first.start_ms),
         end_ms: Some(last.end_ms),
     };
-    check_calibration(calibration_end_ms(shared), first.start_ms)?;
+    check_calibration(S::calibration_end_ms(shared), first.start_ms)?;
     let built = tape.len();
-    let tape = tape.after_warm_up(TRADES_WARM_UP_MS)?;
+    let warm_up_ms = S::warm_up_ms(shared);
+    let tape = tape.after_warm_up(warm_up_ms)?;
     println!(
-        "      Ingested {} ticks -> {} price buckets, {} evaluated after the {}-day warm-up, \
+        "      Ingested {} ticks -> {} price buckets, {} evaluated after a warm-up of {} ms, \
          {} features, in {:.2}s",
         raw_trades,
         built,
         tape.len(),
-        TRADES_WARM_UP_MS / 86_400_000,
+        warm_up_ms,
         tape.features().len(),
         start_total.elapsed().as_secs_f64()
     );
@@ -280,8 +276,9 @@ fn prepare<S: OptimizableStrategy>(
     })
 }
 
-/// The shared configuration of the run: `--shared-config`, which a strategy must be given
-/// because its feed thresholds are calibrated.
+/// The shared configuration of the run: `--shared-config`, or the strategy's default. A
+/// strategy whose default would mislead ([`OptimizableStrategy::requires_shared_config`], the
+/// swarm's uncalibrated feed thresholds) must be given one.
 fn shared_config<S>(args: &Args) -> Result<S::SharedConfig>
 where
     S: OptimizableStrategy,
@@ -327,10 +324,10 @@ where
             strategy_instance.compatible_market_types()
         );
     }
-    if args.shared_config.is_none() {
+    if args.shared_config.is_none() && S::requires_shared_config() {
         anyhow::bail!(
-            "strategy '{}' needs the shared configuration its feeds were calibrated with: pass \
-             --shared-config <file> (e.g. the output of calibrate_feeds)",
+            "strategy '{}' needs the shared configuration it was calibrated with: pass \
+             --shared-config <file> (for the swarm, the output of calibrate_feeds)",
             S::id()
         );
     }
@@ -649,14 +646,18 @@ where
         shared_config: shared_json,
     };
 
-    if let Some(parent) = args.output_config.parent() {
+    let output_config = args
+        .output_config
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("configs/hpo_{}_results.json", S::id())));
+    if let Some(parent) = output_config.parent() {
         fs::create_dir_all(parent)?;
     }
     let artifact_json = serde_json::to_string_pretty(&deployment_artifact)?;
-    fs::write(&args.output_config, artifact_json)?;
+    fs::write(&output_config, artifact_json)?;
     println!(
         "\n[SAVED] Strategy Deployment Artifact saved to: {}",
-        args.output_config.display()
+        output_config.display()
     );
     println!(
         "        • Strategy:     {}",

@@ -11,11 +11,11 @@ fn long_at(bar: &PriceEvent) -> OrderIntent {
         price: bar.close,
         stop_loss: bar.close - dec!(20),
         take_profit: bar.close + dec!(25),
-        max_bars_hold: 4,
+        // Four one-second bars after the signal.
+        deadline_ms: bar.end_ms + 4_000,
         risk_fraction: None,
         trailing_atr: None,
         breakeven_atr: None,
-        deadline_ms: None,
         order_type: domain::OrderType::Market,
         time_in_force_bars: None,
         post_only: false,

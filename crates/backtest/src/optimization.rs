@@ -25,10 +25,6 @@ pub const DEFAULT_MIN_TRADES_PER_FOLD: usize = 30;
 /// p-value below which a candidate's Deflated Sharpe Ratio counts as significant.
 const DSR_SIGNIFICANCE: Decimal = dec!(0.05);
 
-/// Lead the data must give a trade-consuming strategy before its first evaluated timestamp
-/// (strategy spec §15.2): 70 days, so the slowest swarm feed (1 day, 64 closed bars) is warm.
-pub const TRADES_WARM_UP_MS: i64 = 70 * 86_400_000;
-
 /// The features the extractor of `S` produces.
 pub type FeaturesOf<S> = <<S as OptimizableStrategy>::Extractor as FeatureExtractor>::Features;
 
@@ -126,8 +122,9 @@ impl<F> Tape<F> {
         self
     }
 
-    /// The warm-up cut of a trade-consuming strategy (strategy spec §15.2): the tape from the
-    /// first timestamp that has at least `warm_up_ms` of data before it and at which the
+    /// The warm-up cut of a strategy (strategy spec §15.2; the lead is the strategy's
+    /// [`OptimizableStrategy::warm_up_ms`]): the tape from the first timestamp that has at least
+    /// `warm_up_ms` of data before it and at which the
     /// extractor has already produced a feature.
     ///
     /// Fails with [`BacktestError::InsufficientWarmUp`] when no price event is left after the
@@ -135,7 +132,7 @@ impl<F> Tape<F> {
     pub fn after_warm_up(self, warm_up_ms: i64) -> Result<Self, BacktestError> {
         let (Some(first), Some(last)) = (self.prices.first(), self.prices.last()) else {
             return Err(BacktestError::InsufficientWarmUp {
-                warm_up_days: warm_up_ms / 86_400_000,
+                warm_up_ms,
                 data_start_ms: None,
                 data_end_ms: None,
                 first_feature_ms: None,
@@ -144,7 +141,7 @@ impl<F> Tape<F> {
         let (data_start_ms, data_end_ms) = (first.start_ms, last.end_ms);
         let first_feature_ms = self.features.first().map(|(timestamp, _)| *timestamp);
         let refusal = || BacktestError::InsufficientWarmUp {
-            warm_up_days: warm_up_ms / 86_400_000,
+            warm_up_ms,
             data_start_ms: Some(data_start_ms),
             data_end_ms: Some(data_end_ms),
             first_feature_ms,
@@ -182,14 +179,6 @@ pub fn trade_tape<S: OptimizableStrategy>(
         bucket_ms,
     )?;
     Tape::merge(prices, features)
-}
-
-/// `calibration_end_ms` of a shared configuration that declares one (the swarm's, spec §14.1).
-pub fn calibration_end_ms<T: Serialize>(shared: &T) -> Option<i64> {
-    serde_json::to_value(shared)
-        .ok()?
-        .get("calibration_end_ms")?
-        .as_i64()
 }
 
 /// The calibration check of strategy spec §15.2: thresholds calibrated on the evaluated data
@@ -1217,6 +1206,10 @@ mod tests {
             strategies::Strategy::on_event(self, &strategies::MarketEvent::Trade(trade))
         }
 
+        fn warm_up_ms(_: &()) -> i64 {
+            0
+        }
+
         fn default_space() -> Self::Space {
             MockSpace {
                 windows: vec![3, 5, 8],
@@ -1294,6 +1287,10 @@ mod tests {
             strategies::Strategy::on_event(self, &strategies::MarketEvent::Trade(trade))
         }
 
+        fn warm_up_ms(_: &()) -> i64 {
+            0
+        }
+
         fn default_space() -> Self::Space {
             MockSpace {
                 windows: vec![2, 3, 5],
@@ -1347,21 +1344,20 @@ mod tests {
         let early = Tape::merge(prices.clone(), vec![(10 * day, ()), (80 * day, ())]).unwrap();
         let late = Tape::merge(prices.clone(), vec![(90 * day, ())]).unwrap();
 
-        let early = early.after_warm_up(TRADES_WARM_UP_MS).unwrap();
+        let warm_up = 70 * day;
+        let early = early.after_warm_up(warm_up).unwrap();
         assert_eq!(early.prices()[0].start_ms, 70 * day);
         assert_eq!(early.features().len(), 1);
-        let late = late.after_warm_up(TRADES_WARM_UP_MS).unwrap();
+        let late = late.after_warm_up(warm_up).unwrap();
         assert_eq!(late.prices()[0].start_ms, 90 * day);
 
         let short = Tape::merge(prices[..60].to_vec(), vec![(10 * day, ())]).unwrap();
         let no_feature = Tape::<()>::merge(prices, Vec::new()).unwrap();
         for tape in [short, no_feature] {
-            let message = tape
-                .after_warm_up(TRADES_WARM_UP_MS)
-                .unwrap_err()
-                .to_string();
+            let message = tape.after_warm_up(warm_up).unwrap_err().to_string();
             assert!(
-                message.starts_with("the data window gives the swarm less than 70 days of warm-up"),
+                message
+                    .starts_with("the data window gives the strategy less than 70 days of warm-up"),
                 "{message}"
             );
         }
@@ -1369,18 +1365,6 @@ mod tests {
 
     #[test]
     fn a_calibration_that_reaches_the_data_is_refused() {
-        #[derive(Serialize)]
-        struct Shared {
-            calibration_end_ms: i64,
-        }
-        assert_eq!(
-            calibration_end_ms(&Shared {
-                calibration_end_ms: 5
-            }),
-            Some(5)
-        );
-        assert_eq!(calibration_end_ms(&()), None);
-
         assert!(check_calibration(Some(999), 1_000).is_ok());
         assert!(check_calibration(None, 1_000).is_ok());
         let message = check_calibration(Some(1_000), 1_000)

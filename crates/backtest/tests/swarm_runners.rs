@@ -8,16 +8,23 @@ use std::process::{Command, Output};
 use adapters::TapeWriter;
 use backtest::{
     check_calibration, embargo_buckets, trade_tape, CandidateEvaluation, WalkForwardConfig,
-    WalkForwardOptimizer, WalkForwardSplitter, TRADES_WARM_UP_MS,
+    WalkForwardOptimizer, WalkForwardSplitter,
 };
 use domain::Trade;
 use rust_decimal_macros::dec;
-use strategies::{PolicyConfig, SwarmConfig, SwarmConsensusStrategy, SwarmPolicySpace};
+use strategies::{
+    OptimizableStrategy, PolicyConfig, SwarmConfig, SwarmConsensusStrategy, SwarmPolicySpace,
+};
 
 mod support;
 use support::swarm::{account, busy_policy, shared, swarm_trades, DAY_MS, START_MS};
 
 const BUCKET_MS: i64 = 1_000;
+
+/// The swarm's declared warm-up.
+fn warm_up_ms() -> i64 {
+    SwarmConsensusStrategy::warm_up_ms(&SwarmConfig::default())
+}
 const EMBARGO_MS: i64 = 5_000;
 
 fn space() -> SwarmPolicySpace {
@@ -42,7 +49,7 @@ fn ranking(trades: &[Trade]) -> Vec<CandidateEvaluation<PolicyConfig>> {
     let shared = shared();
     let tape = trade_tape::<SwarmConsensusStrategy>(&shared, trades.to_vec(), BUCKET_MS)
         .expect("tape builds")
-        .after_warm_up(TRADES_WARM_UP_MS)
+        .after_warm_up(warm_up_ms())
         .expect("the tape has its warm-up");
     let folds = WalkForwardSplitter::generate_rolling_folds(
         tape.len(),
@@ -81,7 +88,7 @@ fn a_trade_tape_hpo_ranks_deterministically() {
 fn trade_folds_respect_the_embargo() {
     let tape = trade_tape::<SwarmConsensusStrategy>(&shared(), swarm_trades(90), BUCKET_MS)
         .unwrap()
-        .after_warm_up(TRADES_WARM_UP_MS)
+        .after_warm_up(warm_up_ms())
         .unwrap();
     let embargo = embargo_buckets(EMBARGO_MS, BUCKET_MS).unwrap();
     let folds = WalkForwardSplitter::generate_rolling_folds(
@@ -102,7 +109,7 @@ fn trade_folds_respect_the_embargo() {
         assert!(test_start - train_end > EMBARGO_MS, "{fold:?}");
     }
     // The evaluated tape starts after 70 days of data, with the swarm already warm.
-    assert!(tape.prices()[0].start_ms >= START_MS + TRADES_WARM_UP_MS);
+    assert!(tape.prices()[0].start_ms >= START_MS + warm_up_ms());
     assert!(!tape.features().is_empty());
 }
 
@@ -110,11 +117,11 @@ fn trade_folds_respect_the_embargo() {
 fn a_tape_without_seventy_days_of_warm_up_is_refused() {
     let message = trade_tape::<SwarmConsensusStrategy>(&shared(), swarm_trades(60), BUCKET_MS)
         .unwrap()
-        .after_warm_up(TRADES_WARM_UP_MS)
+        .after_warm_up(warm_up_ms())
         .unwrap_err()
         .to_string();
     assert!(
-        message.starts_with("the data window gives the swarm less than 70 days of warm-up"),
+        message.starts_with("the data window gives the strategy less than 70 days of warm-up"),
         "{message}"
     );
 }
@@ -293,6 +300,20 @@ fn run_hpo_refuses_the_swarm_without_a_shared_config() {
 }
 
 #[test]
+fn run_hpo_needs_a_strategy_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = write_trades(dir.path(), &swarm_trades(3));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_run_hpo"))
+        .arg("--data")
+        .arg(&data)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(text(&out).contains("--strategy"), "{}", text(&out));
+}
+
+#[test]
 fn run_hpo_refuses_a_calibration_that_overlaps_the_data() {
     let dir = tempfile::tempdir().unwrap();
     let data = write_trades(dir.path(), &swarm_trades(3));
@@ -331,7 +352,7 @@ fn run_hpo_refuses_data_without_the_warm_up() {
     );
     assert!(!out.status.success());
     assert!(
-        text(&out).contains("the data window gives the swarm less than 70 days of warm-up"),
+        text(&out).contains("the data window gives the strategy less than 70 days of warm-up"),
         "{}",
         text(&out)
     );

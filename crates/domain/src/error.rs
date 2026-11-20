@@ -19,4 +19,7 @@ pub enum DomainError {
     InsufficientData(String),
     #[error("invalid target position: {0}")]
     InvalidTarget(String),
+    /// A time barrier that does not end after the decision.
+    #[error("the time barrier must end after the decision: hold of {0} ms")]
+    InvalidTimeBarrier(i64),
 }
