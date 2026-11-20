@@ -24,7 +24,9 @@ pub use analytics::{
     TickBarAggregator, TimeBarAggregator, VolumeBarAggregator, VwapDeviation, WilderAtr, WilderRsi,
     ZScoreResult,
 };
-pub use decision::{MarketEvent, ProtectiveExits};
+pub use decision::{
+    Decision, MarketEvent, PositionView, ProtectiveExits, StrategyView, SIGNAL_EXIT,
+};
 pub use error::DomainError;
 pub use gate::{EntryGate, EntryRefusal, MarginRule};
 pub use market::MarketType;

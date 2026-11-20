@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use domain::{EntryGate, EntryRefusal, OrderIntent};
-use domain::{Position, PositionSide, RiskPolicy, Side};
+use domain::{Decision, EntryGate, EntryRefusal, OrderIntent, PositionView, StrategyView};
+use domain::{Position, PositionSide, RiskPolicy, Side, SIGNAL_EXIT};
 use rust_decimal::Decimal;
 
 use crate::config::BacktestConfig;
@@ -11,11 +11,19 @@ use crate::price_event::PriceEvent;
 use domain::accounting::utc_month_key;
 use domain::accounting::DailyBreaker;
 
+/// The side of the market order that closes a position on `side`.
+fn closing_side(side: PositionSide) -> Side {
+    match side {
+        PositionSide::Long => Side::Sell,
+        PositionSide::Short => Side::Buy,
+    }
+}
+
 /// Deterministic, discrete-event backtesting simulator.
 ///
 /// Models exchange fees, a fixed per-fill slippage and Triple Barrier exits evaluated per bar.
 /// A signal becomes a market order that fills at the next bar's open (the first price after
-/// the signal); take-profit and stop exits are market orders too, so they pay taker fees and
+/// the signal), and so does a strategy's decision to close its position; take-profit and stop exits are market orders too, so they pay taker fees and
 /// slippage and fill at the open when a bar gaps through the trigger. With
 /// `BacktestConfig::latency_ms` set, an order is due that many milliseconds after the deciding
 /// event's end and fills at the first [`PriceEvent`] starting at or after then. Tick-level
@@ -49,6 +57,10 @@ pub struct BacktestEngine {
     halted: bool,
     /// Signals that did not become orders, per reason (see `BacktestMetrics::rejected_orders`).
     rejected_orders: BTreeMap<String, usize>,
+    /// When the strategy's market close of the open position is due (Unix ms), if it decided one.
+    pending_exit_due_ms: Option<i64>,
+    /// The strategy's decisions on the current event; kept to reuse its allocation.
+    decisions: Vec<Decision>,
 }
 
 impl BacktestEngine {
@@ -76,6 +88,20 @@ impl BacktestEngine {
             monthly_trip_drawdown_pct: None,
             halted: false,
             rejected_orders: BTreeMap::new(),
+            pending_exit_due_ms: None,
+            decisions: Vec::new(),
+        }
+    }
+
+    /// What the strategy may see of its book: the open position and whether an entry is pending.
+    pub fn view(&self) -> StrategyView {
+        StrategyView {
+            position: self.core.position().map(|position| PositionView {
+                side: position.side,
+                quantity: position.quantity,
+                entry_price: position.entry_price,
+            }),
+            entry_pending: self.core.pending().is_some(),
         }
     }
 
@@ -205,13 +231,16 @@ impl BacktestEngine {
     /// monthly kill switch, the decision step (`decide`), mark to market and the daily breaker,
     /// and the open trade's excursion.
     ///
-    /// `decide` is called once per event unless the engine is halted. A decision is scheduled,
-    /// never filled on the event that produced it: its order is due at `event.end_ms +
+    /// `decide` is called once per event unless the engine is halted, with the strategy's view of
+    /// its book and an empty list to push its decisions to; they apply in order. A decision is
+    /// scheduled, never filled on the event that produced it: its order is due at `event.end_ms +
     /// latency_ms` and fills at the first later event whose `start_ms` is at or after that time.
+    /// An entry while a position is open or an entry pending is ignored, as is an exit while
+    /// flat.
     pub fn process_event(
         &mut self,
         event: &PriceEvent,
-        decide: &mut dyn FnMut() -> Option<OrderIntent>,
+        decide: &mut dyn FnMut(&StrategyView, &mut Vec<Decision>),
     ) {
         let bar = event;
         let previous_bar_end = self.last_bar_end_time;
@@ -255,6 +284,19 @@ impl BacktestEngine {
                 _ => {}
             }
         }
+        // 0b. The strategy's close, decided on an earlier event, fills at this event's open.
+        if let Some(due_ms) = self.pending_exit_due_ms {
+            match self.core.position().map(|position| position.side) {
+                None => self.pending_exit_due_ms = None,
+                Some(side) if bar.start_ms >= due_ms => {
+                    self.pending_exit_due_ms = None;
+                    let (exit_price, slip) =
+                        market_fill_price(closing_side(side), bar.open, self.config.slippage_pct);
+                    self.execute_close(bar.start_ms, exit_price, slip, true, SIGNAL_EXIT);
+                }
+                Some(_) => {}
+            }
+        }
         let had_position = self.core.position().is_some();
 
         // 1. If an active position exists, evaluate liquidation and the protective exits.
@@ -273,35 +315,44 @@ impl BacktestEngine {
             self.halted = true;
             self.monthly_trip_drawdown_pct = Some(month_dd_pct);
             if let Some(side) = self.core.position().map(|pos| pos.side) {
-                let close_side = match side {
-                    PositionSide::Long => Side::Sell,
-                    PositionSide::Short => Side::Buy,
-                };
                 let (exit_price, slip) =
-                    market_fill_price(close_side, bar.close, self.config.slippage_pct);
+                    market_fill_price(closing_side(side), bar.close, self.config.slippage_pct);
                 self.execute_close(bar.end_ms, exit_price, slip, true, "MonthlyCircuitBreaker");
             }
         }
 
-        // 2. The strategy sees every event so its rolling state matches the live session; a
-        //    signal only becomes an order when flat. A time-barrier close is sent at the end of
+        // 2. The strategy sees every event so its rolling state matches the live session; an
+        //    entry only becomes an order when flat. A time-barrier close is sent at the end of
         //    the event and is still settling live, so that event cannot open a new trade.
         if !self.halted {
-            let signal = decide();
+            let view = self.view();
+            let mut decisions = std::mem::take(&mut self.decisions);
+            decisions.clear();
+            decide(&view, &mut decisions);
             let closed_by_time_barrier = self.closed_trades().len() > trades_before
                 && self
                     .closed_trades()
                     .last()
                     .is_some_and(|trade| trade.exit_reason == "TimeBarrier");
-            if let Some(intent) = signal {
-                if self.core.position().is_none()
-                    && self.core.pending().is_none()
-                    && !closed_by_time_barrier
-                {
-                    let due_ms = bar.end_ms.saturating_add(self.config.latency_ms);
-                    self.submit_entry(intent, bar.close, due_ms);
+            let due_ms = bar.end_ms.saturating_add(self.config.latency_ms);
+            for decision in decisions.drain(..) {
+                match decision {
+                    Decision::Enter(intent) => {
+                        if self.core.position().is_none()
+                            && self.core.pending().is_none()
+                            && !closed_by_time_barrier
+                        {
+                            self.submit_entry(intent, bar.close, due_ms);
+                        }
+                    }
+                    Decision::Exit => {
+                        if self.core.position().is_some() && self.pending_exit_due_ms.is_none() {
+                            self.pending_exit_due_ms = Some(due_ms);
+                        }
+                    }
                 }
             }
+            self.decisions = decisions;
         }
 
         // 3. Mark-to-market and update peak equity / drawdown
@@ -440,7 +491,9 @@ mod tests {
         fn process_bar<S: Strategy>(&mut self, strategy: &mut S, bar: &PriceEvent) {
             let print = domain::Trade::new(bar.end_ms, bar.close, dec!(1), Side::Buy)
                 .expect("a positive close");
-            self.process_event(bar, &mut || strategy.on_event(&MarketEvent::Trade(&print)));
+            self.process_event(bar, &mut |view, out| {
+                strategy.on_event(&MarketEvent::Trade(&print), view, out)
+            });
         }
     }
 
@@ -459,6 +512,16 @@ mod tests {
         }
     }
 
+    impl Scripted {
+        fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+            let MarketEvent::Trade(_) = event else {
+                return None;
+            };
+            self.bars_seen += 1;
+            self.decisions.pop_front().flatten()
+        }
+    }
+
     impl Strategy for Scripted {
         fn name(&self) -> &str {
             "scripted"
@@ -468,12 +531,13 @@ mod tests {
             &[MarketType::UsdMPerpetual]
         }
 
-        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::Trade(_) = event else {
-                return None;
-            };
-            self.bars_seen += 1;
-            self.decisions.pop_front().flatten()
+        fn on_event(
+            &mut self,
+            event: &MarketEvent<'_>,
+            _view: &StrategyView,
+            out: &mut Vec<Decision>,
+        ) {
+            out.extend(self.decide(event).map(Decision::Enter));
         }
 
         fn reset(&mut self) {}
@@ -1137,16 +1201,8 @@ mod tests {
         stop: Decimal,
     }
 
-    impl Strategy for ScriptedLong {
-        fn name(&self) -> &str {
-            "ScriptedLong"
-        }
-
-        fn compatible_market_types(&self) -> &'static [strategies::MarketType] {
-            &[strategies::MarketType::UsdMPerpetual]
-        }
-
-        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+    impl ScriptedLong {
+        fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
             let MarketEvent::Trade(trade) = event else {
                 return None;
             };
@@ -1159,6 +1215,25 @@ mod tests {
                 YEAR_MS,
             )
             .ok()
+        }
+    }
+
+    impl Strategy for ScriptedLong {
+        fn name(&self) -> &str {
+            "ScriptedLong"
+        }
+
+        fn compatible_market_types(&self) -> &'static [strategies::MarketType] {
+            &[strategies::MarketType::UsdMPerpetual]
+        }
+
+        fn on_event(
+            &mut self,
+            event: &MarketEvent<'_>,
+            _view: &StrategyView,
+            out: &mut Vec<Decision>,
+        ) {
+            out.extend(self.decide(event).map(Decision::Enter));
         }
 
         fn reset(&mut self) {}
@@ -1609,7 +1684,9 @@ mod tests {
         times
             .iter()
             .map(|&(t, price)| {
-                engine.process_event(&trade_event(t, price), &mut || entry.take());
+                engine.process_event(&trade_event(t, price), &mut |_, out| {
+                    out.extend(entry.take().map(Decision::Enter))
+                });
                 engine.active_position().cloned()
             })
             .collect()

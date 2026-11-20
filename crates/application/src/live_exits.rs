@@ -40,6 +40,10 @@ pub enum ExitEvent {
     TimeBarrierClosed,
     /// The time barrier close failed; the exchange-held SL/TP remain and it is retried.
     TimeBarrierCloseFailed { reason: String },
+    /// The strategy decided to close and the position was closed at market.
+    SignalExitClosed,
+    /// The strategy's close failed; the exchange-held SL/TP remain in place.
+    SignalExitCloseFailed { reason: String },
     /// The kill-switch flattened the session; no new entries until restart.
     Halted,
     /// The kill-switch could not confirm a flat position; retried on the next call.
@@ -275,6 +279,19 @@ impl ExitManager {
         None
     }
 
+    /// Closes the tracked position at market because the strategy decided to
+    /// ([`domain::Decision::Exit`]). `None` when nothing is tracked.
+    pub async fn on_signal_exit<G: ExitGateway>(&mut self, gateway: &G) -> Option<ExitEvent> {
+        self.position?;
+        match self.flatten(gateway).await {
+            Ok(()) => {
+                self.position = None;
+                Some(ExitEvent::SignalExitClosed)
+            }
+            Err(reason) => Some(ExitEvent::SignalExitCloseFailed { reason }),
+        }
+    }
+
     /// Retries what an earlier attempt left pending: the close of a position that has no exits,
     /// or the cancelling of the orders a closed position left behind.
     pub async fn retry_pending<G: ExitGateway>(&mut self, gateway: &G) -> Option<ExitEvent> {
@@ -505,6 +522,26 @@ mod tests {
             .await;
         assert_eq!(event, ExitEvent::Protected);
         manager
+    }
+
+    #[tokio::test]
+    async fn a_signal_exit_closes_the_tracked_position_and_is_a_no_op_when_flat() {
+        let gateway = MockGateway::default();
+        let mut flat = ExitManager::new("BTCUSDT");
+        assert_eq!(flat.on_signal_exit(&gateway).await, None);
+        assert!(gateway.calls().is_empty());
+
+        let mut manager = entered_with_deadline(&gateway, 1_000_000).await;
+        let event = manager.on_signal_exit(&gateway).await;
+
+        assert_eq!(event, Some(ExitEvent::SignalExitClosed));
+        assert_eq!(
+            gateway.calls(),
+            vec!["place", "close", "cancel", "close"],
+            "protection must outlive the closing order"
+        );
+        assert!(manager.can_open());
+        assert_eq!(manager.on_signal_exit(&gateway).await, None);
     }
 
     #[tokio::test]

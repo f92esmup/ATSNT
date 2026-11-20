@@ -109,7 +109,7 @@ mod tests {
     use super::*;
 
     use crate::session::SessionConfig;
-    use domain::{OrderIntent, Side};
+    use domain::{Decision, OrderIntent, Side, StrategyView};
     use ports::{EntryAck, ExitGateway, OrderRequest};
     use rust_decimal_macros::dec;
     use std::cell::RefCell;
@@ -165,6 +165,16 @@ mod tests {
         trades_seen: usize,
     }
 
+    impl Scripted {
+        fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+            let MarketEvent::Trade(_) = event else {
+                return None;
+            };
+            self.trades_seen += 1;
+            self.intents.pop_front()
+        }
+    }
+
     impl Strategy for Scripted {
         fn name(&self) -> &str {
             "scripted"
@@ -174,12 +184,13 @@ mod tests {
             &[MarketType::UsdMPerpetual]
         }
 
-        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-            let MarketEvent::Trade(_) = event else {
-                return None;
-            };
-            self.trades_seen += 1;
-            self.intents.pop_front()
+        fn on_event(
+            &mut self,
+            event: &MarketEvent<'_>,
+            _view: &StrategyView,
+            out: &mut Vec<Decision>,
+        ) {
+            out.extend(self.decide(event).map(Decision::Enter));
         }
 
         fn reset(&mut self) {}

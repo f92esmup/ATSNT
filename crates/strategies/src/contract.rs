@@ -6,12 +6,13 @@
 //! The suite feeds deterministic synthetic trades and makes no assumption about when a strategy decides: it pins what must hold
 //! whenever it does.
 
-use domain::{OrderIntent, Side, Trade};
+use domain::{OrderIntent, PositionSide, Side, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 use crate::strategy::{
-    FeatureExtractor, HyperparameterSpace, MarketEvent, OptimizableStrategy, Strategy,
+    Decision, FeatureExtractor, HyperparameterSpace, MarketEvent, OptimizableStrategy,
+    PositionView, Strategy, StrategyView,
 };
 
 /// Candidates requested from the search space when checking it.
@@ -176,10 +177,46 @@ fn events(trades: &[Trade]) -> Vec<MarketEvent<'_>> {
     trades.iter().map(MarketEvent::Trade).collect()
 }
 
-fn replay<T: Strategy>(strategy: &mut T, input: &[Trade]) -> Vec<Option<OrderIntent>> {
+/// The smallest book a strategy can decide against: an entry opens a position of one unit at
+/// its signal price at once, and an exit closes it. Both replays below use it, so a strategy
+/// that reads its position sees the same view in one and in two stages.
+#[derive(Default)]
+struct PaperBook {
+    view: StrategyView,
+}
+
+impl PaperBook {
+    fn apply(&mut self, decisions: &[Decision]) {
+        for decision in decisions {
+            match decision {
+                Decision::Enter(intent) if self.view.is_flat() => {
+                    self.view.position = Some(PositionView {
+                        side: match intent.side {
+                            Side::Buy => PositionSide::Long,
+                            Side::Sell => PositionSide::Short,
+                        },
+                        quantity: Decimal::ONE,
+                        entry_price: intent.price,
+                    });
+                }
+                Decision::Exit => self.view.position = None,
+                Decision::Enter(_) => {}
+            }
+        }
+    }
+}
+
+/// The decisions of every event of `input`, one list per event.
+fn replay<T: Strategy>(strategy: &mut T, input: &[Trade]) -> Vec<Vec<Decision>> {
+    let mut book = PaperBook::default();
     events(input)
         .iter()
-        .map(|event| strategy.on_event(event))
+        .map(|event| {
+            let mut out = Vec::new();
+            strategy.on_event(event, &book.view, &mut out);
+            book.apply(&out);
+            out
+        })
         .collect()
 }
 
@@ -189,12 +226,24 @@ fn replay_in_two_stages<S: OptimizableStrategy>(
     extractor: &mut S::Extractor,
     strategy: &mut S,
     input: &[Trade],
-) -> Vec<OrderIntent> {
-    events(input)
-        .iter()
-        .filter_map(|event| extractor.on_event(event))
-        .filter_map(|features| strategy.on_features(&features))
-        .collect()
+) -> Vec<Decision> {
+    let mut book = PaperBook::default();
+    let mut decisions = Vec::new();
+    for event in events(input) {
+        if let Some(features) = extractor.on_event(&event) {
+            let mut out = Vec::new();
+            strategy.on_features(&features, &book.view, &mut out);
+            book.apply(&out);
+            decisions.extend(out);
+        }
+    }
+    decisions
+}
+
+fn assert_valid_decision(id: &str, decision: &Decision) {
+    if let Decision::Enter(intent) = decision {
+        assert_valid_intent(id, intent);
+    }
 }
 
 fn assert_valid_intent(id: &str, intent: &OrderIntent) {
@@ -340,14 +389,14 @@ where
         input.len()
     );
     for decision in first.iter().flatten() {
-        assert_valid_intent(id, decision);
+        assert_valid_decision(id, decision);
     }
 
     // The optimizer decides in two stages; they must agree with the one-stage run.
     let mut extractor = S::extractor(&shared)
         .unwrap_or_else(|error| panic!("{id}: the extractor must build: {error}"));
     let staged = replay_in_two_stages(&mut extractor, &mut build(), &input);
-    let direct: Vec<OrderIntent> = first.iter().flatten().cloned().collect();
+    let direct: Vec<Decision> = first.iter().flatten().cloned().collect();
     assert_eq!(
         staged, direct,
         "{id}: extractor + on_features must decide exactly what on_event decides"
@@ -356,7 +405,7 @@ where
     // Quiet markets must not break it.
     let mut quiet = build();
     for decision in replay(&mut quiet, &flat_trades(200)).iter().flatten() {
-        assert_valid_intent(id, decision);
+        assert_valid_decision(id, decision);
     }
 }
 
@@ -444,20 +493,30 @@ mod tests {
             &[MarketType::UsdMPerpetual]
         }
 
-        fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+        fn on_event(
+            &mut self,
+            event: &MarketEvent<'_>,
+            view: &StrategyView,
+            out: &mut Vec<Decision>,
+        ) {
             let MarketEvent::Trade(trade) = event else {
-                return None;
+                return;
             };
             self.seen += 1;
             if MODE == 4 || self.seen % 7 != 0 {
-                return None;
+                return;
+            }
+            // Holding a position, it closes it; flat, it opens one.
+            if view.position.is_some() {
+                out.push(Decision::Exit);
+                return;
             }
             let stop = if MODE == 2 {
                 trade.price + dec!(10)
             } else {
                 trade.price - dec!(10)
             };
-            OrderIntent::new(
+            let intent = OrderIntent::new(
                 trade.timestamp,
                 Side::Buy,
                 trade.price,
@@ -466,6 +525,8 @@ mod tests {
                 300_000,
             )
             .ok()
+            .map(Decision::Enter);
+            out.extend(intent);
         }
 
         fn reset(&mut self) {
@@ -493,12 +554,11 @@ mod tests {
             Ok(TradePassThrough)
         }
 
-        fn on_features(&mut self, trade: &Trade) -> Option<OrderIntent> {
-            let decision = self.on_event(&MarketEvent::Trade(trade));
-            if MODE == 3 {
-                None
-            } else {
-                decision
+        fn on_features(&mut self, trade: &Trade, view: &StrategyView, out: &mut Vec<Decision>) {
+            let mut decided = Vec::new();
+            self.on_event(&MarketEvent::Trade(trade), view, &mut decided);
+            if MODE != 3 {
+                out.extend(decided);
             }
         }
 

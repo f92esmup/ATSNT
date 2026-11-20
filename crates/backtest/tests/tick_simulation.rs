@@ -4,7 +4,7 @@ use backtest::session::SessionEvent;
 use backtest::tick_simulation::TickSimulationConfig;
 use backtest::BacktestConfig;
 use domain::futures::FundingSchedule;
-use domain::OrderIntent;
+use domain::{Decision, OrderIntent, StrategyView};
 use domain::{Side, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -17,6 +17,15 @@ struct Scripted {
     decisions: VecDeque<Option<OrderIntent>>,
 }
 
+impl Scripted {
+    fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+        let MarketEvent::Trade(_) = event else {
+            return None;
+        };
+        self.decisions.pop_front().flatten()
+    }
+}
+
 impl Strategy for Scripted {
     fn name(&self) -> &str {
         "scripted"
@@ -26,11 +35,8 @@ impl Strategy for Scripted {
         &[MarketType::UsdMPerpetual]
     }
 
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
-        let MarketEvent::Trade(_) = event else {
-            return None;
-        };
-        self.decisions.pop_front().flatten()
+    fn on_event(&mut self, event: &MarketEvent<'_>, _view: &StrategyView, out: &mut Vec<Decision>) {
+        out.extend(self.decide(event).map(Decision::Enter));
     }
 
     fn reset(&mut self) {}

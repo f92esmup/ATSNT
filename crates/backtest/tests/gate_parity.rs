@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use backtest::{BacktestConfig, BacktestEngine, PriceEvent, TickSimulationConfig};
 use domain::futures::FundingSchedule;
-use domain::{MarketEvent, MarketType, OrderIntent, Side, Trade};
+use domain::{Decision, MarketEvent, MarketType, OrderIntent, Side, StrategyView, Trade};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategies::Strategy;
@@ -25,16 +25,8 @@ struct EveryTrade {
     stop_fraction: Decimal,
 }
 
-impl Strategy for EveryTrade {
-    fn name(&self) -> &str {
-        "every_trade"
-    }
-
-    fn compatible_market_types(&self) -> &'static [MarketType] {
-        &[MarketType::Spot, MarketType::UsdMPerpetual]
-    }
-
-    fn on_event(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
+impl EveryTrade {
+    fn decide(&mut self, event: &MarketEvent<'_>) -> Option<OrderIntent> {
         let MarketEvent::Trade(trade) = event else {
             return None;
         };
@@ -53,6 +45,20 @@ impl Strategy for EveryTrade {
             365 * 86_400_000,
         )
         .ok()
+    }
+}
+
+impl Strategy for EveryTrade {
+    fn name(&self) -> &str {
+        "every_trade"
+    }
+
+    fn compatible_market_types(&self) -> &'static [MarketType] {
+        &[MarketType::Spot, MarketType::UsdMPerpetual]
+    }
+
+    fn on_event(&mut self, event: &MarketEvent<'_>, _view: &StrategyView, out: &mut Vec<Decision>) {
+        out.extend(self.decide(event).map(Decision::Enter));
     }
 
     fn reset(&mut self) {}
@@ -80,8 +86,8 @@ fn bar_refusals(
 ) -> (BTreeMap<String, usize>, usize) {
     let mut engine = BacktestEngine::new(config);
     for trade in tape {
-        engine.process_event(&PriceEvent::from(trade), &mut || {
-            strategy.on_event(&MarketEvent::Trade(trade))
+        engine.process_event(&PriceEvent::from(trade), &mut |view, out| {
+            strategy.on_event(&MarketEvent::Trade(trade), view, out)
         });
     }
     let (metrics, trades) = engine.finish_with_trades(tape.last().map(|trade| trade.price));
