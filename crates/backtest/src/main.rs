@@ -14,7 +14,7 @@ use backtest::{
     RunSpec, RunType, SamplingConfig, TickSimulationConfig,
 };
 use clap::Parser;
-use domain::futures::FundingSchedule;
+use domain::futures::{FundingFeed, FundingSchedule};
 use ports::MarketDataStream;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -288,6 +288,11 @@ async fn main() -> Result<()> {
         FillModelArg::Bar => {
             let mut engine = BacktestEngine::new(engine_config);
             let mut last_price = Decimal::ZERO;
+            // The strategy is told of the funding settlements the engine charges.
+            let mut funding = (engine_config.market_type == MarketType::UsdMPerpetual).then(|| {
+                FundingFeed::new(FundingSchedule::constant(engine_config.funding_rate_pct))
+            });
+            let mut ignored = Vec::new();
             while let Some(trade) = stream.next_trade()? {
                 total_trades_processed += 1;
                 if total_trades_processed == 1 {
@@ -298,6 +303,16 @@ async fn main() -> Result<()> {
                 data_window.start_ms.get_or_insert(trade.timestamp);
                 data_window.end_ms = Some(trade.timestamp);
 
+                if let Some(feed) = funding.as_mut() {
+                    for (time_ms, rate) in feed.due(trade.timestamp) {
+                        strategy.on_event(
+                            &MarketEvent::funding(&instrument, time_ms, rate),
+                            &engine.view(),
+                            &mut ignored,
+                        );
+                        ignored.clear();
+                    }
+                }
                 engine.process_event(&PriceEvent::from(&trade), &mut |view, out| {
                     strategy.on_event(&MarketEvent::trade(&instrument, &trade), view, out)
                 });

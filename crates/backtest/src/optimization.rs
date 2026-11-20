@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+use domain::futures::{FundingFeed, FundingSchedule};
 use domain::{InstrumentId, Trade};
 use ports::ProgressSink;
 use rayon::prelude::*;
@@ -234,13 +235,34 @@ pub fn trade_tape<S: OptimizableStrategy>(
     trades: impl IntoIterator<Item = Trade>,
     bucket_ms: i64,
 ) -> Result<Tape<FeaturesOf<S>>, BacktestError> {
+    trade_tape_with_funding::<S>(shared, &domain::UNNAMED_INSTRUMENT, trades, bucket_ms, None)
+}
+
+/// [`trade_tape`] of `instrument`'s trades, telling the extractor of `funding`'s settlements
+/// before the first trade at or after each, as the runners tell the strategy. A feature produced
+/// by a settlement is decided after the bucket of the trade that follows it.
+pub fn trade_tape_with_funding<S: OptimizableStrategy>(
+    shared: &S::SharedConfig,
+    instrument: &InstrumentId,
+    trades: impl IntoIterator<Item = Trade>,
+    bucket_ms: i64,
+    funding: Option<FundingSchedule>,
+) -> Result<Tape<FeaturesOf<S>>, BacktestError> {
     let mut extractor = S::extractor(shared)?;
+    let mut feed = funding.map(FundingFeed::new);
     let mut features = Vec::new();
     let prices = bucket_trades(
         trades.into_iter().inspect(|trade| {
-            if let Some(feature) =
-                extractor.on_event(&MarketEvent::trade(&domain::UNNAMED_INSTRUMENT, trade))
-            {
+            if let Some(feed) = feed.as_mut() {
+                for (time_ms, rate) in feed.due(trade.timestamp) {
+                    if let Some(feature) =
+                        extractor.on_event(&MarketEvent::funding(instrument, time_ms, rate))
+                    {
+                        features.push((trade.timestamp, feature));
+                    }
+                }
+            }
+            if let Some(feature) = extractor.on_event(&MarketEvent::trade(instrument, trade)) {
                 features.push((trade.timestamp, feature));
             }
         }),

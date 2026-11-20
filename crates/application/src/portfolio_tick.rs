@@ -9,7 +9,8 @@
 
 use std::collections::BTreeMap;
 
-use domain::{Book, EntryGate, InstrumentId, InstrumentPosition, Side, Trade};
+use domain::futures::FundingFeed;
+use domain::{Book, EntryGate, InstrumentId, InstrumentPosition, MarketType, Side, Trade};
 use ports::MultiTapeVenue;
 use rust_decimal::Decimal;
 use strategies::Strategy;
@@ -34,6 +35,8 @@ pub struct PortfolioTickSimulation<S: Strategy, V: MultiTapeVenue> {
     rejected_orders: BTreeMap<String, usize>,
     initial_capital: Decimal,
     max_leverage: Decimal,
+    /// The funding settlements each instrument's strategy is told of; empty on spot.
+    funding: BTreeMap<InstrumentId, FundingFeed>,
 }
 
 impl<S: Strategy, V: MultiTapeVenue> PortfolioTickSimulation<S, V> {
@@ -53,6 +56,14 @@ impl<S: Strategy, V: MultiTapeVenue> PortfolioTickSimulation<S, V> {
         )
         .with_margin(backtest.margin_rule())
         .with_portfolio_limits(backtest.portfolio_limits());
+        let funding = if backtest.market_type == MarketType::UsdMPerpetual {
+            strategies
+                .keys()
+                .map(|id| (id.clone(), FundingFeed::new(config.funding.clone())))
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
         let drivers = strategies
             .into_iter()
             .map(|(instrument, strategy)| {
@@ -78,6 +89,7 @@ impl<S: Strategy, V: MultiTapeVenue> PortfolioTickSimulation<S, V> {
             rejected_orders: BTreeMap::new(),
             initial_capital: backtest.initial_capital,
             max_leverage: backtest.max_leverage,
+            funding,
         })
     }
 
@@ -155,8 +167,16 @@ impl<S: Strategy, V: MultiTapeVenue> PortfolioTickSimulation<S, V> {
             }
         }
         let context = self.account_for(instrument);
+        let settlements = self
+            .funding
+            .get_mut(instrument)
+            .map(|feed| feed.due(trade.timestamp))
+            .unwrap_or_default();
         if let Some(driver) = self.drivers.get_mut(instrument) {
             driver.session_mut().set_account(context);
+            for (time_ms, rate) in settlements {
+                driver.session_mut().on_funding_rate(time_ms, rate);
+            }
             let step = driver.on_market_trade(&self.venue, trade).await;
             events.extend(step.into_events());
         }

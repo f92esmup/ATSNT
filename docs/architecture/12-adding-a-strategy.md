@@ -43,7 +43,12 @@ A strategy decides two things (`domain::Decision`):
   both routes close alike.
 
 Every event names its instrument: `MarketEvent::Trade { instrument, trade }`, and
-`event.instrument()` returns it. A decision may name an instrument too (`OrderIntent::on(id)`,
+`event.instrument()` returns it. On perpetuals the runners also send
+`MarketEvent::Funding { instrument, time_ms, rate }` for each funding settlement, before the first
+trade at or after it, on the bar and tick routes and to the extractor when the optimizer builds its
+tape (`trade_tape_with_funding`). A funding event informs: decisions pushed on it are ignored. A
+strategy that does not care matches the trade and ignores the rest (`MarketEvent` is
+`#[non_exhaustive]`). There is no order-book event: no data source records the book yet (WP-10). A decision may name an instrument too (`OrderIntent::on(id)`,
 `Decision::exit_of(id)`); without one it is about the instrument of the event being decided on,
 which is all a `PerInstrument` strategy needs. A single-instrument runner ignores a decision that
 names another instrument.

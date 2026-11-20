@@ -51,9 +51,9 @@ pub use monte_carlo::{
 };
 pub use optimization::{
     calculate_parameter_stability, check_calibration, deflated_sharpe_p_value, embargo_buckets,
-    expected_max_sharpe, plateau_stability, run_tape_slice, trade_tape, CandidateEvaluation,
-    FeaturesOf, FoldMetrics, ReturnMoments, Tape, TapeRun, WalkForwardOptimizer,
-    DEFAULT_MIN_TRADES_PER_FOLD,
+    expected_max_sharpe, plateau_stability, run_tape_slice, trade_tape, trade_tape_with_funding,
+    CandidateEvaluation, FeaturesOf, FoldMetrics, ReturnMoments, Tape, TapeRun,
+    WalkForwardOptimizer, DEFAULT_MIN_TRADES_PER_FOLD,
 };
 pub use parity::FillRecordError;
 pub use portfolio::{results_by_instrument, PortfolioEngine, PortfolioStrategies};

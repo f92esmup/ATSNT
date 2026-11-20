@@ -125,6 +125,28 @@ impl PortfolioEngine {
         self.lanes.get(instrument).and_then(|lane| lane.view().0)
     }
 
+    /// The strategy's view of `instrument` as owned parts: its position there, whether an entry
+    /// is pending there, and the account's positions on the other instruments.
+    pub fn view_parts(
+        &self,
+        instrument: &InstrumentId,
+    ) -> (Option<PositionView>, bool, Vec<InstrumentPosition>) {
+        let (position, entry_pending) =
+            self.lanes.get(instrument).map_or((None, false), Lane::view);
+        let others = self
+            .lanes
+            .iter()
+            .filter(|(id, _)| *id != instrument)
+            .filter_map(|(id, lane)| {
+                Some(InstrumentPosition {
+                    instrument: id.clone(),
+                    position: lane.view().0?,
+                })
+            })
+            .collect();
+        (position, entry_pending, others)
+    }
+
     /// Cash balance, without unrealized PnL.
     pub fn cash_equity(&self) -> Decimal {
         self.equity
@@ -587,6 +609,32 @@ impl<S: Strategy> PortfolioStrategies<S> {
                     }
                 });
             }
+        }
+    }
+
+    /// Tells the strategy that decides on `instrument` of a funding settlement there. It informs:
+    /// whatever the strategy decides on it is ignored.
+    pub fn on_funding(
+        &mut self,
+        engine: &PortfolioEngine,
+        instrument: &InstrumentId,
+        time_ms: i64,
+        rate: Decimal,
+    ) {
+        let (position, entry_pending, others) = engine.view_parts(instrument);
+        let view = StrategyView {
+            position,
+            entry_pending,
+            others: &others,
+        };
+        let event = MarketEvent::funding(instrument, time_ms, rate);
+        let mut ignored = Vec::new();
+        let strategy = match self {
+            Self::CrossSectional(strategy) => Some(strategy),
+            Self::PerInstrument(instances) => instances.get_mut(instrument),
+        };
+        if let Some(strategy) = strategy {
+            strategy.on_event(&event, &view, &mut ignored);
         }
     }
 

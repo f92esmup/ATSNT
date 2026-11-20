@@ -25,6 +25,17 @@ pub enum MarketEvent<'a> {
         /// The trade.
         trade: &'a Trade,
     },
+    /// A perpetual funding settlement of one instrument. Runners deliver it before the first
+    /// trade at or after the settlement. It informs: decisions taken on it are ignored, and the
+    /// strategy acts on the trades that follow.
+    Funding {
+        /// The instrument settled.
+        instrument: &'a InstrumentId,
+        /// Settlement instant (Unix ms).
+        time_ms: i64,
+        /// Rate charged per settlement, as a fraction of notional; longs pay a positive rate.
+        rate: Decimal,
+    },
 }
 
 impl<'a> MarketEvent<'a> {
@@ -33,17 +44,29 @@ impl<'a> MarketEvent<'a> {
         Self::Trade { instrument, trade }
     }
 
+    /// A funding settlement of `instrument` at `time_ms`, at `rate`.
+    pub fn funding(instrument: &'a InstrumentId, time_ms: i64, rate: Decimal) -> Self {
+        Self::Funding {
+            instrument,
+            time_ms,
+            rate,
+        }
+    }
+
     /// When the event happened (Unix ms).
     pub fn timestamp(&self) -> i64 {
         match self {
             MarketEvent::Trade { trade, .. } => trade.timestamp,
+            MarketEvent::Funding { time_ms, .. } => *time_ms,
         }
     }
 
     /// The instrument the event is about.
     pub fn instrument(&self) -> &'a InstrumentId {
         match self {
-            MarketEvent::Trade { instrument, .. } => instrument,
+            MarketEvent::Trade { instrument, .. } | MarketEvent::Funding { instrument, .. } => {
+                instrument
+            }
         }
     }
 }

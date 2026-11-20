@@ -10,8 +10,8 @@
 //! A position still open when the data ends is left open (see [`TickSimulation::open_position`])
 //! and is not counted in the metrics, unlike the bar engine, which marks it out.
 
-use domain::futures::FundingSchedule;
-use domain::{EntryGate, RiskError, Side, Trade};
+use domain::futures::{FundingFeed, FundingSchedule};
+use domain::{EntryGate, MarketType, RiskError, Side, Trade};
 use ports::TapeVenue;
 use rust_decimal::Decimal;
 use strategies::Strategy;
@@ -65,6 +65,8 @@ pub struct TickSimulation<S: Strategy, V: TapeVenue> {
     initial_capital: Decimal,
     driver: SessionDriver<S>,
     venue: V,
+    /// The funding settlements the strategy is told of; none on spot.
+    funding: Option<FundingFeed>,
 }
 
 impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
@@ -100,6 +102,8 @@ impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
             initial_capital: backtest.initial_capital,
             driver,
             venue,
+            funding: (backtest.market_type == MarketType::UsdMPerpetual)
+                .then(|| FundingFeed::new(config.funding.clone())),
         })
     }
 
@@ -122,6 +126,11 @@ impl<S: Strategy, V: TapeVenue> TickSimulation<S, V> {
         for report in reports {
             events.extend(self.driver.on_execution(&self.venue, &report).await);
             self.driver.on_wallet_balance(self.venue.wallet_balance());
+        }
+        if let Some(feed) = self.funding.as_mut() {
+            for (time_ms, rate) in feed.due(trade.timestamp) {
+                self.driver.session_mut().on_funding_rate(time_ms, rate);
+            }
         }
         let step = self.driver.on_market_trade(&self.venue, trade).await;
         events.extend(step.into_events());
